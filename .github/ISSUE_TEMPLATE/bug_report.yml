@@ -1,0 +1,51 @@
+name: 버그 제보
+description: 잘못 동작하거나 멈추는 문제
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 무슨 일이 있었나요?
+      description: 기대한 동작과 실제 동작을 적어 주세요
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 재현 방법
+      placeholder: |
+        1. 4분할 레이아웃에서
+        2. 사진 폴더를 썸네일 보기로 열고
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Sakadu 버전
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows 버전
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: dropdown
+    id: service
+    attributes:
+      label: 디스크 검색 서비스
+      options:
+        - 설치함
+        - 설치 안 함
+        - 모름
+  - type: textarea
+    id: log
+    attributes:
+      label: 진단 로그 (선택)
+      description: |
+        sakadu.exe --log 로 실행해 문제를 재현하면 %TEMP%\sakadu.log 에 기록이 남습니다.
+        로그에는 폴더 경로가 들어 있으니 공개해도 괜찮은지 확인한 뒤 붙여 주세요.
+      render: text

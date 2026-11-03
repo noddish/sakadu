@@ -1,0 +1,22 @@
+name: 기능 제안
+description: 있으면 좋겠는 기능이나 바뀌었으면 하는 동작
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 어떤 상황에서 불편한가요?
+      description: 지금 어떻게 하고 있는지, 무엇이 번거로운지 적어 주세요
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 원하는 동작
+    validations:
+      required: true
+  - type: textarea
+    id: other
+    attributes:
+      label: 참고할 만한 다른 프로그램 (선택)
+      placeholder: Q-Dir, Everything, Directory Opus 등에서는 이렇게 동작합니다
