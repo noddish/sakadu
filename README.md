@@ -1,110 +1,78 @@
+**한국어** | [English](README.en.md)
+
 # Sakadu
 
-**사카두**. 시선이 한 곳에서 다른 곳으로 빠르게 옮겨 가는 안구 운동, 사카드(saccade)에서 따온 이름이다.
+폴더 여러 개를 한 창에 띄워 놓고, 디스크 어디에 있는 파일이든 이름만 치면 바로 찾는 Windows 파일 관리자.
 
-가볍고 빠른 Windows 멀티뷰 파일 관리자. Q-Dir 같은 분할 화면에 Everything 같은 즉시 검색을 더하고,
-우클릭 메뉴·복사 진행 창 같은 탐색기 기능은 그대로 쓴다.
+![Sakadu 2분할 화면과 썸네일, 미리 보기](docs/screenshot-main.png)
 
-*Sakadu, named after the saccade (a quick eye movement), is a fast, lightweight multi-pane file manager for Windows with instant whole-disk search. Native Rust + Win32 + Direct2D.*
+**[최신 버전 받기](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · 설치 없이 exe 하나(0.7MB) · 무료 오픈소스
 
-![Sakadu](docs/screenshot-main.png)
+## 이런 점이 좋아요
 
-## 특징
+**찾을 때 기다리지 않아요.** Ctrl+K를 누르고 이름 몇 글자만 치면 디스크 전체에서 바로 나와요.
+파일과 폴더가 180만 개쯤 있는 PC에서 한 번 찾는 데 10~20ms 걸려요.
+Sakadu를 켜 두면 다른 앱을 쓰다가도 단축키 한 번으로 검색창이 떠요.
 
-- **멀티뷰**: 1·2·3·4분할 레이아웃, 패널마다 탭. 분할선은 끌어서 조절
-- **즉시 검색 (Ctrl+K)**: NTFS 디스크 전체를 파일 이름으로 검색. 개발 PC 기준 약 180만 개 항목에서 10~15ms.
-  다른 앱 위에서도 전역 단축키로 바로 연다
-- **입력하면 바로 필터**: 현재 폴더에서 글자를 치는 즉시 걸러 보기 (한글 입력 지원)
-- **썸네일 보기와 미리 보기 창**: 사진·PDF·Office·텍스트를 옆에서 바로 확인
-- **즐겨찾기**: 실제 폴더 이름과 별개인 표시 이름("01.일간 업무")과 내 마음대로 정하는 순서
-- **탐색기 그대로**: 셸 우클릭 메뉴, 복사·이동 진행 창과 충돌 처리, 끌어서 놓기(기본 복사, Shift 이동), Ctrl+Z 되돌리기
-- **가볍게**: 런타임·웹뷰 없는 네이티브 앱. 실행 파일 약 0.7MB
-- 다크 모드(시스템 설정 연동), 창·탭 복원, 기본 파일 관리자로 사용(선택)
+![검색어를 치는 대로 디스크 전체에서 찾은 결과](docs/screenshot-search.png)
 
-![다크 모드 4분할](docs/screenshot-dark.png)
+**창을 왔다 갔다 하지 않아요.** 화면을 2·3·4칸으로 나누고 칸마다 탭을 열 수 있어요.
+다운로드 폴더에서 업무 폴더로 옮기는 일이 한 화면에서 끝나요.
 
-## 설치
+**탐색기 쓰던 대로 써요.** 우클릭 메뉴, 복사 진행 창, 끌어서 놓기가 탐색기와 똑같이 동작해요.
+잘못 옮겼으면 Ctrl+Z로 되돌리면 돼요.
 
-1. [Releases](../../releases)에서 `Sakadu-버전-windows-x64.zip`을 받아 원하는 폴더에 푼다
-2. `sakadu.exe`를 실행한다
+**열어 보지 않고 확인해요.** 썸네일 보기와 미리 보기 창으로 사진, PDF, 텍스트를 옆에서 바로 봐요.
 
-- 아직 코드 서명이 없어서 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있다. **추가 정보 → 실행**을 누르면 된다
-- 설정·세션·즐겨찾기는 `%APPDATA%\Sakadu`에 저장된다
-- Windows 11에서 개발·테스트했다. Windows 10(64비트)에서도 돌도록 만들었지만 아직 확인하지 못했다
+**가벼워요.** 런타임이나 웹뷰 없이 Rust와 Direct2D로 직접 그려요. 압축을 풀고 exe를 실행하면 끝이에요.
 
-### 선택 기능
+다크 모드는 Windows 설정을 따라가요.
 
-- **디스크 검색 서비스**: Ctrl+K 팔레트의 "검색 서비스 설치" 또는 설정(톱니) 메뉴에서 설치. 관리자 승인(UAC)이 한 번 필요하다
-- **기본 파일 관리자**: 설정 메뉴의 "기본 파일 관리자로 사용"을 켜면 폴더·드라이브 열기와 Win+E가 Sakadu로 열린다
+![다크 모드 4분할 화면](docs/screenshot-dark.png)
 
-### 제거
+## 시작하기
 
-1. 설정 메뉴에서 "기본 파일 관리자로 사용"을 끄고 "디스크 검색 서비스 제거"를 누른다
-2. 압축을 푼 폴더, `%APPDATA%\Sakadu`, (있으면) `%LOCALAPPDATA%\Programs\Sakadu`를 지운다
+1. [Releases](https://github.com/noddish/sakadu/releases/latest)에서 `Sakadu-버전-windows-x64.zip`을 받아 원하는 폴더에 풀어요.
+2. `sakadu.exe`를 실행해요.
 
-## 기능 자세히
+- 처음 실행할 때 "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**을 누르세요. 아직 코드 서명이 없어서 뜨는 창이에요.
+- 디스크 전체 검색은 Ctrl+K 창에서 **검색 서비스 설치**를 한 번 눌러야 켜져요. 이때 관리자 승인을 한 번 물어요.
+- 폴더를 열 때마다 Sakadu로 열리게 하려면 설정(톱니) 메뉴에서 **기본 파일 관리자로 사용**을 켜세요.
+- Windows 11에서 만들고 테스트했어요. Windows 10(64비트)은 아직 확인하지 못했어요.
 
-### 검색 서비스와 개인 정보
+## 자주 쓰는 키
 
-- NTFS 고정 디스크의 MFT를 읽어 **파일·폴더 이름만** 메모리에 인덱싱하고, USN 저널로 실시간 갱신한다. 파일 내용은 읽지 않는다
-- MFT를 읽으려면 관리자 권한이 필요해서 SYSTEM 서비스(SakaduIndex)로 돌고, 앱은 이름 있는 파이프로 질의한다.
-  파이프는 원격 접속을 거부하고, 로그인한 사용자만 쓸 수 있다
-- 인덱스는 디스크에 저장하지 않는다. 앱과 서비스 모두 네트워크 코드가 없어 외부로 아무것도 보내지 않는다
-- Everything과 마찬가지로, 로그인한 사용자는 다른 계정 폴더의 파일 **이름**도 검색될 수 있다
-- 서비스 실행 파일은 `C:\Program Files\Sakadu`에 복사해 등록한다. 앱을 새 버전으로 바꾸면 서비스도 다시 설치해야 갱신된다
-- 검색어: 여러 낱말은 모두 포함, `업무\`처럼 `\`를 붙이면 경로로 찾기. Enter 열기 · Ctrl+Enter 위치 열기 · Shift+Enter 새 탭
-- 전역 단축키는 Ctrl+Alt+Space → Win+Shift+F → Ctrl+Alt+F 중 비어 있는 첫 키를 쓰고 도구 막대에 표시한다
-
-### 썸네일 보기와 미리 보기 창
-
-- **썸네일 보기**: 경로 표시줄 오른쪽 버튼 또는 Ctrl+Shift+2(자세히 보기는 Ctrl+Shift+6). 패널마다 따로 저장된다.
-  화면에 보이는 칸만 백그라운드에서 만들고, 스크롤로 지나간 요청은 버린다
-- **미리 보기 창** (Alt+P, 도구 막대 오른쪽 버튼): 활성 패널에서 선택한 항목을 보여 준다
-  - 사진: 큰 썸네일 / 텍스트·코드: 앞부분(UTF-8·UTF-16·CP949 자동 판별, 휠로 스크롤)
-  - PDF·Office 등: Windows에 등록된 미리 보기 처리기. 처리기가 죽어도 앱은 살아 있도록 별도 프로세스에서만 연다
-  - 폴더·그 밖의 파일: 큰 아이콘과 수정한 날짜·위치
-
-### 즐겨찾기
-
-![즐겨찾기](docs/screenshot-favorites.png)
-
-★ 버튼 또는 Ctrl+B. 표시 이름은 실제 폴더 이름과 별개로 정하고(F2), 끌어서 또는 Ctrl+↑↓로 순서를 바꾼다.
-이름순·역순·경로순 정렬도 된다. Ctrl+D는 선택한 폴더(없으면 현재 폴더)를 추가하고 바로 이름을 정하게 한다.
-
-### 기본 파일 관리자
-
-설정 메뉴에서 켜면 폴더·드라이브 열기와 Win+E가 Sakadu로 열린다.
-
-- 현재 사용자(HKCU)만 바꾸고, 원래 값을 백업해 두었다가 끌 때 되돌린다
-- Win+E는 실행 중인 탐색기가 이전 설정을 기억하고 있어서, 다시 로그인하거나 PC를 다시 시작한 뒤부터 바뀔 수 있다(폴더 열기는 바로 바뀐다)
-- 실행 파일은 `%LOCALAPPDATA%\Programs\Sakadu`에 복사해 등록한다. 새 버전으로 바꾸면 한 번 껐다 켜야 갱신된다
-- 바탕 화면·작업 표시줄, 제어판·휴지통 같은 특수 폴더, 탐색기 창 안에서의 폴더 이동은 계속 탐색기가 맡는다
-- 이미 Sakadu가 떠 있으면 새 탭으로 열린다. 그 창이 응답하지 않으면 폴더가 안 열리는 일이 없도록 탐색기로 대신 연다
-- 명령줄: `sakadu.exe --register-default` / `--unregister-default`
-
-### 되돌리기 (Ctrl+Z)
-
-이 앱에서 한 파일 작업을 마지막부터 되돌린다: 이름 바꾸기, 이동(원래 자리로), 복사(복사본은 휴지통으로),
-휴지통 삭제(휴지통에서 복원), 새 폴더, 붙여넣기, 끌어서 놓기. 영구 삭제와 셸 우클릭 메뉴로 한 작업은 대상이 아니다.
-
-## 단축키
-
-| 키 | 동작 |
+| 키 | 하는 일 |
 |---|---|
-| 글자 입력 | 현재 패널 필터 (Esc로 해제) |
+| Ctrl+K | 디스크 전체 검색 |
+| 그냥 글자 입력 | 지금 폴더에서 바로 걸러 보기 (Esc로 해제) |
+| Ctrl+1 ~ Ctrl+5 | 화면 나누기 |
+| Tab / Shift+Tab | 다음 칸 / 이전 칸 |
+| Ctrl+T / Ctrl+W | 새 탭 / 탭 닫기 |
+| Alt+P | 미리 보기 창 |
+| Ctrl+B / Ctrl+D | 즐겨찾기 열기 / 추가 |
+| Ctrl+Z | 방금 한 파일 작업 되돌리기 |
+
+<details>
+<summary>전체 단축키</summary>
+
+| 키 | 하는 일 |
+|---|---|
+| 글자 입력 | 현재 칸 필터 (Esc로 해제) |
 | Enter / Ctrl+Enter | 열기 / 폴더를 새 탭에서 열기 |
 | Backspace, Alt+↑ | 상위 폴더 |
 | Alt+← / Alt+→, 마우스 뒤로·앞으로 버튼 | 뒤로 / 앞으로 |
-| Tab / Shift+Tab | 패널 전환 |
+| Tab / Shift+Tab | 칸 이동 |
 | Ctrl+T / Ctrl+W / Ctrl+Tab | 새 탭 / 탭 닫기 / 탭 전환 |
-| Ctrl+1 ~ Ctrl+5 | 레이아웃 |
+| Ctrl+1 ~ Ctrl+5 | 화면 나누기 |
 | Ctrl+Shift+2 / Ctrl+Shift+6 | 썸네일 보기 / 자세히 보기 |
 | Alt+P | 미리 보기 창 |
-| F2 / F5 / F4, Ctrl+L, Alt+D | 이름 바꾸기 / 새로 고침 / 경로 입력 |
+| F2 / F5 | 이름 바꾸기 / 새로 고침 |
+| F4, Ctrl+L, Alt+D | 경로 입력 |
 | Ctrl+C / Ctrl+X / Ctrl+V | 복사 / 잘라내기 / 붙여넣기 |
 | Delete / Shift+Delete | 휴지통 / 영구 삭제(확인) |
 | Ctrl+Shift+N | 새 폴더 |
-| Ctrl+H | 숨김 항목 표시 |
+| Ctrl+H | 숨김 항목 보기 |
 | Ctrl+K | 디스크 전체 검색 |
 | Ctrl+Z | 마지막 파일 작업 되돌리기 |
 | Ctrl+B | 즐겨찾기 (열린 동안 ↑↓·Enter·F2·Del·Ctrl+↑↓, 글자로 항목 찾기) |
@@ -112,37 +80,90 @@
 | Alt+Enter | 속성 |
 | 메뉴 키, Shift+F10 | 우클릭 메뉴 |
 
-## 문제 신고·제안
+</details>
 
-[Issues](../../issues)에 남겨 주세요. 재현이 어려운 문제는 `sakadu.exe --log`(또는 환경 변수 `SAKADU_LOG=1`)로
-실행하면 `%TEMP%\sakadu.log`에 기록이 남는다. 로그에는 폴더 경로가 들어 있으니 올리기 전에 확인하세요.
+## 더 알아두면 좋은 것
 
-관리자 권한으로 실행하면(제목에 "(관리자)" 표시) Windows 보안(UIPI) 때문에 일반 권한 탐색기와의 끌어서 놓기가 막힌다.
+<details>
+<summary>검색 서비스는 무엇을 읽나요</summary>
 
-## 개발
+- NTFS 디스크의 파일 목록(MFT)에서 **파일·폴더 이름만** 읽어 메모리에 둬요. 파일 내용은 읽지 않아요. 바뀐 내용은 USN 저널로 바로 반영돼요.
+- 인덱스는 디스크에 저장하지 않아요. 앱과 서비스 모두 네트워크 코드가 없어서 밖으로 나가는 것도 없어요.
+- 파일 목록을 읽으려면 관리자 권한이 필요해서 Windows 서비스(SakaduIndex)로 돌아요. 앱과는 이 PC 안에서만 열리는 파이프로 주고받고, 원격 접속은 받지 않아요.
+- 인덱스 메모리는 항목 180만 개 기준으로 120MB쯤이에요.
+- Everything과 마찬가지로, 다른 사용자 계정 폴더에 있는 파일의 **이름**도 검색에 나올 수 있어요.
+- 검색어: 띄어 쓴 낱말이 모두 들어간 것만 찾아요. `업무\`처럼 끝에 `\`를 붙이면 경로로 찾아요. Enter 열기 · Ctrl+Enter 위치 열기 · Shift+Enter 새 탭.
+- 전역 단축키는 Ctrl+Alt+Space, Win+Shift+F, Ctrl+Alt+F 중 비어 있는 첫 번째를 쓰고, 도구 막대에 표시돼요.
+- 서비스 실행 파일은 `C:\Program Files\Sakadu`에 복사해서 등록해요. 앱을 새 버전으로 바꾸면 서비스도 다시 설치해야 갱신돼요.
 
-최신 stable Rust(MSVC 도구 체인, edition 2024)와 Windows SDK가 필요하다.
+</details>
+
+<details>
+<summary>기본 파일 관리자로 쓰기</summary>
+
+설정 메뉴에서 켜면 폴더·드라이브를 열 때와 Win+E가 Sakadu로 열려요.
+
+- 현재 사용자 설정(HKCU)만 바꾸고, 원래 값은 백업해 두었다가 끌 때 되돌려요.
+- Win+E는 탐색기가 예전 설정을 기억하고 있어서, 다시 로그인하거나 PC를 다시 시작한 뒤에 바뀔 수 있어요. 폴더 열기는 바로 바뀌어요.
+- 바탕 화면, 작업 표시줄, 제어판·휴지통 같은 특수 폴더는 계속 탐색기가 맡아요.
+- Sakadu가 이미 떠 있으면 새 탭으로 열려요. 그 창이 응답하지 않으면 폴더가 안 열리는 일이 없도록 탐색기로 대신 열어요.
+- 실행 파일은 `%LOCALAPPDATA%\Programs\Sakadu`에 복사해서 등록해요. 새 버전으로 바꾸면 한 번 껐다 켜 주세요.
+- 명령줄: `sakadu.exe --register-default` / `--unregister-default`
+
+</details>
+
+<details>
+<summary>썸네일, 미리 보기, 즐겨찾기, 되돌리기</summary>
+
+- **썸네일 보기**는 Ctrl+Shift+2, 자세히 보기는 Ctrl+Shift+6이에요. 칸마다 따로 기억해요.
+- **미리 보기 창**(Alt+P)은 사진은 크게, 텍스트·코드는 앞부분을 보여 줘요(UTF-8·UTF-16·CP949 자동 판별). PDF·Office는 Windows에 등록된 미리 보기 처리기로 열고, 처리기가 죽어도 앱은 멀쩡하도록 따로 띄워요.
+- **즐겨찾기**(Ctrl+B)는 실제 폴더 이름과 상관없이 "01.일간 업무"처럼 보기 좋은 이름을 붙이고(F2), 끌어서 순서를 바꿀 수 있어요.
+- **되돌리기**(Ctrl+Z)는 이름 바꾸기, 이동, 복사, 휴지통 삭제, 새 폴더, 붙여넣기, 끌어서 놓기를 마지막 것부터 되돌려요. 영구 삭제와 우클릭 메뉴로 한 작업은 되돌리지 못해요.
+
+</details>
+
+<details>
+<summary>지우는 방법</summary>
+
+1. 설정 메뉴에서 **기본 파일 관리자로 사용**을 끄고 **디스크 검색 서비스 제거**를 눌러요.
+2. 압축을 푼 폴더와 `%APPDATA%\Sakadu`, `%LOCALAPPDATA%\Programs\Sakadu`(있으면)를 지워요.
+
+설정, 창 상태, 즐겨찾기는 모두 `%APPDATA%\Sakadu`에 있어요.
+
+</details>
+
+## 문제가 생기면
+
+[Issues](https://github.com/noddish/sakadu/issues)에 남겨 주세요. 다시 일으키기 어려운 문제는 `sakadu.exe --log`로 실행한 뒤
+`%TEMP%\sakadu.log`를 함께 올려 주시면 큰 도움이 돼요. 로그에 폴더 경로가 들어 있으니 올리기 전에 한 번 확인해 주세요.
+
+관리자 권한으로 실행하면(제목에 "(관리자)" 표시) Windows 보안 정책(UIPI) 때문에 일반 탐색기와 끌어서 놓기가 안 돼요.
+
+## 직접 빌드하기
+
+stable Rust(MSVC 도구 체인, edition 2024)와 Windows SDK가 있으면 돼요.
 
 ```
 cargo build --release
 cargo test
 ```
 
-- 프로젝트 경로가 매우 길면 링커가 260자 경로 제한에 걸린다(LNK1104). 그럴 때는 빌드 출력만 짧은 경로로 돌린다:
-  `$env:CARGO_TARGET_DIR = "$env:TEMP\qp-target"; cargo build --release`
-- 셸·서비스와 실제로 붙는 테스트와 성능 측정은 `#[ignore]`로 빠져 있다: `cargo test --release -- --ignored --nocapture`
-- 테마 강제: `SAKADU_THEME=dark` 또는 `light`
-- 릴리스: `Cargo.toml`의 `version`을 올리고 `v0.2.0` 같은 태그를 푸시하면 GitHub Actions가 빌드해 **초안** 릴리스를 만든다. 확인한 뒤 게시한다
+<details>
+<summary>개발 메모와 코드 구조</summary>
 
-### 구조
+- 프로젝트 경로가 너무 길면 링커가 260자 제한에 걸려요(LNK1104). 빌드 출력만 짧은 경로로 돌리면 돼요:
+  `$env:CARGO_TARGET_DIR = "$env:TEMP\sakadu-target"; cargo build --release`
+- 셸·서비스와 실제로 붙는 테스트와 성능 측정은 `#[ignore]`로 빠져 있어요: `cargo test --release -- --ignored --nocapture`
+- 테마 강제: `SAKADU_THEME=dark` 또는 `light`
+- 릴리스: `Cargo.toml`의 `version`을 올리고 `v0.2.0` 같은 태그를 푸시하면 GitHub Actions가 빌드해서 **초안** 릴리스를 만들어요. 확인한 뒤 게시해요.
 
 | 파일 | 역할 |
 |---|---|
 | `main.rs` | 창 생성, 메시지 루프, 재진입 처리, 명령줄, 한 창만 실행 |
-| `app.rs` | 레이아웃, 입력, 그리기, 패널·탭 동작, 설정 메뉴 |
-| `app/fav_ui.rs` · `app/palette.rs` · `app/preview.rs` | 즐겨찾기 팝업 · Ctrl+K 검색 팔레트 · 미리 보기 창 |
+| `app.rs` | 레이아웃, 입력, 그리기, 칸·탭 동작, 설정 메뉴 |
+| `app/fav_ui.rs` · `app/palette.rs` · `app/preview.rs` | 즐겨찾기 팝업 · Ctrl+K 검색 창 · 미리 보기 창 |
 | `pane.rs` | 탭 상태(기록·정렬·필터·선택) |
-| `listing.rs` | 폴더 열거, 내 PC, 표시 포맷 |
+| `listing.rs` | 폴더 열거, 내 PC, 표시 형식 |
 | `shell.rs` | 셸 메뉴, 파일 작업, 클립보드, 드래그, 변경 알림, 아이콘 |
 | `droptarget.rs` | 드롭 대상(셸 드롭 대상에 위임) |
 | `thumbs.rs` | 썸네일 백그라운드 생성 |
@@ -152,8 +173,15 @@ cargo test
 | `favorites.rs`, `session.rs` | 즐겨찾기·세션 저장 |
 | `gfx.rs`, `theme.rs`, `util.rs`, `diag.rs` | 렌더링, 색, 경로, 진단 로그 |
 
-기여는 환영한다. 큰 변경은 먼저 이슈로 이야기해 주세요. PR은 `cargo test`가 통과해야 한다.
+기여는 언제든 환영해요. 큰 변경은 이슈로 먼저 이야기해 주세요. PR은 `cargo test`를 통과해야 해요.
+
+</details>
+
+## 이름
+
+사카두(Sakadu)는 눈이 한 곳에서 다른 곳으로 휙 옮겨 가는 움직임, 사카드(saccade)에서 따왔어요.
+보고 싶은 파일로 그렇게 바로 가는 게 목표예요.
 
 ## 라이선스
 
-[GPL-3.0-or-later](LICENSE). 고쳐서 배포할 때는 같은 라이선스로 소스를 함께 공개해야 한다.
+[GPL-3.0-or-later](LICENSE). 고쳐서 배포할 때는 같은 라이선스로 소스도 함께 공개해야 해요.
