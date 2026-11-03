@@ -1,4 +1,4 @@
-//! Ctrl+K 검색 팔레트: 검색 서비스(인덱스)에 이름으로 질의해 디스크 전체에서 바로 찾는다
+//! Ctrl+F 검색 팔레트: 검색 서비스(인덱스)와 검색에 넣은 폴더에서 이름으로 바로 찾는다
 
 use super::*;
 use crate::service::{self, SearchError, SearchResponse};
@@ -39,15 +39,44 @@ pub(super) fn search_button() -> R {
     R::new(l, 8.0, l + 150.0, 38.0)
 }
 
-fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>) {
+fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>, folders: crate::folders::Folders) {
     let owner = shell::SendHwnd(hwnd);
     std::thread::spawn(move || {
         let reply = match query {
-            Some(q) => SearchReply::Results(service::query(&q, PAL_LIMIT)),
+            Some(q) => SearchReply::Results(search_all(&q, &folders)),
             None => SearchReply::Status(service::status()),
         };
         post(owner.get(), WM_APP_SEARCH, Box::new(SearchDone { seq, reply }));
     });
+}
+
+/// 디스크 인덱스(검색 서비스)와 검색에 넣은 폴더에서 함께 찾아 같은 점수 기준으로 합친다
+fn search_all(q: &str, folders: &crate::folders::Folders) -> Result<SearchResponse, SearchError> {
+    let local = service::query(q, PAL_LIMIT);
+    let started = std::time::Instant::now();
+    let query = crate::index::Query::parse(q);
+    let (extra, extra_total) = folders.search(&query, PAL_LIMIT);
+    if extra_total == 0 {
+        return local;
+    }
+    // 서비스가 없거나 실패해도 폴더 쪽 결과는 보여 준다
+    let (hits, total, micros) = match local {
+        Ok(r) => (r.hits, r.total, r.micros),
+        Err(e) => {
+            if let SearchError::Other(e) = e {
+                crate::diag::log(|| format!("search: {e}"));
+            }
+            (Vec::new(), 0, 0)
+        }
+    };
+    let mut all: Vec<(i32, bool, String)> = hits
+        .into_iter()
+        .map(|(is_dir, path)| (query.name_score(util::file_name(&path), is_dir).and_then(|s| query.path_score(s, &path)).unwrap_or(i32::MIN), is_dir, path))
+        .chain(extra.into_iter().map(|h| (h.score, h.is_dir, h.path)))
+        .collect();
+    all.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.len().cmp(&b.2.len())));
+    all.truncate(PAL_LIMIT);
+    Ok(SearchResponse { total: total + extra_total, micros: micros + started.elapsed().as_micros() as u64, hits: all.into_iter().map(|(_, d, p)| (d, p)).collect() })
 }
 
 pub enum OpenMode {
@@ -125,8 +154,10 @@ impl App {
                 let _ = SetWindowTextW(self.search_edit, w!(""));
             }
         }
+        let dir = self.panes[self.active].tab().loc.dir();
+        self.pal_outside = dir.is_some_and(|d| self.folders.covering(d).is_none() && crate::folders::outside_disk_index(d));
         // 서비스가 있는지·인덱스가 준비됐는지 먼저 확인
-        spawn_search(self.hwnd, self.pal_seq, None);
+        spawn_search(self.hwnd, self.pal_seq, None, self.folders.clone());
         self.hover = Hit::None;
         self.layout_edits();
         self.focus();
@@ -181,7 +212,7 @@ impl App {
         if self.pal_status != PalStatus::NotInstalled {
             self.pal_status = PalStatus::Searching;
         }
-        spawn_search(self.hwnd, self.pal_seq, Some(q));
+        spawn_search(self.hwnd, self.pal_seq, Some(q), self.folders.clone());
         self.invalidate();
     }
 
@@ -267,7 +298,7 @@ impl App {
         // 설치가 끝나면 다시 확인할 수 있게 상태를 비운다
         self.pal_status = PalStatus::Idle;
         self.pal_seq += 1;
-        spawn_search(self.hwnd, self.pal_seq, None);
+        spawn_search(self.hwnd, self.pal_seq, None, self.folders.clone());
         self.invalidate();
     }
 
@@ -290,7 +321,7 @@ impl App {
                 return true;
             }
             VK_TAB => {}
-            _ if ctrl && vk.0 == b'K' as u16 => self.close_palette(),
+            _ if ctrl && vk.0 == b'F' as u16 => self.close_palette(),
             _ => return false,
         }
         if self.pal_open {
@@ -322,6 +353,8 @@ impl App {
         let (hover, sel, scroll) = (self.hover, self.pal_sel, self.pal_scroll);
         let status = self.pal_status.clone();
         let query = edit_text(self.search_edit);
+        let outside = self.pal_outside;
+        let folder_entries = self.folders.entry_count();
         let App { gfx, pal_results, types, .. } = self;
 
         let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.5 } else { 0.16 } };
@@ -339,6 +372,10 @@ impl App {
             PalStatus::NotInstalled => Some("검색 서비스가 설치되어 있지 않습니다\n디스크 전체를 바로 찾으려면 관리자 권한으로 한 번 설치합니다".into()),
             PalStatus::Indexing => Some("인덱스를 만드는 중입니다… 잠시 후 다시 입력해 보세요".into()),
             PalStatus::Error(e) => Some(format!("검색 서비스와 통신하지 못했습니다\n{e}")),
+            PalStatus::Done { .. } if pal_results.is_empty() && outside => Some(format!(
+                "‘{}’와(과) 일치하는 항목이 없습니다\n지금 연 폴더는 검색 범위 밖입니다 · 설정(톱니) 메뉴의 ‘이 폴더도 검색하기’로 넣을 수 있습니다",
+                query.trim()
+            )),
             PalStatus::Done { .. } if pal_results.is_empty() => Some(format!("‘{}’와(과) 일치하는 항목이 없습니다", query.trim())),
             PalStatus::Idle | PalStatus::Ready(_) if query.trim().is_empty() => {
                 Some("파일·폴더 이름을 입력하세요\n여러 낱말은 모두 포함 · ‘업무\\’처럼 \\를 붙이면 경로로 찾기".into())
@@ -380,6 +417,7 @@ impl App {
         let right = match &status {
             PalStatus::Done { total, micros } => format!("{total}개 중 {}개 · {:.1}ms", pal_results.len(), *micros as f64 / 1000.0),
             PalStatus::Searching => "찾는 중…".to_string(),
+            PalStatus::Ready(n) if folder_entries > 0 => format!("인덱스 {n}개 · 넣은 폴더 {folder_entries}개"),
             PalStatus::Ready(n) => format!("인덱스 {n}개"),
             _ => String::new(),
         };

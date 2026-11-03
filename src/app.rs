@@ -17,6 +17,7 @@ use windows::Win32::Graphics::Dwm::{DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Ole::{IDropTarget, RegisterDragDrop, RevokeDragDrop};
+use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::UI::Controls::{EM_SETCUEBANNER, EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -135,6 +136,7 @@ enum Hit {
     FavRemove(usize),
     FavAdd,
     FavSort,
+    FavNewGroup,
     FavPanel,
     SearchButton,
     PalRow(usize),
@@ -192,6 +194,8 @@ pub enum Deferred {
     DragOut(Vec<String>),
     Verb { paths: Vec<String>, verb: &'static str },
     Paste { pane: usize, dest: String },
+    /// 트레이 대기 중에 창을 닫으면 끝내지 않고 숨긴다
+    HideToTray,
     /// 미리 보기 처리기를 지금 상태에 맞춘다 (열기·닫기·크기)
     PreviewSync,
     SettingsMenu { pt: POINT },
@@ -234,7 +238,7 @@ pub struct App {
     drop_hover: Option<(usize, Option<usize>)>,
     next_id: u64,
     types: HashMap<String, (String, i32)>,
-    favs: Vec<crate::favorites::Favorite>,
+    favs: crate::favorites::Favorites,
     fav_open: bool,
     fav_sel: usize,
     fav_scroll: f32,
@@ -258,6 +262,14 @@ pub struct App {
     preview: Option<Preview>,
     /// 미리 보기 처리기(PDF 등)가 그려 넣을 자식 창
     preview_host: HWND,
+    /// 트레이 대기 중이면 알림 영역 아이콘. 이때 창을 닫으면 끝내지 않고 숨긴다
+    tray: Option<crate::tray::TrayIcon>,
+    /// 창을 숨긴 동안 폴더가 바뀐 패널. 다시 보일 때 한 번만 읽는다
+    stale: [bool; 4],
+    /// Ctrl+F 검색에 넣은 폴더(공유폴더 등 디스크 인덱스 밖)
+    folders: crate::folders::Folders,
+    /// 검색 창을 열 때 활성 칸이 검색 범위 밖 폴더였는지 (결과가 없을 때 안내)
+    pal_outside: bool,
 }
 
 // ---------- 기하 ----------
@@ -721,6 +733,10 @@ impl App {
             thumb_failed: HashSet::new(),
             preview: sess.as_ref().is_some_and(|s| s.preview).then(Preview::new),
             preview_host,
+            tray: None,
+            stale: [false; 4],
+            folders: crate::folders::Folders::start(),
+            pal_outside: false,
         };
         unsafe {
             let cue = HSTRING::from("입력하면 바로 필터");
@@ -1026,7 +1042,12 @@ impl App {
             return;
         }
         let restore = match l.result {
-            Ok(entries) => tab.set_entries(entries, sort, hidden),
+            Ok(entries) => {
+                if let Some(dir) = tab.loc.dir() {
+                    self.folders.observe(dir, &entries);
+                }
+                tab.set_entries(entries, sort, hidden)
+            }
             Err(msg) => {
                 tab.entries.clear();
                 tab.view.clear();
@@ -1618,6 +1639,50 @@ impl App {
         self.invalidate();
     }
 
+    // ---------- 트레이 대기 ----------
+
+    /// 켜 두면 창을 닫아도 끝내지 않고 알림 영역에 남아, 전역 단축키로 다시 띄운다
+    pub fn set_tray(&mut self, on: bool) {
+        if !on {
+            self.tray = None;
+        } else if self.tray.is_none() {
+            self.tray = Some(crate::tray::TrayIcon::add(self.hwnd, &self.tray_tip()));
+        }
+    }
+
+    fn tray_tip(&self) -> String {
+        match self.hotkey {
+            Some(key) => format!("Sakadu · {key}로 검색"),
+            None => "Sakadu".to_string(),
+        }
+    }
+
+    /// 탐색기가 다시 시작돼 알림 영역 아이콘이 사라졌을 때
+    pub fn on_taskbar_created(&mut self) {
+        let tip = self.tray_tip();
+        if let Some(t) = &mut self.tray {
+            t.update(true, &tip);
+        }
+    }
+
+    /// 숨겨 둔 창이 다시 보일 때: 그사이 바뀐 폴더를 읽는다
+    pub fn on_shown(&mut self) {
+        for p in 0..self.layout.count() {
+            if std::mem::take(&mut self.stale[p]) {
+                self.load(p, true);
+            }
+        }
+        self.invalidate();
+    }
+
+    /// 트레이 메뉴의 끝내기
+    pub fn quit(&mut self) {
+        if unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+            self.save_session();
+        }
+        self.pending.push(Deferred::Close);
+    }
+
     // ---------- 파일 작업 ----------
 
     fn delete(&mut self, p: usize, permanent: bool) {
@@ -1796,6 +1861,7 @@ impl App {
             let _ = RevokeDragDrop(self.hwnd);
             let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_SEARCH);
         }
+        self.tray = None;
     }
 
     pub fn on_dpi(&mut self, dpi: f32) {
@@ -1951,7 +2017,12 @@ impl App {
                         let _ = KillTimer(Some(hwnd), id);
                         let p = id - TIMER_REFRESH;
                         if p < self.layout.count() {
-                            self.load(p, true);
+                            // 트레이에 숨어 있는 동안에는 읽지 않고, 다시 보일 때 읽는다
+                            if IsWindowVisible(hwnd).as_bool() {
+                                self.load(p, true);
+                            } else {
+                                self.stale[p] = true;
+                            }
                         }
                     }
                 }
@@ -1959,12 +2030,16 @@ impl App {
                     if lp.0 != 0 && PCWSTR(lp.0 as *const u16).to_string().is_ok_and(|s| s == "ImmersiveColorSet") {
                         self.theme = Theme::system();
                         self.apply_window_theme();
+                        let tip = self.tray_tip();
+                        if let Some(t) = &mut self.tray {
+                            t.update(false, &tip);
+                        }
                     }
                     return None;
                 }
                 WM_CLOSE => {
                     self.save_session();
-                    self.pending.push(Deferred::Close);
+                    self.pending.push(if self.tray.is_some() { Deferred::HideToTray } else { Deferred::Close });
                 }
                 WM_APP_LISTED => self.on_listed(*Box::from_raw(lp.0 as *mut Listed)),
                 WM_APP_ICONS => self.on_icons(*Box::from_raw(lp.0 as *mut IconsReady)),
@@ -2190,7 +2265,7 @@ impl App {
                     self.end_edits_for_click();
                     self.fav_sel = i;
                 }
-                Hit::FavAdd | Hit::FavSort | Hit::FavPanel | Hit::FavButton => {}
+                Hit::FavAdd | Hit::FavSort | Hit::FavNewGroup | Hit::FavPanel | Hit::FavButton => {}
                 _ => self.close_favorites(),
             }
             self.invalidate();
@@ -2405,7 +2480,7 @@ impl App {
                     }
                     b'H' => self.toggle_hidden(),
                     b'B' => self.toggle_favorites(),
-                    b'K' => self.toggle_palette(),
+                    b'F' => self.toggle_palette(),
                     b'Z' => self.undo_last(),
                     b'D' => self.add_favorite(),
                     b'N' if shift => self.new_folder(p),
@@ -2550,14 +2625,14 @@ impl App {
         button(new_folder_button(), G_NEW_FOLDER, "새 폴더", false, self.hover == Hit::NewFolder);
         button(hidden_button(), G_HIDDEN, "숨김 항목", self.show_hidden, self.hover == Hit::Hidden);
         button(fav_button(), G_STAR, "즐겨찾기", self.fav_open, self.hover == Hit::FavButton);
-        // 검색 상자처럼 보이는 버튼: 누르면 Ctrl+K 팔레트
+        // 검색 상자처럼 보이는 버튼: 누르면 Ctrl+F 팔레트
         let sb = search_button();
         let on = self.pal_open || self.hover == Hit::SearchButton;
         g.fill_round(sb, 8.0, if on { t.pane } else { t.field });
         g.stroke_round(sb.inset(0.5, 0.5), 8.0, if self.pal_open { t.accent } else { t.border }, 1.0);
         g.glyph(G_SEARCH, R::new(sb.l + 8.0, sb.t, sb.l + 28.0, sb.b), true, t.dim);
         g.text("검색", R::new(sb.l + 30.0, sb.t, sb.r - 8.0, sb.b), Font::Normal, t.dim);
-        g.text("Ctrl+K", R::new(sb.l + 30.0, sb.t, sb.r - 10.0, sb.b), Font::Right, t.faint);
+        g.text("Ctrl+F", R::new(sb.l + 30.0, sb.t, sb.r - 10.0, sb.b), Font::Right, t.faint);
         // 글자 없는 버튼: 올려 두면 오른쪽 안내 문구 자리에 설명을 보여 준다
         let icon_button = |r: R, glyph: u16, on: bool, hovered: bool| {
             if on {
@@ -2877,6 +2952,11 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         Deferred::Close => unsafe {
             let _ = DestroyWindow(hwnd);
         },
+        Deferred::HideToTray => unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            // 숨어 있는 동안 쓰지 않는 메모리를 돌려준다. 다시 띄우면 필요한 만큼 돌아온다
+            let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+        },
         Deferred::Open { pane, paths, dir } => {
             for path in paths {
                 if path.to_lowercase().ends_with(".lnk") {
@@ -2923,9 +3003,23 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
     const HIDDEN: usize = 4;
     const DEFAULT_FM: usize = 5;
     const SERVICE: usize = 6;
-    let Some((thumbs, preview, hidden)) = with_app(|a| (a.panes[a.active].view == ViewMode::Thumbs, a.preview.is_some(), a.show_hidden)) else { return };
+    const TRAY: usize = 7;
+    const FOLDER: usize = 8;
+    /// 검색에 넣은 폴더 하위 메뉴 (FOLDER_LIST + 번호)
+    const FOLDER_LIST: usize = 100;
+    let Some((thumbs, preview, hidden, dir, folders)) = with_app(|a| {
+        let dir = a.panes[a.active].tab().loc.dir().map(str::to_string);
+        (a.panes[a.active].view == ViewMode::Thumbs, a.preview.is_some(), a.show_hidden, dir, a.folders.clone())
+    }) else {
+        return;
+    };
     let is_default = defaultfm::is_registered(defaultfm::CLASSES);
     let service = crate::service::is_installed();
+    let tray = crate::tray::is_enabled(crate::tray::RUN_KEY);
+    // 지금 폴더가 디스크 인덱스 밖이면 검색에 넣을 수 있고, 이미 넣은 폴더 안이면 뺄 수 있다
+    let covering = dir.as_deref().and_then(|d| folders.covering(d));
+    let can_add = covering.is_none() && dir.as_deref().is_some_and(crate::folders::outside_disk_index);
+    let added = folders.list();
     let cmd = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let item = |id: usize, label: &str, checked: bool| {
@@ -2941,7 +3035,27 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
         item(HIDDEN, "숨김 항목 표시\tCtrl+H", hidden);
         sep();
         item(DEFAULT_FM, "기본 파일 관리자로 사용 (폴더 열기·Win+E)", is_default);
+        item(TRAY, "트레이에서 대기 (로그인할 때 시작)", tray);
         item(SERVICE, if service { "디스크 검색 서비스 제거…" } else { "디스크 검색 서비스 설치…" }, false);
+        if can_add || covering.is_some() || !added.is_empty() {
+            sep();
+        }
+        if can_add || covering.is_some() {
+            item(FOLDER, "이 폴더도 검색하기 (공유폴더·USB)", covering.is_some());
+        }
+        if !added.is_empty() {
+            if let Ok(sub) = CreatePopupMenu() {
+                for (i, (path, state)) in added.iter().enumerate() {
+                    let state = match state {
+                        crate::folders::State::Scanning => "훑는 중".to_string(),
+                        crate::folders::State::Ready(n) => format!("{n}개"),
+                        crate::folders::State::Offline => "연결 안 됨".to_string(),
+                    };
+                    let _ = AppendMenuW(sub, MF_STRING, FOLDER_LIST + i, &HSTRING::from(format!("{path}\t{state}")));
+                }
+                let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("검색에 넣은 폴더"));
+            }
+        }
         let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_RIGHTALIGN).0, pt.x, pt.y, hwnd, None).0 as usize;
         let _ = DestroyMenu(menu);
         cmd
@@ -2979,6 +3093,39 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
                 with_app(|a| a.flash(a.active, msg));
             }
         }
+        FOLDER => {
+            if let Some(root) = covering {
+                remove_search_folder(hwnd, &folders, &root);
+            } else if let Some(dir) = dir {
+                let msg = match folders.add(&dir) {
+                    Ok(()) => "이제 Ctrl+F로 이 폴더 안도 찾습니다. 처음 훑는 동안에는 결과가 덜 나올 수 있습니다".to_string(),
+                    Err(e) => format!("검색 폴더 목록을 저장하지 못했습니다: {e}"),
+                };
+                with_app(|a| a.flash(a.active, msg));
+            }
+        }
+        _ if cmd >= FOLDER_LIST && cmd < FOLDER_LIST + added.len() => {
+            remove_search_folder(hwnd, &folders, &added[cmd - FOLDER_LIST].0);
+        }
+        TRAY if tray => {
+            crate::tray::disable(crate::tray::RUN_KEY);
+            with_app(|a| {
+                a.set_tray(false);
+                a.flash(a.active, "트레이 대기를 껐습니다. 이제 창을 닫으면 Sakadu가 끝납니다");
+            });
+        }
+        TRAY => {
+            // 기본 파일 관리자와 같은 위치에 복사해 두고 그 파일을 로그인할 때 실행한다
+            let r = defaultfm::copy_self().and_then(|exe| crate::tray::enable(crate::tray::RUN_KEY, &exe));
+            crate::diag::log(|| format!("tray: enable -> {r:?}"));
+            with_app(|a| match r {
+                Ok(()) => {
+                    a.set_tray(true);
+                    a.flash(a.active, "이제 창을 닫아도 트레이에서 기다리고, 로그인할 때도 창 없이 시작합니다");
+                }
+                Err(e) => a.flash(a.active, format!("시작 프로그램에 등록하지 못했습니다: {e}")),
+            });
+        }
         SERVICE => {
             // 서비스 설치·제거는 관리자 권한이 필요하므로 UAC를 거쳐 따로 실행한다
             let arg = if service { "--uninstall-service" } else { "--install-service" };
@@ -2991,6 +3138,18 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
         _ => {}
     }
     with_app(|a| a.invalidate());
+}
+
+fn remove_search_folder(hwnd: HWND, folders: &crate::folders::Folders, root: &str) {
+    let text = format!("이 폴더를 Ctrl+F 검색에서 뺄까요?\n{root}");
+    if unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), w!("Sakadu"), MB_YESNO | MB_ICONQUESTION) } != IDYES {
+        return;
+    }
+    let msg = match folders.remove(root) {
+        Ok(()) => format!("검색에서 뺐습니다: {root}"),
+        Err(e) => format!("검색 폴더 목록을 저장하지 못했습니다: {e}"),
+    };
+    with_app(|a| a.flash(a.active, msg));
 }
 
 struct MenuRequest {
@@ -3021,6 +3180,8 @@ fn build_menu(hwnd: HWND, paths: &[String], dir: Option<&str>, extended: bool) -
     let single_dir = paths.len() == 1 && shell::is_dir(&paths[0]);
     let custom: Vec<(u32, &str)> = if single_dir {
         vec![(ID_OPEN_TAB, "새 탭에서 열기"), (ID_ADD_FAV, "즐겨찾기에 추가")]
+    } else if paths.len() == 1 {
+        vec![(ID_ADD_FAV, "즐겨찾기에 추가")]
     } else if paths.is_empty() {
         vec![(ID_ADD_FAV, "이 폴더를 즐겨찾기에 추가")]
     } else {

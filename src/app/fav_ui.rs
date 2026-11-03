@@ -1,16 +1,20 @@
-//! 즐겨찾기 팝업. 도구 막대 버튼이나 Ctrl+B로 열고, 표시 이름·순서는 사용자가 정한다
+//! 즐겨찾기 팝업. 도구 막대 버튼이나 Ctrl+B로 열고, 표시 이름·순서·그룹은 사용자가 정한다
 
 use super::*;
-use crate::favorites::{self, Favorite, SortBy};
+use crate::favorites::{self, Favorite, Row, SortBy};
 
 const FAV_W: f32 = 480.0;
 const FAV_HEAD_H: f32 = 46.0;
 const FAV_FOOT_H: f32 = 30.0;
 const FAV_ROW_H: f32 = 32.0;
+/// 그룹 안 항목의 들여쓰기
+const FAV_INDENT: f32 = 18.0;
 pub(super) const G_STAR: u16 = 0xE734;
 const G_EDIT: u16 = 0xE70F;
 const G_REMOVE: u16 = 0xE711;
 const G_SORT: u16 = 0xE8CB;
+const G_NEW_GROUP: u16 = 0xE8F4;
+const G_CHEVRON_DOWN: u16 = 0xE70D;
 
 pub(super) fn fav_button() -> R {
     let l = hidden_button().r + 6.0;
@@ -21,31 +25,113 @@ pub(super) fn fav_button() -> R {
 fn popup_menu(hwnd: HWND, pt: POINT, items: &[(u32, &str)]) -> u32 {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return 0 };
-        for (id, label) in items {
-            let _ = if *id == 0 {
-                AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
-            } else {
-                AppendMenuW(menu, MF_STRING, *id as usize, &HSTRING::from(*label))
-            };
-        }
+        append_items(menu, items);
         let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
         let _ = DestroyMenu(menu);
         cmd
     }
 }
 
+fn append_items(menu: HMENU, items: &[(u32, &str)]) {
+    for (id, label) in items {
+        unsafe {
+            let _ = if *id == 0 {
+                AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
+            } else {
+                AppendMenuW(menu, MF_STRING, *id as usize, &HSTRING::from(*label))
+            };
+        }
+    }
+}
+
 pub(super) fn show_fav_menu(hwnd: HWND, index: usize, pt: POINT) {
-    let cmd = popup_menu(
-        hwnd,
-        pt,
-        &[(1, "열기"), (2, "새 탭에서 열기"), (0, ""), (3, "이름 바꾸기\tF2"), (4, "위로 이동\tCtrl+↑"), (5, "아래로 이동\tCtrl+↓"), (0, ""), (6, "즐겨찾기에서 삭제\tDel")],
-    );
+    let Some(info) = with_app(|a| {
+        let row = a.favs.rows().get(index).copied()?;
+        let groups: Vec<(String, usize)> = a.favs.groups.iter().map(|g| (g.name.clone(), g.items.len())).collect();
+        let is_dir = match row {
+            Row::Item { group, index } => a.favs.item(group, index).is_some_and(|f| f.is_dir),
+            Row::Group(_) => true,
+        };
+        let collapsed = matches!(row, Row::Group(g) if a.favs.groups[g].collapsed);
+        Some((row, groups, is_dir, collapsed))
+    })
+    .flatten() else {
+        return;
+    };
+    match info {
+        (Row::Group(g), groups, _, collapsed) => show_group_menu(hwnd, index, g, &groups[g], collapsed, pt),
+        (Row::Item { group, .. }, groups, is_dir, _) => show_item_menu(hwnd, index, group, &groups, is_dir, pt),
+    }
+}
+
+fn show_item_menu(hwnd: HWND, index: usize, current: Option<usize>, groups: &[(String, usize)], is_dir: bool, pt: POINT) {
+    const NO_GROUP: u32 = 7;
+    const NEW_GROUP: u32 = 8;
+    const GROUP: u32 = 100;
+    let cmd = unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let Ok(sub) = CreatePopupMenu() else {
+            let _ = DestroyMenu(menu);
+            return;
+        };
+        let check = |on: bool| MF_STRING | if on { MF_CHECKED } else { MF_UNCHECKED };
+        for (g, (name, _)) in groups.iter().enumerate() {
+            let _ = AppendMenuW(sub, check(current == Some(g)), GROUP as usize + g, &HSTRING::from(name.as_str()));
+        }
+        if !groups.is_empty() {
+            let _ = AppendMenuW(sub, check(current.is_none()), NO_GROUP as usize, w!("그룹 없음"));
+            let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+        }
+        let _ = AppendMenuW(sub, MF_STRING, NEW_GROUP as usize, w!("새 그룹을 만들어 넣기"));
+        append_items(menu, &[(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, ""), (3, "이름 바꾸기\tF2"), (4, "위로 이동\tCtrl+↑"), (5, "아래로 이동\tCtrl+↓")]);
+        let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("그룹으로 이동"));
+        append_items(menu, &[(0, ""), (6, "즐겨찾기에서 삭제\tDel")]);
+        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
+        let _ = DestroyMenu(menu);
+        cmd
+    };
     with_app(|a| match cmd {
         1 | 2 => a.fav_open_item(index, cmd == 2),
         3 => a.begin_fav_rename(index),
-        4 if index > 0 => a.move_favorite(index, index - 1),
-        5 => a.move_favorite(index, index + 1),
+        4 => a.fav_nudge(index, true),
+        5 => a.fav_nudge(index, false),
         6 => a.remove_favorite(index),
+        NO_GROUP => a.fav_move_to_group(index, None),
+        NEW_GROUP => a.fav_move_to_new_group(index),
+        _ if cmd >= GROUP && ((cmd - GROUP) as usize) < groups.len() => a.fav_move_to_group(index, Some((cmd - GROUP) as usize)),
+        _ => {}
+    });
+}
+
+fn show_group_menu(hwnd: HWND, index: usize, g: usize, group: &(String, usize), collapsed: bool, pt: POINT) {
+    let cmd = popup_menu(
+        hwnd,
+        pt,
+        &[
+            (1, if collapsed { "펼치기" } else { "접기" }),
+            (0, ""),
+            (2, "이름 바꾸기\tF2"),
+            (3, "위로 이동\tCtrl+↑"),
+            (4, "아래로 이동\tCtrl+↓"),
+            (0, ""),
+            (5, "그룹 풀기 (안의 즐겨찾기는 남김)\tDel"),
+            (6, "그룹과 안의 즐겨찾기 삭제…"),
+        ],
+    );
+    if cmd == 6 {
+        let (name, count) = group;
+        let text = format!("‘{name}’ 그룹과 안에 든 즐겨찾기 {count}개를 지울까요?");
+        if unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), w!("Sakadu"), MB_YESNO | MB_ICONQUESTION) } != IDYES {
+            return;
+        }
+    }
+    with_app(|a| match cmd {
+        1 => a.fav_toggle_group(g),
+        2 => a.begin_fav_rename(index),
+        3 => a.fav_nudge(index, true),
+        4 => a.fav_nudge(index, false),
+        5 => a.fav_ungroup(g),
+        6 => a.fav_delete_group(g),
         _ => {}
     });
 }
@@ -65,7 +151,7 @@ impl App {
     pub(super) fn fav_rect(&self) -> R {
         let b = fav_button();
         let w = FAV_W.min(self.w - b.l - MARGIN).max(260.0);
-        let rows = self.favs.len().max(2) as f32;
+        let rows = self.favs.rows().len().max(2) as f32;
         let max_h = (self.h - TOOLBAR_H - 12.0).max(160.0);
         let h = (FAV_HEAD_H + rows * FAV_ROW_H + FAV_FOOT_H + 8.0).min(max_h);
         R::new(b.l, TOOLBAR_H - 4.0, b.l + w, TOOLBAR_H - 4.0 + h)
@@ -92,10 +178,19 @@ impl App {
         R::new(a.l - 76.0, a.t, a.l - 6.0, a.b)
     }
 
+    fn fav_group_button(&self) -> R {
+        let s = self.fav_sort_button();
+        R::new(s.l - 76.0, s.t, s.l - 6.0, s.b)
+    }
+
     fn fav_row_buttons(row: R) -> (R, R) {
         let remove = R::new(row.r - 32.0, row.t + 4.0, row.r - 6.0, row.b - 4.0);
         let edit = R::new(remove.l - 28.0, remove.t, remove.l - 2.0, remove.b);
         (edit, remove)
+    }
+
+    fn fav_indent(row: Row) -> f32 {
+        if matches!(row, Row::Item { group: Some(_), .. }) { FAV_INDENT } else { 0.0 }
     }
 
     /// 이름 바꾸기 입력 상자 자리 (표시 이름 칸)
@@ -105,7 +200,8 @@ impl App {
         if row.t < list.t - 1.0 || row.b > list.b + 1.0 {
             return None;
         }
-        Some(R::new(row.l + 36.0, row.t + 3.0, row.l + 36.0 + (row.w() - 36.0) * 0.5, row.b - 3.0))
+        let l = row.l + 36.0 + Self::fav_indent(*self.favs.rows().get(i)?);
+        Some(R::new(l, row.t + 3.0, l + (row.r - l) * 0.5, row.b - 3.0))
     }
 
     pub(super) fn fav_hit(&self, x: f32, y: f32) -> Option<Hit> {
@@ -119,10 +215,13 @@ impl App {
         if self.fav_sort_button().contains(x, y) {
             return Some(Hit::FavSort);
         }
+        if self.fav_group_button().contains(x, y) {
+            return Some(Hit::FavNewGroup);
+        }
         let list = self.fav_list();
         if list.contains(x, y) {
             let i = ((y - list.t + self.fav_scroll) / FAV_ROW_H).floor();
-            if i >= 0.0 && (i as usize) < self.favs.len() {
+            if i >= 0.0 && (i as usize) < self.favs.rows().len() {
                 let i = i as usize;
                 let (edit, remove) = Self::fav_row_buttons(self.fav_row(i));
                 return Some(if remove.contains(x, y) {
@@ -151,7 +250,7 @@ impl App {
             self.cancel_edit();
         }
         self.fav_open = true;
-        self.fav_sel = select.unwrap_or(self.fav_sel).min(self.favs.len().saturating_sub(1));
+        self.fav_sel = select.unwrap_or(self.fav_sel).min(self.favs.rows().len().saturating_sub(1));
         self.hover = Hit::None;
         self.fav_ensure_visible();
         // 필터 입력 상자(자식 창)가 팝업 위에 그려지지 않도록 화면 밖으로 옮긴다. 포커스는 유지
@@ -176,7 +275,7 @@ impl App {
 
     fn fav_clamp_scroll(&mut self) {
         let list = self.fav_list();
-        let max = (self.favs.len() as f32 * FAV_ROW_H - list.h()).max(0.0);
+        let max = (self.favs.rows().len() as f32 * FAV_ROW_H - list.h()).max(0.0);
         self.fav_scroll = self.fav_scroll.clamp(0.0, max);
     }
 
@@ -191,29 +290,61 @@ impl App {
         self.fav_clamp_scroll();
     }
 
+    /// 줄을 고르고 보이게 한 뒤 저장한다 (항목을 옮기거나 그룹을 바꾼 다음)
+    fn fav_changed(&mut self, select: Option<Row>) {
+        if let Some(i) = select.and_then(|r| self.favs.row_index(r)) {
+            self.fav_sel = i;
+        }
+        self.fav_sel = self.fav_sel.min(self.favs.rows().len().saturating_sub(1));
+        self.save_favorites();
+        self.fav_ensure_visible();
+        self.invalidate();
+    }
+
+    /// 항목은 열고(폴더는 이동, 파일은 실행), 그룹 머리 줄은 접거나 펼친다.
+    /// new_tab: 폴더는 새 탭, 파일은 그 파일이 있는 폴더를 새 탭에서 열고 선택
     pub(super) fn fav_open_item(&mut self, i: usize, new_tab: bool) {
-        let Some(f) = self.favs.get(i).cloned() else { return };
+        let f = match self.favs.rows().get(i) {
+            Some(Row::Group(g)) => {
+                self.fav_toggle_group(*g);
+                return;
+            }
+            Some(Row::Item { group, index }) => match self.favs.item(*group, *index) {
+                Some(f) => f.clone(),
+                None => return,
+            },
+            None => return,
+        };
         self.close_favorites();
         let path = util::normalize(&f.path);
         let p = self.active;
-        if !shell::is_dir(&path) {
-            self.flash(p, format!("즐겨찾기 폴더를 찾을 수 없습니다: {}", f.path));
-            return;
-        }
-        if new_tab {
-            self.new_tab(p, Some(Location::Dir(path)), true);
+        if shell::is_dir(&path) {
+            if new_tab {
+                self.new_tab(p, Some(Location::Dir(path)), true);
+            } else {
+                self.navigate(p, Location::Dir(path), None);
+            }
+        } else if shell::exists(&path) {
+            let dir = util::parent(&path);
+            if !new_tab {
+                self.pending.push(Deferred::Open { pane: p, paths: vec![path], dir });
+            } else if let Some(dir) = dir {
+                let name = util::file_name(&path).to_string();
+                self.new_tab(p, Some(Location::Dir(dir)), true);
+                self.panes[p].tab_mut().restore = Some(Restore::select(&name));
+            }
         } else {
-            self.navigate(p, Location::Dir(path), None);
+            self.flash(p, format!("즐겨찾기 항목을 찾을 수 없습니다: {}", f.path));
         }
     }
 
-    /// Ctrl+D·추가 버튼: 폴더 하나를 선택했으면 그 폴더, 아니면 현재 폴더
+    /// Ctrl+D·추가 버튼: 폴더·파일 하나를 선택했으면 그것, 아니면 현재 폴더
     pub(super) fn add_favorite(&mut self) {
         let tab = self.panes[self.active].tab();
         let picked = match tab.cursor_entry() {
-            Some(e) if e.selected && e.is_dir() && tab.selection_stats().0 == 1 => {
+            Some(e) if e.selected && tab.selection_stats().0 == 1 => {
                 // 드라이브·사용자 폴더는 "로컬 디스크 (C:)" 같은 표시 이름을 그대로 쓴다
-                tab.path_of(e).map(|p| (p, (e.kind != Kind::Dir).then(|| e.name_string())))
+                tab.path_of(e).map(|p| (p, matches!(e.kind, Kind::Drive | Kind::Known).then(|| e.name_string())))
             }
             _ => None,
         };
@@ -221,26 +352,38 @@ impl App {
             Some((path, name)) => self.add_favorite_path(&path, name),
             None => {
                 let p = self.active;
-                self.flash(p, "즐겨찾기에 추가할 폴더가 없습니다");
+                self.flash(p, "즐겨찾기에 추가할 폴더나 파일이 없습니다");
             }
         }
     }
 
+    /// 팝업이 열려 있고 그룹 안(또는 그룹 머리 줄)을 고르고 있으면 그 그룹에, 아니면 그룹 없음 끝에 넣는다
     pub fn add_favorite_path(&mut self, path: &str, name: Option<String>) {
         let path = util::normalize(path);
-        if let Some(i) = favorites::index_of(&self.favs, &path) {
-            self.open_favorites(Some(i));
+        if let Some((group, index)) = self.favs.find(&path) {
+            if let Some(g) = group {
+                self.favs.groups[g].collapsed = false;
+            }
+            let row = self.favs.row_index(Row::Item { group, index });
+            self.open_favorites(row);
             let p = self.active;
             self.flash(p, "이미 즐겨찾기에 있습니다");
             return;
         }
+        let target = match self.fav_open.then(|| self.favs.rows().get(self.fav_sel).copied()).flatten() {
+            Some(Row::Group(g)) | Some(Row::Item { group: Some(g), .. }) => Some(g),
+            _ => None,
+        };
         let name = name.unwrap_or_else(|| favorites::default_name(&path));
-        self.favs.push(Favorite { name, path });
+        let is_dir = shell::is_dir(&path);
+        let (group, index) = self.favs.push(target, Favorite { name, path, is_dir });
         self.save_favorites();
-        let i = self.favs.len() - 1;
-        self.open_favorites(Some(i));
+        let i = self.favs.row_index(Row::Item { group, index });
+        self.open_favorites(i);
         // 추가하자마자 원하는 표시 이름(예: "01.일간 업무")을 붙일 수 있게 한다. Enter면 그대로
-        self.begin_fav_rename(i);
+        if let Some(i) = i {
+            self.begin_fav_rename(i);
+        }
     }
 
     fn save_favorites(&mut self) {
@@ -250,8 +393,17 @@ impl App {
         }
     }
 
+    pub(super) fn add_fav_group(&mut self) -> usize {
+        let g = self.favs.add_group("새 그룹".to_string());
+        self.save_favorites();
+        let i = self.favs.row_index(Row::Group(g)).unwrap_or(0);
+        self.open_favorites(Some(i));
+        self.begin_fav_rename(i);
+        g
+    }
+
     pub(super) fn begin_fav_rename(&mut self, i: usize) {
-        let Some(name) = self.favs.get(i).map(|f| f.name.clone()) else { return };
+        let Some(name) = self.favs.rows().get(i).and_then(|r| self.favs.row_name(*r)).map(str::to_string) else { return };
         if !self.fav_open {
             self.open_favorites(Some(i));
         }
@@ -270,69 +422,112 @@ impl App {
     pub(super) fn commit_fav_rename(&mut self, i: usize) {
         let text = favorites::clean_name(&edit_text(self.rename_edit));
         self.close_edit();
-        let changed = match self.favs.get_mut(i) {
-            Some(f) if !text.is_empty() && text != f.name => {
-                f.name = text;
-                true
-            }
-            _ => false,
-        };
-        if changed {
+        let Some(row) = self.favs.rows().get(i).copied() else { return };
+        if !text.is_empty() && self.favs.set_row_name(row, text) {
             self.save_favorites();
         }
     }
 
+    /// Del: 항목은 지우고, 그룹은 풀어서 안의 항목을 남긴다
     pub(super) fn remove_favorite(&mut self, i: usize) {
-        if i >= self.favs.len() {
-            return;
-        }
+        let Some(row) = self.favs.rows().get(i).copied() else { return };
         if let EditMode::FavRename(_) = self.edit_mode {
             self.cancel_edit();
         }
-        self.favs.remove(i);
-        self.fav_sel = self.fav_sel.min(self.favs.len().saturating_sub(1));
-        self.save_favorites();
-        self.fav_clamp_scroll();
-        self.invalidate();
+        match row {
+            Row::Item { group, index } => {
+                self.favs.remove_item(group, index);
+            }
+            Row::Group(g) => self.favs.ungroup(g),
+        }
+        self.fav_changed(None);
     }
 
-    pub(super) fn move_favorite(&mut self, from: usize, to: usize) {
-        if from >= self.favs.len() || to >= self.favs.len() || from == to {
-            return;
+    pub(super) fn fav_toggle_group(&mut self, g: usize) {
+        if let Some(group) = self.favs.groups.get_mut(g) {
+            group.collapsed = !group.collapsed;
+            self.fav_changed(Some(Row::Group(g)));
         }
-        favorites::move_item(&mut self.favs, from, to);
-        self.fav_sel = to;
-        self.save_favorites();
-        self.fav_ensure_visible();
-        self.invalidate();
+    }
+
+    pub(super) fn fav_ungroup(&mut self, g: usize) {
+        self.favs.ungroup(g);
+        self.fav_changed(None);
+    }
+
+    pub(super) fn fav_delete_group(&mut self, g: usize) {
+        self.favs.delete_group(g);
+        self.fav_changed(None);
+    }
+
+    fn fav_item_at(&self, i: usize) -> Option<(Option<usize>, usize)> {
+        match self.favs.rows().get(i) {
+            Some(Row::Item { group, index }) => Some((*group, *index)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn fav_move_to_group(&mut self, i: usize, group: Option<usize>) {
+        let Some(from) = self.fav_item_at(i) else { return };
+        let to = self.favs.section(group).len();
+        if let Some((group, index)) = self.favs.move_item(from, group, to) {
+            self.fav_changed(Some(Row::Item { group, index }));
+        }
+    }
+
+    pub(super) fn fav_move_to_new_group(&mut self, i: usize) {
+        let Some(from) = self.fav_item_at(i) else { return };
+        let g = self.favs.add_group("새 그룹".to_string());
+        self.favs.move_item(from, Some(g), 0);
+        self.fav_changed(None);
+        if let Some(i) = self.favs.row_index(Row::Group(g)) {
+            self.begin_fav_rename(i);
+        }
+    }
+
+    /// Ctrl+↑↓ 또는 메뉴의 위로·아래로
+    pub(super) fn fav_nudge(&mut self, i: usize, up: bool) {
+        let Some(row) = self.favs.rows().get(i).copied() else { return };
+        if let Some(moved) = self.favs.nudge(row, up) {
+            self.fav_changed(Some(moved));
+        }
     }
 
     pub(super) fn sort_favorites(&mut self, by: SortBy) {
-        favorites::sort(&mut self.favs, by);
-        self.save_favorites();
-        self.invalidate();
+        self.favs.sort(by);
+        self.fav_changed(None);
     }
 
     /// 팝업이 열려 있을 때의 키. 처리했으면 true
     pub(super) fn fav_key(&mut self, vk: VIRTUAL_KEY) -> bool {
         let ctrl = key_down(VK_CONTROL);
-        let n = self.favs.len();
+        let rows = self.favs.rows();
+        let n = rows.len();
         let s = self.fav_sel;
         let page = ((self.fav_list().h() / FAV_ROW_H).floor() as usize).max(1);
         match vk {
             VK_ESCAPE => self.close_favorites(),
-            VK_UP if ctrl => {
-                if s > 0 {
-                    self.move_favorite(s, s - 1);
-                }
-            }
-            VK_DOWN if ctrl => self.move_favorite(s, s + 1),
+            VK_UP if ctrl => self.fav_nudge(s, true),
+            VK_DOWN if ctrl => self.fav_nudge(s, false),
             VK_UP => self.fav_sel = s.saturating_sub(1),
             VK_DOWN => self.fav_sel = (s + 1).min(n.saturating_sub(1)),
             VK_PRIOR => self.fav_sel = s.saturating_sub(page),
             VK_NEXT => self.fav_sel = (s + page).min(n.saturating_sub(1)),
             VK_HOME => self.fav_sel = 0,
             VK_END => self.fav_sel = n.saturating_sub(1),
+            // ←: 그룹을 접거나 그룹 안 항목에서 머리 줄로, →: 접힌 그룹을 펼친다
+            VK_LEFT => match rows.get(s) {
+                Some(Row::Group(g)) if !self.favs.groups[*g].collapsed => self.fav_toggle_group(*g),
+                Some(Row::Item { group: Some(g), .. }) => self.fav_sel = self.favs.row_index(Row::Group(*g)).unwrap_or(s),
+                _ => {}
+            },
+            VK_RIGHT => {
+                if let Some(Row::Group(g)) = rows.get(s) {
+                    if self.favs.groups[*g].collapsed {
+                        self.fav_toggle_group(*g);
+                    }
+                }
+            }
             VK_RETURN => {
                 self.fav_open_item(s, ctrl);
                 return true;
@@ -357,17 +552,18 @@ impl App {
         true
     }
 
-    /// 팝업이 열려 있을 때 글자를 누르면 그 글자로 시작하는 다음 항목으로 이동
+    /// 팝업이 열려 있을 때 글자를 누르면 그 글자로 시작하는 다음 줄(항목·그룹)로 이동
     pub fn fav_type_char(&mut self, ch: u16) -> bool {
         if !self.fav_open || self.edit_mode != EditMode::None {
             return false;
         }
-        let n = self.favs.len();
+        let rows = self.favs.rows();
+        let n = rows.len();
         let Some(c) = char::from_u32(ch as u32).filter(|c| !c.is_control()) else { return true };
         let needle = c.to_lowercase().to_string();
         for k in 1..=n {
             let i = (self.fav_sel + k) % n;
-            if self.favs[i].name.to_lowercase().starts_with(&needle) {
+            if self.favs.row_name(rows[i]).is_some_and(|name| name.to_lowercase().starts_with(&needle)) {
                 self.fav_sel = i;
                 self.fav_ensure_visible();
                 self.invalidate();
@@ -381,6 +577,9 @@ impl App {
     pub(super) fn fav_mouse_down(&mut self, hit: Hit, y: f32) {
         match hit {
             Hit::FavAdd => self.add_favorite(),
+            Hit::FavNewGroup => {
+                self.add_fav_group();
+            }
             Hit::FavSort => {
                 let r = self.fav_sort_button();
                 let pt = self.to_screen(r.l, r.b + 2.0);
@@ -415,11 +614,11 @@ impl App {
         self.invalidate();
     }
 
-    /// 끌어 놓을 자리(항목 사이 경계, 0..=len)
+    /// 끌어 놓을 자리(줄 사이 경계, 0..=줄 수)
     fn fav_drop_slot(&self, y: f32) -> usize {
         let list = self.fav_list();
         let slot = ((y - list.t + self.fav_scroll) / FAV_ROW_H + 0.5).floor().max(0.0) as usize;
-        slot.min(self.favs.len())
+        slot.min(self.favs.rows().len())
     }
 
     /// 처리했으면 true
@@ -433,8 +632,22 @@ impl App {
             Drag::FavMove { from, y } => {
                 self.drag = Drag::None;
                 let slot = self.fav_drop_slot(y);
-                let to = if slot > from { slot - 1 } else { slot };
-                self.move_favorite(from, to);
+                match self.favs.rows().get(from).copied() {
+                    // 항목은 놓은 자리의 그룹으로 들어가고, 그룹은 안의 항목과 함께 옮겨진다
+                    Some(Row::Item { group, index }) => {
+                        let (to_group, to_index) = self.favs.item_drop_target(slot);
+                        if let Some((group, index)) = self.favs.move_item((group, index), to_group, to_index) {
+                            self.fav_changed(Some(Row::Item { group, index }));
+                        }
+                    }
+                    Some(Row::Group(g)) => {
+                        let to = self.favs.group_drop_target(slot, g);
+                        if let Some(to) = self.favs.move_group(g, to) {
+                            self.fav_changed(Some(Row::Group(to)));
+                        }
+                    }
+                    None => {}
+                }
                 true
             }
             _ => false,
@@ -461,13 +674,14 @@ impl App {
         let t = self.theme;
         let r = self.fav_rect();
         let list = self.fav_list();
-        let (add, sort) = (self.fav_add_button(), self.fav_sort_button());
+        let (add, sort, group_b) = (self.fav_add_button(), self.fav_sort_button(), self.fav_group_button());
         let hover = self.hover;
         let (sel, scroll, edit_mode) = (self.fav_sel, self.fav_scroll, self.edit_mode);
         let moving = match self.drag {
             Drag::FavMove { from, y } => Some((from, self.fav_drop_slot(y))),
             _ => None,
         };
+        let rows = self.favs.rows();
         let App { gfx, favs, types, .. } = self;
         let folder_icon = types.entry("\\dir".to_string()).or_insert_with(|| shell::type_info("", true)).1;
 
@@ -477,11 +691,11 @@ impl App {
         gfx.fill_round(r, 10.0, t.pane);
         gfx.stroke_round(r.inset(0.5, 0.5), 10.0, t.border, 1.0);
 
-        // 머리: 제목, 개수, 정렬·추가 버튼
+        // 머리: 제목, 개수, 그룹·정렬·추가 버튼
         gfx.glyph(G_STAR, R::new(r.l + 12.0, r.t, r.l + 34.0, r.t + FAV_HEAD_H), false, t.accent);
         gfx.text("즐겨찾기", R::new(r.l + 38.0, r.t, r.l + 120.0, r.t + FAV_HEAD_H), Font::Strong, t.text);
-        gfx.text(&format!("{}개", favs.len()), R::new(r.l + 104.0, r.t, sort.l - 8.0, r.t + FAV_HEAD_H), Font::Normal, t.faint);
-        for (b, glyph, label, h) in [(sort, G_SORT, "정렬", Hit::FavSort), (add, G_ADD, "추가", Hit::FavAdd)] {
+        gfx.text(&format!("{}개", favs.count()), R::new(r.l + 104.0, r.t, group_b.l - 8.0, r.t + FAV_HEAD_H), Font::Normal, t.faint);
+        for (b, glyph, label, h) in [(group_b, G_NEW_GROUP, "그룹", Hit::FavNewGroup), (sort, G_SORT, "정렬", Hit::FavSort), (add, G_ADD, "추가", Hit::FavAdd)] {
             gfx.fill_round(b, 6.0, if hover == h { t.sel_inactive } else { t.field });
             gfx.glyph(glyph, R::new(b.l + 6.0, b.t, b.l + 26.0, b.b), true, t.text);
             gfx.text(label, R::new(b.l + 28.0, b.t, b.r - 4.0, b.b), Font::Normal, t.text);
@@ -490,9 +704,9 @@ impl App {
 
         // 목록
         gfx.clip(list);
-        if favs.is_empty() {
+        if rows.is_empty() {
             gfx.text(
-                "즐겨찾기가 비어 있습니다\nCtrl+D 또는 ‘추가’로 현재 폴더를 넣고\n원하는 이름과 순서로 정리하세요",
+                "즐겨찾기가 비어 있습니다\nCtrl+D 또는 ‘추가’로 현재 폴더나 고른 파일을 넣고\n‘그룹’으로 묶어 원하는 이름과 순서로 정리하세요",
                 list.inset(16.0, 8.0),
                 Font::Hint,
                 t.faint,
@@ -500,7 +714,7 @@ impl App {
         }
         let first = (scroll / FAV_ROW_H).floor().max(0.0) as usize;
         let count = (list.h() / FAV_ROW_H).ceil() as usize + 1;
-        for i in first..(first + count).min(favs.len()) {
+        for i in first..(first + count).min(rows.len()) {
             let y = list.t + i as f32 * FAV_ROW_H - scroll;
             let row = R::new(list.l, y, list.r, y + FAV_ROW_H);
             let body = row.inset(2.0, 1.0);
@@ -512,13 +726,33 @@ impl App {
                 gfx.fill_round(body, 6.0, t.hover);
             }
             let fg = if dragged { t.faint } else { t.text };
-            gfx.icon(folder_icon, R::new(row.l + 12.0, y + 8.0, row.l + 28.0, y + 24.0));
-            let split = row.l + 36.0 + (row.w() - 36.0) * 0.5;
-            let f = &favs[i];
-            gfx.text(&f.name, R::new(row.l + 40.0, y, split - 8.0, y + FAV_ROW_H), Font::Normal, fg);
+            let indent = Self::fav_indent(rows[i]);
             let show_buttons = row_hover || i == sel;
-            let path_r = if show_buttons { row.r - 66.0 } else { row.r - 12.0 };
-            gfx.text(&f.path, R::new(split, y, path_r, y + FAV_ROW_H), Font::Path, t.faint);
+            let text_r = if show_buttons { row.r - 66.0 } else { row.r - 12.0 };
+            let name_l = row.l + 40.0 + indent;
+            match rows[i] {
+                Row::Group(g) => {
+                    let group = &favs.groups[g];
+                    let chevron = if group.collapsed { G_CHEVRON } else { G_CHEVRON_DOWN };
+                    gfx.glyph(chevron, R::new(row.l + 10.0, y, row.l + 30.0, y + FAV_ROW_H), true, t.dim);
+                    gfx.text(&group.name, R::new(name_l, y, text_r, y + FAV_ROW_H), Font::Strong, fg);
+                    gfx.text(&format!("{}개", group.items.len()), R::new(name_l, y, text_r, y + FAV_ROW_H), Font::Right, t.faint);
+                }
+                Row::Item { group, index } => {
+                    let Some(f) = favs.item(group, index) else { continue };
+                    let icon = if f.is_dir {
+                        folder_icon
+                    } else {
+                        let name = util::file_name(&f.path);
+                        let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+                        types.entry(ext.clone()).or_insert_with(|| shell::type_info(&ext, false)).1
+                    };
+                    gfx.icon(icon, R::new(row.l + 12.0 + indent, y + 8.0, row.l + 28.0 + indent, y + 24.0));
+                    let split = name_l - 4.0 + (row.r - name_l) * 0.5;
+                    gfx.text(&f.name, R::new(name_l, y, split - 8.0, y + FAV_ROW_H), Font::Normal, fg);
+                    gfx.text(&f.path, R::new(split, y, text_r, y + FAV_ROW_H), Font::Path, t.faint);
+                }
+            }
             if show_buttons && !dragged {
                 let (edit, remove) = Self::fav_row_buttons(row);
                 for (b, glyph, h) in [(edit, G_EDIT, Hit::FavEdit(i)), (remove, G_REMOVE, Hit::FavRemove(i))] {
@@ -529,7 +763,7 @@ impl App {
                 }
             }
             if edit_mode == EditMode::FavRename(i) {
-                let er = R::new(row.l + 36.0, y + 3.0, split, y + FAV_ROW_H - 3.0);
+                let er = R::new(row.l + 36.0 + indent, y + 3.0, row.l + 36.0 + indent + (row.r - row.l - 36.0 - indent) * 0.5, y + FAV_ROW_H - 3.0);
                 gfx.fill_round(er, 4.0, t.pane);
                 gfx.stroke_round(er.inset(0.75, 0.75), 4.0, t.accent, 1.5);
             }
@@ -542,7 +776,7 @@ impl App {
         gfx.unclip();
 
         gfx.text(
-            "클릭 열기 · Ctrl+Enter 새 탭 · F2 이름 · Del 삭제 · 끌거나 Ctrl+↑↓로 순서 변경",
+            "클릭 열기 · Ctrl+Enter 새 탭 · F2 이름 · Del 삭제 · 끌어서 순서·그룹 바꾸기",
             R::new(r.l + 14.0, r.b - FAV_FOOT_H, r.r - 10.0, r.b - 2.0),
             Font::Normal,
             t.faint,

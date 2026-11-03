@@ -261,6 +261,19 @@ impl Query {
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty() && self.path_terms.is_empty()
     }
+
+    // 이 인덱스 밖의 항목(검색에 넣은 폴더, 서비스가 돌려준 결과)에도 search와 같은 기준으로 점수를 매긴다
+
+    /// 이름만 보고 매기는 1차 점수. 이름이 맞지 않으면 None
+    pub fn name_score(&self, name: &str, is_dir: bool) -> Option<i32> {
+        if self.terms.is_empty() { Some(0) } else { name_score(name.as_bytes(), &self.terms, is_dir) }
+    }
+
+    /// 1차 점수에 전체 경로를 반영한 최종 점수. 경로가 경로 낱말을 모두 포함하지 않으면 None
+    pub fn path_score(&self, name_score: i32, path: &str) -> Option<i32> {
+        let lower = path.to_lowercase();
+        self.path_terms.iter().all(|t| lower.contains(t.as_str())).then(|| name_score - path_penalty(&lower))
+    }
 }
 
 /// 대소문자 무시(ASCII) 부분 문자열 위치. needle은 소문자여야 한다

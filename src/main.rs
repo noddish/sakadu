@@ -6,6 +6,7 @@ mod defaultfm;
 mod diag;
 mod droptarget;
 mod favorites;
+mod folders;
 mod gfx;
 mod index;
 mod listing;
@@ -15,10 +16,11 @@ mod session;
 mod shell;
 mod theme;
 mod thumbs;
+mod tray;
 mod undo;
 mod util;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -33,11 +35,15 @@ pub const WM_APP_SEARCH: u32 = WM_APP + 3;
 pub const WM_APP_UNDO: u32 = WM_APP + 4;
 pub const WM_APP_THUMB: u32 = WM_APP + 5;
 pub const WM_APP_PREVIEW: u32 = WM_APP + 6;
+/// 알림 영역(트레이) 아이콘을 누르거나 메뉴를 열 때
+pub const WM_APP_TRAY: u32 = WM_APP + 7;
 /// 패널별 폴더 변경 알림 (WM_APP_NOTIFY + 패널 번호)
 pub const WM_APP_NOTIFY: u32 = WM_APP + 0x10;
 
 thread_local! {
     static APP: RefCell<Option<Box<app::App>>> = const { RefCell::new(None) };
+    /// 트레이에서 창 없이 시작했을 때, 처음 보일 때 쓸 표시 방법(세션의 최대화 여부)
+    static FIRST_SHOW: Cell<Option<SHOW_WINDOW_CMD>> = const { Cell::new(None) };
 }
 
 /// UI 스레드의 App에 접근. 이미 처리 중이면(재진입) None
@@ -51,6 +57,23 @@ pub fn with_app<R>(f: impl FnOnce(&mut app::App) -> R) -> Option<R> {
 
 fn app_busy() -> bool {
     APP.with(|c| c.try_borrow_mut().is_err())
+}
+
+/// 숨겨 두었거나(트레이) 최소화한 창을 보이고 앞으로 가져온다. App 빌림 밖에서 부른다
+fn bring_to_front(hwnd: HWND) {
+    unsafe {
+        let hidden = !IsWindowVisible(hwnd).as_bool();
+        if hidden {
+            let _ = ShowWindow(hwnd, FIRST_SHOW.take().unwrap_or(SW_SHOW));
+        }
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd);
+        if hidden {
+            with_app(|a| a.on_shown());
+        }
+    }
 }
 
 /// 메시지 처리 중 미뤄 둔 모달 작업(메뉴, 드래그, 열기)을 App 빌림 없이 실행
@@ -95,10 +118,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if cds.dwData == app::COPYDATA_OPEN {
                     let units = if cds.lpData.is_null() { &[][..] } else { std::slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2) };
                     let path = String::from_utf16_lossy(units);
-                    if IsIconic(hwnd).as_bool() {
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
-                    }
-                    let _ = SetForegroundWindow(hwnd);
+                    bring_to_front(hwnd);
                     with_app(|a| a.open_external((!path.is_empty()).then_some(path)));
                     run_deferred(hwnd);
                     return LRESULT(1);
@@ -106,12 +126,24 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_HOTKEY if wp.0 as i32 == app::HOTKEY_SEARCH => {
                 // 다른 앱 위에서 눌러도 창을 앞으로 가져와 바로 검색 (App 빌림 밖에서 창 표시)
-                if IsIconic(hwnd).as_bool() {
-                    let _ = ShowWindow(hwnd, SW_RESTORE);
-                }
-                let _ = SetForegroundWindow(hwnd);
+                bring_to_front(hwnd);
                 with_app(|a| a.open_palette_global());
                 run_deferred(hwnd);
+                return LRESULT(0);
+            }
+            WM_APP_TRAY => {
+                match tray::on_message(hwnd, wp, lp) {
+                    Some(tray::Command::Open) => bring_to_front(hwnd),
+                    Some(tray::Command::Quit) => {
+                        with_app(|a| a.quit());
+                        run_deferred(hwnd);
+                    }
+                    None => {}
+                }
+                return LRESULT(0);
+            }
+            m if m == tray::taskbar_created() => {
+                with_app(|a| a.on_taskbar_created());
                 return LRESULT(0);
             }
             WM_DESTROY => {
@@ -223,8 +255,14 @@ fn main() -> Result<()> {
     if run_service_command() {
         return Ok(());
     }
+    let background = std::env::args().skip(1).any(|a| a.eq_ignore_ascii_case(tray::ARG));
     let open_path = path_arg();
-    if forward_to_running(&open_path) {
+    if background {
+        // 로그인할 때 시작했는데 이미 떠 있으면 그대로 둔다
+        if unsafe { FindWindowW(w!("SakaduWindow"), windows::core::PCWSTR::null()) }.is_ok_and(|h| !h.is_invalid()) {
+            return Ok(());
+        }
+    } else if forward_to_running(&open_path) {
         return Ok(());
     }
     unsafe {
@@ -238,6 +276,8 @@ fn main() -> Result<()> {
             style: CS_DBLCLKS,
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
+            hIcon: tray::load_icon(tray::ICON_APP, true),
+            hIconSm: tray::load_icon(tray::ICON_APP, false),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             lpszClassName: class,
             ..Default::default()
@@ -275,16 +315,23 @@ fn main() -> Result<()> {
         )?;
         let app = app::App::new(hwnd, sess)?;
         APP.with(|c| *c.borrow_mut() = Some(Box::new(app)));
-        // 창부터 띄우고 목록은 그 뒤에 읽어, 시작하자마자 화면이 보이게 한다
-        let _ = ShowWindow(hwnd, if maximized { SW_SHOWMAXIMIZED } else { SW_SHOWDEFAULT });
+        if background {
+            FIRST_SHOW.set(Some(if maximized { SW_SHOWMAXIMIZED } else { SW_SHOWNORMAL }));
+        } else {
+            // 창부터 띄우고 목록은 그 뒤에 읽어, 시작하자마자 화면이 보이게 한다
+            let _ = ShowWindow(hwnd, if maximized { SW_SHOWMAXIMIZED } else { SW_SHOWDEFAULT });
+        }
         with_app(|a| a.init());
         if open_path.is_some() {
             with_app(|a| a.open_external(open_path));
         }
         // 다른 프로그램이 "활성화하지 말고" 띄운 경우에는 포커스를 가져오지 않는다(SetFocus는 창을 활성화한다).
         // 사용자가 창을 누르면 WM_SETFOCUS에서 필터 상자로 옮긴다
-        if !started_without_activation() {
+        if !background && !started_without_activation() {
             with_app(|a| a.focus());
+        }
+        if background || tray::is_enabled(tray::RUN_KEY) {
+            with_app(|a| a.set_tray(true));
         }
         run_deferred(hwnd);
 

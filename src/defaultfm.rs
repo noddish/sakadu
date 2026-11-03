@@ -16,7 +16,7 @@ const BACKUP: &str = "SakaduPrevDefault";
 const WIN_E: &str = "CLSID\\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}";
 const STATE: &str = "Software\\Sakadu";
 
-fn set(path: &str, name: &str, data: &str) -> Result<(), String> {
+pub(crate) fn set(path: &str, name: &str, data: &str) -> Result<(), String> {
     unsafe {
         let mut key = HKEY::default();
         let r = RegCreateKeyExW(HKEY_CURRENT_USER, &HSTRING::from(path), None, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None);
@@ -31,7 +31,7 @@ fn set(path: &str, name: &str, data: &str) -> Result<(), String> {
     }
 }
 
-fn get(path: &str, name: &str) -> Option<String> {
+pub(crate) fn get(path: &str, name: &str) -> Option<String> {
     let mut buf = vec![0u16; 2048];
     let mut size = (buf.len() * 2) as u32;
     let r = unsafe {
@@ -48,7 +48,7 @@ fn get(path: &str, name: &str) -> Option<String> {
     (r == ERROR_SUCCESS).then(|| crate::util::from_wide(&buf))
 }
 
-fn delete_value(path: &str, name: &str) {
+pub(crate) fn delete_value(path: &str, name: &str) {
     unsafe {
         let mut key = HKEY::default();
         if RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(path), None, KEY_SET_VALUE, &mut key) == ERROR_SUCCESS {

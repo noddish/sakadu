@@ -12,9 +12,10 @@ A Windows file manager that keeps several folders open side by side and finds an
 
 ## Why you might like it
 
-**Search without waiting.** Press Ctrl+K, type part of a name, and results from the whole disk show up right away.
+**Search without waiting.** Press Ctrl+F, type part of a name, and results from the whole disk show up right away.
 On a PC with about 1.8 million files and folders, a search takes 10–20 ms.
-While Sakadu is running, a global hotkey brings up search from any app.
+While Sakadu is running, a global hotkey brings up search from any app. Turn on **트레이에서 대기** (stay in tray) and that works even after you close the window.
+Add a shared folder or USB drive and it's searched too.
 
 ![Results from the whole disk as you type](docs/screenshot-search.png)
 
@@ -38,15 +39,16 @@ Dark mode follows your Windows setting.
 2. Run `sakadu.exe`.
 
 - If Windows shows "Windows protected your PC" on first launch, click **More info → Run anyway**. The exe isn't code-signed yet.
-- Whole-disk search needs a small background service. Press **검색 서비스 설치** (install search service) in the Ctrl+K window once and approve the admin prompt.
+- Whole-disk search needs a small background service. Press **검색 서비스 설치** (install search service) in the Ctrl+F window once and approve the admin prompt.
 - To open folders in Sakadu by default, turn on **기본 파일 관리자로 사용** (use as default file manager) in the gear menu.
+- To keep the search hotkey working after you close the window, turn on **트레이에서 대기** (stay in tray) in the same menu. Sakadu then also starts at sign-in, without a window.
 - Built and tested on Windows 11. It's meant to run on Windows 10 (64-bit) too, but that hasn't been tested yet.
 
 ## Keys you'll use most
 
 | Key | What it does |
 |---|---|
-| Ctrl+K | Search the whole disk |
+| Ctrl+F | Search the whole disk |
 | Just start typing | Filter the current folder (Esc clears) |
 | Ctrl+1 – Ctrl+5 | Change the pane layout |
 | Tab / Shift+Tab | Next / previous pane |
@@ -75,10 +77,10 @@ Dark mode follows your Windows setting.
 | Delete / Shift+Delete | Recycle Bin / delete permanently (asks first) |
 | Ctrl+Shift+N | New folder |
 | Ctrl+H | Show hidden items |
-| Ctrl+K | Whole-disk search |
+| Ctrl+F | Whole-disk search |
 | Ctrl+Z | Undo the last file operation |
-| Ctrl+B | Favorites (while open: ↑↓, Enter, F2, Del, Ctrl+↑↓, type to jump) |
-| Ctrl+D | Add to favorites |
+| Ctrl+B | Favorites (while open: ↑↓, Enter, F2, Del, Ctrl+↑↓, ←→ collapse/expand groups, type to jump) |
+| Ctrl+D | Add to favorites (the selected folder or file, or the current folder) |
 | Alt+Enter | Properties |
 | Menu key, Shift+F10 | Context menu |
 
@@ -101,6 +103,19 @@ Dark mode follows your Windows setting.
 </details>
 
 <details>
+<summary>Searching shared folders and USB drives</summary>
+
+The search service only reads this PC's own (NTFS) disks. Shared folders (`\\server\share`), NAS and USB drives are searched once you add them.
+
+- Open the folder and turn on **이 폴더도 검색하기** (search this folder too) in the gear menu. **검색에 넣은 폴더** (added folders) in the same menu lists them and lets you remove one.
+- The app walks the folder once with your own account and keeps the names in memory. Nothing is written to disk, so it walks the folder again each time the app starts.
+- Changes come in through folder change notifications. In case a server doesn't send them, the folder is walked again every few hours, and opening it in Sakadu also brings it up to date.
+- If the connection drops, the last results stay searchable and Sakadu tries to reconnect every 5 minutes.
+- The app has to be running to keep up, so this pairs well with **트레이에서 대기** (stay in tray).
+
+</details>
+
+<details>
 <summary>Using it as the default file manager</summary>
 
 When turned on in the gear menu, opening folders and drives, and Win+E, go to Sakadu.
@@ -115,11 +130,24 @@ When turned on in the gear menu, opening folders and drives, and Win+E, go to Sa
 </details>
 
 <details>
+<summary>Staying in the tray</summary>
+
+When turned on in the gear menu, closing the window doesn't quit Sakadu. It stays as an icon in the notification area (tray).
+
+- The global hotkey brings back the window with search open. Clicking the tray icon brings the window back too.
+- It's added to your user's startup programs (HKCU Run) so it starts at sign-in without a window. Turning it off removes that entry.
+- To quit completely, right-click the tray icon and choose **끝내기** (quit).
+- While hidden it uses about 30 MB of memory. If an open folder changes, Sakadu doesn't reread it until the window comes back.
+- The exe is copied to `%LOCALAPPDATA%\Programs\Sakadu`, the same place the default file manager option uses. After updating, turn the option off and on once.
+
+</details>
+
+<details>
 <summary>Thumbnails, preview, favorites, undo</summary>
 
 - **Thumbnail view** is Ctrl+Shift+2, details view is Ctrl+Shift+6. Each pane remembers its own.
 - **Preview pane** (Alt+P) shows photos large and the start of text and code files (UTF-8, UTF-16 and CP949 detected). PDF and Office files use the preview handlers registered in Windows, run out of process so a crashing handler can't take the app down.
-- **Favorites** (Ctrl+B) can have their own display names, like "01. Daily work", independent of the real folder name (F2). Drag to reorder.
+- **Favorites** (Ctrl+B) can be folders or files, with their own display names like "01. Daily work", independent of the real name (F2). Drag to reorder. **Groups** fold and unfold; drag an item into a group, or right-click → **그룹으로 이동** (move to group). Clicking a file opens it, and Ctrl+Enter opens its folder in a new tab.
 - **Undo** (Ctrl+Z) reverses renames, moves, copies, Recycle Bin deletes, new folders, pastes and drag and drop, newest first. Permanent deletes and actions from the context menu can't be undone.
 
 </details>
@@ -127,7 +155,7 @@ When turned on in the gear menu, opening folders and drives, and Win+E, go to Sa
 <details>
 <summary>Uninstalling</summary>
 
-1. In the gear menu, turn off **기본 파일 관리자로 사용** (default file manager) and click **디스크 검색 서비스 제거** (remove search service).
+1. In the gear menu, turn off **기본 파일 관리자로 사용** (default file manager) and **트레이에서 대기** (stay in tray), then click **디스크 검색 서비스 제거** (remove search service).
 2. Delete the unzipped folder, `%APPDATA%\Sakadu`, and `%LOCALAPPDATA%\Programs\Sakadu` if it exists.
 
 Settings, window state and favorites all live in `%APPDATA%\Sakadu`.
@@ -157,20 +185,23 @@ cargo test
   `$env:CARGO_TARGET_DIR = "$env:TEMP\sakadu-target"; cargo build --release`
 - Tests that touch the real shell or service, and benchmarks, are `#[ignore]`d: `cargo test --release -- --ignored --nocapture`
 - Force a theme: `SAKADU_THEME=dark` or `light`
+- Icons live in `assets/*.ico`. `build.rs` embeds them in the exe without a resource compiler.
 - Releases: bump `version` in `Cargo.toml` and push a tag like `v0.2.0`. GitHub Actions builds it and creates a **draft** release to check and publish.
 
 | File | Role |
 |---|---|
 | `main.rs` | Window creation, message loop, re-entrancy, command line, single instance |
 | `app.rs` | Layout, input, drawing, pane and tab behavior, settings menu |
-| `app/fav_ui.rs` · `app/palette.rs` · `app/preview.rs` | Favorites popup · Ctrl+K search · preview pane |
+| `app/fav_ui.rs` · `app/palette.rs` · `app/preview.rs` | Favorites popup · Ctrl+F search · preview pane |
 | `pane.rs` | Tab state (history, sort, filter, selection) |
 | `listing.rs` | Folder listing, This PC, display formatting |
 | `shell.rs` | Shell menus, file operations, clipboard, drag, change notifications, icons |
 | `droptarget.rs` | Drop target (delegates to the shell's drop target) |
 | `thumbs.rs` | Background thumbnail generation |
 | `index.rs` · `service.rs` | NTFS name index (MFT scan, USN updates, ranking) · search service, pipe, install |
+| `folders.rs` | Added folders (shares, USB): walking, change tracking, search |
 | `defaultfm.rs` | Default file manager register/unregister (HKCU, backup and restore) |
+| `tray.rs` | Staying in the tray (notification icon and menu, start at sign-in) |
 | `undo.rs` | Undo history (shell progress sink) |
 | `favorites.rs`, `session.rs` | Saving favorites and sessions |
 | `gfx.rs`, `theme.rs`, `util.rs`, `diag.rs` | Rendering, colors, paths, diagnostic log |

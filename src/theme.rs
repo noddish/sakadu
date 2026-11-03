@@ -3,7 +3,7 @@
 use windows::Win32::Foundation::{COLORREF, ERROR_SUCCESS};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 pub type Color = D2D1_COLOR_F;
 
@@ -85,13 +85,22 @@ impl Theme {
 
 /// Windows 설정 > 개인 설정 > 색의 "앱 모드"가 어둡게인지
 pub fn system_prefers_dark() -> bool {
+    personalize_is_dark(w!("AppsUseLightTheme"))
+}
+
+/// "Windows 모드"(작업 표시줄·알림 영역)가 어둡게인지. 트레이 아이콘 색을 고를 때 쓴다
+pub fn taskbar_is_dark() -> bool {
+    personalize_is_dark(w!("SystemUsesLightTheme"))
+}
+
+fn personalize_is_dark(value_name: PCWSTR) -> bool {
     let mut value: u32 = 1;
     let mut size = 4u32;
     let r = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
-            w!("AppsUseLightTheme"),
+            value_name,
             RRF_RT_REG_DWORD,
             None,
             Some(&mut value as *mut u32 as *mut _),
