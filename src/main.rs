@@ -22,7 +22,9 @@ mod util;
 
 use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromRect,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext};
@@ -243,6 +245,61 @@ fn forward_to_running(path: &Option<String>) -> bool {
     }
 }
 
+/// 모니터 작업 영역(작업 표시줄 제외, 픽셀)
+fn work_area(monitor: HMONITOR) -> RECT {
+    let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    unsafe {
+        let _ = GetMonitorInfoW(monitor, &mut mi);
+    }
+    mi.rcWork
+}
+
+/// 처음 열 때의 창: 마우스가 있는 모니터 작업 영역의 가운데.
+/// 고정 크기는 배율이 큰 FHD 노트북(150%)에서 화면보다 커진다
+fn default_window_rect(fallback: (i32, i32)) -> RECT {
+    let mut pt = POINT::default();
+    let wa = unsafe {
+        let _ = GetCursorPos(&mut pt);
+        work_area(MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY))
+    };
+    centered_in(wa).unwrap_or(RECT { left: 0, top: 0, right: fallback.0, bottom: fallback.1 })
+}
+
+/// 작업 영역의 가로 80%·세로 85%를 가운데에. 작업 영역을 알 수 없으면 None
+fn centered_in(wa: RECT) -> Option<RECT> {
+    let (aw, ah) = (wa.right - wa.left, wa.bottom - wa.top);
+    if aw < 200 || ah < 150 {
+        return None;
+    }
+    let (w, h) = ((aw as f32 * 0.8) as i32, (ah as f32 * 0.85) as i32);
+    let (l, t) = (wa.left + (aw - w) / 2, wa.top + (ah - h) / 2);
+    Some(RECT { left: l, top: t, right: l + w, bottom: t + h })
+}
+
+/// 저장된 창이 지금 모니터 작업 영역보다 크거나 밖으로 나가 있으면 안으로 줄이고 옮긴다
+fn fit_to_work_area(rc: RECT) -> RECT {
+    fit_in(rc, work_area(unsafe { MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST) }))
+}
+
+fn fit_in(rc: RECT, wa: RECT) -> RECT {
+    let (aw, ah) = (wa.right - wa.left, wa.bottom - wa.top);
+    if aw < 200 || ah < 150 {
+        return rc;
+    }
+    let w = (rc.right - rc.left).min(aw);
+    let h = (rc.bottom - rc.top).min(ah);
+    let l = rc.left.clamp(wa.left, wa.right - w);
+    let t = rc.top.clamp(wa.top, wa.bottom - h);
+    RECT { left: l, top: t, right: l + w, bottom: t + h }
+}
+
+fn started_with_position() -> bool {
+    use windows::Win32::System::Threading::{GetStartupInfoW, STARTF_USEPOSITION, STARTUPINFOW};
+    let mut si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
+    unsafe { GetStartupInfoW(&mut si) };
+    si.dwFlags.contains(STARTF_USEPOSITION)
+}
+
 fn started_without_activation() -> bool {
     use windows::Win32::System::Threading::{GetStartupInfoW, STARTF_USESHOWWINDOW, STARTUPINFOW};
     let mut si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
@@ -286,18 +343,23 @@ fn main() -> Result<()> {
 
         let sess = session::load();
         let s = GetDpiForSystem().max(96) as f32 / 96.0;
-        let (mut x, mut y, mut w, mut h) = (CW_USEDEFAULT, CW_USEDEFAULT, (1280.0 * s) as i32, (820.0 * s) as i32);
+        // 예전 판의 고정 기본 크기. 이 크기로 저장돼 있으면 사용자가 크기를 바꾼 적이 없다고 본다
+        let old_default = ((1280.0 * s) as i32, (820.0 * s) as i32);
+        let mut rc = default_window_rect(old_default);
         let mut maximized = false;
         if let Some(sess) = &sess {
             if let Some([sx, sy, sw, sh]) = sess.window {
-                let rc = RECT { left: sx, top: sy, right: sx + sw, bottom: sy + sh };
+                let saved = RECT { left: sx, top: sy, right: sx + sw, bottom: sy + sh };
                 // 모니터 구성이 바뀌어 화면 밖이 되면 기본 위치로
-                if sw > 200 && sh > 150 && !MonitorFromRect(&rc, MONITOR_DEFAULTTONULL).is_invalid() {
-                    (x, y, w, h) = (sx, sy, sw, sh);
+                if sw > 200 && sh > 150 && (sw, sh) != old_default && !MonitorFromRect(&saved, MONITOR_DEFAULTTONULL).is_invalid() {
+                    rc = fit_to_work_area(saved);
                 }
             }
             maximized = sess.maximized;
         }
+        // 실행한 쪽이 위치를 정해 주면(STARTF_USEPOSITION) 그 위치를 따른다
+        let (x, y) = if started_with_position() { (CW_USEDEFAULT, CW_USEDEFAULT) } else { (rc.left, rc.top) };
+        let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
 
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -345,4 +407,32 @@ fn main() -> Result<()> {
         OleUninitialize();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(l: i32, t: i32, w: i32, h: i32) -> RECT {
+        RECT { left: l, top: t, right: l + w, bottom: t + h }
+    }
+
+    #[test]
+    fn first_window_fits_fhd_work_area() {
+        // FHD, 작업 표시줄 48px 제외. 배율 150%면 예전 기본 크기(1920×1230)는 화면을 넘었다
+        let wa = r(0, 0, 1920, 1032);
+        assert_eq!(centered_in(wa), Some(r(192, 77, 1536, 877)));
+        assert_eq!(centered_in(r(0, 0, 0, 0)), None);
+    }
+
+    #[test]
+    fn saved_window_is_pulled_inside() {
+        let wa = r(0, 0, 1920, 1032);
+        // 큰 모니터에서 쓰던 크기: 줄여서 화면 안으로
+        assert_eq!(fit_in(r(-50, 100, 2400, 1300), wa), r(0, 0, 1920, 1032));
+        // 오른쪽 아래로 삐져나간 창: 크기는 두고 옮긴다
+        assert_eq!(fit_in(r(1500, 900, 800, 600), wa), r(1120, 432, 800, 600));
+        // 이미 안에 있으면 그대로
+        assert_eq!(fit_in(r(100, 100, 800, 600), wa), r(100, 100, 800, 600));
+    }
 }
