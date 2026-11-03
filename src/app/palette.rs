@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::service::{self, SearchError, SearchResponse};
+use windows::Win32::UI::Controls::EM_GETSEL;
 use windows::Win32::UI::Shell::ShellExecuteW;
 
 const PAL_W: f32 = 760.0;
@@ -56,33 +57,125 @@ fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>, folders: crate::fol
     });
 }
 
-/// 디스크 인덱스(검색 서비스)와 검색에 넣은 폴더에서 함께 찾아 같은 점수 기준으로 합친다
-fn search_all(q: &str, folders: &crate::folders::Folders) -> Result<SearchResponse, SearchError> {
+/// 검색어를 `|`로 나눈 조각들(또는). 조각 안의 띄어 쓴 낱말은 모두 포함해야 한다
+pub(super) fn query_pieces(q: &str) -> Vec<&str> {
+    q.split('|').map(str::trim).filter(|p| !p.is_empty()).collect()
+}
+
+/// 여러 줄 텍스트(엑셀 열 등)를 한 줄 검색어로: 줄마다 `|`로 잇는다
+pub(super) fn lines_to_query(text: &str) -> String {
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" | ")
+}
+
+/// 한 조각을 디스크 인덱스(검색 서비스)와 검색에 넣은 폴더에서 찾아 (점수, 폴더 여부, 경로), 전체 개수, 걸린 시간
+fn search_piece(q: &str, folders: &crate::folders::Folders) -> Result<(Vec<(i32, bool, String)>, usize, u64), SearchError> {
     let local = service::query(q, PAL_LIMIT);
     let started = std::time::Instant::now();
     let query = crate::index::Query::parse(q);
     let (extra, extra_total) = folders.search(&query, PAL_LIMIT);
-    if extra_total == 0 {
-        return local;
-    }
     // 서비스가 없거나 실패해도 폴더 쪽 결과는 보여 준다
     let (hits, total, micros) = match local {
         Ok(r) => (r.hits, r.total, r.micros),
-        Err(e) => {
+        Err(e) if extra_total > 0 => {
             if let SearchError::Other(e) = e {
                 crate::diag::log(|| format!("search: {e}"));
             }
             (Vec::new(), 0, 0)
         }
+        Err(e) => return Err(e),
     };
-    let mut all: Vec<(i32, bool, String)> = hits
+    // 서비스 결과에도 같은 기준으로 점수를 매겨 폴더 결과·다른 조각 결과와 섞는다
+    let all = hits
         .into_iter()
         .map(|(is_dir, path)| (query.name_score(util::file_name(&path), is_dir).and_then(|s| query.path_score(s, &path)).unwrap_or(i32::MIN), is_dir, path))
         .chain(extra.into_iter().map(|h| (h.score, h.is_dir, h.path)))
         .collect();
+    Ok((all, total + extra_total, micros + started.elapsed().as_micros() as u64))
+}
+
+/// 조각마다 찾아 합친다. 여러 조각에 걸린 항목은 가장 높은 점수로 한 번만 남는다.
+/// 전체 개수는 조각별 개수의 합이라 겹치는 항목이 있으면 실제보다 조금 클 수 있다
+fn search_all(q: &str, folders: &crate::folders::Folders) -> Result<SearchResponse, SearchError> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut all: Vec<(i32, bool, String)> = Vec::new();
+    let (mut total, mut micros, mut error) = (0, 0, None);
+    for piece in query_pieces(q) {
+        match search_piece(piece, folders) {
+            Ok((hits, t, m)) => {
+                total += t;
+                micros += m;
+                for hit in hits {
+                    match seen.get(&hit.2.to_lowercase()) {
+                        Some(&i) => all[i].0 = all[i].0.max(hit.0),
+                        None => {
+                            seen.insert(hit.2.to_lowercase(), all.len());
+                            all.push(hit);
+                        }
+                    }
+                }
+            }
+            Err(e) => error = Some(e),
+        }
+    }
+    if let (true, Some(e)) = (all.is_empty(), error) {
+        return Err(e);
+    }
     all.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.len().cmp(&b.2.len())));
     all.truncate(PAL_LIMIT);
-    Ok(SearchResponse { total: total + extra_total, micros: micros + started.elapsed().as_micros() as u64, hits: all.into_iter().map(|(_, d, p)| (d, p)).collect() })
+    Ok(SearchResponse { total, micros, hits: all.into_iter().map(|(_, d, p)| (d, p)).collect() })
+}
+
+const PAL_MENU_OPEN: u32 = 1;
+const PAL_MENU_LOCATE: u32 = 2;
+const PAL_MENU_COPY: u32 = 3;
+const PAL_MENU_COPY_PATH: u32 = 4;
+const PAL_MENU_PICK_ALL: u32 = 5;
+const PAL_MENU_CLEAR: u32 = 6;
+
+/// 검색 결과 오른쪽 버튼 메뉴. 고른 결과(없으면 누른 줄)를 한꺼번에 다룬다
+pub(super) fn show_pal_menu(hwnd: HWND, pt: POINT) {
+    let Some((n, picks)) = with_app(|a| (a.pal_targets().len(), a.pal_pick_count())) else { return };
+    if n == 0 {
+        return;
+    }
+    let open = if n > 1 { format!("{n}개 열기\tEnter") } else { "열기\tEnter".to_string() };
+    let mut items: Vec<(u32, String)> = vec![
+        (PAL_MENU_OPEN, open),
+        (PAL_MENU_LOCATE, "새 탭에서 위치 열기\tCtrl+Enter".to_string()),
+        (0, String::new()),
+        (PAL_MENU_COPY, "복사\tCtrl+C".to_string()),
+        (PAL_MENU_COPY_PATH, "경로 복사".to_string()),
+        (0, String::new()),
+        (PAL_MENU_PICK_ALL, "결과 모두 고르기".to_string()),
+    ];
+    if picks > 0 {
+        items.push((PAL_MENU_CLEAR, "고르기 풀기\tEsc".to_string()));
+    }
+    let cmd = unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        for (id, label) in &items {
+            let _ = if *id == 0 {
+                AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
+            } else {
+                AppendMenuW(menu, MF_STRING, *id as usize, &HSTRING::from(label.as_str()))
+            };
+        }
+        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
+        let _ = DestroyMenu(menu);
+        cmd
+    };
+    if cmd != 0 {
+        with_app(|a| a.pal_menu_command(cmd));
+    }
+}
+
+/// 입력 상자에 선택한 글자가 있는지
+fn edit_has_selection(edit: HWND) -> bool {
+    let (mut start, mut end) = (0u32, 0u32);
+    unsafe {
+        SendMessageW(edit, EM_GETSEL, Some(WPARAM(&mut start as *mut u32 as usize)), Some(LPARAM(&mut end as *mut u32 as isize)));
+    }
+    start != end
 }
 
 pub enum OpenMode {
@@ -159,7 +252,9 @@ impl App {
         }
         self.pal_open = true;
         self.pal_results.clear();
+        self.pal_picked.clear();
         self.pal_sel = 0;
+        self.pal_anchor = 0;
         self.pal_scroll = 0.0;
         self.pal_status = PalStatus::Idle;
         self.pal_seq += 1;
@@ -261,9 +356,13 @@ impl App {
                 }
             }
             SearchReply::Results(Ok(r)) => {
+                // 훑는 중 다시 찾아 결과가 늘어날 때도 골라 둔 항목은 경로로 이어 간다
+                let kept: HashSet<String> = self.pal_picked_paths().into_iter().map(|(_, p)| p.to_lowercase()).collect();
+                self.pal_picked = r.hits.iter().map(|(_, p)| kept.contains(&p.to_lowercase())).collect();
                 self.pal_results = r.hits;
                 self.pal_status = PalStatus::Done { total: r.total, micros: r.micros };
                 self.pal_sel = 0;
+                self.pal_anchor = 0;
                 self.pal_scroll = 0.0;
             }
             SearchReply::Status(Err(SearchError::NotRunning)) | SearchReply::Results(Err(SearchError::NotRunning)) => {
@@ -297,24 +396,125 @@ impl App {
         self.invalidate();
     }
 
+    // ---------- 여러 결과 고르기 ----------
+
+    /// 골라 둔 결과 (결과 순서)
+    fn pal_picked_paths(&self) -> Vec<(bool, String)> {
+        self.pal_results.iter().zip(&self.pal_picked).filter(|(_, picked)| **picked).map(|(r, _)| r.clone()).collect()
+    }
+
+    /// 다룰 결과: 골라 둔 것이 있으면 그것들, 없으면 지금 줄 하나
+    fn pal_targets(&self) -> Vec<(bool, String)> {
+        let picked = self.pal_picked_paths();
+        if !picked.is_empty() {
+            return picked;
+        }
+        self.pal_results.get(self.pal_sel).cloned().into_iter().collect()
+    }
+
+    fn pal_pick_count(&self) -> usize {
+        self.pal_picked.iter().filter(|p| **p).count()
+    }
+
+    fn pal_pick_range(&mut self, a: usize, b: usize) {
+        self.pal_picked.resize(self.pal_results.len(), false);
+        for i in a.min(b)..=a.max(b).min(self.pal_results.len().saturating_sub(1)) {
+            self.pal_picked[i] = true;
+        }
+    }
+
+    fn pal_clear_picks(&mut self) {
+        self.pal_picked.iter_mut().for_each(|p| *p = false);
+    }
+
     pub(super) fn pal_activate(&mut self, i: usize, mode: OpenMode) {
-        let Some((is_dir, path)) = self.pal_results.get(i).cloned() else { return };
+        let Some(target) = self.pal_results.get(i).cloned() else { return };
+        self.pal_open_paths(vec![target], mode);
+    }
+
+    /// 결과를 연다. 위치 열기(Ctrl+Enter)와 Shift+Enter는 지금 탭을 두고 새 탭에서 열고,
+    /// 여러 개면 폴더마다 새 탭을 하나씩 열어 그 안의 고른 파일들을 선택해 둔다
+    fn pal_open_paths(&mut self, targets: Vec<(bool, String)>, mode: OpenMode) {
+        if targets.is_empty() {
+            return;
+        }
         self.close_palette();
         let p = self.active;
-        let parent = util::parent(&path);
-        // 위치 열기(Ctrl+Enter·Ctrl+클릭)와 Shift+Enter는 지금 탭을 두고 새 탭에서 연다
-        match (is_dir, mode) {
-            (true, OpenMode::Locate | OpenMode::NewTab) => self.new_tab(p, Some(Location::Dir(path)), true),
-            (true, OpenMode::Open) => self.navigate(p, Location::Dir(path), None),
-            (false, OpenMode::Locate | OpenMode::NewTab) => {
-                if let Some(dir) = parent {
-                    let name = util::file_name(&path).to_string();
-                    self.new_tab(p, Some(Location::Dir(dir)), true);
-                    self.panes[p].tab_mut().restore = Some(Restore::select(&name));
+        let many = targets.len() > 1;
+        // 위치 열기에서 같은 폴더의 파일은 한 탭에 모은다: (폴더, 고를 이름들)
+        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+        for (is_dir, path) in targets {
+            let parent = util::parent(&path);
+            match (is_dir, &mode) {
+                (true, OpenMode::Open) if !many => self.navigate(p, Location::Dir(path), None),
+                (true, _) => self.new_tab(p, Some(Location::Dir(path)), true),
+                (false, OpenMode::Open) => self.pending.push(Deferred::Open { pane: p, paths: vec![path], dir: parent }),
+                (false, _) => {
+                    let Some(dir) = parent else { continue };
+                    let name = util::file_name(&path).to_lowercase();
+                    match groups.iter_mut().find(|(d, _)| util::eq_path(d, &dir)) {
+                        Some((_, names)) => names.push(name),
+                        None => groups.push((dir, vec![name])),
+                    }
                 }
             }
-            (false, OpenMode::Open) => self.pending.push(Deferred::Open { pane: p, paths: vec![path], dir: parent }),
         }
+        for (dir, names) in groups {
+            self.new_tab(p, Some(Location::Dir(dir)), true);
+            self.panes[p].tab_mut().restore = Some(Restore { cursor: names.first().cloned(), selected: names, reveal: true, ..Default::default() });
+        }
+    }
+
+    /// 고른 결과(없으면 지금 줄)를 파일째 클립보드에 복사한다. 탐색기나 다른 칸에 붙여넣으면 복사된다
+    fn pal_copy_files(&mut self) {
+        let paths: Vec<String> = self.pal_targets().into_iter().map(|(_, p)| p).collect();
+        if paths.is_empty() {
+            return;
+        }
+        let n = paths.len();
+        let p = self.active;
+        match shell::set_clipboard_files(self.hwnd, &paths) {
+            Ok(()) => self.flash(p, format!("검색 결과 {n}개를 복사했습니다. 붙여넣을 폴더에서 Ctrl+V")),
+            Err(e) => self.flash(p, format!("클립보드에 복사하지 못했습니다: {}", e.message())),
+        }
+    }
+
+    fn pal_copy_paths(&mut self) {
+        let text = self.pal_targets().into_iter().map(|(_, p)| p).collect::<Vec<_>>().join("\r\n");
+        if text.is_empty() {
+            return;
+        }
+        let p = self.active;
+        if let Err(e) = shell::set_clipboard_text(self.hwnd, &text) {
+            self.flash(p, format!("클립보드에 복사하지 못했습니다: {}", e.message()));
+        }
+    }
+
+    /// 검색 결과 오른쪽 버튼 메뉴에서 고른 것
+    pub fn pal_menu_command(&mut self, cmd: u32) {
+        match cmd {
+            PAL_MENU_OPEN => self.pal_open_paths(self.pal_targets(), OpenMode::Open),
+            PAL_MENU_LOCATE => self.pal_open_paths(self.pal_targets(), OpenMode::Locate),
+            PAL_MENU_COPY => self.pal_copy_files(),
+            PAL_MENU_COPY_PATH => self.pal_copy_paths(),
+            PAL_MENU_PICK_ALL => {
+                let n = self.pal_results.len();
+                self.pal_pick_range(0, n.saturating_sub(1));
+            }
+            PAL_MENU_CLEAR => self.pal_clear_picks(),
+            _ => {}
+        }
+        self.invalidate();
+    }
+
+    /// 오른쪽 버튼을 누른 줄: 골라 둔 것 밖이면 그 줄만 고른다 (탐색기와 같음)
+    pub(super) fn pal_right_press(&mut self, i: usize) {
+        if !self.pal_picked.get(i).copied().unwrap_or(false) {
+            self.pal_clear_picks();
+        }
+        self.pal_sel = i;
+        self.pal_anchor = i;
+        self.invalidate();
     }
 
     fn pal_install(&mut self) {
@@ -337,20 +537,36 @@ impl App {
         let shift = key_down(VK_SHIFT);
         let n = self.pal_results.len();
         let page = ((self.pal_list().h() / PAL_ROW_H).floor() as usize).max(1);
+        let picks = self.pal_pick_count();
         match vk {
+            // 골라 둔 게 있으면 먼저 그걸 푼다
+            VK_ESCAPE if picks > 0 => self.pal_clear_picks(),
             VK_ESCAPE => self.close_palette(),
-            VK_UP => self.pal_sel = self.pal_sel.saturating_sub(1),
-            VK_DOWN => self.pal_sel = (self.pal_sel + 1).min(n.saturating_sub(1)),
-            VK_PRIOR => self.pal_sel = self.pal_sel.saturating_sub(page),
-            VK_NEXT => self.pal_sel = (self.pal_sel + page).min(n.saturating_sub(1)),
+            VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT => {
+                let s = self.pal_sel;
+                self.pal_sel = match vk {
+                    VK_UP => s.saturating_sub(1),
+                    VK_DOWN => (s + 1).min(n.saturating_sub(1)),
+                    VK_PRIOR => s.saturating_sub(page),
+                    _ => (s + page).min(n.saturating_sub(1)),
+                };
+                // Shift를 누르고 움직이면 시작 줄부터 지금 줄까지 고른다
+                if shift && n > 0 {
+                    self.pal_clear_picks();
+                    self.pal_pick_range(self.pal_anchor, self.pal_sel);
+                } else {
+                    self.pal_anchor = self.pal_sel;
+                }
+            }
             VK_RETURN => {
                 let mode = if ctrl { OpenMode::Locate } else if shift { OpenMode::NewTab } else { OpenMode::Open };
-                let i = self.pal_sel;
-                self.pal_activate(i, mode);
+                self.pal_open_paths(self.pal_targets(), mode);
                 return true;
             }
             VK_TAB => {}
             _ if ctrl && vk.0 == b'F' as u16 => self.close_palette(),
+            // 고른 결과가 있거나 검색어에 선택한 글자가 없으면 파일을 복사한다 (그 밖에는 글자 복사)
+            _ if ctrl && vk.0 == b'C' as u16 && n > 0 && (picks > 0 || !edit_has_selection(self.search_edit)) => self.pal_copy_files(),
             _ => return false,
         }
         if self.pal_open {
@@ -363,10 +579,21 @@ impl App {
     /// 팔레트가 열려 있을 때 왼쪽 버튼. 밖을 누르면 닫고 클릭은 소비
     pub(super) fn pal_mouse_down(&mut self, hit: Hit) {
         match hit {
-            Hit::PalRow(i) => {
-                let mode = if key_down(VK_CONTROL) { OpenMode::Locate } else if key_down(VK_SHIFT) { OpenMode::NewTab } else { OpenMode::Open };
-                self.pal_activate(i, mode);
+            // Ctrl+클릭은 하나씩, Shift+클릭은 범위로 고르고, 그냥 클릭은 바로 연다
+            Hit::PalRow(i) if key_down(VK_CONTROL) => {
+                self.pal_picked.resize(self.pal_results.len(), false);
+                if let Some(p) = self.pal_picked.get_mut(i) {
+                    *p = !*p;
+                }
+                self.pal_sel = i;
+                self.pal_anchor = i;
             }
+            Hit::PalRow(i) if key_down(VK_SHIFT) => {
+                self.pal_clear_picks();
+                self.pal_pick_range(self.pal_anchor, i);
+                self.pal_sel = i;
+            }
+            Hit::PalRow(i) => self.pal_activate(i, OpenMode::Open),
             Hit::PalInstall => self.pal_install(),
             Hit::PalAddFolder => self.pal_add_folder(),
             Hit::PalPanel => {}
@@ -385,7 +612,8 @@ impl App {
         let query = edit_text(self.search_edit);
         let add_folder = if self.pal_shows_add_folder() { self.pal_outside.clone() } else { None };
         let folder_entries = self.folders.entry_count();
-        let App { gfx, pal_results, types, .. } = self;
+        let picks = self.pal_pick_count();
+        let App { gfx, pal_results, pal_picked, types, .. } = self;
 
         let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.5 } else { 0.16 } };
         gfx.fill_round(R::new(r.l - 3.0, r.t + 2.0, r.r + 3.0, r.b + 6.0), 14.0, shadow);
@@ -409,7 +637,10 @@ impl App {
             )),
             PalStatus::Done { .. } if pal_results.is_empty() => Some(format!("‘{}’와(과) 일치하는 항목이 없습니다", query.trim())),
             PalStatus::Idle | PalStatus::Ready(_) if query.trim().is_empty() => {
-                Some("파일·폴더 이름을 입력하세요\n여러 낱말은 모두 포함 · ‘업무\\’처럼 \\를 붙이면 경로로 찾기".into())
+                Some(
+                    "파일·폴더 이름을 입력하세요\n여러 낱말은 모두 포함 · ‘업무\\’처럼 \\를 붙이면 경로로 찾기\n‘|’로 나누면 그중 하나라도 · 여러 줄을 붙여넣으면 한 번에 찾기"
+                        .into(),
+                )
             }
             _ => None,
         };
@@ -431,10 +662,15 @@ impl App {
             let (is_dir, path) = &pal_results[i];
             let y = list.t + i as f32 * PAL_ROW_H - scroll;
             let row = R::new(list.l, y, list.r, y + PAL_ROW_H);
-            if i == sel {
+            // 고른 줄은 선택 색, 고른 게 있을 때 지금 줄은 테두리로만 표시
+            let picked = pal_picked.get(i).copied().unwrap_or(false);
+            if picked || (i == sel && picks == 0) {
                 gfx.fill_round(row.inset(2.0, 1.0), 6.0, t.sel);
             } else if hover == Hit::PalRow(i) {
                 gfx.fill_round(row.inset(2.0, 1.0), 6.0, t.hover);
+            }
+            if i == sel && picks > 0 {
+                gfx.stroke_round(row.inset(2.75, 1.75), 6.0, t.accent, 1.5);
             }
             let name = util::file_name(path);
             let ext = if *is_dir { String::new() } else { name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default() };
@@ -449,7 +685,12 @@ impl App {
         gfx.unclip();
 
         let foot = R::new(r.l + 16.0, r.b - PAL_FOOT_H, r.r - 14.0, r.b - 2.0);
-        gfx.text("Enter 열기 · Ctrl+Enter 새 탭에서 위치 열기 · Esc 닫기", foot, Font::Normal, t.faint);
+        let help = if picks > 0 {
+            format!("{picks}개 고름 · Enter 모두 열기 · Ctrl+Enter 위치 · Ctrl+C 복사 · 오른쪽 버튼 메뉴")
+        } else {
+            "Enter 열기 · Ctrl+Enter 새 탭에서 위치 · Ctrl·Shift+클릭 여러 개 고르기".to_string()
+        };
+        gfx.text(&help, foot, Font::Normal, t.faint);
         let right = match &status {
             PalStatus::Done { total, micros } => format!("{total}개 중 {}개 · {:.1}ms", pal_results.len(), *micros as f64 / 1000.0),
             PalStatus::Searching => "찾는 중…".to_string(),
@@ -458,5 +699,36 @@ impl App {
             _ => String::new(),
         };
         gfx.text(&right, foot, Font::Right, t.faint);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pieces_split_on_bar() {
+        assert_eq!(query_pieces("견적 2026 | 계약서 |  | 0420"), vec!["견적 2026", "계약서", "0420"]);
+        assert_eq!(query_pieces("업무\\ 보고"), vec!["업무\\ 보고"]);
+        assert!(query_pieces(" | ").is_empty());
+    }
+
+    /// 실제 검색 서비스로 "또는" 검색: 조각별 결과가 합쳐지고 겹치는 항목은 한 번만 (cargo test or_search -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn or_search_against_service() {
+        let folders = crate::folders::Folders::default();
+        let count = |q: &str| search_all(q, &folders).map(|r| (r.hits.len(), r.total)).unwrap_or((0, 0));
+        let (a, b, both) = (count("main.rs sakadu\\src\\"), count("tray.rs sakadu\\src\\"), count("main.rs sakadu\\src\\ | tray.rs sakadu\\src\\"));
+        println!("main.rs {a:?}, tray.rs {b:?}, either {both:?}");
+        assert_eq!(both.0, a.0 + b.0);
+        let same = count("tray.rs sakadu\\src\\ | tray.rs sakadu\\src\\");
+        assert_eq!(same.0, b.0, "same piece twice should not duplicate hits");
+    }
+
+    #[test]
+    fn pasted_lines_become_alternatives() {
+        let excel = "20260420_160559\r\n20260407_091344\r\n\r\n  견적서 \r\n";
+        assert_eq!(lines_to_query(excel), "20260420_160559 | 20260407_091344 | 견적서");
     }
 }

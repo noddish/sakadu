@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Ole::{IDropTarget, RegisterDragDrop, RevokeDragDrop};
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
-use windows::Win32::UI::Controls::{EM_SETCUEBANNER, EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE};
+use windows::Win32::UI::Controls::{EM_REPLACESEL, EM_SETCUEBANNER, EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::{
@@ -214,6 +214,8 @@ pub enum Deferred {
     /// 미리 보기 처리기를 지금 상태에 맞춘다 (열기·닫기·크기)
     PreviewSync,
     SettingsMenu { pt: POINT },
+    /// 검색 결과 오른쪽 버튼 메뉴
+    PalMenu { pt: POINT },
 }
 
 pub struct Listed {
@@ -263,6 +265,10 @@ pub struct App {
     pal_open: bool,
     pal_results: Vec<(bool, String)>,
     pal_sel: usize,
+    /// 검색 결과 중 골라 둔 것 (Ctrl·Shift+클릭, Shift+↑↓). 결과와 같은 순서
+    pal_picked: Vec<bool>,
+    /// Shift로 범위를 고를 때의 시작 줄
+    pal_anchor: usize,
     pal_scroll: f32,
     pal_status: PalStatus,
     /// 늦게 도착한 이전 검색 결과를 버리기 위한 순번
@@ -753,6 +759,8 @@ impl App {
             pal_open: false,
             pal_results: Vec::new(),
             pal_sel: 0,
+            pal_picked: Vec::new(),
+            pal_anchor: 0,
             pal_scroll: 0.0,
             pal_status: PalStatus::Idle,
             pal_seq: 0,
@@ -2436,8 +2444,10 @@ impl App {
     fn on_rbutton_down(&mut self, x: f32, y: f32) {
         let hit = self.hit(x, y);
         if self.pal_open {
-            if !matches!(hit, Hit::PalRow(_) | Hit::PalPanel | Hit::PalInstall | Hit::PalAddFolder) {
-                self.close_palette();
+            match hit {
+                Hit::PalRow(i) => self.pal_right_press(i),
+                Hit::PalPanel | Hit::PalInstall | Hit::PalAddFolder => {}
+                _ => self.close_palette(),
             }
             self.invalidate();
             return;
@@ -2491,6 +2501,10 @@ impl App {
 
     fn on_rbutton_up(&mut self, x: f32, y: f32) -> bool {
         if self.pal_open {
+            if let Hit::PalRow(_) = self.hit(x, y) {
+                let pt = self.to_screen(x, y);
+                self.pending.push(Deferred::PalMenu { pt });
+            }
             return true;
         }
         if self.fav_open {
@@ -3250,6 +3264,7 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         Deferred::FavSortMenu { pt } => fav_ui::show_fav_sort_menu(hwnd, pt),
         Deferred::PreviewSync => preview::sync_handler(),
         Deferred::SettingsMenu { pt } => show_settings_menu(hwnd, pt),
+        Deferred::PalMenu { pt } => palette::show_pal_menu(hwnd, pt),
     }
 }
 
@@ -3602,6 +3617,14 @@ pub unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                     let vk = VIRTUAL_KEY(wp.0 as u16);
                     let makes_char = matches!(vk, VK_RETURN | VK_ESCAPE | VK_TAB | VK_BACK | VK_SPACE) || key_down(VK_CONTROL);
                     SUPPRESS_CHAR.set(makes_char);
+                    return LRESULT(0);
+                }
+            }
+            // 검색 상자에 여러 줄(엑셀 열 등)을 붙여넣으면 줄마다 `|`로 이어 한 번에 찾는다
+            WM_PASTE if id as i32 == ID_SEARCH => {
+                if let Some(text) = shell::clipboard_text(hwnd).filter(|t| t.trim().contains('\n')) {
+                    let q = HSTRING::from(palette::lines_to_query(&text));
+                    SendMessageW(hwnd, EM_REPLACESEL, Some(WPARAM(1)), Some(LPARAM(q.as_ptr() as isize)));
                     return LRESULT(0);
                 }
             }

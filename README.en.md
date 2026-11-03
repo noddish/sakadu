@@ -16,6 +16,7 @@ A Windows file manager that keeps several folders open side by side and finds an
 On a PC with about 1.8 million files and folders, a search takes 10–20 ms.
 While Sakadu is running, a global hotkey brings up search from any app. Turn on **트레이에서 대기** (stay in tray) and that works even after you close the window.
 Add a shared folder or USB drive and it's searched too.
+Paste a list of file names to find them all at once, then open or copy the ones you pick in one go.
 
 ![Results from the whole disk as you type](docs/screenshot-search.png)
 
@@ -98,7 +99,8 @@ Dark mode follows your Windows setting.
 - Reading the MFT needs admin rights, so it runs as a Windows service (SakaduIndex). The app talks to it over a local named pipe that refuses remote clients.
 - The index takes about 120 MB of memory for 1.8 million entries.
 - As with Everything, file **names** in other users' folders can show up in results.
-- Query syntax: space-separated words must all match. A word ending in `\`, like `work\`, matches the path. Enter opens, Ctrl+Enter (or Ctrl+click) opens the containing folder in a new tab.
+- Query syntax: space-separated words must all match. A word ending in `\`, like `work\`, matches the path. `|` means "or" (`quote 2026 | contract`). Pasting several lines joins them with `|`.
+- Results: Enter opens, Ctrl+Enter opens the containing folder in a new tab. Pick several with Ctrl+click, Shift+click or Shift+↑↓, then Enter opens them all and Ctrl+C copies the files. The right-click menu also has copy path and pick all.
 - The global hotkey is the first free one of Ctrl+Alt+Space, Win+Shift+F and Ctrl+Alt+F. The toolbar shows which one you got.
 - The service exe is copied to `C:\Program Files\Sakadu`. After updating Sakadu, reinstall the service to update it too.
 

@@ -10,7 +10,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
 };
 use windows::Win32::System::Com::*;
-use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::SystemServices::{MK_CONTROL, MK_RBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
 use windows::Win32::System::Ole::*;
@@ -628,6 +628,87 @@ pub fn clear_clipboard() {
     }
 }
 
+/// bytes를 담은 전역 메모리 (클립보드에 넘기면 시스템이 해제한다)
+fn global_bytes(bytes: &[u8]) -> Result<HGLOBAL> {
+    unsafe {
+        let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len())?;
+        let p = GlobalLock(h) as *mut u8;
+        if p.is_null() {
+            let _ = GlobalFree(Some(h));
+            return Err(E_OUTOFMEMORY.into());
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+        let _ = GlobalUnlock(h);
+        Ok(h)
+    }
+}
+
+/// 클립보드를 비우고 (형식, 내용)들을 넣는다
+fn set_clipboard(hwnd: HWND, items: Vec<(u32, Vec<u8>)>) -> Result<()> {
+    unsafe {
+        OpenClipboard(Some(hwnd))?;
+        let r = EmptyClipboard().and_then(|_| {
+            for (format, bytes) in items {
+                let h = global_bytes(&bytes)?;
+                if let Err(e) = SetClipboardData(format, Some(HANDLE(h.0))) {
+                    let _ = GlobalFree(Some(h));
+                    return Err(e);
+                }
+            }
+            Ok(())
+        });
+        let _ = CloseClipboard();
+        r
+    }
+}
+
+fn utf16_bytes(units: &[u16]) -> Vec<u8> {
+    units.iter().flat_map(|u| u.to_le_bytes()).collect()
+}
+
+/// CF_HDROP 내용: DROPFILES 머리 + 경로들(NUL로 구분, 끝에 NUL 하나 더)
+fn hdrop_bytes(paths: &[String]) -> Vec<u8> {
+    let header = size_of::<DROPFILES>();
+    let df = DROPFILES { pFiles: header as u32, fWide: true.into(), ..Default::default() };
+    let mut bytes = unsafe { std::slice::from_raw_parts(&df as *const DROPFILES as *const u8, header) }.to_vec();
+    let mut names: Vec<u16> = Vec::new();
+    for p in paths {
+        names.extend(p.encode_utf16());
+        names.push(0);
+    }
+    names.push(0);
+    bytes.extend(utf16_bytes(&names));
+    bytes
+}
+
+/// 파일 목록을 복사한 상태로 클립보드에 넣는다. 여러 폴더에 흩어진 파일도 한 번에 붙여넣을 수 있다
+pub fn set_clipboard_files(hwnd: HWND, paths: &[String]) -> Result<()> {
+    let effect = unsafe { RegisterClipboardFormatW(w!("Preferred DropEffect")) };
+    set_clipboard(hwnd, vec![(CF_HDROP.0 as u32, hdrop_bytes(paths)), (effect, DROPEFFECT_COPY.0.to_le_bytes().to_vec())])
+}
+
+pub fn set_clipboard_text(hwnd: HWND, text: &str) -> Result<()> {
+    set_clipboard(hwnd, vec![(CF_UNICODETEXT.0 as u32, utf16_bytes(&wide(text)))])
+}
+
+pub fn clipboard_text(hwnd: HWND) -> Option<String> {
+    unsafe {
+        OpenClipboard(Some(hwnd)).ok()?;
+        let text = GetClipboardData(CF_UNICODETEXT.0 as u32).ok().and_then(|h| {
+            let p = GlobalLock(HGLOBAL(h.0)) as *const u16;
+            if p.is_null() {
+                return None;
+            }
+            let len = (0..).take_while(|&i| *p.add(i) != 0).count();
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
+            let _ = GlobalUnlock(HGLOBAL(h.0));
+            Some(s)
+        });
+        let _ = CloseClipboard();
+        text
+    }
+}
+
 pub fn drag_out(hwnd: HWND, paths: &[String]) -> Result<()> {
     let obj: IDataObject = ui_object(hwnd, paths).inspect_err(|e| crate::diag::log(|| format!("drag: data object failed: {e}")))?;
     // 탐색기 등 다른 앱에 놓을 때도 기본은 복사 (Shift를 누르면 이동)
@@ -672,6 +753,27 @@ mod tests {
     use super::*;
     use std::time::Instant;
     use windows::Win32::System::SystemServices::MK_LBUTTON;
+
+    /// 여러 폴더의 파일을 담은 CF_HDROP 내용을 셸이 그대로 읽는지 (클립보드는 건드리지 않는다)
+    #[test]
+    fn hdrop_bytes_are_readable_by_the_shell() {
+        let paths = vec!["C:\\업무\\견적서.xlsx".to_string(), "\\\\nas\\scan\\20260420_160559.pdf".to_string()];
+        let h = global_bytes(&hdrop_bytes(&paths)).unwrap();
+        let hdrop = HDROP(h.0);
+        let read: Vec<String> = unsafe {
+            (0..DragQueryFileW(hdrop, u32::MAX, None))
+                .map(|i| {
+                    let mut buf = vec![0u16; DragQueryFileW(hdrop, i, None) as usize + 1];
+                    DragQueryFileW(hdrop, i, Some(&mut buf));
+                    util::from_wide(&buf)
+                })
+                .collect()
+        };
+        unsafe {
+            let _ = GlobalFree(Some(h));
+        }
+        assert_eq!(read, paths);
+    }
 
     /// 되돌리기 왕복: 이름 바꾸기·이동·휴지통 삭제를 실제로 하고 기록대로 되돌린다
     #[test]
