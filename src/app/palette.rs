@@ -89,8 +89,8 @@ impl App {
     pub(super) fn pal_rect(&self) -> R {
         let w = PAL_W.min(self.w - 40.0).max(320.0);
         let l = ((self.w - w) / 2.0).max(MARGIN);
-        // 설치 안내에는 버튼 자리까지 필요하다
-        let min_rows = if self.pal_status == PalStatus::NotInstalled { 5 } else { 3 };
+        // 설치 안내·폴더 넣기 버튼 자리까지 필요하다
+        let min_rows = if self.pal_status == PalStatus::NotInstalled || self.pal_shows_add_folder() { 5 } else { 3 };
         let rows = self.pal_results.len().clamp(min_rows, PAL_MAX_ROWS) as f32;
         let h = (PAL_HEAD_H + rows * PAL_ROW_H + PAL_FOOT_H + 8.0).min((self.h - TOOLBAR_H - 16.0).max(180.0));
         R::new(l, TOOLBAR_H + 6.0, l + w, TOOLBAR_H + 6.0 + h)
@@ -112,6 +112,11 @@ impl App {
         R::new(cx - 90.0, list.t + 96.0, cx + 90.0, list.t + 128.0)
     }
 
+    /// 찾은 게 없고 보이는 칸에 검색 범위 밖 폴더가 열려 있으면 "이 폴더도 검색하기" 버튼을 보인다
+    fn pal_shows_add_folder(&self) -> bool {
+        matches!(self.pal_status, PalStatus::Done { .. }) && self.pal_results.is_empty() && self.pal_outside.is_some()
+    }
+
     pub(super) fn pal_hit(&self, x: f32, y: f32) -> Option<Hit> {
         let r = self.pal_rect();
         if !r.contains(x, y) {
@@ -119,6 +124,9 @@ impl App {
         }
         if self.pal_status == PalStatus::NotInstalled && self.pal_install_button().contains(x, y) {
             return Some(Hit::PalInstall);
+        }
+        if self.pal_shows_add_folder() && self.pal_install_button().contains(x, y) {
+            return Some(Hit::PalAddFolder);
         }
         let list = self.pal_list();
         if list.contains(x, y) {
@@ -154,8 +162,7 @@ impl App {
                 let _ = SetWindowTextW(self.search_edit, w!(""));
             }
         }
-        let dir = self.panes[self.active].tab().loc.dir();
-        self.pal_outside = dir.is_some_and(|d| self.folders.covering(d).is_none() && crate::folders::outside_disk_index(d));
+        self.pal_outside = self.visible_dirs().into_iter().find(|d| self.folders.covering(d).is_none() && crate::folders::outside_disk_index(d));
         // 서비스가 있는지·인덱스가 준비됐는지 먼저 확인
         spawn_search(self.hwnd, self.pal_seq, None, self.folders.clone());
         self.hover = Hit::None;
@@ -213,7 +220,21 @@ impl App {
             self.pal_status = PalStatus::Searching;
         }
         spawn_search(self.hwnd, self.pal_seq, Some(q), self.folders.clone());
+        // 넣은 폴더를 아직 훑는 중이면, 다 훑을 때까지 잠깐마다 다시 찾아 결과를 채운다
+        if self.folders.list().iter().any(|(_, s)| *s == crate::folders::State::Scanning) {
+            unsafe { SetTimer(Some(self.hwnd), TIMER_SEARCH, 300, None) };
+        }
         self.invalidate();
+    }
+
+    /// 검색 창의 "이 폴더도 검색하기": 넣고 다시 찾는다
+    fn pal_add_folder(&mut self) {
+        let Some(dir) = self.pal_outside.take() else { return };
+        if let Err(e) = self.folders.add(&dir) {
+            let p = self.active;
+            self.flash(p, format!("검색 폴더 목록을 저장하지 못했습니다: {e}"));
+        }
+        self.pal_run_query();
     }
 
     pub(super) fn on_search_done(&mut self, done: SearchDone) {
@@ -275,13 +296,15 @@ impl App {
         self.close_palette();
         let p = self.active;
         let parent = util::parent(&path);
+        // 위치 열기(Ctrl+Enter·Ctrl+클릭)와 Shift+Enter는 지금 탭을 두고 새 탭에서 연다
         match (is_dir, mode) {
-            (true, OpenMode::NewTab) => self.new_tab(p, Some(Location::Dir(path)), true),
-            (true, _) => self.navigate(p, Location::Dir(path), None),
+            (true, OpenMode::Locate | OpenMode::NewTab) => self.new_tab(p, Some(Location::Dir(path)), true),
+            (true, OpenMode::Open) => self.navigate(p, Location::Dir(path), None),
             (false, OpenMode::Locate | OpenMode::NewTab) => {
                 if let Some(dir) = parent {
                     let name = util::file_name(&path).to_string();
-                    self.navigate(p, Location::Dir(dir), Some(name));
+                    self.new_tab(p, Some(Location::Dir(dir)), true);
+                    self.panes[p].tab_mut().restore = Some(Restore::select(&name));
                 }
             }
             (false, OpenMode::Open) => self.pending.push(Deferred::Open { pane: p, paths: vec![path], dir: parent }),
@@ -339,6 +362,7 @@ impl App {
                 self.pal_activate(i, mode);
             }
             Hit::PalInstall => self.pal_install(),
+            Hit::PalAddFolder => self.pal_add_folder(),
             Hit::PalPanel => {}
             _ => self.close_palette(),
         }
@@ -353,7 +377,7 @@ impl App {
         let (hover, sel, scroll) = (self.hover, self.pal_sel, self.pal_scroll);
         let status = self.pal_status.clone();
         let query = edit_text(self.search_edit);
-        let outside = self.pal_outside;
+        let add_folder = if self.pal_shows_add_folder() { self.pal_outside.clone() } else { None };
         let folder_entries = self.folders.entry_count();
         let App { gfx, pal_results, types, .. } = self;
 
@@ -372,9 +396,10 @@ impl App {
             PalStatus::NotInstalled => Some("검색 서비스가 설치되어 있지 않습니다\n디스크 전체를 바로 찾으려면 관리자 권한으로 한 번 설치합니다".into()),
             PalStatus::Indexing => Some("인덱스를 만드는 중입니다… 잠시 후 다시 입력해 보세요".into()),
             PalStatus::Error(e) => Some(format!("검색 서비스와 통신하지 못했습니다\n{e}")),
-            PalStatus::Done { .. } if pal_results.is_empty() && outside => Some(format!(
-                "‘{}’와(과) 일치하는 항목이 없습니다\n지금 연 폴더는 검색 범위 밖입니다 · 설정(톱니) 메뉴의 ‘이 폴더도 검색하기’로 넣을 수 있습니다",
-                query.trim()
+            PalStatus::Done { .. } if pal_results.is_empty() && add_folder.is_some() => Some(format!(
+                "‘{}’와(과) 일치하는 항목이 없습니다\n열어 둔 {}은(는) 아직 검색 범위 밖입니다. 넣으면 그 안도 함께 찾습니다",
+                query.trim(),
+                add_folder.as_deref().unwrap_or_default()
             )),
             PalStatus::Done { .. } if pal_results.is_empty() => Some(format!("‘{}’와(과) 일치하는 항목이 없습니다", query.trim())),
             PalStatus::Idle | PalStatus::Ready(_) if query.trim().is_empty() => {
@@ -385,9 +410,14 @@ impl App {
         if let Some(m) = message {
             gfx.text(&m, R::new(list.l + 16.0, list.t + 10.0, list.r - 16.0, list.t + 90.0), Font::Hint, t.faint);
         }
-        if status == PalStatus::NotInstalled {
-            gfx.fill_round(install, 8.0, if hover == Hit::PalInstall { t.accent } else { alpha(t.accent, 0.85) });
-            gfx.text("검색 서비스 설치", R::new(install.l, install.t, install.r, install.b), Font::Hint, Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+        let button = match (&status, &add_folder) {
+            (PalStatus::NotInstalled, _) => Some(("검색 서비스 설치", Hit::PalInstall)),
+            (_, Some(_)) => Some(("이 폴더도 검색하기", Hit::PalAddFolder)),
+            _ => None,
+        };
+        if let Some((label, h)) = button {
+            gfx.fill_round(install, 8.0, if hover == h { t.accent } else { alpha(t.accent, 0.85) });
+            gfx.text(label, R::new(install.l, install.t, install.r, install.b), Font::Hint, Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
         }
         let first = (scroll / PAL_ROW_H).floor().max(0.0) as usize;
         let count = (list.h() / PAL_ROW_H).ceil() as usize + 1;
@@ -413,7 +443,7 @@ impl App {
         gfx.unclip();
 
         let foot = R::new(r.l + 16.0, r.b - PAL_FOOT_H, r.r - 14.0, r.b - 2.0);
-        gfx.text("Enter 열기 · Ctrl+Enter 위치 열기 · Shift+Enter 새 탭 · Esc 닫기", foot, Font::Normal, t.faint);
+        gfx.text("Enter 열기 · Ctrl+Enter 새 탭에서 위치 열기 · Esc 닫기", foot, Font::Normal, t.faint);
         let right = match &status {
             PalStatus::Done { total, micros } => format!("{total}개 중 {}개 · {:.1}ms", pal_results.len(), *micros as f64 / 1000.0),
             PalStatus::Searching => "찾는 중…".to_string(),

@@ -291,6 +291,19 @@ impl Tab {
         self.cursor = to;
     }
 
+    /// 보이는 순서대로 선택 여부
+    pub fn selection_mask(&self) -> Vec<bool> {
+        (0..self.view.len()).map(|vi| self.is_selected(vi)).collect()
+    }
+
+    /// 끌어서 고르기: 끌기 전 선택(base)에 네모 상자 안 항목(inside)을 더한다
+    pub fn select_marquee(&mut self, base: &[bool], inside: impl Fn(usize) -> bool) {
+        for vi in 0..self.view.len() {
+            let v = base.get(vi).copied().unwrap_or(false) || inside(vi);
+            self.set_selected(vi, v);
+        }
+    }
+
     pub fn select_all(&mut self) {
         for k in 0..self.view.len() {
             self.set_selected(k, true);

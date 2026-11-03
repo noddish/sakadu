@@ -19,7 +19,7 @@ Add a shared folder or USB drive and it's searched too.
 
 ![Results from the whole disk as you type](docs/screenshot-search.png)
 
-**Stop juggling windows.** Split the window into 2, 3 or 4 panes, each with its own tabs.
+**Stop juggling windows.** Split the window into 2, 3 or 4 panes, each with its own tabs. Drag a tab to move it to another pane.
 Moving files from Downloads into a project folder happens on one screen.
 
 **Works like Explorer.** Right-click menus, the copy progress dialog and drag and drop behave exactly as they do in Explorer.
@@ -68,6 +68,8 @@ Dark mode follows your Windows setting.
 | Alt+← / Alt+→, mouse back/forward buttons | Back / forward |
 | Tab / Shift+Tab | Switch pane |
 | Ctrl+T / Ctrl+W / Ctrl+Tab | New tab / close tab / next tab |
+| Drag a tab | Reorder, or move to another pane |
+| Drag from empty space or the date column | Select with a rectangle (hold Ctrl to add to the selection) |
 | Ctrl+1 – Ctrl+5 | Pane layout |
 | Ctrl+Shift+2 / Ctrl+Shift+6 | Thumbnail view / details view |
 | Alt+P | Preview pane |
@@ -96,7 +98,7 @@ Dark mode follows your Windows setting.
 - Reading the MFT needs admin rights, so it runs as a Windows service (SakaduIndex). The app talks to it over a local named pipe that refuses remote clients.
 - The index takes about 120 MB of memory for 1.8 million entries.
 - As with Everything, file **names** in other users' folders can show up in results.
-- Query syntax: space-separated words must all match. A word ending in `\`, like `work\`, matches the path. Enter opens, Ctrl+Enter opens the containing folder, Shift+Enter opens in a new tab.
+- Query syntax: space-separated words must all match. A word ending in `\`, like `work\`, matches the path. Enter opens, Ctrl+Enter (or Ctrl+click) opens the containing folder in a new tab.
 - The global hotkey is the first free one of Ctrl+Alt+Space, Win+Shift+F and Ctrl+Alt+F. The toolbar shows which one you got.
 - The service exe is copied to `C:\Program Files\Sakadu`. After updating Sakadu, reinstall the service to update it too.
 
@@ -107,7 +109,8 @@ Dark mode follows your Windows setting.
 
 The search service only reads this PC's own (NTFS) disks. Shared folders (`\\server\share`), NAS and USB drives are searched once you add them.
 
-- Open the folder and turn on **이 폴더도 검색하기** (search this folder too) in the gear menu. **검색에 넣은 폴더** (added folders) in the same menu lists them and lets you remove one.
+- Open the folder in any pane and search with Ctrl+F. If nothing turns up, click **이 폴더도 검색하기** (search this folder too) in the search window. The gear menu also lets you add or remove the folders open in any visible pane.
+- **검색에 넣은 폴더** (added folders) in the same menu lists them and lets you remove one.
 - The app walks the folder once with your own account and keeps the names in memory. Nothing is written to disk, so it walks the folder again each time the app starts.
 - Changes come in through folder change notifications. In case a server doesn't send them, the folder is walked again every few hours, and opening it in Sakadu also brings it up to date.
 - If the connection drops, the last results stay searchable and Sakadu tries to reconnect every 5 minutes.

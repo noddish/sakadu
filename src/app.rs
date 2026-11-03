@@ -137,6 +137,8 @@ enum Hit {
     FavAdd,
     FavSort,
     FavNewGroup,
+    /// 검색 창의 "이 폴더도 검색하기" 버튼
+    PalAddFolder,
     FavPanel,
     SearchButton,
     PalRow(usize),
@@ -166,6 +168,14 @@ enum Drag {
     Press { pane: usize, vi: usize, x: f32, y: f32, select_on_up: bool },
     FavPress { index: usize, y: f32 },
     FavMove { from: usize, y: f32 },
+    /// 탭을 눌렀다. 조금 움직이면 TabMove
+    TabPress { pane: usize, tab: usize, x: f32, y: f32 },
+    /// 탭을 끄는 중. (x, y)는 지금 포인터 위치
+    TabMove { pane: usize, tab: usize, x: f32, y: f32 },
+    /// 빈 곳이나 자세히 보기의 이름 칸 밖을 눌렀다. 조금 움직이면 Marquee. additive는 Ctrl
+    MarqueeArm { pane: usize, x: f32, y: f32, additive: bool },
+    /// 네모 상자로 고르는 중. (x0, y0)는 시작점(y0은 스크롤 0 기준), (x, y)는 지금 포인터
+    Marquee { pane: usize, x0: f32, y0: f32, x: f32, y: f32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -266,10 +276,12 @@ pub struct App {
     tray: Option<crate::tray::TrayIcon>,
     /// 창을 숨긴 동안 폴더가 바뀐 패널. 다시 보일 때 한 번만 읽는다
     stale: [bool; 4],
+    /// 네모 상자로 고르기 시작할 때의 선택 (보이는 순서)
+    marquee_base: Vec<bool>,
     /// Ctrl+F 검색에 넣은 폴더(공유폴더 등 디스크 인덱스 밖)
     folders: crate::folders::Folders,
-    /// 검색 창을 열 때 활성 칸이 검색 범위 밖 폴더였는지 (결과가 없을 때 안내)
-    pal_outside: bool,
+    /// 검색 창을 열 때 보이는 칸에 열려 있던, 아직 검색에 넣지 않은 공유폴더·USB 폴더 (결과가 없으면 넣기 버튼)
+    pal_outside: Option<String>,
 }
 
 // ---------- 기하 ----------
@@ -735,8 +747,9 @@ impl App {
             preview_host,
             tray: None,
             stale: [false; 4],
+            marquee_base: Vec::new(),
             folders: crate::folders::Folders::start(),
-            pal_outside: false,
+            pal_outside: None,
         };
         unsafe {
             let cue = HSTRING::from("입력하면 바로 필터");
@@ -1245,6 +1258,52 @@ impl App {
         self.invalidate();
     }
 
+    /// 끌던 탭을 놓을 곳: (칸, 들어갈 위치). 탭 줄 위면 놓은 자리, 칸 본문이면 그 칸의 맨 끝. 칸 밖이면 None
+    fn tab_drop_target(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        let (q, r) = self.pane_rects().into_iter().find(|(_, r)| r.contains(x, y))?;
+        let g = geom(r);
+        let n = self.panes[q].tabs.len();
+        let at = if g.tabs.contains(x, y) { tab_rects(&g, n).iter().filter(|tr| (tr.l + tr.r) / 2.0 < x).count() } else { n };
+        Some((q, at))
+    }
+
+    /// 탭을 같은 칸 안에서 옮기거나 다른 칸으로 보낸다.
+    /// 칸에 하나뿐인 탭은 그 칸을 비울 수 없으니 남겨 두고, 대상 칸에 같은 위치를 새 탭으로 연다
+    fn move_tab(&mut self, p: usize, t: usize, q: usize, at: usize) {
+        if t >= self.panes[p].tabs.len() {
+            return;
+        }
+        if p == q {
+            let pane = &mut self.panes[p];
+            let to = (if at > t { at - 1 } else { at }).min(pane.tabs.len() - 1);
+            if to != t {
+                let tab = pane.tabs.remove(t);
+                pane.tabs.insert(to, tab);
+                pane.active = to;
+            }
+            self.invalidate();
+            return;
+        }
+        let tab = if self.panes[p].tabs.len() > 1 {
+            let src = &mut self.panes[p];
+            let tab = src.tabs.remove(t);
+            if t < src.active || src.active >= src.tabs.len() {
+                src.active = src.active.saturating_sub(1);
+            }
+            self.after_tab_switch(p);
+            tab
+        } else {
+            let loc = self.panes[p].tab().loc.clone();
+            Tab::new(self.next_tab_id(), loc)
+        };
+        let dst = &mut self.panes[q];
+        let at = at.min(dst.tabs.len());
+        dst.tabs.insert(at, tab);
+        dst.active = at;
+        self.activate_pane(q);
+        self.after_tab_switch(q);
+    }
+
     fn activate_tab(&mut self, p: usize, t: usize) {
         if t < self.panes[p].tabs.len() && t != self.panes[p].active {
             self.panes[p].active = t;
@@ -1637,6 +1696,19 @@ impl App {
     fn flash(&mut self, p: usize, msg: impl Into<String>) {
         self.panes[p].tab_mut().message = Some(msg.into());
         self.invalidate();
+    }
+
+    /// 보이는 칸들의 지금 폴더 (활성 칸부터, 같은 폴더는 한 번)
+    fn visible_dirs(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for p in std::iter::once(self.active).chain(0..self.layout.count()) {
+            if let Some(d) = self.panes[p].tab().loc.dir() {
+                if !out.iter().any(|x| util::eq_path(x, d)) {
+                    out.push(d.to_string());
+                }
+            }
+        }
+        out
     }
 
     // ---------- 트레이 대기 ----------
@@ -2099,6 +2171,28 @@ impl App {
                 }
             }
             Drag::FavPress { .. } | Drag::FavMove { .. } => self.fav_drag_move(y),
+            Drag::TabPress { pane, tab, x: x0, y: y0 } => {
+                if (x - x0).abs() > 6.0 || (y - y0).abs() > 6.0 {
+                    self.drag = Drag::TabMove { pane, tab, x, y };
+                    self.invalidate();
+                }
+            }
+            Drag::TabMove { pane, tab, .. } => {
+                self.drag = Drag::TabMove { pane, tab, x, y };
+                self.invalidate();
+            }
+            Drag::MarqueeArm { pane, x: x0, y: y0, additive } => {
+                if (x - x0).abs() > 4.0 || (y - y0).abs() > 4.0 {
+                    let tab = self.panes[pane].tab_mut();
+                    if !additive {
+                        tab.clear_selection();
+                    }
+                    self.marquee_base = tab.selection_mask();
+                    let y0 = y0 + tab.scroll;
+                    self.update_marquee(pane, x0, y0, x, y);
+                }
+            }
+            Drag::Marquee { pane, x0, y0, .. } => self.update_marquee(pane, x0, y0, x, y),
             Drag::None => {
                 let h = self.hit(x, y);
                 if h != self.hover {
@@ -2116,6 +2210,30 @@ impl App {
                 }
             }
         }
+    }
+
+    /// 자세히 보기에서 이름 칸 밖(날짜·유형·크기)은 끌면 네모 상자로 고른다. 이름 칸은 파일 끌기
+    fn marquee_column(&self, p: usize, x: f32) -> bool {
+        self.panes[p].view == ViewMode::Details && self.list_rect(p).is_some_and(|l| x >= columns(l, self.panes[p].cols).name.1)
+    }
+
+    fn update_marquee(&mut self, p: usize, x0: f32, y0: f32, x: f32, y: f32) {
+        self.drag = Drag::Marquee { pane: p, x0, y0, x, y };
+        let Some((list, grid)) = self.grid(p) else { return };
+        // 목록 위·아래로 벗어나면 그쪽으로 스크롤
+        if y < list.t {
+            self.scroll_by(p, -(list.t - y).min(40.0));
+        } else if y > list.b {
+            self.scroll_by(p, (y - list.b).min(40.0));
+        }
+        let tab = self.panes[p].tab_mut();
+        let (t, b) = (y0.min(y + tab.scroll), y0.max(y + tab.scroll));
+        let (l, r) = (x0.min(x), x0.max(x));
+        tab.select_marquee(&self.marquee_base, |vi| {
+            let it = grid.item(vi, 0.0);
+            it.l < r && it.r > l && it.t < b && it.b > t
+        });
+        self.invalidate();
     }
 
     fn after_resize_drag(&mut self) {
@@ -2166,7 +2284,10 @@ impl App {
             Hit::View(p, v) => self.set_view(p, v),
             Hit::SplitX => capture(self, Drag::SplitX),
             Hit::SplitY => capture(self, Drag::SplitY),
-            Hit::Tab(p, t) => self.activate_tab(p, t),
+            Hit::Tab(p, t) => {
+                self.activate_tab(p, t);
+                capture(self, Drag::TabPress { pane: p, tab: t, x, y });
+            }
             Hit::TabClose(p, t) => self.close_tab(p, t),
             Hit::TabAdd(p) => self.new_tab(p, None, true),
             Hit::TabStrip(p) if dbl => self.new_tab(p, None, true),
@@ -2205,6 +2326,18 @@ impl App {
                     self.scroll_by(p, if y < thumb.t { -list.h() } else { list.h() });
                 }
             }
+            Hit::Row(p, vi) if !dbl && self.marquee_column(p, x) => {
+                // 누르기만 하면 그 줄을 고르고, 끌면 네모 상자 고르기
+                let tab = self.panes[p].tab_mut();
+                if ctrl {
+                    tab.toggle(vi);
+                } else if shift {
+                    tab.select_range(vi, false);
+                } else {
+                    tab.select_only(vi);
+                }
+                capture(self, Drag::MarqueeArm { pane: p, x, y, additive: ctrl });
+            }
             Hit::Row(p, vi) => {
                 if dbl {
                     self.drag = Drag::None;
@@ -2227,7 +2360,12 @@ impl App {
                 // 이미 선택된 여러 항목을 끌 수 있도록, 단일 선택 전환은 버튼을 뗄 때 한다
                 capture(self, Drag::Press { pane: p, vi, x, y, select_on_up: !ctrl && !shift && was_selected });
             }
-            Hit::ListEmpty(p) if !ctrl => self.panes[p].tab_mut().clear_selection(),
+            Hit::ListEmpty(p) => {
+                if !ctrl {
+                    self.panes[p].tab_mut().clear_selection();
+                }
+                capture(self, Drag::MarqueeArm { pane: p, x, y, additive: ctrl });
+            }
             Hit::Status(_) => self.focus(),
             _ => {}
         }
@@ -2241,6 +2379,11 @@ impl App {
         if let Drag::Press { pane, vi, select_on_up: true, .. } = self.drag {
             self.panes[pane].tab_mut().select_only(vi);
         }
+        if let Drag::TabMove { pane, tab, x, y } = self.drag {
+            if let Some((q, at)) = self.tab_drop_target(x, y) {
+                self.move_tab(pane, tab, q, at);
+            }
+        }
         if !matches!(self.drag, Drag::None) {
             self.drag = Drag::None;
             unsafe {
@@ -2253,7 +2396,7 @@ impl App {
     fn on_rbutton_down(&mut self, x: f32, y: f32) {
         let hit = self.hit(x, y);
         if self.pal_open {
-            if !matches!(hit, Hit::PalRow(_) | Hit::PalPanel | Hit::PalInstall) {
+            if !matches!(hit, Hit::PalRow(_) | Hit::PalPanel | Hit::PalInstall | Hit::PalAddFolder) {
                 self.close_palette();
             }
             self.invalidate();
@@ -2666,6 +2809,19 @@ impl App {
         let drop_hover = self.drop_hover;
         let edit_mode = self.edit_mode;
         let thumb_drag = matches!(self.drag, Drag::Thumb { pane, .. } if pane == p);
+        // 끌고 있는 탭: (그 탭이 있던 칸, 탭), 놓을 곳 (칸, 위치)
+        let (dragged_tab, tab_drop) = match self.drag {
+            Drag::TabMove { pane, tab, x, y } => (Some((pane, tab)), self.tab_drop_target(x, y)),
+            _ => (None, None),
+        };
+        // 네모 상자 고르기 (화면 좌표)
+        let marquee = match self.drag {
+            Drag::Marquee { pane, x0, y0, x, y } if pane == p => {
+                let y0 = y0 - self.panes[p].tab().scroll;
+                Some(R::new(x0.min(x), y0.min(y), x0.max(x), y0.max(y)))
+            }
+            _ => None,
+        };
         let App { gfx, panes, types, thumb_failed, .. } = self;
         let pane = &panes[p];
         let tab = pane.tab();
@@ -2690,7 +2846,8 @@ impl App {
             }
             let closable = pane.tabs.len() > 1 && (is_active || hovered);
             let label = R::new(tr.l + 12.0, tr.t, tr.r - if closable { 28.0 } else { 10.0 }, tr.b);
-            gfx.text(&pane.tabs[i].loc.title(), label, if is_active { Font::Strong } else { Font::Normal }, if is_active { t.text } else { t.dim });
+            let color = if dragged_tab == Some((p, i)) { t.faint } else if is_active { t.text } else { t.dim };
+            gfx.text(&pane.tabs[i].loc.title(), label, if is_active { Font::Strong } else { Font::Normal }, color);
             if closable {
                 let cr = close_rect(*tr);
                 if hover == Hit::TabClose(p, i) {
@@ -2704,6 +2861,11 @@ impl App {
             gfx.fill_round(add, 6.0, t.sel_inactive);
         }
         gfx.glyph(G_ADD, add, true, t.dim);
+        // 끌어 놓을 자리
+        if let Some((_, at)) = tab_drop.filter(|(q, _)| *q == p) {
+            let x = trs.get(at).map(|tr| tr.l - 2.0).or(trs.last().map(|tr| tr.r + 2.0)).unwrap_or(g.tabs.l + 8.0);
+            gfx.fill_round(R::new(x - 1.5, g.tabs.t + 6.0, x + 1.5, g.tabs.b - 2.0), 1.5, t.accent);
+        }
         gfx.unclip();
 
         // 탐색 버튼
@@ -2915,8 +3077,17 @@ impl App {
             }
         }
 
-        // 테두리: 드롭 대상 > 활성 패널 > 기본
+        if let Some(m) = marquee {
+            gfx.clip(g.list);
+            gfx.fill(m, alpha(t.accent, 0.15));
+            gfx.stroke_round(m.inset(0.5, 0.5), 1.0, t.accent, 1.0);
+            gfx.unclip();
+        }
+
+        // 테두리: 드롭 대상(파일, 다른 칸에서 끌어 온 탭) > 활성 패널 > 기본
+        let tab_target = tab_drop.is_some_and(|(q, _)| q == p) && dragged_tab.is_some_and(|(from, _)| from != p);
         match drop_hover {
+            _ if tab_target => gfx.stroke_round(r.inset(1.0, 1.0), RADIUS, t.accent, 2.0),
             Some((dp, None)) if dp == p => gfx.stroke_round(r.inset(1.0, 1.0), RADIUS, t.accent, 2.0),
             _ if active && multi => gfx.stroke_round(r.inset(0.75, 0.75), RADIUS, t.accent, 1.5),
             _ => gfx.stroke_round(r.inset(0.5, 0.5), RADIUS, t.border, 1.0),
@@ -3004,21 +3175,30 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
     const DEFAULT_FM: usize = 5;
     const SERVICE: usize = 6;
     const TRAY: usize = 7;
-    const FOLDER: usize = 8;
+    /// 보이는 칸들의 검색 범위 밖 폴더 (FOLDER_ITEM + 번호)
+    const FOLDER_ITEM: usize = 200;
     /// 검색에 넣은 폴더 하위 메뉴 (FOLDER_LIST + 번호)
     const FOLDER_LIST: usize = 100;
-    let Some((thumbs, preview, hidden, dir, folders)) = with_app(|a| {
-        let dir = a.panes[a.active].tab().loc.dir().map(str::to_string);
-        (a.panes[a.active].view == ViewMode::Thumbs, a.preview.is_some(), a.show_hidden, dir, a.folders.clone())
-    }) else {
+    let Some((thumbs, preview, hidden, dirs, folders)) =
+        with_app(|a| (a.panes[a.active].view == ViewMode::Thumbs, a.preview.is_some(), a.show_hidden, a.visible_dirs(), a.folders.clone()))
+    else {
         return;
     };
     let is_default = defaultfm::is_registered(defaultfm::CLASSES);
     let service = crate::service::is_installed();
     let tray = crate::tray::is_enabled(crate::tray::RUN_KEY);
-    // 지금 폴더가 디스크 인덱스 밖이면 검색에 넣을 수 있고, 이미 넣은 폴더 안이면 뺄 수 있다
-    let covering = dir.as_deref().and_then(|d| folders.covering(d));
-    let can_add = covering.is_none() && dir.as_deref().is_some_and(crate::folders::outside_disk_index);
+    // 활성 칸이 아니어도, 보이는 칸에 열린 공유폴더·USB 폴더는 여기서 넣거나 뺄 수 있다: (보여 줄 경로, 이미 넣었는지)
+    let mut candidates: Vec<(String, bool)> = Vec::new();
+    for d in &dirs {
+        let c = match folders.covering(d) {
+            Some(root) => (root, true),
+            None if crate::folders::outside_disk_index(d) => (d.clone(), false),
+            None => continue,
+        };
+        if !candidates.iter().any(|(p, _)| util::eq_path(p, &c.0)) {
+            candidates.push(c);
+        }
+    }
     let added = folders.list();
     let cmd = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
@@ -3037,11 +3217,11 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
         item(DEFAULT_FM, "기본 파일 관리자로 사용 (폴더 열기·Win+E)", is_default);
         item(TRAY, "트레이에서 대기 (로그인할 때 시작)", tray);
         item(SERVICE, if service { "디스크 검색 서비스 제거…" } else { "디스크 검색 서비스 설치…" }, false);
-        if can_add || covering.is_some() || !added.is_empty() {
+        if !candidates.is_empty() || !added.is_empty() {
             sep();
         }
-        if can_add || covering.is_some() {
-            item(FOLDER, "이 폴더도 검색하기 (공유폴더·USB)", covering.is_some());
+        for (i, (path, on)) in candidates.iter().enumerate() {
+            item(FOLDER_ITEM + i, &format!("이 폴더도 검색하기 ({path})"), *on);
         }
         if !added.is_empty() {
             if let Ok(sub) = CreatePopupMenu() {
@@ -3093,11 +3273,12 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
                 with_app(|a| a.flash(a.active, msg));
             }
         }
-        FOLDER => {
-            if let Some(root) = covering {
-                remove_search_folder(hwnd, &folders, &root);
-            } else if let Some(dir) = dir {
-                let msg = match folders.add(&dir) {
+        _ if cmd >= FOLDER_ITEM && cmd < FOLDER_ITEM + candidates.len() => {
+            let (path, on) = &candidates[cmd - FOLDER_ITEM];
+            if *on {
+                remove_search_folder(hwnd, &folders, path);
+            } else {
+                let msg = match folders.add(path) {
                     Ok(()) => "이제 Ctrl+F로 이 폴더 안도 찾습니다. 처음 훑는 동안에는 결과가 덜 나올 수 있습니다".to_string(),
                     Err(e) => format!("검색 폴더 목록을 저장하지 못했습니다: {e}"),
                 };
