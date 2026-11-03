@@ -22,10 +22,13 @@ pub struct Session {
     pub active: usize,
     pub show_hidden: bool,
     pub preview: bool,
+    /// 새 탭(Ctrl+T·+)을 열 위치: NEW_TAB_SAME이면 지금 탭과 같은 폴더, 아니면 탭 경로 형식("::computer" 또는 폴더)
+    pub new_tab: String,
     pub panes: Vec<PaneState>,
 }
 
 const HEADER: &str = "sakadu-session 1";
+pub const NEW_TAB_SAME: &str = "::same";
 
 pub fn file_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Sakadu").join("session.txt"))
@@ -59,6 +62,7 @@ pub fn serialize(s: &Session) -> String {
     out.push_str(&format!("active={}\n", s.active));
     out.push_str(&format!("hidden={}\n", s.show_hidden as u8));
     out.push_str(&format!("preview={}\n", s.preview as u8));
+    out.push_str(&format!("newtab={}\n", s.new_tab));
     for p in &s.panes {
         out.push_str(&format!(
             "pane=active:{};cols:{},{},{};sort:{},{};view:{}\n",
@@ -87,6 +91,7 @@ pub fn parse(text: &str) -> Option<Session> {
         active: 0,
         show_hidden: false,
         preview: false,
+        new_tab: "::computer".to_string(),
         panes: Vec::new(),
     };
     for line in lines {
@@ -108,6 +113,7 @@ pub fn parse(text: &str) -> Option<Session> {
             "active" => s.active = value.parse().unwrap_or(0),
             "hidden" => s.show_hidden = value == "1",
             "preview" => s.preview = value == "1",
+            "newtab" => s.new_tab = value.to_string(),
             "pane" => {
                 let mut p = PaneState { tabs: Vec::new(), active: 0, cols: [140.0, 130.0, 84.0], sort_key: 0, sort_desc: false, view: 0 };
                 for part in value.split(';') {
@@ -152,6 +158,7 @@ mod tests {
             active: 2,
             show_hidden: true,
             preview: true,
+            new_tab: "D:\\업무".into(),
             panes: vec![
                 PaneState {
                     tabs: vec!["C:\\a=b,c".into(), "::computer".into()],
@@ -165,6 +172,11 @@ mod tests {
             ],
         };
         assert_eq!(parse(&serialize(&s)), Some(s));
+    }
+
+    #[test]
+    fn new_tab_defaults_to_this_pc() {
+        assert_eq!(parse("sakadu-session 1\nlayout=2").unwrap().new_tab, "::computer");
     }
 
     #[test]

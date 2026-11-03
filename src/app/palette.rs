@@ -34,9 +34,15 @@ pub struct SearchDone {
     reply: SearchReply,
 }
 
-pub(super) fn search_button() -> R {
-    let l = fav_button().r + 6.0;
-    R::new(l, 8.0, l + 150.0, 38.0)
+/// 도구 막대 검색 상자의 너비 (창이 좁으면 줄어든다)
+pub(super) const SEARCH_W: f32 = 300.0;
+
+impl App {
+    pub(super) fn search_button(&self) -> R {
+        let l = self.fav_button().r + 6.0;
+        let r = (l + SEARCH_W).min(self.preview_button().l - 16.0).max(l + 140.0);
+        R::new(l, 8.0, r, 38.0)
+    }
 }
 
 fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>, folders: crate::folders::Folders) {

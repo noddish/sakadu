@@ -149,8 +149,10 @@ When turned on in the gear menu, closing the window doesn't quit Sakadu. It stay
 <summary>Thumbnails, preview, favorites, undo</summary>
 
 - **Thumbnail view** is Ctrl+Shift+2, details view is Ctrl+Shift+6. Each pane remembers its own.
+- **New tabs** (Ctrl+T, +) open at This PC. Change it in the gear menu under **새 탭을 열 위치** (new tab location): the same folder as the current tab, or a folder of your choice.
+- Hover over a toolbar button for a moment to see its name and shortcut.
 - **Preview pane** (Alt+P) shows photos large and the start of text and code files (UTF-8, UTF-16 and CP949 detected). PDF and Office files use the preview handlers registered in Windows, run out of process so a crashing handler can't take the app down.
-- **Favorites** (Ctrl+B) can be folders or files, with their own display names like "01. Daily work", independent of the real name (F2). Drag to reorder. **Groups** fold and unfold; drag an item into a group, or right-click → **그룹으로 이동** (move to group). Clicking a file opens it, and Ctrl+Enter opens its folder in a new tab.
+- **Favorites** (Ctrl+B) can be folders or files, with their own display names like "01. Daily work", independent of the real name (F2). Drag to reorder. **Groups** open to the side when you hover over a folded group; click a group to unfold it in place for tidying. Drag an item into a group, or right-click → **그룹으로 이동** (move to group). Clicking a file opens it, and Ctrl+Enter opens its folder in a new tab.
 - **Undo** (Ctrl+Z) reverses renames, moves, copies, Recycle Bin deletes, new folders, pastes and drag and drop, newest first. Permanent deletes and actions from the context menu can't be undone.
 
 </details>

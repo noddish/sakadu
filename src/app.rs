@@ -31,8 +31,8 @@ use windows::core::{BOOL, HSTRING, PCWSTR, w};
 mod fav_ui;
 mod palette;
 mod preview;
-use fav_ui::{G_STAR, fav_button};
-use palette::{G_SEARCH, PalStatus, TIMER_SEARCH, search_button};
+use fav_ui::{G_STAR, TIMER_FLY, TIMER_FLY_CLOSE};
+use palette::{G_SEARCH, PalStatus, TIMER_SEARCH};
 use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
 pub use preview::{TextReady, unload_handler};
@@ -61,6 +61,8 @@ pub const COPYDATA_OPEN: usize = 0x5150_0001;
 const ID_OPEN_TAB: u32 = shell::MENU_CUSTOM;
 const ID_ADD_FAV: u32 = shell::MENU_CUSTOM + 1;
 const TIMER_REFRESH: usize = 10;
+/// 도구 막대 버튼 말풍선을 띄우기까지
+const TIMER_TIP: usize = 42;
 
 // Segoe Fluent Icons / Segoe MDL2 Assets 글리프
 const G_BACK: u16 = 0xE72B;
@@ -139,6 +141,9 @@ enum Hit {
     FavNewGroup,
     /// 검색 창의 "이 폴더도 검색하기" 버튼
     PalAddFolder,
+    /// 즐겨찾기 그룹 옆 목록의 항목·빈 곳
+    FavFlyItem(usize),
+    FavFlyPanel,
     FavPanel,
     SearchButton,
     PalRow(usize),
@@ -252,6 +257,8 @@ pub struct App {
     fav_open: bool,
     fav_sel: usize,
     fav_scroll: f32,
+    /// 즐겨찾기 그룹에 마우스를 올리면 옆에 띄우는 목록: (그룹, 나타난 정도 0~1)
+    fav_fly: Option<(usize, f32)>,
     search_edit: HWND,
     pal_open: bool,
     pal_results: Vec<(bool, String)>,
@@ -278,6 +285,10 @@ pub struct App {
     stale: [bool; 4],
     /// 네모 상자로 고르기 시작할 때의 선택 (보이는 순서)
     marquee_base: Vec<bool>,
+    /// 새 탭을 열 위치 (세션 형식, session::NEW_TAB_SAME이면 지금 탭과 같은 폴더)
+    new_tab_home: String,
+    /// 도구 막대 버튼 말풍선이 떠 있는지
+    tip_shown: bool,
     /// Ctrl+F 검색에 넣은 폴더(공유폴더 등 디스크 인덱스 밖)
     folders: crate::folders::Folders,
     /// 검색 창을 열 때 보이는 칸에 열려 있던, 아직 검색에 넣지 않은 공유폴더·USB 폴더 (결과가 없으면 넣기 버튼)
@@ -498,21 +509,26 @@ fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
     }
 }
 
+/// 칸 나누기 버튼 5개를 한 덩어리로 담는 판
+fn layout_pill() -> R {
+    R::new(MARGIN, 8.0, MARGIN + 6.0 + 5.0 * 32.0, 38.0)
+}
+
 fn layout_buttons() -> [R; 5] {
     std::array::from_fn(|i| {
-        let l = MARGIN + i as f32 * 36.0;
-        R::new(l, 8.0, l + 32.0, 38.0)
+        let l = MARGIN + 3.0 + i as f32 * 32.0;
+        R::new(l, 11.0, l + 32.0, 35.0)
     })
 }
 
 fn new_folder_button() -> R {
-    let l = MARGIN + 5.0 * 36.0 + 14.0;
-    R::new(l, 8.0, l + 92.0, 38.0)
+    let l = layout_pill().r + 12.0;
+    R::new(l, 8.0, l + 32.0, 38.0)
 }
 
 fn hidden_button() -> R {
-    let l = new_folder_button().r + 6.0;
-    R::new(l, 8.0, l + 104.0, 38.0)
+    let l = new_folder_button().r + 4.0;
+    R::new(l, 8.0, l + 32.0, 38.0)
 }
 
 fn type_info(types: &mut HashMap<String, (String, i32)>, e: &Entry) -> (String, i32) {
@@ -732,6 +748,7 @@ impl App {
             fav_open: false,
             fav_sel: 0,
             fav_scroll: 0.0,
+            fav_fly: None,
             search_edit,
             pal_open: false,
             pal_results: Vec::new(),
@@ -748,6 +765,8 @@ impl App {
             tray: None,
             stale: [false; 4],
             marquee_base: Vec::new(),
+            new_tab_home: sess.as_ref().map_or_else(|| "::computer".to_string(), |s| s.new_tab.clone()),
+            tip_shown: false,
             folders: crate::folders::Folders::start(),
             pal_outside: None,
         };
@@ -902,7 +921,7 @@ impl App {
                 return h;
             }
         }
-        if y < TOOLBAR_H && search_button().contains(x, y) {
+        if y < TOOLBAR_H && self.search_button().contains(x, y) {
             return Hit::SearchButton;
         }
         if self.fav_open {
@@ -911,7 +930,7 @@ impl App {
             }
         }
         if y < TOOLBAR_H {
-            if fav_button().contains(x, y) {
+            if self.fav_button().contains(x, y) {
                 return Hit::FavButton;
             }
             if let Some(i) = layout_buttons().iter().position(|r| r.contains(x, y)) {
@@ -1227,8 +1246,13 @@ impl App {
 
     // ---------- 탭·패널 ----------
 
+    /// 위치 없이 여는 새 탭(Ctrl+T·+·탭 줄 더블클릭)의 위치: 설정에 따라 내 PC, 정해 둔 폴더, 지금 탭과 같은 폴더
+    fn new_tab_location(&self, p: usize) -> Location {
+        if self.new_tab_home == session::NEW_TAB_SAME { self.panes[p].tab().loc.clone() } else { Location::from_session(&self.new_tab_home) }
+    }
+
     pub fn new_tab(&mut self, p: usize, loc: Option<Location>, activate: bool) {
-        let loc = loc.unwrap_or_else(|| self.panes[p].tab().loc.clone());
+        let loc = loc.unwrap_or_else(|| self.new_tab_location(p));
         let id = self.next_tab_id();
         let pane = &mut self.panes[p];
         let idx = pane.active + 1;
@@ -1907,6 +1931,7 @@ impl App {
             active: self.active,
             show_hidden: self.show_hidden,
             preview: self.preview.is_some(),
+            new_tab: self.new_tab_home.clone(),
             panes: self
                 .panes
                 .iter()
@@ -2011,6 +2036,10 @@ impl App {
                     self.tracking = false;
                     if self.hover != Hit::None {
                         self.hover = Hit::None;
+                        if self.fav_open {
+                            self.fav_fly_hover(Hit::None);
+                        }
+                        self.update_tip();
                         self.invalidate();
                     }
                 }
@@ -2085,6 +2114,12 @@ impl App {
                         self.pal_run_query();
                     } else if id == TIMER_PREVIEW {
                         self.start_preview();
+                    } else if id == TIMER_FLY || id == TIMER_FLY_CLOSE {
+                        self.fav_fly_timer(id);
+                    } else if id == TIMER_TIP {
+                        let _ = KillTimer(Some(hwnd), id);
+                        self.tip_shown = true;
+                        self.invalidate();
                     } else if (TIMER_REFRESH..TIMER_REFRESH + 4).contains(&id) {
                         let _ = KillTimer(Some(hwnd), id);
                         let p = id - TIMER_REFRESH;
@@ -2197,6 +2232,10 @@ impl App {
                 let h = self.hit(x, y);
                 if h != self.hover {
                     self.hover = h;
+                    if self.fav_open {
+                        self.fav_fly_hover(h);
+                    }
+                    self.update_tip();
                     self.invalidate();
                 }
                 if !self.tracking {
@@ -2246,6 +2285,7 @@ impl App {
 
     fn on_lbutton_down(&mut self, x: f32, y: f32, dbl: bool) {
         let hit = self.hit(x, y);
+        self.tip_shown = false;
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
         if self.pal_open && hit != Hit::SearchButton {
@@ -2408,7 +2448,7 @@ impl App {
                     self.end_edits_for_click();
                     self.fav_sel = i;
                 }
-                Hit::FavAdd | Hit::FavSort | Hit::FavNewGroup | Hit::FavPanel | Hit::FavButton => {}
+                Hit::FavAdd | Hit::FavSort | Hit::FavNewGroup | Hit::FavPanel | Hit::FavButton | Hit::FavFlyItem(_) | Hit::FavFlyPanel => {}
                 _ => self.close_favorites(),
             }
             self.invalidate();
@@ -2454,7 +2494,13 @@ impl App {
             return true;
         }
         if self.fav_open {
-            if let Hit::FavRow(i) | Hit::FavEdit(i) | Hit::FavRemove(i) = self.hit(x, y) {
+            let row = match self.hit(x, y) {
+                Hit::FavRow(i) | Hit::FavEdit(i) | Hit::FavRemove(i) => Some(i),
+                // 옆 목록의 항목은 그룹을 펼쳐 그 항목을 고른 뒤 같은 메뉴를 띄운다
+                Hit::FavFlyItem(j) => self.fav_fly_reveal(j),
+                _ => None,
+            };
+            if let Some(i) = row {
                 let pt = self.to_screen(x, y);
                 self.pending.push(Deferred::FavMenu { index: i, pt });
             }
@@ -2737,6 +2783,7 @@ impl App {
         if self.pal_open {
             self.paint_palette();
         }
+        self.paint_tip();
         self.gfx.end();
         self.request_thumbs(missing);
     }
@@ -2745,16 +2792,30 @@ impl App {
         let t = self.theme;
         let g = &self.gfx;
         let hover_bg = t.sel_inactive;
+        // 칸 나누기: 한 덩어리 판 위에 지금 고른 것만 도드라지게
+        g.fill_round(layout_pill(), 8.0, t.field);
         for (i, r) in layout_buttons().iter().enumerate() {
             let layout = Layout::ALL[i];
             let current = layout == self.layout;
             if current {
-                g.fill_round(*r, 6.0, t.accent_soft);
+                g.fill_round(*r, 6.0, t.pane);
+                g.stroke_round(r.inset(0.5, 0.5), 6.0, t.border, 1.0);
             } else if self.hover == Hit::Layout(i) {
                 g.fill_round(*r, 6.0, hover_bg);
             }
             draw_layout_icon(g, *r, layout, if current { t.accent } else { t.dim });
         }
+        // 글자 없는 버튼: 올려 두면 이름과 단축키를 말풍선으로 보여 준다
+        let icon_button = |r: R, glyph: u16, on: bool, hovered: bool| {
+            if on {
+                g.fill_round(r, 6.0, t.accent_soft);
+            } else if hovered {
+                g.fill_round(r, 6.0, hover_bg);
+            }
+            g.glyph(glyph, r, false, if on { t.accent } else { t.text });
+        };
+        icon_button(new_folder_button(), G_NEW_FOLDER, false, self.hover == Hit::NewFolder);
+        icon_button(hidden_button(), G_HIDDEN, self.show_hidden, self.hover == Hit::Hidden);
         let button = |r: R, glyph: u16, label: &str, on: bool, hovered: bool| {
             if on {
                 g.fill_round(r, 6.0, t.accent_soft);
@@ -2765,40 +2826,66 @@ impl App {
             g.glyph(glyph, R::new(r.l + 8.0, r.t, r.l + 28.0, r.b), false, fg);
             g.text(label, R::new(r.l + 32.0, r.t, r.r - 6.0, r.b), Font::Normal, fg);
         };
-        button(new_folder_button(), G_NEW_FOLDER, "새 폴더", false, self.hover == Hit::NewFolder);
-        button(hidden_button(), G_HIDDEN, "숨김 항목", self.show_hidden, self.hover == Hit::Hidden);
-        button(fav_button(), G_STAR, "즐겨찾기", self.fav_open, self.hover == Hit::FavButton);
+        button(self.fav_button(), G_STAR, "즐겨찾기", self.fav_open, self.hover == Hit::FavButton);
         // 검색 상자처럼 보이는 버튼: 누르면 Ctrl+F 팔레트
-        let sb = search_button();
+        let sb = self.search_button();
         let on = self.pal_open || self.hover == Hit::SearchButton;
         g.fill_round(sb, 8.0, if on { t.pane } else { t.field });
         g.stroke_round(sb.inset(0.5, 0.5), 8.0, if self.pal_open { t.accent } else { t.border }, 1.0);
         g.glyph(G_SEARCH, R::new(sb.l + 8.0, sb.t, sb.l + 28.0, sb.b), true, t.dim);
         g.text("검색", R::new(sb.l + 30.0, sb.t, sb.r - 8.0, sb.b), Font::Normal, t.dim);
         g.text("Ctrl+F", R::new(sb.l + 30.0, sb.t, sb.r - 10.0, sb.b), Font::Right, t.faint);
-        // 글자 없는 버튼: 올려 두면 오른쪽 안내 문구 자리에 설명을 보여 준다
-        let icon_button = |r: R, glyph: u16, on: bool, hovered: bool| {
-            if on {
-                g.fill_round(r, 6.0, t.accent_soft);
-            } else if hovered {
-                g.fill_round(r, 6.0, hover_bg);
-            }
-            g.glyph(glyph, r, false, if on { t.accent } else { t.text });
-        };
-        let (pb, setb) = (self.preview_button(), self.settings_button());
-        icon_button(pb, G_PREVIEW, self.preview.is_some(), self.hover == Hit::PreviewButton);
-        icon_button(setb, G_SETTINGS, false, self.hover == Hit::SettingsButton);
-        let hint = match (self.hover, self.hotkey) {
-            (Hit::PreviewButton, _) => "미리 보기 창 (Alt+P)".to_string(),
-            (Hit::SettingsButton, _) => "설정: 보기, 기본 파일 관리자, 검색 서비스".to_string(),
-            (_, Some(hk)) => format!("{hk} 어디서든 검색 · Ctrl+B 즐겨찾기 · Ctrl+Z 되돌리기 · 입력하면 필터"),
-            (_, None) => "Ctrl+B 즐겨찾기 · Ctrl+Z 되돌리기 · Ctrl+1~5 레이아웃 · 입력하면 필터".to_string(),
-        };
-        let right = pb.l - 10.0;
-        let left = sb.r + 24.0;
-        if right - left > g.measure(&hint, Font::Normal) {
-            g.text(&hint, R::new(left, 8.0, right, 38.0), Font::Right, t.faint);
+        icon_button(self.preview_button(), G_PREVIEW, self.preview.is_some(), self.hover == Hit::PreviewButton);
+        icon_button(self.settings_button(), G_SETTINGS, false, self.hover == Hit::SettingsButton);
+    }
+
+    /// 도구 막대 버튼에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
+    fn tip(&self) -> Option<(R, String)> {
+        if self.fav_open || self.pal_open {
+            return None;
         }
+        const LAYOUTS: [&str; 5] = ["한 칸", "좌우 두 칸", "위아래 두 칸", "세 칸", "네 칸"];
+        Some(match self.hover {
+            Hit::Layout(i) => (layout_buttons()[i], format!("{} (Ctrl+{})", LAYOUTS[i], i + 1)),
+            Hit::NewFolder => (new_folder_button(), "새 폴더 (Ctrl+Shift+N)".to_string()),
+            Hit::Hidden => (hidden_button(), format!("숨김 항목 {} (Ctrl+H)", if self.show_hidden { "감추기" } else { "보기" })),
+            Hit::FavButton => (self.fav_button(), "즐겨찾기 (Ctrl+B, 고른 항목 추가는 Ctrl+D)".to_string()),
+            Hit::SearchButton => (
+                self.search_button(),
+                match self.hotkey {
+                    Some(hk) => format!("디스크 전체 검색 (Ctrl+F, 다른 앱에서는 {hk})"),
+                    None => "디스크 전체 검색 (Ctrl+F)".to_string(),
+                },
+            ),
+            Hit::PreviewButton => (self.preview_button(), "미리 보기 창 (Alt+P)".to_string()),
+            Hit::SettingsButton => (self.settings_button(), "설정".to_string()),
+            _ => return None,
+        })
+    }
+
+    /// 버튼 위에 마우스가 바뀌면 말풍선을 숨기고, 잠시 머무르면 보이게 한다
+    fn update_tip(&mut self) {
+        self.tip_shown = false;
+        unsafe {
+            if self.tip().is_some() {
+                SetTimer(Some(self.hwnd), TIMER_TIP, 600, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_TIP);
+            }
+        }
+    }
+
+    fn paint_tip(&self) {
+        let Some((b, text)) = self.tip().filter(|_| self.tip_shown) else { return };
+        let t = self.theme;
+        let w = self.gfx.measure(&text, Font::Normal) + 20.0;
+        let l = ((b.l + b.r) / 2.0 - w / 2.0).clamp(MARGIN, (self.w - MARGIN - w).max(MARGIN));
+        let r = R::new(l, b.b + 6.0, l + w, b.b + 32.0);
+        let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.4 } else { 0.1 } };
+        self.gfx.fill_round(R::new(r.l - 1.0, r.t + 1.0, r.r + 1.0, r.b + 3.0), 7.0, shadow);
+        self.gfx.fill_round(r, 6.0, t.pane);
+        self.gfx.stroke_round(r.inset(0.5, 0.5), 6.0, t.border, 1.0);
+        self.gfx.text(&text, R::new(r.l + 10.0, r.t, r.r - 6.0, r.b), Font::Normal, t.text);
     }
 
     fn paint_pane(&mut self, p: usize, r: R, missing: &mut Vec<crate::thumbs::Request>) {
@@ -3184,6 +3271,12 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
     else {
         return;
     };
+    const NEWTAB_PC: usize = 20;
+    const NEWTAB_SAME: usize = 21;
+    const NEWTAB_CUSTOM: usize = 22;
+    const NEWTAB_SET: usize = 23;
+    let (new_tab_home, active_dir) = with_app(|a| (a.new_tab_home.clone(), a.panes[a.active].tab().loc.dir().map(str::to_string))).unwrap_or_default();
+    let custom_home = Some(new_tab_home.as_str()).filter(|h| *h != "::computer" && *h != session::NEW_TAB_SAME && !h.is_empty());
     let is_default = defaultfm::is_registered(defaultfm::CLASSES);
     let service = crate::service::is_installed();
     let tray = crate::tray::is_enabled(crate::tray::RUN_KEY);
@@ -3213,6 +3306,21 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
         sep();
         item(PREVIEW, "미리 보기 창\tAlt+P", preview);
         item(HIDDEN, "숨김 항목 표시\tCtrl+H", hidden);
+        if let Ok(sub) = CreatePopupMenu() {
+            let sub_item = |id: usize, label: &str, checked: bool| {
+                let _ = AppendMenuW(sub, MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED }, id, &HSTRING::from(label));
+            };
+            sub_item(NEWTAB_PC, "내 PC", custom_home.is_none() && new_tab_home != session::NEW_TAB_SAME);
+            sub_item(NEWTAB_SAME, "지금 탭과 같은 폴더", new_tab_home == session::NEW_TAB_SAME);
+            if let Some(h) = custom_home {
+                sub_item(NEWTAB_CUSTOM, h, true);
+            }
+            if let Some(d) = &active_dir {
+                let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+                sub_item(NEWTAB_SET, &format!("지금 폴더로 정하기 ({d})"), false);
+            }
+            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("새 탭을 열 위치"));
+        }
         sep();
         item(DEFAULT_FM, "기본 파일 관리자로 사용 (폴더 열기·Win+E)", is_default);
         item(TRAY, "트레이에서 대기 (로그인할 때 시작)", tray);
@@ -3252,6 +3360,21 @@ fn show_settings_menu(hwnd: HWND, pt: POINT) {
         }
         HIDDEN => {
             with_app(|a| a.toggle_hidden());
+        }
+        NEWTAB_PC | NEWTAB_SAME | NEWTAB_SET => {
+            let (home, label) = match cmd {
+                NEWTAB_PC => ("::computer".to_string(), "내 PC".to_string()),
+                NEWTAB_SAME => (session::NEW_TAB_SAME.to_string(), "지금 탭과 같은 폴더".to_string()),
+                _ => match active_dir {
+                    Some(d) => (d.clone(), d),
+                    None => return,
+                },
+            };
+            with_app(|a| {
+                a.new_tab_home = home;
+                a.save_session();
+                a.flash(a.active, format!("이제 새 탭은 {label}에서 열립니다"));
+            });
         }
         DEFAULT_FM if is_default => {
             defaultfm::unregister(defaultfm::CLASSES);

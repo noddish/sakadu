@@ -15,10 +15,21 @@ const G_REMOVE: u16 = 0xE711;
 const G_SORT: u16 = 0xE8CB;
 const G_NEW_GROUP: u16 = 0xE8F4;
 const G_CHEVRON_DOWN: u16 = 0xE70D;
+/// 그룹 옆 목록이 미끄러져 나오는 애니메이션
+pub(super) const TIMER_FLY: usize = 40;
+/// 마우스가 그룹을 벗어난 뒤 옆 목록을 닫기까지 (대각선으로 옮겨 가는 동안 닫히지 않게)
+pub(super) const TIMER_FLY_CLOSE: usize = 41;
+const FLY_W: f32 = 320.0;
 
-pub(super) fn fav_button() -> R {
-    let l = hidden_button().r + 6.0;
-    R::new(l, 8.0, l + 100.0, 38.0)
+const FAV_BUTTON_W: f32 = 100.0;
+
+impl App {
+    /// 도구 막대 가운데에 즐겨찾기 버튼과 검색 상자를 한 묶음으로 둔다. 창이 좁으면 왼쪽 버튼들 바로 뒤에 붙는다
+    pub(super) fn fav_button(&self) -> R {
+        let group = FAV_BUTTON_W + 6.0 + palette::SEARCH_W;
+        let l = (self.w / 2.0 - group / 2.0).max(hidden_button().r + 16.0);
+        R::new(l, 8.0, l + FAV_BUTTON_W, 38.0)
+    }
 }
 
 /// 네이티브 팝업 메뉴. id 0은 구분선. 고른 id(없으면 0)
@@ -149,7 +160,7 @@ pub(super) fn show_fav_sort_menu(hwnd: HWND, pt: POINT) {
 
 impl App {
     pub(super) fn fav_rect(&self) -> R {
-        let b = fav_button();
+        let b = self.fav_button();
         let w = FAV_W.min(self.w - b.l - MARGIN).max(260.0);
         let rows = self.favs.rows().len().max(2) as f32;
         let max_h = (self.h - TOOLBAR_H - 12.0).max(160.0);
@@ -204,7 +215,96 @@ impl App {
         Some(R::new(l, row.t + 3.0, l + (row.r - l) * 0.5, row.b - 3.0))
     }
 
+    /// 접힌 그룹에 마우스를 올리면 팝업 옆에 띄우는 목록의 자리
+    fn fav_fly_rect(&self) -> Option<R> {
+        let (g, _) = self.fav_fly?;
+        let n = self.favs.groups.get(g)?.items.len();
+        let row = self.fav_row(self.favs.row_index(Row::Group(g))?);
+        let pop = self.fav_rect();
+        let h = (n.max(1) as f32 * FAV_ROW_H + 12.0).min((self.h - TOOLBAR_H - 8.0).max(FAV_ROW_H + 12.0));
+        // 오른쪽에 자리가 없으면 창 오른쪽 끝에 붙인다
+        let l = if pop.r + 4.0 + FLY_W <= self.w - MARGIN { pop.r + 4.0 } else { (self.w - MARGIN - FLY_W).max(MARGIN) };
+        let t = (row.t - 6.0).min(self.h - h - 8.0).max(TOOLBAR_H - 4.0);
+        Some(R::new(l, t, l + FLY_W, t + h))
+    }
+
+    fn fav_fly_row(fly: R, j: usize) -> R {
+        let y = fly.t + 6.0 + j as f32 * FAV_ROW_H;
+        R::new(fly.l + 6.0, y, fly.r - 6.0, y + FAV_ROW_H)
+    }
+
+    /// 마우스가 옮겨 갈 때: 접힌 그룹 위면 옆 목록을 띄우고, 목록·그룹 밖으로 나가면 잠시 뒤 닫는다
+    pub(super) fn fav_fly_hover(&mut self, hit: Hit) {
+        let group = match hit {
+            Hit::FavRow(i) => match self.favs.rows().get(i) {
+                Some(Row::Group(g)) if self.favs.groups[*g].collapsed && !self.favs.groups[*g].items.is_empty() => Some(*g),
+                _ => None,
+            },
+            Hit::FavFlyItem(_) | Hit::FavFlyPanel => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_FLY_CLOSE);
+                }
+                return;
+            }
+            _ => None,
+        };
+        unsafe {
+            match group {
+                Some(g) => {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_FLY_CLOSE);
+                    if self.fav_fly.map(|(fg, _)| fg) != Some(g) {
+                        self.fav_fly = Some((g, 0.0));
+                        SetTimer(Some(self.hwnd), TIMER_FLY, 15, None);
+                    }
+                }
+                None if self.fav_fly.is_some() => {
+                    SetTimer(Some(self.hwnd), TIMER_FLY_CLOSE, 250, None);
+                }
+                None => {}
+            }
+        }
+        self.invalidate();
+    }
+
+    pub(super) fn fav_fly_timer(&mut self, id: usize) {
+        if id == TIMER_FLY_CLOSE {
+            self.fav_fly_close();
+            return;
+        }
+        match &mut self.fav_fly {
+            Some((_, a)) if *a < 1.0 => *a = (*a + 0.2).min(1.0),
+            _ => unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_FLY);
+            },
+        }
+        self.invalidate();
+    }
+
+    fn fav_fly_close(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_FLY);
+            let _ = KillTimer(Some(self.hwnd), TIMER_FLY_CLOSE);
+        }
+        if self.fav_fly.take().is_some() {
+            self.invalidate();
+        }
+    }
+
+    /// 옆 목록의 항목을 오른쪽 버튼으로 눌렀을 때: 그룹을 펼쳐 그 항목을 고르고 줄 번호를 돌려준다 (항목 메뉴용)
+    pub(super) fn fav_fly_reveal(&mut self, j: usize) -> Option<usize> {
+        let (g, _) = self.fav_fly?;
+        self.fav_fly_close();
+        self.favs.groups.get_mut(g)?.collapsed = false;
+        let i = self.favs.row_index(Row::Item { group: Some(g), index: j })?;
+        self.fav_changed(Some(Row::Item { group: Some(g), index: j }));
+        Some(i)
+    }
+
     pub(super) fn fav_hit(&self, x: f32, y: f32) -> Option<Hit> {
+        if let Some(fly) = self.fav_fly_rect().filter(|f| f.contains(x, y)) {
+            let n = self.fav_fly.and_then(|(g, _)| self.favs.groups.get(g)).map_or(0, |g| g.items.len());
+            return Some((0..n).find(|&j| Self::fav_fly_row(fly, j).contains(x, y)).map_or(Hit::FavFlyPanel, Hit::FavFlyItem));
+        }
         let r = self.fav_rect();
         if !r.contains(x, y) {
             return None;
@@ -266,6 +366,7 @@ impl App {
             self.commit_rename();
         }
         self.fav_open = false;
+        self.fav_fly_close();
         if matches!(self.drag, Drag::FavPress { .. } | Drag::FavMove { .. }) {
             self.drag = Drag::None;
         }
@@ -304,17 +405,15 @@ impl App {
     /// 항목은 열고(폴더는 이동, 파일은 실행), 그룹 머리 줄은 접거나 펼친다.
     /// new_tab: 폴더는 새 탭, 파일은 그 파일이 있는 폴더를 새 탭에서 열고 선택
     pub(super) fn fav_open_item(&mut self, i: usize, new_tab: bool) {
-        let f = match self.favs.rows().get(i) {
-            Some(Row::Group(g)) => {
-                self.fav_toggle_group(*g);
-                return;
-            }
-            Some(Row::Item { group, index }) => match self.favs.item(*group, *index) {
-                Some(f) => f.clone(),
-                None => return,
-            },
-            None => return,
-        };
+        match self.favs.rows().get(i) {
+            Some(Row::Group(g)) => self.fav_toggle_group(*g),
+            Some(Row::Item { group, index }) => self.fav_open_entry(*group, *index, new_tab),
+            None => {}
+        }
+    }
+
+    fn fav_open_entry(&mut self, group: Option<usize>, index: usize, new_tab: bool) {
+        let Some(f) = self.favs.item(group, index).cloned() else { return };
         self.close_favorites();
         let path = util::normalize(&f.path);
         let p = self.active;
@@ -592,7 +691,12 @@ impl App {
                 self.drag = Drag::FavPress { index: i, y };
                 unsafe { SetCapture(self.hwnd) };
             }
-            Hit::FavPanel => {}
+            Hit::FavFlyItem(j) => {
+                if let Some((g, _)) = self.fav_fly {
+                    self.fav_open_entry(Some(g), j, key_down(VK_CONTROL));
+                }
+            }
+            Hit::FavPanel | Hit::FavFlyPanel => {}
             _ => self.close_favorites(),
         }
     }
@@ -682,6 +786,7 @@ impl App {
             _ => None,
         };
         let rows = self.favs.rows();
+        let fly = self.fav_fly_rect().zip(self.fav_fly);
         let App { gfx, favs, types, .. } = self;
         let folder_icon = types.entry("\\dir".to_string()).or_insert_with(|| shell::type_info("", true)).1;
 
@@ -720,9 +825,10 @@ impl App {
             let body = row.inset(2.0, 1.0);
             let row_hover = matches!(hover, Hit::FavRow(h) | Hit::FavEdit(h) | Hit::FavRemove(h) if h == i);
             let dragged = moving.is_some_and(|(from, _)| from == i);
+            let flying = matches!((rows[i], fly), (Row::Group(g), Some((_, (fg, _)))) if g == fg);
             if i == sel {
                 gfx.fill_round(body, 6.0, t.sel);
-            } else if row_hover {
+            } else if row_hover || flying {
                 gfx.fill_round(body, 6.0, t.hover);
             }
             let fg = if dragged { t.faint } else { t.text };
@@ -781,5 +887,37 @@ impl App {
             Font::Normal,
             t.faint,
         );
+
+        // 그룹 옆 목록: 왼쪽에서 살짝 미끄러지며 나타난다
+        if let Some((fr, (g, a))) = fly {
+            let Some(group) = favs.groups.get(g) else { return };
+            let dx = (1.0 - a) * -14.0;
+            let fr = R::new(fr.l + dx, fr.t, fr.r + dx, fr.b);
+            let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.45 } else { 0.12 } * a };
+            gfx.fill_round(R::new(fr.l - 2.0, fr.t + 1.0, fr.r + 2.0, fr.b + 4.0), 12.0, shadow);
+            gfx.fill_round(fr, 10.0, alpha(t.pane, a));
+            gfx.stroke_round(fr.inset(0.5, 0.5), 10.0, alpha(t.border, a), 1.0);
+            gfx.clip(fr);
+            for (j, f) in group.items.iter().enumerate() {
+                let row = Self::fav_fly_row(fr, j);
+                if row.t > fr.b {
+                    break;
+                }
+                if hover == Hit::FavFlyItem(j) {
+                    gfx.fill_round(row.inset(0.0, 1.0), 6.0, alpha(t.hover, a));
+                }
+                let icon = if f.is_dir {
+                    folder_icon
+                } else {
+                    let ext = util::file_name(&f.path).rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+                    types.entry(ext.clone()).or_insert_with(|| shell::type_info(&ext, false)).1
+                };
+                gfx.icon(icon, R::new(row.l + 8.0, row.t + 8.0, row.l + 24.0, row.t + 24.0));
+                let split = row.l + 34.0 + (row.w() - 34.0) * 0.55;
+                gfx.text(&f.name, R::new(row.l + 34.0, row.t, split - 6.0, row.b), Font::Normal, alpha(t.text, a));
+                gfx.text(util::file_name(&f.path), R::new(split, row.t, row.r - 8.0, row.b), Font::Path, alpha(t.faint, a));
+            }
+            gfx.unclip();
+        }
     }
 }
