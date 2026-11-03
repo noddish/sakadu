@@ -2100,10 +2100,10 @@ impl App {
                 }
                 WM_SETFOCUS => self.focus(),
                 WM_ACTIVATE => {
-                    // 다른 창으로 전환하면 즐겨찾기 팝업을 닫는다 (WA_INACTIVE)
+                    // 다른 창으로 전환하면 즐겨찾기 팝업을 닫는다 (WA_INACTIVE).
+                    // 검색 창은 다른 앱에서 무언가 복사해 오는 동안에도 적어 둔 검색어가 그대로 있도록 열어 둔다
                     if loword(wp.0) == 0 {
                         self.close_favorites();
-                        self.close_palette();
                     }
                     return None;
                 }

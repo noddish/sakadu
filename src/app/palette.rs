@@ -258,17 +258,19 @@ impl App {
         self.pal_scroll = 0.0;
         self.pal_status = PalStatus::Idle;
         self.pal_seq += 1;
-        if !edit_text(self.search_edit).is_empty() {
-            unsafe {
-                let _ = SetWindowTextW(self.search_edit, w!(""));
-            }
-        }
         self.pal_outside = self.visible_dirs().into_iter().find(|d| self.folders.covering(d).is_none() && crate::folders::outside_disk_index(d));
         // 서비스가 있는지·인덱스가 준비됐는지 먼저 확인
         spawn_search(self.hwnd, self.pal_seq, None, self.folders.clone());
         self.hover = Hit::None;
         self.layout_edits();
         self.focus();
+        // 지난 검색어는 남겨 두고 통째로 선택한다: 새로 치면 바뀌고, 이어 쓰려면 End. 결과도 다시 찾아 채운다
+        if !edit_text(self.search_edit).trim().is_empty() {
+            unsafe {
+                SendMessageW(self.search_edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+            }
+            self.pal_run_query();
+        }
         self.invalidate();
     }
 

@@ -101,6 +101,7 @@ Dark mode follows your Windows setting.
 - As with Everything, file **names** in other users' folders can show up in results.
 - Query syntax: space-separated words must all match. A word ending in `\`, like `work\`, matches the path. `|` means "or" (`quote 2026 | contract`). Pasting several lines joins them with `|`.
 - Results: Enter opens, Ctrl+Enter opens the containing folder in a new tab. Pick several with Ctrl+click, Shift+click or Shift+↑↓, then Enter opens them all and Ctrl+C copies the files. The right-click menu also has copy path and pick all.
+- The search window stays open while you visit other apps. Reopen it after closing and your last query is still there, selected: type to replace it, or press End to keep going.
 - The global hotkey is the first free one of Ctrl+Alt+Space, Win+Shift+F and Ctrl+Alt+F. The toolbar shows which one you got.
 - The service exe is copied to `C:\Program Files\Sakadu`. After updating Sakadu, reinstall the service to update it too.
 
