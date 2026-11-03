@@ -566,7 +566,18 @@ impl App {
                 return true;
             }
             VK_TAB => {}
-            _ if ctrl && vk.0 == b'F' as u16 => self.close_palette(),
+            // 검색 단축키를 한 번 더 누르면 닫고, 설정·도움말·즐겨찾기 단축키는 검색 창을 닫고 그쪽으로
+            _ if self.keys.find(crate::keys::Combo::now(vk.0)).is_some_and(|a| {
+                use crate::keys::Action;
+                matches!(a, Action::Search | Action::Settings | Action::Help | Action::Favorites)
+            }) =>
+            {
+                let a = self.keys.find(crate::keys::Combo::now(vk.0));
+                self.close_palette();
+                if let Some(a) = a.filter(|a| *a != crate::keys::Action::Search) {
+                    self.run_action(a);
+                }
+            }
             // 고른 결과가 있거나 검색어에 선택한 글자가 없으면 파일을 복사한다 (그 밖에는 글자 복사)
             _ if ctrl && vk.0 == b'C' as u16 && n > 0 && (picks > 0 || !edit_has_selection(self.search_edit)) => self.pal_copy_files(),
             _ => return false,
@@ -615,6 +626,7 @@ impl App {
         let add_folder = if self.pal_shows_add_folder() { self.pal_outside.clone() } else { None };
         let folder_entries = self.folders.entry_count();
         let picks = self.pal_pick_count();
+        let help = self.keys.get(crate::keys::Action::Help).map(crate::keys::Combo::label);
         let App { gfx, pal_results, pal_picked, types, .. } = self;
 
         let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.5 } else { 0.16 } };
@@ -639,10 +651,10 @@ impl App {
             )),
             PalStatus::Done { .. } if pal_results.is_empty() => Some(format!("‘{}’와(과) 일치하는 항목이 없습니다", query.trim())),
             PalStatus::Idle | PalStatus::Ready(_) if query.trim().is_empty() => {
-                Some(
-                    "파일·폴더 이름을 입력하세요\n여러 낱말은 모두 포함 · ‘업무\\’처럼 \\를 붙이면 경로로 찾기\n‘|’로 나누면 그중 하나라도 · 여러 줄을 붙여넣으면 한 번에 찾기"
-                        .into(),
-                )
+                Some(format!(
+                    "파일·폴더 이름을 입력하세요\n띄어 쓰면 모두 포함 · | 는 또는 · 끝에 \\ 는 경로{}",
+                    help.as_deref().map(|h| format!(" · 자세히는 {h}")).unwrap_or_default()
+                ))
             }
             _ => None,
         };
@@ -687,12 +699,12 @@ impl App {
         gfx.unclip();
 
         let foot = R::new(r.l + 16.0, r.b - PAL_FOOT_H, r.r - 14.0, r.b - 2.0);
-        let help = if picks > 0 {
-            format!("{picks}개 고름 · Enter 모두 열기 · Ctrl+Enter 위치 · Ctrl+C 복사 · 오른쪽 버튼 메뉴")
+        let foot_text = if picks > 0 {
+            format!("{picks}개 고름 · Enter 모두 열기 · Ctrl+C 복사")
         } else {
-            "Enter 열기 · Ctrl+Enter 새 탭에서 위치 · Ctrl·Shift+클릭 여러 개 고르기".to_string()
+            format!("Enter 열기 · Ctrl+Enter 위치{}", help.as_deref().map(|h| format!(" · {h} 도움말")).unwrap_or_default())
         };
-        gfx.text(&help, foot, Font::Normal, t.faint);
+        gfx.text(&foot_text, foot, Font::Normal, t.faint);
         let right = match &status {
             PalStatus::Done { total, micros } => format!("{total}개 중 {}개 · {:.1}ms", pal_results.len(), *micros as f64 / 1000.0),
             PalStatus::Searching => "찾는 중…".to_string(),

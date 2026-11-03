@@ -41,8 +41,9 @@ Dark mode follows your Windows setting.
 
 - If Windows shows "Windows protected your PC" on first launch, click **More info → Run anyway**. The exe isn't code-signed yet.
 - Whole-disk search needs a small background service. Press **검색 서비스 설치** (install search service) in the Ctrl+F window once and approve the admin prompt.
-- To open folders in Sakadu by default, turn on **기본 파일 관리자로 사용** (use as default file manager) in the gear menu.
-- To keep the search hotkey working after you close the window, turn on **트레이에서 대기** (stay in tray) in the same menu. Sakadu then also starts at sign-in, without a window.
+- To open folders in Sakadu by default, open Settings (gear) → **일반** (General) and turn on **기본 파일 관리자로 사용** (use as default file manager).
+- To keep the search hotkey working after you close the window, turn on **트레이에서 대기** (stay in tray) in the same place. Sakadu then also starts at sign-in, without a window.
+- Theme, accent color, font and size live in Settings → **화면** (Appearance); shortcuts in Settings → **단축키** (Shortcuts). Press F1 for usage tips.
 - Built and tested on Windows 11. It's meant to run on Windows 10 (64-bit) too, but that hasn't been tested yet.
 
 ## Keys you'll use most
@@ -112,8 +113,8 @@ Dark mode follows your Windows setting.
 
 The search service only reads this PC's own (NTFS) disks. Shared folders (`\\server\share`), NAS and USB drives are searched once you add them.
 
-- Open the folder in any pane and search with Ctrl+F. If nothing turns up, click **이 폴더도 검색하기** (search this folder too) in the search window. The gear menu also lets you add or remove the folders open in any visible pane.
-- **검색에 넣은 폴더** (added folders) in the same menu lists them and lets you remove one.
+- Open the folder in any pane and search with Ctrl+F. If nothing turns up, click **이 폴더도 검색하기** (search this folder too) in the search window.
+- Settings → **검색** (Search) → **검색에 넣은 폴더** (added folders) lists them, lets you remove one, and adds folders you have open.
 - The app walks the folder once with your own account and keeps the names in memory. Nothing is written to disk, so it walks the folder again each time the app starts.
 - Changes come in through folder change notifications. In case a server doesn't send them, the folder is walked again every few hours, and opening it in Sakadu also brings it up to date.
 - If the connection drops, the last results stay searchable and Sakadu tries to reconnect every 5 minutes.
@@ -124,7 +125,7 @@ The search service only reads this PC's own (NTFS) disks. Shared folders (`\\ser
 <details>
 <summary>Using it as the default file manager</summary>
 
-When turned on in the gear menu, opening folders and drives, and Win+E, go to Sakadu.
+When turned on in Settings → General, opening folders and drives, and Win+E, go to Sakadu.
 
 - Only your user settings (HKCU) change. The original values are backed up and restored when you turn it off.
 - Explorer caches the old Win+E command, so Win+E may only switch after you sign out and back in or restart. Opening folders switches right away.
@@ -138,7 +139,7 @@ When turned on in the gear menu, opening folders and drives, and Win+E, go to Sa
 <details>
 <summary>Staying in the tray</summary>
 
-When turned on in the gear menu, closing the window doesn't quit Sakadu. It stays as an icon in the notification area (tray).
+When turned on in Settings → General, closing the window doesn't quit Sakadu. It stays as an icon in the notification area (tray).
 
 - The global hotkey brings back the window with search open. Clicking the tray icon brings the window back too.
 - It's added to your user's startup programs (HKCU Run) so it starts at sign-in without a window. Turning it off removes that entry.
@@ -152,7 +153,8 @@ When turned on in the gear menu, closing the window doesn't quit Sakadu. It stay
 <summary>Thumbnails, preview, favorites, undo</summary>
 
 - **Thumbnail view** is Ctrl+Shift+2, details view is Ctrl+Shift+6. Each pane remembers its own.
-- **New tabs** (Ctrl+T, +) open at This PC. Change it in the gear menu under **새 탭을 열 위치** (new tab location): the same folder as the current tab, or a folder of your choice.
+- **New tabs** (Ctrl+T, +) open at This PC. Change it in Settings → General → **새 탭을 열 위치** (new tab location): the same folder as the current tab, or a folder of your choice.
+- The **star** at the right end of the path box adds the current folder to favorites in one click (it turns yellow). Click again to remove it.
 - Hover over a toolbar button for a moment to see its name and shortcut.
 - **Preview pane** (Alt+P) shows photos large and the start of text and code files (UTF-8, UTF-16 and CP949 detected). PDF and Office files use the preview handlers registered in Windows, run out of process so a crashing handler can't take the app down.
 - **Favorites** (Ctrl+B) can be folders or files, with their own display names like "01. Daily work", independent of the real name (F2). Drag to reorder. **Groups** open to the side when you hover over a folded group; click a group to unfold it in place for tidying. Drag an item into a group, or right-click → **그룹으로 이동** (move to group). Clicking a file opens it, and Ctrl+Enter opens its folder in a new tab.
@@ -161,9 +163,25 @@ When turned on in the gear menu, closing the window doesn't quit Sakadu. It stay
 </details>
 
 <details>
+<summary>Settings and shortcuts</summary>
+
+The gear button (Ctrl+,) opens Settings over the whole window. Pick a category on the left; Esc or ← closes it.
+
+- **일반** (General): new tab location, hidden items, preview pane, default file manager, stay in tray
+- **화면** (Appearance): theme (system, light, dark), accent color (or follow the Windows accent), font, size (90–150%)
+- **검색** (Search): install or remove the search service, added folders
+- **단축키** (Shortcuts): click a row and press the new keys. If another action used them, that one is cleared. Esc cancels, Backspace clears. The anywhere-search hotkey is set here too.
+- **도움말** (Help, F1): search syntax and everyday tips
+- **정보** (About): version, GitHub, settings folder
+
+Only changed shortcuts are saved, in `%APPDATA%\Sakadu\keys.txt`. Basic keys such as arrows, Enter, Esc, Tab and Ctrl+C/X/V/A can't be remapped.
+
+</details>
+
+<details>
 <summary>Uninstalling</summary>
 
-1. In the gear menu, turn off **기본 파일 관리자로 사용** (default file manager) and **트레이에서 대기** (stay in tray), then click **디스크 검색 서비스 제거** (remove search service).
+1. In Settings → General, turn off **기본 파일 관리자로 사용** (default file manager) and **트레이에서 대기** (stay in tray). Then in Settings → Search, click **제거…** (remove) next to the search service.
 2. Delete the unzipped folder, `%APPDATA%\Sakadu`, and `%LOCALAPPDATA%\Programs\Sakadu` if it exists.
 
 Settings, window state and favorites all live in `%APPDATA%\Sakadu`.
@@ -199,7 +217,9 @@ cargo test
 | File | Role |
 |---|---|
 | `main.rs` | Window creation, message loop, re-entrancy, command line, single instance |
-| `app.rs` | Layout, input, drawing, pane and tab behavior, settings menu |
+| `app.rs` | Layout, input, drawing, pane and tab behavior |
+| `app/settings_ui.rs` | Settings window (general, appearance, search, shortcuts, help, about) |
+| `keys.rs` | Remappable shortcuts (key map, saving) |
 | `app/fav_ui.rs` · `app/palette.rs` · `app/preview.rs` | Favorites popup · Ctrl+F search · preview pane |
 | `pane.rs` | Tab state (history, sort, filter, selection) |
 | `listing.rs` | Folder listing, This PC, display formatting |

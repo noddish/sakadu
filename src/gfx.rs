@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::Controls::{HIMAGELIST, ILD_NORMAL, ImageList_GetIcon};
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetClientRect};
-use windows::core::{BOOL, PCWSTR, Result, w};
+use windows::core::{BOOL, HSTRING, PCWSTR, Result, w};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct R {
@@ -57,6 +57,10 @@ pub enum Font {
     Caption,
     /// 텍스트 파일 미리 보기: 고정폭, 줄바꿈, 위쪽 정렬
     Mono,
+    /// 설정 창 쪽 제목
+    Title,
+    /// 설명·작은 안내
+    Small,
 }
 
 /// 썸네일 비트맵 캐시 상한. 96 DIP 썸네일(150%에서 약 80KB)이 이 개수까지
@@ -89,16 +93,73 @@ fn family_exists(dw: &IDWriteFactory, name: PCWSTR) -> bool {
     }
 }
 
+/// 설정에서 고른 글꼴이 있으면 그것, 없으면 Windows 11 글꼴(없으면 Windows 10 글꼴)
+fn ui_family(dw: &IDWriteFactory, chosen: &str) -> HSTRING {
+    let name = HSTRING::from(chosen);
+    if !chosen.is_empty() && family_exists(dw, PCWSTR(name.as_ptr())) {
+        return name;
+    }
+    if family_exists(dw, w!("Segoe UI Variable Text")) { HSTRING::from("Segoe UI Variable Text") } else { HSTRING::from("Segoe UI") }
+}
+
 impl Gfx {
-    pub fn new(dpi: f32, imagelist: HIMAGELIST) -> Result<Gfx> {
+    /// font: 설정에서 고른 글꼴 이름 (빈 문자열이면 기본)
+    pub fn new(dpi: f32, imagelist: HIMAGELIST, font: &str) -> Result<Gfx> {
         unsafe {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+            let fonts = build_fonts(&dwrite, &ui_family(&dwrite, font))?;
+            Ok(Gfx { factory, dwrite, wic, rt: None, brush: None, fonts, icons: HashMap::new(), thumbs: HashMap::new(), clock: 0, imagelist, dpi })
+        }
+    }
 
-            // Windows 11 글꼴이 없으면 Windows 10 글꼴로
-            let ui = if family_exists(&dwrite, w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
-            let icons = if family_exists(&dwrite, w!("Segoe Fluent Icons")) { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") };
+    /// 화면 글꼴을 바꾼다 (빈 문자열이면 기본). 없는 글꼴이면 기본으로
+    pub fn set_font(&mut self, font: &str) -> Result<()> {
+        self.fonts = build_fonts(&self.dwrite, &ui_family(&self.dwrite, font))?;
+        Ok(())
+    }
+
+    /// 이 PC에 설치된 글꼴 이름 (사용자 언어 이름이 있으면 그것, 가나다순)
+    pub fn installed_fonts(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        unsafe {
+            let mut coll = None;
+            if self.dwrite.GetSystemFontCollection(&mut coll, false).is_err() {
+                return out;
+            }
+            let Some(coll) = coll else { return out };
+            let mut locale = [0u16; 85];
+            if GetUserDefaultLocaleName(&mut locale) == 0 {
+                locale[0] = 0;
+            }
+            for i in 0..coll.GetFontFamilyCount() {
+                let Ok(names) = coll.GetFontFamily(i).and_then(|f| f.GetFamilyNames()) else { continue };
+                let (mut idx, mut exists) = (0u32, BOOL(0));
+                if names.FindLocaleName(PCWSTR(locale.as_ptr()), &mut idx, &mut exists).is_err() || !exists.as_bool() {
+                    idx = 0;
+                }
+                let len = names.GetStringLength(idx).unwrap_or(0) as usize;
+                let mut buf = vec![0u16; len + 1];
+                if names.GetString(idx, &mut buf).is_ok() {
+                    let name = String::from_utf16_lossy(&buf[..len]);
+                    if !name.starts_with('@') {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextFormat>> {
+    unsafe {
+        {
+            let ui: PCWSTR = PCWSTR(ui.as_ptr());
+            let icons = if family_exists(dwrite, w!("Segoe Fluent Icons")) { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") };
             let mut locale = [0u16; 85];
             if GetUserDefaultLocaleName(&mut locale) == 0 {
                 locale[0] = 0;
@@ -137,11 +198,12 @@ impl Gfx {
             let sign = dwrite.CreateEllipsisTrimmingSign(&caption)?;
             let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
             caption.SetTrimming(&trim, &sign)?;
-            let mono_family = if family_exists(&dwrite, w!("Cascadia Mono")) { w!("Cascadia Mono") } else { w!("Consolas") };
+            let mono_family = if family_exists(dwrite, w!("Cascadia Mono")) { w!("Cascadia Mono") } else { w!("Consolas") };
             let mono = make(mono_family, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true)?;
             mono.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
             mono.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK)?;
-            let fonts = vec![
+            // Font 순서와 같게
+            Ok(vec![
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false)?,
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
@@ -151,11 +213,14 @@ impl Gfx {
                 path,
                 caption,
                 mono,
-            ];
-            Ok(Gfx { factory, dwrite, wic, rt: None, brush: None, fonts, icons: HashMap::new(), thumbs: HashMap::new(), clock: 0, imagelist, dpi })
+                make(ui, 22.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
+                make(ui, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
+            ])
         }
     }
+}
 
+impl Gfx {
     /// 그리기 시작. 렌더 타깃이 없으면(최초·장치 손실 후) 새로 만든다
     pub fn begin(&mut self, hwnd: HWND) -> bool {
         unsafe {

@@ -9,6 +9,7 @@ mod favorites;
 mod folders;
 mod gfx;
 mod index;
+mod keys;
 mod listing;
 mod pane;
 mod service;
@@ -110,7 +111,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_GETMINMAXINFO => {
                 let mmi = &mut *(lp.0 as *mut MINMAXINFO);
-                let s = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+                // 설정의 크기(%)만큼 최소 크기도 키운다 (창을 만드는 중이거나 App 처리 중이면 100%)
+                let s = GetDpiForWindow(hwnd).max(96) as f32 / 96.0 * with_app(|a| a.zoom()).unwrap_or(1.0);
                 mmi.ptMinTrackSize = POINT { x: (760.0 * s) as i32, y: (420.0 * s) as i32 };
                 return LRESULT(0);
             }

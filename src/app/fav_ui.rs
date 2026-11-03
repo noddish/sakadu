@@ -485,6 +485,23 @@ impl App {
         }
     }
 
+    /// 경로 상자의 별: 이 폴더를 즐겨찾기에 바로 넣거나 뺀다 (팝업을 열지 않는다)
+    pub(super) fn toggle_star(&mut self, p: usize) {
+        let Some(dir) = self.panes[p].tab().loc.dir().map(util::normalize) else { return };
+        let msg = match self.favs.find(&dir) {
+            Some((group, index)) => {
+                self.favs.remove_item(group, index);
+                "즐겨찾기에서 뺐습니다"
+            }
+            None => {
+                self.favs.push(None, Favorite { name: favorites::default_name(&dir), path: dir, is_dir: true });
+                "즐겨찾기에 넣었습니다 · 이름과 그룹은 즐겨찾기 창에서 정리할 수 있어요"
+            }
+        };
+        self.save_favorites();
+        self.flash(p, msg);
+    }
+
     fn save_favorites(&mut self) {
         if let Err(e) = favorites::save(&self.favs) {
             let p = self.active;
@@ -640,9 +657,15 @@ impl App {
                 self.close_favorites();
                 return self.on_key(vk);
             }
-            _ if ctrl && vk.0 == b'B' as u16 => self.close_favorites(),
-            _ if ctrl && vk.0 == b'D' as u16 => self.add_favorite(),
-            _ => return false,
+            _ => match self.keys.find(crate::keys::Combo::now(vk.0)) {
+                Some(crate::keys::Action::Favorites) => self.close_favorites(),
+                Some(crate::keys::Action::AddFavorite) => self.add_favorite(),
+                Some(a @ (crate::keys::Action::Settings | crate::keys::Action::Help | crate::keys::Action::Search)) => {
+                    self.close_favorites();
+                    self.run_action(a);
+                }
+                _ => return false,
+            },
         }
         if self.fav_open {
             self.fav_ensure_visible();
@@ -787,6 +810,8 @@ impl App {
         };
         let rows = self.favs.rows();
         let fly = self.fav_fly_rect().zip(self.fav_fly);
+        let help = self.keys.get(crate::keys::Action::Help).map(crate::keys::Combo::label);
+        let add_key = self.keys.get(crate::keys::Action::AddFavorite).map(crate::keys::Combo::label);
         let App { gfx, favs, types, .. } = self;
         let folder_icon = types.entry("\\dir".to_string()).or_insert_with(|| shell::type_info("", true)).1;
 
@@ -810,8 +835,9 @@ impl App {
         // 목록
         gfx.clip(list);
         if rows.is_empty() {
+            let how = add_key.as_deref().map(|k| format!("경로 상자의 ☆나 {k}로")).unwrap_or_else(|| "경로 상자의 ☆로".to_string());
             gfx.text(
-                "즐겨찾기가 비어 있습니다\nCtrl+D 또는 ‘추가’로 현재 폴더나 고른 파일을 넣고\n‘그룹’으로 묶어 원하는 이름과 순서로 정리하세요",
+                &format!("즐겨찾기가 비어 있어요\n{how} 폴더·파일을 넣고, ‘그룹’으로 묶어 보세요"),
                 list.inset(16.0, 8.0),
                 Font::Hint,
                 t.faint,
@@ -882,7 +908,7 @@ impl App {
         gfx.unclip();
 
         gfx.text(
-            "클릭 열기 · Ctrl+Enter 새 탭 · F2 이름 · Del 삭제 · 끌어서 순서·그룹 바꾸기",
+            &format!("클릭 열기 · F2 이름 · Del 삭제 · 끌어서 정리{}", help.as_deref().map(|h| format!(" · {h} 도움말")).unwrap_or_default()),
             R::new(r.l + 14.0, r.b - FAV_FOOT_H, r.r - 10.0, r.b - 2.0),
             Font::Normal,
             t.faint,
