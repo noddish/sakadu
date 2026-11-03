@@ -5,6 +5,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 const NO_PARENT: u32 = u32::MAX;
 const FLAG_USED: u8 = 1;
@@ -329,6 +330,115 @@ fn path_penalty(lower_path: &str) -> i32 {
     depth * 4 + noisy
 }
 
+// 폴더별 경로 조건 판정 (search 한 번 동안 memo에 기억). 0은 아직 모름, DIR_FAIL은 그 폴더 바로 아래 항목은 맞을 수 없음,
+// 그 밖에는 DIR_KNOWN에 "이름 앞부분까지 봐야 하는 낱말" 비트(낱말 j → 1 << (j + 2))를 더한 값
+const DIR_FAIL: u32 = 1;
+const DIR_KNOWN: u32 = 2;
+/// 폴더별 판정에 비트로 담을 수 있는 경로 낱말 수
+const MEMO_TERMS: usize = 30;
+
+/// 경로 낱말에서 마지막 '\' 뒤 부분 (이름 앞부분과 맞춰 볼 부분)
+fn after_last_sep(t: &str) -> &str {
+    &t[t.rfind('\\').map_or(0, |k| k + 1)..]
+}
+
+fn starts_with_lower(name: &str, prefix: &str) -> bool {
+    let mut lower = name.chars().flat_map(char::to_lowercase);
+    prefix.chars().all(|c| lower.next() == Some(c))
+}
+
+/// 폴더 경로 앞부분을 만드는 스레드별 버퍼. 바로 전에 만든 경로와 겹치는 앞부분은 다시 만들지 않는다
+#[derive(Default)]
+struct PrefixBuf {
+    /// "c:\users\hong\"처럼 소문자로 만든 경로
+    s: String,
+    /// s에 든 폴더들: 루트 쪽부터 (레코드 번호, 그 폴더 이름 뒤 '\'까지의 길이)
+    parts: Vec<(u32, usize)>,
+    chain: Vec<u32>,
+}
+
+impl PrefixBuf {
+    /// 폴더 d 바로 아래 항목 경로의 앞부분을 s에 만든다. 그 항목의 path()가 None이면 false (깊이 제한도 같게 맞춤)
+    fn build(&mut self, vol: &Volume, d: u32) -> bool {
+        self.chain.clear();
+        let mut keep = None;
+        let mut cur = d;
+        for _ in 0..511 {
+            if cur == ROOT_RECORD {
+                keep = Some(0);
+                break;
+            }
+            if let Some(k) = self.parts.iter().position(|&(r, _)| r == cur) {
+                keep = Some(k + 1);
+                break;
+            }
+            let c = cur as usize;
+            if c >= vol.flags.len() || !vol.used(c) {
+                return false;
+            }
+            self.chain.push(cur);
+            cur = vol.parent[c];
+        }
+        let Some(keep) = keep.filter(|k| k + self.chain.len() <= 510) else { return false };
+        self.parts.truncate(keep);
+        match self.parts.last() {
+            Some(&(_, end)) => self.s.truncate(end),
+            None => {
+                self.s.clear();
+                self.s.push(vol.letter.to_ascii_lowercase());
+                self.s.push_str(":\\");
+            }
+        }
+        while let Some(c) = self.chain.pop() {
+            let Ok(name) = std::str::from_utf8(vol.name_bytes(c as usize)) else {
+                self.parts.clear();
+                return false;
+            };
+            self.s.extend(name.chars().flat_map(char::to_lowercase));
+            self.s.push('\\');
+            self.parts.push((c, self.s.len()));
+        }
+        true
+    }
+}
+
+/// 항목 i의 전체 경로가 경로 낱말을 모두 포함하는가.
+/// 경로는 "폴더 경로\" + 이름이고 이름에는 '\'가 없으므로, 낱말은 폴더 쪽에 통째로 들어 있거나
+/// 마지막 '\'까지가 폴더 쪽 끝과 같고 나머지가 이름 앞부분이어야 한다. 폴더 쪽 판정은 폴더마다 한 번만 한다
+fn path_matches(vol: &Volume, i: usize, terms: &[String], memo: &[AtomicU32], buf: &mut PrefixBuf) -> bool {
+    let p = vol.parent[i] as usize;
+    if i == ROOT_RECORD as usize || p >= memo.len() {
+        return vol.path(i as u32).is_some_and(|path| {
+            let lower = path.to_lowercase();
+            terms.iter().all(|t| lower.contains(t.as_str()))
+        });
+    }
+    let mut state = memo[p].load(Ordering::Relaxed);
+    if state == 0 {
+        state = DIR_FAIL;
+        if buf.build(vol, p as u32) {
+            state = DIR_KNOWN;
+            for (j, t) in terms.iter().enumerate() {
+                if buf.s.contains(t.as_str()) {
+                    continue;
+                }
+                let rest = after_last_sep(t);
+                if rest.is_empty() || !buf.s.ends_with(&t[..t.len() - rest.len()]) {
+                    state = DIR_FAIL;
+                    break;
+                }
+                state |= 1 << (j + 2);
+            }
+        }
+        memo[p].store(state, Ordering::Relaxed);
+    }
+    if state == DIR_FAIL {
+        return false;
+    }
+    let Ok(name) = std::str::from_utf8(vol.name_bytes(i)) else { return false };
+    terms.iter().enumerate().all(|(j, t)| state & (1 << (j + 2)) == 0 || starts_with_lower(name, after_last_sep(t)))
+}
+
 /// 여러 볼륨에서 찾는다. (상위 결과, 전체 일치 개수)
 pub fn search(vols: &[&Volume], q: &Query, limit: usize) -> (Vec<Hit>, usize) {
     if q.is_empty() {
@@ -341,6 +451,10 @@ pub fn search(vols: &[&Volume], q: &Query, limit: usize) -> (Vec<Hit>, usize) {
     let mut total = 0usize;
     for (vi, vol) in vols.iter().enumerate() {
         let n = vol.flags.len();
+        // 경로 조건이 있으면 폴더별 판정을 스레드끼리 함께 기억한다 (낱말이 너무 많으면 비워 두고 항목마다 전체 경로로 판정)
+        let memo: Vec<AtomicU32> =
+            if q.path_terms.is_empty() || q.path_terms.len() > MEMO_TERMS { Vec::new() } else { (0..n).map(|_| AtomicU32::new(0)).collect() };
+        let memo = &memo;
         let chunk = n.div_ceil(threads).max(1);
         let parts: Vec<(usize, Vec<(i32, usize, u32)>)> = std::thread::scope(|sc| {
             let handles: Vec<_> = (0..n)
@@ -350,12 +464,16 @@ pub fn search(vols: &[&Volume], q: &Query, limit: usize) -> (Vec<Hit>, usize) {
                     sc.spawn(move || {
                         let mut heap: BinaryHeap<Reverse<(i32, usize, u32)>> = BinaryHeap::new();
                         let mut count = 0;
+                        let mut prefix = PrefixBuf::default();
                         for i in start..end {
                             if !vol.used(i) {
                                 continue;
                             }
                             let score = if q.terms.is_empty() { Some(0) } else { name_score(vol.name_bytes(i), &q.terms, vol.flags[i] & FLAG_DIR != 0) };
                             if let Some(s) = score {
+                                if !q.path_terms.is_empty() && !path_matches(vol, i, &q.path_terms, memo, &mut prefix) {
+                                    continue;
+                                }
                                 count += 1;
                                 heap.push(Reverse((s, vi, i as u32)));
                                 if heap.len() > CANDIDATES {
@@ -377,16 +495,12 @@ pub fn search(vols: &[&Volume], q: &Query, limit: usize) -> (Vec<Hit>, usize) {
     cands.sort_unstable_by(|a, b| b.0.cmp(&a.0));
     cands.truncate(CANDIDATES);
 
-    // 2차: 경로를 만들어 경로 조건·감점을 반영
+    // 2차: 후보의 경로를 만들어 감점을 반영
     let mut hits: Vec<Hit> = cands
         .into_iter()
         .filter_map(|(s, vi, i)| {
             let path = vols[vi].path(i)?;
-            let lower = path.to_lowercase();
-            if !q.path_terms.iter().all(|t| lower.contains(t.as_str())) {
-                return None;
-            }
-            Some(Hit { score: s - path_penalty(&lower), is_dir: vols[vi].is_dir(i), path })
+            Some(Hit { score: s - path_penalty(&path.to_lowercase()), is_dir: vols[vi].is_dir(i), path })
         })
         .collect();
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.len().cmp(&b.path.len())));
@@ -629,6 +743,51 @@ mod tests {
     }
 
     #[test]
+    fn path_terms_count_only_full_matches() {
+        let v = sample();
+        // 이름은 report.pdf, report.log 둘이 맞지만 경로까지 맞는 것은 하나
+        let (hits, total) = search(&[&v], &Query::parse("report hong\\"), 10);
+        assert_eq!((hits.len(), total), (1, 1), "{hits:?}");
+        // 경로 낱말만 있거나, 낱말이 폴더 경로와 이름에 걸치는 경우
+        for (q, n) in [("업무\\", 2), ("hong\\업무\\", 2), ("c:\\users\\", 5), ("\\windows\\", 1), ("업무\\일간", 1), ("\\보고", 1)] {
+            let (hits, total) = search(&[&v], &Query::parse(q), 10);
+            assert_eq!((hits.len(), total), (n, n), "{q}: {hits:?}");
+        }
+    }
+
+    #[test]
+    fn path_terms_reach_beyond_top_candidates() {
+        // 이름 점수가 더 높은 일치 항목이 후보 수(600)보다 많아도 경로까지 맞는 항목을 놓치지 않는다
+        let mut v = Volume::new('C');
+        v.upsert(100, ROOT, "기타", true);
+        v.upsert(101, ROOT, "업무", true);
+        for k in 0..1000u64 {
+            v.upsert(1000 + k, 100, &format!("report{k}.txt"), false);
+        }
+        for k in 0..3u64 {
+            v.upsert(5000 + k, 101, &format!("report with a much longer name {k}.txt"), false);
+        }
+        let (hits, total) = search(&[&v], &Query::parse("report 업무\\"), 10);
+        assert_eq!((hits.len(), total), (3, 3), "{hits:?}");
+        assert!(hits.iter().all(|h| h.path.starts_with("C:\\업무\\")));
+    }
+
+    #[test]
+    fn prefix_buf_reuses_shared_part() {
+        let v = sample();
+        let mut buf = PrefixBuf::default();
+        // 아래로, 위로, 다른 가지로, 루트로 오가며 앞 결과를 이어 써도 path()와 같아야 한다
+        for d in [102, 100, 101, 200, 102, ROOT_RECORD, 102] {
+            assert!(buf.build(&v, d));
+            let path = v.path(d).unwrap().to_lowercase();
+            assert_eq!(buf.s, if d == ROOT_RECORD { path } else { path + "\\" });
+        }
+        assert!(!buf.build(&v, 999), "없는 폴더");
+        assert!(buf.build(&v, 101));
+        assert_eq!(buf.s, "c:\\users\\hong\\");
+    }
+
+    #[test]
     fn rename_move_and_delete() {
         let mut v = sample();
         // 이름 바꾸며 다른 폴더로 이동
@@ -692,6 +851,54 @@ mod tests {
             let t = std::time::Instant::now();
             let (hits, total) = search(&[&v], &Query::parse(q), 100);
             println!("{q:>16}: {total:>8} matches, top {:>3} in {:?}", hits.len(), t.elapsed());
+        }
+    }
+
+    /// 성능 측정: 경로 낱말 검색. 실제 디스크처럼 폴더가 많고 깊은 트리 (cargo test --release bench_path -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn bench_path_terms_deep() {
+        const WORDS: [&str; 10] = ["report", "보고서", "invoice", "사진", "budget", "회의록", "draft", "final", "data", "로그"];
+        // 실제 MFT처럼 레코드 번호가 트리 순서와 어긋나게 섞는다 (홀수 곱은 2^21 안에서 일대일)
+        fn rec(n: u64) -> u64 {
+            100 + (n.wrapping_mul(0x9E37_79B1) & ((1 << 21) - 1))
+        }
+        // 10 × 10 × 10 × 10 × 20 = 폴더 21만 개, 맨 아래 폴더마다 파일 8개
+        fn fill(out: &mut Vec<(u64, u64, String, bool)>, parent: u64, depth: usize) {
+            let fan = if depth == 4 { 20 } else { 10 };
+            for k in 0..fan {
+                let dir = rec(out.len() as u64);
+                out.push((dir, parent, format!("{k}_{}", WORDS[(k + depth) % 10]), true));
+                if depth == 4 {
+                    for f in 0..8 {
+                        out.push((rec(out.len() as u64), dir, format!("{}_{f}.txt", WORDS[(f + k) % 10]), false));
+                    }
+                } else {
+                    fill(out, dir, depth + 1);
+                }
+            }
+        }
+        let t = std::time::Instant::now();
+        let mut entries = Vec::new();
+        fill(&mut entries, ROOT, 0);
+        // 인덱스를 만들 때처럼 레코드 번호 순서로 넣는다
+        entries.sort_unstable_by_key(|e| e.0);
+        let mut v = Volume::new('C');
+        for (frn, parent, name, is_dir) in &entries {
+            v.upsert(*frn, *parent, name, *is_dir);
+        }
+        println!("built {} entries in {:?}, ~{} MB", v.len(), t.elapsed(), v.memory() >> 20);
+        for q in ["report", "zzz_nothing", "report\\", "final report\\", "\\budget", "3_사진\\2_사진\\", "3_final\\final", "zzz\\"] {
+            let query = Query::parse(q);
+            let mut best = std::time::Duration::MAX;
+            let (mut total, mut top) = (0, 0);
+            for _ in 0..7 {
+                let t = std::time::Instant::now();
+                let (hits, n) = search(&[&v], &query, 100);
+                best = best.min(t.elapsed());
+                (total, top) = (n, hits.len());
+            }
+            println!("{q:>16}: {total:>8} matches, top {top:>3}, best of 7 {best:?}");
         }
     }
 
