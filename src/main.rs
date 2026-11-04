@@ -111,6 +111,31 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let _ = SetWindowPos(hwnd, None, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_NOACTIVATE);
                 return LRESULT(0);
             }
+            // 제목 줄 없애기: 위쪽 비클라이언트 영역을 클라이언트로 돌린다 (양옆·아래 크기 조절 테두리는 그대로).
+            // 최대화하면 창이 화면 밖으로 테두리만큼 나가므로 위도 그만큼 안으로 들인다.
+            // wParam이 FALSE(창을 만들 때)면 lParam은 RECT 하나, TRUE면 NCCALCSIZE_PARAMS. 둘 다 첫 사각형이 창→클라이언트
+            WM_NCCALCSIZE => {
+                let rect = if wp.0 != 0 { &mut (*(lp.0 as *mut NCCALCSIZE_PARAMS)).rgrc[0] } else { &mut *(lp.0 as *mut RECT) };
+                let top = rect.top;
+                let r = DefWindowProcW(hwnd, msg, wp, lp);
+                rect.top = top + if IsZoomed(hwnd).as_bool() { resize_border(hwnd) } else { 0 };
+                return r;
+            }
+            WM_NCHITTEST => {
+                let def = DefWindowProcW(hwnd, msg, wp, lp);
+                if def.0 as u32 != HTCLIENT {
+                    return def;
+                }
+                if let Some(Some(code)) = with_app(|a| a.nc_hit(lp)) {
+                    return LRESULT(code as isize);
+                }
+                return def;
+            }
+            WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK | WM_NCLBUTTONUP => {
+                if let Some(Some(r)) = with_app(|a| a.on_nc_mouse(msg, wp)) {
+                    return r;
+                }
+            }
             WM_GETMINMAXINFO => {
                 let mmi = &mut *(lp.0 as *mut MINMAXINFO);
                 // 설정의 크기(%)만큼 최소 크기도 키운다 (창을 만드는 중이거나 App 처리 중이면 100%)
@@ -297,6 +322,15 @@ fn fit_in(rc: RECT, wa: RECT) -> RECT {
     RECT { left: l, top: t, right: l + w, bottom: t + h }
 }
 
+/// 창 크기 조절 테두리 두께(px, 창 DPI 기준). 제목 줄을 없앤 창의 위 가장자리 조절과 최대화 때 안쪽 여백에 쓴다
+pub fn resize_border(hwnd: HWND) -> i32 {
+    use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+    }
+}
+
 fn started_with_position() -> bool {
     use windows::Win32::System::Threading::{GetStartupInfoW, STARTF_USEPOSITION, STARTUPINFOW};
     let mut si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
@@ -379,6 +413,8 @@ fn main() -> Result<()> {
             Some(instance.into()),
             None,
         )?;
+        // 제목 줄을 없앤 틀로 다시 계산하게 한다 (WM_NCCALCSIZE)
+        let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         let app = app::App::new(hwnd, sess)?;
         APP.with(|c| *c.borrow_mut() = Some(Box::new(app)));
         if background {

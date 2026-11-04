@@ -29,7 +29,12 @@ pub enum Action {
     Layout3,
     Layout4,
     Layout5,
+    Huge,
+    /// 큰 아이콘 (예전 이름: 썸네일)
     Thumbs,
+    Medium,
+    SmallIcons,
+    List,
     Details,
     Address,
     Rename,
@@ -39,7 +44,7 @@ pub enum Action {
 }
 
 /// (동작, 저장 이름, 화면 이름, 기본 키)
-pub const ACTIONS: [(Action, &str, &str, &str); 21] = [
+pub const ACTIONS: [(Action, &str, &str, &str); 25] = [
     (Action::Search, "search", "디스크 검색", "Ctrl+F"),
     (Action::Favorites, "favorites", "즐겨찾기 열기", "Ctrl+B"),
     (Action::AddFavorite, "add-favorite", "즐겨찾기에 추가", "Ctrl+D"),
@@ -54,7 +59,12 @@ pub const ACTIONS: [(Action, &str, &str, &str); 21] = [
     (Action::Layout3, "layout-3", "위아래 두 칸", "Ctrl+3"),
     (Action::Layout4, "layout-4", "세 칸", "Ctrl+4"),
     (Action::Layout5, "layout-5", "네 칸", "Ctrl+5"),
-    (Action::Thumbs, "thumbs", "썸네일 보기", "Ctrl+Shift+2"),
+    // 보기 단축키는 탐색기와 같다
+    (Action::Huge, "huge-icons", "아주 큰 아이콘 보기", "Ctrl+Shift+1"),
+    (Action::Thumbs, "thumbs", "큰 아이콘 보기", "Ctrl+Shift+2"),
+    (Action::Medium, "medium-icons", "보통 아이콘 보기", "Ctrl+Shift+3"),
+    (Action::SmallIcons, "small-icons", "작은 아이콘 보기", "Ctrl+Shift+4"),
+    (Action::List, "list", "목록 보기", "Ctrl+Shift+5"),
     (Action::Details, "details", "자세히 보기", "Ctrl+Shift+6"),
     (Action::Address, "address", "경로 입력", "Ctrl+L"),
     (Action::Rename, "rename", "이름 바꾸기", "F2"),

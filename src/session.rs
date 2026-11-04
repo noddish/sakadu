@@ -28,18 +28,20 @@ pub struct Session {
     pub panes: Vec<PaneState>,
 }
 
-/// 화면 설정: 테마("system"·"light"·"dark"), 강조 색(theme::ACCENTS의 키), 글꼴(빈 문자열이면 기본), 크기(%)
+/// 화면 설정: 테마("system"·"light"·"dark"), 강조 색(theme::ACCENTS의 키), 글꼴(빈 문자열이면 기본), 크기(%),
+/// 글자 표시("soft"·"sharp"·"gray", gfx::TextLook)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Look {
     pub theme: String,
     pub accent: String,
     pub font: String,
     pub zoom: u32,
+    pub text: String,
 }
 
 impl Default for Look {
     fn default() -> Look {
-        Look { theme: "system".into(), accent: "blue".into(), font: String::new(), zoom: 100 }
+        Look { theme: "system".into(), accent: "blue".into(), font: String::new(), zoom: 100, text: "gray".into() }
     }
 }
 
@@ -79,7 +81,7 @@ pub fn serialize(s: &Session) -> String {
     out.push_str(&format!("hidden={}\n", s.show_hidden as u8));
     out.push_str(&format!("preview={}\n", s.preview as u8));
     out.push_str(&format!("newtab={}\n", s.new_tab));
-    out.push_str(&format!("theme={}\naccent={}\nfont={}\nzoom={}\n", s.look.theme, s.look.accent, s.look.font, s.look.zoom));
+    out.push_str(&format!("theme={}\naccent={}\nfont={}\nzoom={}\ntext={}\n", s.look.theme, s.look.accent, s.look.font, s.look.zoom, s.look.text));
     for p in &s.panes {
         out.push_str(&format!(
             "pane=active:{};cols:{},{},{};sort:{},{};view:{}\n",
@@ -136,6 +138,7 @@ pub fn parse(text: &str) -> Option<Session> {
             "accent" => s.look.accent = value.to_string(),
             "font" => s.look.font = value.to_string(),
             "zoom" => s.look.zoom = value.parse::<u32>().unwrap_or(100).clamp(80, 200),
+            "text" => s.look.text = value.to_string(),
             "pane" => {
                 let mut p = PaneState { tabs: Vec::new(), active: 0, cols: [140.0, 130.0, 84.0], sort_key: 0, sort_desc: false, view: 0 };
                 for part in value.split(';') {
@@ -181,7 +184,7 @@ mod tests {
             show_hidden: true,
             preview: true,
             new_tab: "D:\\업무".into(),
-            look: Look { theme: "dark".into(), accent: "green".into(), font: "맑은 고딕".into(), zoom: 125 },
+            look: Look { theme: "dark".into(), accent: "green".into(), font: "맑은 고딕".into(), zoom: 125, text: "soft".into() },
             panes: vec![
                 PaneState {
                     tabs: vec!["C:\\a=b,c".into(), "::computer".into()],

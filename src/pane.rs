@@ -406,11 +406,47 @@ fn cmp_ext(a: &[u16], b: &[u16]) -> Ordering {
     a.iter().map(lower).cmp(b.iter().map(lower))
 }
 
+/// 파일 보기 방식 (탐색기의 보기 메뉴와 같은 순서)
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ViewMode {
+    Huge,
+    Large,
+    Medium,
+    Small,
+    List,
     #[default]
     Details,
-    Thumbs,
+}
+
+impl ViewMode {
+    pub const ALL: [ViewMode; 6] = [ViewMode::Huge, ViewMode::Large, ViewMode::Medium, ViewMode::Small, ViewMode::List, ViewMode::Details];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewMode::Huge => "아주 큰 아이콘",
+            ViewMode::Large => "큰 아이콘",
+            ViewMode::Medium => "보통 아이콘",
+            ViewMode::Small => "작은 아이콘",
+            ViewMode::List => "목록",
+            ViewMode::Details => "자세히",
+        }
+    }
+
+    /// 세션 파일 값. 0(자세히)과 1(큰 아이콘, 예전 썸네일)은 예전 파일과 같다
+    pub fn code(self) -> u8 {
+        match self {
+            ViewMode::Details => 0,
+            ViewMode::Large => 1,
+            ViewMode::Huge => 2,
+            ViewMode::Medium => 3,
+            ViewMode::Small => 4,
+            ViewMode::List => 5,
+        }
+    }
+
+    pub fn from_code(c: u8) -> ViewMode {
+        ViewMode::ALL.into_iter().find(|v| v.code() == c).unwrap_or_default()
+    }
 }
 
 pub struct Pane {
@@ -572,5 +608,16 @@ mod tests {
         assert!(t.nav_forward());
         assert_eq!(t.loc, Location::Dir("C:\\Users".into()));
         assert!(!t.nav_forward());
+    }
+
+    /// 세션 파일의 보기 값: 예전 파일(0 자세히, 1 썸네일)은 그대로 읽히고, 모든 보기가 저장·복원된다
+    #[test]
+    fn view_codes_round_trip_and_keep_old_values() {
+        assert_eq!(ViewMode::from_code(0), ViewMode::Details);
+        assert_eq!(ViewMode::from_code(1), ViewMode::Large);
+        assert_eq!(ViewMode::from_code(99), ViewMode::Details);
+        for v in ViewMode::ALL {
+            assert_eq!(ViewMode::from_code(v.code()), v);
+        }
     }
 }

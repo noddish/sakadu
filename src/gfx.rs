@@ -65,6 +65,8 @@ pub enum Font {
 
 /// 썸네일 비트맵 캐시 상한. 96 DIP 썸네일(150%에서 약 80KB)이 이 개수까지
 const MAX_THUMBS: usize = 360;
+/// 썸네일 캐시 픽셀 상한 (4바이트씩, 약 64MB). 아주 큰 아이콘(256 DIP)은 100%에서 250장쯤
+const MAX_THUMB_PIXELS: u64 = 16 * 1024 * 1024;
 
 pub struct Gfx {
     factory: ID2D1Factory,
@@ -79,6 +81,33 @@ pub struct Gfx {
     clock: u64,
     imagelist: HIMAGELIST,
     pub dpi: f32,
+    text_look: TextLook,
+    /// GDI ClearType처럼 획을 픽셀에 맞추는 설정
+    sharp_params: Option<IDWriteRenderingParams>,
+    /// 시스템 기본(부드럽게). 예전 방식 글자와 아이콘 글리프에 쓴다
+    soft_params: Option<IDWriteRenderingParams>,
+}
+
+/// 글자 그리기 방식 (설정 → 화면 → 글자 표시)
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TextLook {
+    /// 획을 픽셀에 맞추지 않고 부드럽게 (DirectWrite 기본)
+    Soft,
+    /// GDI ClearType처럼 획을 픽셀에 맞춘다 (Q-Dir 같은 기존 Windows 앱과 같은 방식)
+    Sharp,
+    /// Sharp처럼 맞추되 ClearType 색 번짐 없이 회색조로
+    Gray,
+}
+
+impl TextLook {
+    /// 설정 파일 값. 모르는 값이면 회색조
+    pub fn from_key(key: &str) -> TextLook {
+        match key {
+            "soft" => TextLook::Soft,
+            "sharp" => TextLook::Sharp,
+            _ => TextLook::Gray,
+        }
+    }
 }
 
 fn family_exists(dw: &IDWriteFactory, name: PCWSTR) -> bool {
@@ -110,7 +139,29 @@ impl Gfx {
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
             let fonts = build_fonts(&dwrite, &ui_family(&dwrite, font))?;
-            Ok(Gfx { factory, dwrite, wic, rt: None, brush: None, fonts, icons: HashMap::new(), thumbs: HashMap::new(), clock: 0, imagelist, dpi })
+            // 감마·대비·ClearType 정도는 시스템(ClearType 텍스트 조정) 값을 그대로 쓰고, 그리기 방식만 GDI식으로 바꾼다
+            let soft_params = dwrite.CreateRenderingParams().ok();
+            let sharp_params = soft_params.as_ref().and_then(|p| {
+                dwrite
+                    .CreateCustomRenderingParams(p.GetGamma(), p.GetEnhancedContrast(), p.GetClearTypeLevel(), p.GetPixelGeometry(), DWRITE_RENDERING_MODE_GDI_CLASSIC)
+                    .ok()
+            });
+            Ok(Gfx {
+                factory,
+                dwrite,
+                wic,
+                rt: None,
+                brush: None,
+                fonts,
+                icons: HashMap::new(),
+                thumbs: HashMap::new(),
+                clock: 0,
+                imagelist,
+                dpi,
+                text_look: TextLook::Gray,
+                sharp_params,
+                soft_params,
+            })
         }
     }
 
@@ -245,6 +296,7 @@ impl Gfx {
                 let Ok(brush) = rt.CreateSolidColorBrush(&black, None) else { return false };
                 self.rt = Some(rt);
                 self.brush = Some(brush);
+                self.apply_text_look();
             }
             self.rt.as_ref().unwrap().BeginDraw();
         }
@@ -320,32 +372,73 @@ impl Gfx {
     }
 
     pub fn text_w(&self, s: &[u16], r: R, f: Font, c: Color) {
+        if self.text_look == TextLook::Soft {
+            self.draw(s, r, f, c, DWRITE_MEASURING_MODE_NATURAL);
+            return;
+        }
+        // 글자 시작·끝을 픽셀 경계에 맞춰야 GDI식 그리기에서 획이 두 픽셀로 번지지 않는다
+        let k = self.dpi / 96.0;
+        let snap = |v: f32| (v * k).round() / k;
+        self.draw(s, R::new(snap(r.l), r.t, snap(r.r), r.b), f, c, DWRITE_MEASURING_MODE_GDI_CLASSIC);
+    }
+
+    /// 글자 그리기 방식을 바꾼다. 렌더 타깃이 있으면 바로 적용
+    pub fn set_text_look(&mut self, look: TextLook) {
+        self.text_look = look;
+        self.apply_text_look();
+    }
+
+    fn apply_text_look(&self) {
+        let Some(rt) = &self.rt else { return };
+        let params = if self.text_look == TextLook::Soft { &self.soft_params } else { &self.sharp_params };
+        let aa = if self.text_look == TextLook::Gray { D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE } else { D2D1_TEXT_ANTIALIAS_MODE_DEFAULT };
+        unsafe {
+            if let Some(p) = params {
+                rt.SetTextRenderingParams(p);
+            }
+            rt.SetTextAntialiasMode(aa);
+        }
+    }
+
+    fn draw(&self, s: &[u16], r: R, f: Font, c: Color, mode: DWRITE_MEASURING_MODE) {
         if s.is_empty() || r.w() <= 0.0 {
             return;
         }
         unsafe {
-            self.rt().DrawText(
-                s,
-                &self.fonts[f as usize],
-                &r.d2d(),
-                self.brush(c),
-                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
-                DWRITE_MEASURING_MODE_NATURAL,
-            )
+            self.rt().DrawText(s, &self.fonts[f as usize], &r.d2d(), self.brush(c), D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, mode)
         };
     }
 
-    /// 아이콘 글리프는 ClearType 색 번짐이 눈에 띄므로 회색조로 그린다
+    /// 아이콘 글리프는 ClearType 색 번짐이 눈에 띄므로 회색조로, 힌팅이 거의 없는 아이콘 글꼴이라 원래의 부드러운 방식으로 그린다
     pub fn glyph(&self, code: u16, r: R, small: bool, c: Color) {
-        unsafe { self.rt().SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE) };
-        self.text_w(&[code], r, if small { Font::GlyphSmall } else { Font::Glyph }, c);
-        unsafe { self.rt().SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_DEFAULT) };
+        let rt = self.rt();
+        unsafe {
+            rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            if let Some(p) = &self.soft_params {
+                rt.SetTextRenderingParams(p);
+            }
+        }
+        self.draw(&[code], r, if small { Font::GlyphSmall } else { Font::Glyph }, c, DWRITE_MEASURING_MODE_NATURAL);
+        self.apply_text_look();
+    }
+
+    /// 그릴 때와 같은 방식으로 배치한다. 너비 재기와 그리기가 어긋나지 않게
+    fn text_layout(&self, s: &[u16], f: Font, w: f32, h: f32) -> Option<IDWriteTextLayout> {
+        let format = &self.fonts[f as usize];
+        unsafe {
+            if self.text_look == TextLook::Soft {
+                self.dwrite.CreateTextLayout(s, format, w, h).ok()
+            } else {
+                // GDI식: 글자 간격을 픽셀 단위로
+                self.dwrite.CreateGdiCompatibleTextLayout(s, format, w, h, self.dpi / 96.0, None, false).ok()
+            }
+        }
     }
 
     pub fn measure(&self, s: &str, f: Font) -> f32 {
         let w: Vec<u16> = s.encode_utf16().collect();
         unsafe {
-            let Ok(layout) = self.dwrite.CreateTextLayout(&w, &self.fonts[f as usize], 10000.0, 100.0) else { return 0.0 };
+            let Some(layout) = self.text_layout(&w, f, 10000.0, 100.0) else { return 0.0 };
             let mut m = DWRITE_TEXT_METRICS::default();
             if layout.GetMetrics(&mut m).is_err() {
                 return 0.0;
@@ -395,8 +488,13 @@ impl Gfx {
         let Ok(bmp) = (unsafe { rt.CreateBitmap(D2D_SIZE_U { width: w, height: h }, Some(pixels.as_ptr() as *const _), w * 4, &props) }) else {
             return false;
         };
-        if self.thumbs.len() >= MAX_THUMBS {
-            // 가장 오래 안 그린 4분의 1을 버린다
+        // 개수나 픽셀 양(아주 큰 아이콘은 한 장이 크다)이 넘치면 가장 오래 안 그린 4분의 1을 버린다
+        let pixels_of = |b: &ID2D1Bitmap| {
+            let s = unsafe { b.GetPixelSize() };
+            s.width as u64 * s.height as u64
+        };
+        let total: u64 = self.thumbs.values().map(|v| pixels_of(&v.0)).sum();
+        if !self.thumbs.is_empty() && (self.thumbs.len() >= MAX_THUMBS || total + w as u64 * h as u64 > MAX_THUMB_PIXELS) {
             let mut ages: Vec<u64> = self.thumbs.values().map(|v| v.1).collect();
             ages.sort_unstable();
             let cut = ages[ages.len() / 4];
@@ -430,7 +528,7 @@ impl Gfx {
     /// 긴 글(미리 보기)을 매번 다시 배치하지 않도록 레이아웃을 만들어 둔다
     pub fn layout(&self, s: &str, f: Font, w: f32) -> Option<IDWriteTextLayout> {
         let w16: Vec<u16> = s.encode_utf16().collect();
-        unsafe { self.dwrite.CreateTextLayout(&w16, &self.fonts[f as usize], w.max(1.0), 1.0e6).ok() }
+        self.text_layout(&w16, f, w.max(1.0), 1.0e6)
     }
 
     pub fn layout_height(l: &IDWriteTextLayout) -> f32 {

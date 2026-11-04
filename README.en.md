@@ -73,7 +73,7 @@ Dark mode follows your Windows setting.
 | Drag a tab | Reorder, or move to another pane |
 | Drag from empty space or the date column | Select with a rectangle (hold Ctrl to add to the selection) |
 | Ctrl+1 – Ctrl+5 | Pane layout |
-| Ctrl+Shift+2 / Ctrl+Shift+6 | Thumbnail view / details view |
+| Ctrl+Shift+1 ~ Ctrl+Shift+6 | Extra large, large, medium, small icons, list, details (same as Explorer) |
 | Alt+P | Preview pane |
 | F2 / F5 | Rename / refresh |
 | F4, Ctrl+L, Alt+D | Edit the path |
@@ -152,7 +152,7 @@ When turned on in Settings → General, closing the window doesn't quit Sakadu. 
 <details>
 <summary>Thumbnails, preview, favorites, undo</summary>
 
-- **Thumbnail view** is Ctrl+Shift+2, details view is Ctrl+Shift+6. Each pane remembers its own.
+- The **view button** at the right end of the path bar picks extra large, large, medium or small icons, list, or details. Shortcuts match Explorer (Ctrl+Shift+1–6), and each pane remembers its own. Icon views show thumbnails for photos and PDFs.
 - **New tabs** (Ctrl+T, +) open at This PC. Change it in Settings → General → **새 탭을 열 위치** (new tab location): the same folder as the current tab, or a folder of your choice.
 - The **star** at the right end of the path box adds the current folder to favorites in one click (it turns yellow). Click again to remove it.
 - Hover over a toolbar button for a moment to see its name and shortcut.

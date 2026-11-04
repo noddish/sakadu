@@ -1138,9 +1138,9 @@ impl App {
         let shadow = |a: f32| Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.45 } else { 0.12 } * a };
 
         // 그림자 + 본체
-        gfx.fill_round(R::new(r.l - 2.0, r.t + 1.0, r.r + 2.0, r.b + 4.0), 12.0, shadow(1.0));
-        gfx.fill_round(r, 10.0, t.pane);
-        gfx.stroke_round(r.inset(0.5, 0.5), 10.0, t.border, 1.0);
+        gfx.fill_round(R::new(r.l - 2.0, r.t + 1.0, r.r + 2.0, r.b + 4.0), R_PANE + 2.0, shadow(1.0));
+        gfx.fill_round(r, R_PANE, t.pane);
+        gfx.stroke_round(r.inset(0.5, 0.5), R_PANE, t.pane_border, 1.0);
 
         // 머리: 제목·개수, 오른쪽에 아이콘 버튼 (이름은 마우스를 올리면)
         gfx.glyph(G_STAR, R::new(r.l + 12.0, r.t, r.l + 34.0, r.t + FAV_HEAD_H), false, t.accent);
@@ -1182,25 +1182,26 @@ impl App {
             let body = row.inset(2.0, 1.0);
             let dragged = moving.is_some_and(|(from, _)| from == i);
             let open_group = matches!((rows[i], fly), (Row::Group(g), Some((_, f))) if g == f.group);
-            // 고른 줄(마우스를 올린 줄도)은 진하게, 키보드가 오른쪽에 있으면 그 그룹은 옅게
-            if i == sel && !(keyboard_in_fly && open_group) {
-                gfx.fill_round(body, 6.0, t.sel);
-            } else if open_group || hover == Hit::FavRow(i) {
-                gfx.fill_round(body, 6.0, t.hover);
+            // 오른쪽 메뉴가 열린 줄은 머무는 강조, 가리키는 줄(마우스·키보드)은 회색 바탕
+            if open_group {
+                gfx.fill_round(body, R_ROW, t.menu_open);
+            } else if (i == sel && !keyboard_in_fly) || hover == Hit::FavRow(i) {
+                gfx.fill_round(body, R_ROW, t.hover);
             }
             if matches!(rows[i], Row::Group(g) if drop_into == Some(g)) {
-                gfx.stroke_round(body.inset(0.75, 0.75), 6.0, t.accent, 1.5);
+                gfx.stroke_round(body.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
             }
             let fg = if dragged { t.faint } else { t.text };
             match rows[i] {
                 Row::Group(g) => {
                     let group = &favs.groups[g];
-                    gfx.glyph(G_GROUP, R::new(row.l + 10.0, y, row.l + 30.0, y + FAV_ROW_H), true, t.dim);
+                    gfx.glyph(G_GROUP, R::new(row.l + 10.0, y, row.l + 30.0, y + FAV_ROW_H), true, t.text);
                     let n = format!("{}", group.items.len());
                     let nw = gfx.measure(&n, Font::Small);
-                    gfx.text(&group.name, R::new(row.l + 36.0, y, row.r - 34.0 - nw, y + FAV_ROW_H), Font::Normal, fg);
-                    gfx.text(&n, R::new(row.l + 36.0, y, row.r - 28.0, y + FAV_ROW_H), Font::Right, t.faint);
-                    gfx.glyph(G_CHEVRON, R::new(row.r - 26.0, y, row.r - 8.0, y + FAV_ROW_H), true, t.dim);
+                    let weight = if open_group { Font::Strong } else { Font::Normal };
+                    gfx.text(&group.name, R::new(row.l + 36.0, y, row.r - 34.0 - nw, y + FAV_ROW_H), weight, fg);
+                    gfx.text(&n, R::new(row.l + 36.0, y, row.r - 28.0, y + FAV_ROW_H), Font::Right, t.dim);
+                    gfx.glyph(G_CHEVRON, R::new(row.r - 26.0, y, row.r - 8.0, y + FAV_ROW_H), true, t.text);
                 }
                 Row::Item { group, index } => {
                     let Some(f) = favs.item(group, index) else { continue };
@@ -1211,8 +1212,8 @@ impl App {
             if let (EditMode::FavRename(er), true) = (edit_mode, i == sel) {
                 if er == rows[i] {
                     let er = R::new(row.l + 34.0, y + 3.0, row.r - 8.0, y + FAV_ROW_H - 3.0);
-                    gfx.fill_round(er, 4.0, t.pane);
-                    gfx.stroke_round(er.inset(0.75, 0.75), 4.0, t.accent, 1.5);
+                    gfx.fill_round(er, R_ROW, t.pane);
+                    gfx.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                 }
             }
         }
@@ -1241,9 +1242,9 @@ impl App {
             let a = f.anim;
             let dx = (1.0 - a) * if fr.l > r.l { -14.0 } else { 14.0 };
             let fr = R::new(fr.l + dx, fr.t, fr.r + dx, fr.b);
-            gfx.fill_round(R::new(fr.l - 2.0, fr.t + 1.0, fr.r + 2.0, fr.b + 4.0), 12.0, shadow(a));
-            gfx.fill_round(fr, 10.0, alpha(t.pane, a));
-            gfx.stroke_round(fr.inset(0.5, 0.5), 10.0, alpha(t.border, a), 1.0);
+            gfx.fill_round(R::new(fr.l - 2.0, fr.t + 1.0, fr.r + 2.0, fr.b + 4.0), R_PANE + 2.0, shadow(a));
+            gfx.fill_round(fr, R_PANE, alpha(t.pane, a));
+            gfx.stroke_round(fr.inset(0.5, 0.5), R_PANE, alpha(t.pane_border, a), 1.0);
             let flist = Self::fav_fly_list(fr);
             gfx.clip(flist);
             if group.items.is_empty() {
@@ -1254,17 +1255,16 @@ impl App {
                 if row.b < flist.t || row.t > flist.b {
                     continue;
                 }
-                if f.sel == Some(j) {
-                    gfx.fill_round(row.inset(0.0, 1.0), 6.0, alpha(if keyboard_in_fly { t.sel } else { t.hover }, a));
-                } else if hover == Hit::FavFlyItem(j) {
-                    gfx.fill_round(row.inset(0.0, 1.0), 6.0, alpha(t.hover, a));
+                // 가리키는 줄(마우스·키보드)은 회색 바탕
+                if f.sel == Some(j) || hover == Hit::FavFlyItem(j) {
+                    gfx.fill_round(row.inset(0.0, 1.0), R_ROW, alpha(t.hover, a));
                 }
                 gfx.icon(icon_of(item), R::new(row.l + 8.0, row.t + 8.0, row.l + 24.0, row.t + 24.0));
                 gfx.text(&item.name, R::new(row.l + 34.0, row.t, row.r - 8.0, row.b), Font::Normal, alpha(t.text, a));
                 if edit_mode == EditMode::FavRename(Row::Item { group: Some(f.group), index: j }) {
                     let er = R::new(row.l + 34.0, row.t + 3.0, row.r - 8.0, row.b - 3.0);
-                    gfx.fill_round(er, 4.0, t.pane);
-                    gfx.stroke_round(er.inset(0.75, 0.75), 4.0, t.accent, 1.5);
+                    gfx.fill_round(er, R_ROW, t.pane);
+                    gfx.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                 }
             }
             gfx.unclip();
