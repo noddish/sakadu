@@ -635,6 +635,11 @@ impl App {
             VK_TAB | VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT => {
                 self.settings_nav_key(vk);
             }
+            // 도움말처럼 긴 쪽을 키보드로 끝까지 읽을 수 있게
+            VK_PRIOR => self.settings_wheel(-(self.h - 80.0).max(40.0)),
+            VK_NEXT => self.settings_wheel((self.h - 80.0).max(40.0)),
+            VK_HOME => self.settings_wheel(-f32::MAX / 2.0),
+            VK_END => self.settings_wheel(f32::MAX / 2.0),
             _ => {}
         }
         true
@@ -845,6 +850,11 @@ impl App {
                 }
             }
         }
+        // 누를 것이 없는 쪽(도움말)은 내용 전체를 한 자리로 둔다. 여기서 ↑↓로 내용을 읽어 내려간다
+        let side = self.side_w();
+        if !stops.iter().any(|(_, r)| r.r > side) {
+            stops.push((SetHit::Panel, R::new(side + 12.0, 16.0, self.w - 12.0, self.h - 16.0)));
+        }
         stops
     }
 
@@ -871,6 +881,10 @@ impl App {
                     s.focus = Some(SetHit::Nav(PAGES[k].0));
                 }
                 self.invalidate();
+                return true;
+            }
+            (VK_UP | VK_DOWN, Some(i)) if stops[i].0 == SetHit::Panel => {
+                self.settings_wheel(if vk == VK_UP { -48.0 } else { 48.0 });
                 return true;
             }
             (VK_UP, Some(i)) => (i > 0 && !in_side(i - 1)).then(|| i - 1).or(Some(i)),

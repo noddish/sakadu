@@ -42,6 +42,9 @@ pub struct Client {
     token: Token,
     /// 로그온 세션 (같은 사람이라도 관리자 권한으로 올린 창은 다른 세션)
     session: u64,
+    /// 권한 판정에 쓰이는 토큰 내용(사용자·그룹과 그 속성·제한 SID·무결성 수준·앱 컨테이너).
+    /// 같은 로그온 세션에도 권한을 줄인 토큰 등 여러 토큰이 있을 수 있어, 판정은 이것까지 같을 때만 함께 쓴다
+    context: Vec<u8>,
 }
 
 impl Client {
@@ -59,9 +62,74 @@ impl Client {
             let mut len = 0u32;
             GetTokenInformation(token.0, TokenStatistics, Some(&mut stats as *mut _ as *mut _), size_of::<TOKEN_STATISTICS>() as u32, &mut len).ok()?;
             let session = (stats.AuthenticationId.HighPart as u32 as u64) << 32 | stats.AuthenticationId.LowPart as u64;
-            Some(Client { token, session })
+            let context = security_context(token.0)?;
+            Some(Client { token, session, context })
         }
     }
+}
+
+/// GetTokenInformation 결과 (정렬을 맞춘 버퍼)
+fn token_info(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Option<Vec<u64>> {
+    unsafe {
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, class, None, 0, &mut len);
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        GetTokenInformation(token, class, Some(buf.as_mut_ptr() as *mut _), len, &mut len).ok()?;
+        Some(buf)
+    }
+}
+
+fn push_sid(out: &mut Vec<u8>, sid: PSID, attrs: u32) {
+    if sid.0.is_null() {
+        out.push(0);
+        return;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(sid.0 as *const u8, GetLengthSid(sid) as usize) };
+    out.push(bytes.len() as u8);
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(&attrs.to_le_bytes());
+}
+
+fn push_groups(out: &mut Vec<u8>, token: HANDLE, class: TOKEN_INFORMATION_CLASS) {
+    let Some(buf) = token_info(token, class) else {
+        out.extend_from_slice(&u32::MAX.to_le_bytes());
+        return;
+    };
+    unsafe {
+        let g = &*(buf.as_ptr() as *const TOKEN_GROUPS);
+        out.extend_from_slice(&g.GroupCount.to_le_bytes());
+        for sa in std::slice::from_raw_parts(g.Groups.as_ptr(), g.GroupCount as usize) {
+            push_sid(out, sa.Sid, sa.Attributes);
+        }
+    }
+}
+
+/// AccessCheck 결과를 좌우하는 토큰 내용을 이어 붙인 값 (같으면 판정도 같다)
+fn security_context(token: HANDLE) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    unsafe {
+        let user = token_info(token, TokenUser)?;
+        let u = &*(user.as_ptr() as *const TOKEN_USER);
+        push_sid(&mut out, u.User.Sid, u.User.Attributes);
+        push_groups(&mut out, token, TokenGroups);
+        push_groups(&mut out, token, TokenRestrictedSids);
+        match token_info(token, TokenIntegrityLevel) {
+            Some(b) => {
+                let l = &*(b.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+                push_sid(&mut out, l.Label.Sid, l.Label.Attributes);
+            }
+            None => out.push(0),
+        }
+        match token_info(token, TokenAppContainerSid) {
+            Some(b) => push_sid(&mut out, (*(b.as_ptr() as *const TOKEN_APPCONTAINER_INFORMATION)).TokenAppContainer, 0),
+            None => out.push(0),
+        }
+        push_groups(&mut out, token, TokenCapabilities);
+    }
+    Some(out)
 }
 
 /// 칸별 판정 (세대 + 모름·보임·안 보임). 검색 스레드들이 잠금 없이 함께 읽고 쓴다
@@ -75,9 +143,10 @@ fn forget(a: &AtomicU32) {
     }
 }
 
-/// 한 로그온 세션의 판정: 드라이브마다 칸별
+/// 한 보안 컨텍스트(로그온 세션 + 토큰 내용)의 판정: 드라이브마다 칸별
 pub struct Session {
     id: u64,
+    context: Vec<u8>,
     token: Token,
     vols: RwLock<Vec<(char, States)>>,
     used: Mutex<Instant>,
@@ -114,10 +183,10 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    /// 이 계정(로그온 세션)의 판정 모음. 처음이면 만든다
+    /// 이 계정(로그온 세션과 토큰 내용)의 판정 모음. 처음이면 만든다
     pub fn session(&self, client: Client) -> Arc<Session> {
         let mut list = self.list.lock().unwrap();
-        let session = match list.iter().find(|s| s.id == client.session).cloned() {
+        let session = match list.iter().find(|s| s.id == client.session && s.context == client.context).cloned() {
             Some(s) => s,
             None => {
                 if list.len() >= MAX_SESSIONS {
@@ -126,6 +195,7 @@ impl Sessions {
                 }
                 let s = Arc::new(Session {
                     id: client.session,
+                    context: client.context,
                     token: client.token,
                     vols: RwLock::new(Vec::new()),
                     used: Mutex::new(Instant::now()),
@@ -398,11 +468,79 @@ mod tests {
             let mut tok = HANDLE::default();
             windows::Win32::System::Threading::OpenProcessToken(windows::Win32::System::Threading::GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &mut tok)
                 .unwrap();
-            let mut imp = HANDLE::default();
-            DuplicateToken(tok, SecurityIdentification, &mut imp).unwrap();
-            let _ = CloseHandle(tok);
-            Client { token: Token(imp), session: 1 }
+            client_from(tok)
         }
+    }
+
+    /// 주 토큰을 판정용 가장 토큰으로 바꿔 Client로 (주 토큰은 닫는다)
+    fn client_from(primary: HANDLE) -> Client {
+        unsafe {
+            let mut imp = HANDLE::default();
+            DuplicateToken(primary, SecurityIdentification, &mut imp).unwrap();
+            let _ = CloseHandle(primary);
+            let mut stats = TOKEN_STATISTICS::default();
+            let mut len = 0u32;
+            GetTokenInformation(imp, TokenStatistics, Some(&mut stats as *mut _ as *mut _), size_of::<TOKEN_STATISTICS>() as u32, &mut len).unwrap();
+            let session = (stats.AuthenticationId.HighPart as u32 as u64) << 32 | stats.AuthenticationId.LowPart as u64;
+            Client { context: security_context(imp).unwrap(), token: Token(imp), session }
+        }
+    }
+
+    /// 같은 로그온 세션이라도 토큰 내용이 다르면 판정을 함께 쓰지 않는다
+    #[test]
+    fn same_logon_different_tokens_do_not_share() {
+        let fake = |context: &[u8]| Client { token: Token(HANDLE::default()), session: 7, context: context.to_vec() };
+        let sessions = Sessions::default();
+        let a = sessions.session(fake(b"user+groups"));
+        let again = sessions.session(fake(b"user+groups"));
+        let restricted = sessions.session(fake(b"user+groups(deny-only)"));
+        assert!(Arc::ptr_eq(&a, &again), "same context reuses the cache");
+        assert!(!Arc::ptr_eq(&a, &restricted), "restricted token gets its own cache");
+    }
+
+    /// 실제 토큰: 같은 로그온 세션에서 자기 SID를 거부 전용으로 줄인 토큰은 자기 프로필 안을 볼 수 없고,
+    /// 먼저 보통 토큰으로 판정해 둔 결과를 물려받지도 않는다 (cargo test restricted_token -- --ignored)
+    #[test]
+    #[ignore]
+    fn restricted_token_in_same_logon_gets_own_answer() {
+        use crate::index::{Query, search_visible};
+        let me = std::env::var("USERPROFILE").unwrap();
+        let mut v = Volume::new('C');
+        let (mut parent, mut frn) = (5u64, 200u64);
+        for comp in me[3..].split('\\') {
+            v.upsert(frn, parent, comp, true);
+            parent = frn;
+            frn += 1;
+        }
+        v.upsert(frn, parent, "sakadu-acl-토큰시험.txt", false);
+        let normal = current_client();
+        let restricted = unsafe {
+            let mut tok = HANDLE::default();
+            windows::Win32::System::Threading::OpenProcessToken(
+                windows::Win32::System::Threading::GetCurrentProcess(),
+                TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY,
+                &mut tok,
+            )
+            .unwrap();
+            let user = token_info(tok, TokenUser).unwrap();
+            let me_sid = (*(user.as_ptr() as *const TOKEN_USER)).User;
+            let disable = [SID_AND_ATTRIBUTES { Sid: me_sid.Sid, Attributes: 0 }];
+            let mut r = HANDLE::default();
+            CreateRestrictedToken(tok, CREATE_RESTRICTED_TOKEN_FLAGS(0), Some(&disable), None, None, &mut r).unwrap();
+            let _ = CloseHandle(tok);
+            client_from(r)
+        };
+        assert_eq!(normal.session, restricted.session, "same logon session");
+        assert_ne!(normal.context, restricted.context);
+        let sessions = Sessions::default();
+        let vols = [&v];
+        let q = Query::parse("sakadu-acl-토큰시험");
+        let a = sessions.session(normal);
+        let va = sessions.viewer(&a, &vols);
+        assert_eq!(search_visible(&vols, &q, 10, &|vi, i| va.visible(&vols, vi, i)).1, 1, "normal token sees it");
+        let b = sessions.session(restricted);
+        let vb = sessions.viewer(&b, &vols);
+        assert_eq!(search_visible(&vols, &q, 10, &|vi, i| vb.visible(&vols, vi, i)).1, 0, "restricted token does not inherit the answer");
     }
 
     /// 성능: 실제 폴더 트리(SAKADU_ACL_BENCH_DIR, 기본 C:\Users)로 만든 인덱스에서 넓은 검색어를 이 계정으로 거를 때.

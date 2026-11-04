@@ -405,6 +405,8 @@ pub struct CutLeft {
     pub clip: Vec<String>,
     /// 아직 옮기지 못한 파일
     pub left: Vec<String>,
+    /// 진행 중 목록에서 이 작업만 지우는 데 쓰는 번호
+    pub id: u64,
 }
 
 /// 진행 창이 떠 있는 동안에도 UI가 멈추지 않도록 별도 STA 스레드에서 실행.
@@ -414,11 +416,11 @@ pub fn spawn_file_op(hwnd: HWND, op: FileOp) {
 }
 
 /// 잘라낸 파일(clip) 중 paths를 dest로 옮긴다. 끝나면 옮기지 못한 파일을 클립보드에 남길 수 있게 알린다
-pub fn spawn_cut_paste(hwnd: HWND, paths: Vec<String>, dest: String, seq: u32, clip: Vec<String>) {
-    spawn_op(hwnd, FileOp::Move { paths, dest }, Some((seq, clip)));
+pub fn spawn_cut_paste(hwnd: HWND, paths: Vec<String>, dest: String, seq: u32, clip: Vec<String>, id: u64) {
+    spawn_op(hwnd, FileOp::Move { paths, dest }, Some((seq, clip, id)));
 }
 
-fn spawn_op(hwnd: HWND, op: FileOp, cut: Option<(u32, Vec<String>)>) {
+fn spawn_op(hwnd: HWND, op: FileOp, cut: Option<(u32, Vec<String>, u64)>) {
     let owner = SendHwnd(hwnd);
     std::thread::spawn(move || {
         let _com = ComInit::sta();
@@ -435,7 +437,7 @@ fn spawn_op(hwnd: HWND, op: FileOp, cut: Option<(u32, Vec<String>)>) {
             }),
         };
         report.undo = Undo::from_done(&done, crate::undo::stamp);
-        report.cut = cut.map(|(seq, clip)| CutLeft { seq, left: crate::undo::not_moved(&clip, &done), clip });
+        report.cut = cut.map(|(seq, clip, id)| CutLeft { seq, left: crate::undo::not_moved(&clip, &done), clip, id });
         post_box(owner.get(), crate::WM_APP_FILEOP, Box::new(report));
     });
 }
@@ -445,22 +447,25 @@ fn run_undo(owner: HWND, u: &Undo) -> Undone {
     let (todo, changed) = u.verified(crate::undo::stamp);
     let mut out = Undone { changed, ..Default::default() };
     let Some(todo) = todo else { return out };
-    let handled: Vec<String> = match &todo {
+    // (처리한 항목, 영영 사라져 다시 해도 소용없는 항목)
+    let (handled, gone): (Vec<String>, Vec<String>) = match &todo {
         Undo::Recycle(items) => {
             let (restored, missing) = restore_from_recycle_bin(owner, items);
-            out.changed.extend(missing);
-            restored
+            out.changed.extend(missing.iter().map(|(_, was)| was.clone()));
+            (restored, missing.into_iter().map(|(bin, _)| bin).collect())
         }
         _ => match run_file_op(owner, &FileOp::Undo(todo.clone())) {
-            Ok(done) => done.iter().map(|d| d.source().to_string()).collect(),
+            Ok(done) => (done.iter().map(|d| d.source().to_string()).collect(), Vec::new()),
             Err(e) => {
                 crate::diag::log(|| format!("undo failed: {e}"));
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         },
     };
     out.done = handled.len();
-    out.retry = todo.left_after(&handled);
+    // 휴지통을 비워 사라진 항목은 다시 시도할 기록으로 남기지 않는다. 남기면 Ctrl+Z가 그것만 되풀이해
+    // 그보다 앞선 작업(예: 그 전에 한 이름 바꾸기)을 되돌릴 수 없게 된다
+    out.retry = todo.left_after(&[handled, gone].concat());
     if let Some(r) = &out.retry {
         crate::diag::log(|| format!("undo: {} item(s) left for retry: {r:?}", r.len()));
     }
@@ -481,7 +486,7 @@ pub fn post_box<T>(hwnd: HWND, msg: u32, payload: Box<T>) {
 /// 휴지통 폴더를 열거해 기록해 둔 항목($Recycle.Bin 안 실제 파일 경로)을 찾고, 그 항목의 "복원" 동사를 실행한다.
 /// 셸이 삭제 직후 알려 주는 항목은 실제 파일이라 "복원"이 없으므로 휴지통 화면의 항목으로 다시 찾아야 한다.
 /// (복원한 휴지통 항목, 휴지통에 없는 항목의 원래 경로)를 돌려준다. 복원하다 실패한 항목은 어느 쪽에도 없다
-fn restore_from_recycle_bin(owner: HWND, items: &[(String, String)]) -> (Vec<String>, Vec<String>) {
+fn restore_from_recycle_bin(owner: HWND, items: &[(String, String)]) -> (Vec<String>, Vec<(String, String)>) {
     let mut restored = Vec::new();
     let mut seen = Vec::new();
     if let Err(e) = restore_found(owner, items, &mut restored, &mut seen) {
@@ -489,7 +494,7 @@ fn restore_from_recycle_bin(owner: HWND, items: &[(String, String)]) -> (Vec<Str
         // 휴지통을 끝까지 보지 못했으면 없다고 단정하지 않는다 (다시 시도할 수 있게)
         return (restored, Vec::new());
     }
-    let missing = items.iter().filter(|(b, _)| !seen.iter().any(|s| util::eq_path(s, b))).map(|(_, was)| was.clone()).collect();
+    let missing = items.iter().filter(|(b, _)| !seen.iter().any(|s| util::eq_path(s, b))).cloned().collect();
     (restored, missing)
 }
 
@@ -911,8 +916,22 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let restored = a.exists();
-        let _ = std::fs::remove_dir_all(&base);
         assert!(restored, "restored from recycle bin");
+
+        // 회귀: 휴지통에서 그 항목이 사라졌으면(휴지통 비우기) 다시 시도할 기록으로 남기지 않는다.
+        // 이 시험의 더미 파일 하나만 휴지통에서 지워 흉내 낸다 ($R 본체와 $I 정보 파일)
+        let b = src.join("sakadu-undo-gone.txt");
+        std::fs::write(&b, b"bye").unwrap();
+        let done = run(FileOp::Delete { paths: vec![b.to_string_lossy().into_owned()], permanent: false });
+        let u = record(&done).expect("recycle recorded");
+        let Undo::Recycle(items) = &u else { panic!("{u:?}") };
+        let bin = std::path::PathBuf::from(&items[0].0);
+        let info = bin.with_file_name(bin.file_name().unwrap().to_string_lossy().replacen("$R", "$I", 1));
+        std::fs::remove_file(&bin).unwrap();
+        let _ = std::fs::remove_file(&info);
+        let out = run_undo(owner, &u);
+        assert_eq!((out.done, out.changed.len(), out.retry.is_none()), (0, 1, true), "gone item is reported, not retried");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 기본 복사 규칙이 실제 셸 드롭 대상에서 그대로 동작하는지 (파일을 실제로 만들고 옮겨 본다)

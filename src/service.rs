@@ -96,62 +96,97 @@ fn start_indexing() -> Arc<Shared> {
     shared
 }
 
-/// 한 볼륨의 USN 저널을 계속 읽어 인덱스에 반영. 저널이 끊기면 다시 만든다
+/// 한 볼륨의 USN 저널을 계속 읽어 인덱스에 반영한다.
+/// 감시가 끊기면(저널 오류·볼륨을 열 수 없음) 다시 만들 때까지 그 드라이브를 검색에서 뺀다.
+/// 변경을 모르는 채로 예전 목록과 권한 판정으로 답하면, 그사이 거둔 권한이 반영되지 않기 때문이다
 fn watch(shared: Arc<Shared>, letter: char) {
-    let Ok(h) = volume_io::open(letter) else { return };
-    let start = {
-        let vols = shared.vols.read().unwrap();
-        vols.iter().find(|v| v.letter == letter).map(|v| (v.journal_id, v.next_usn))
-    };
-    let Some((mut journal, mut usn)) = start else { return };
+    let start = shared.vols.read().unwrap().iter().find(|v| v.letter == letter).map(|v| (v.journal_id, v.next_usn));
+    let Some(mut cursor) = start else { return };
     while !STOP.load(Ordering::SeqCst) {
-        match volume_io::read_changes(&h, journal, usn) {
-            Ok((next, recs)) => {
-                usn = next;
-                if recs.is_empty() {
-                    continue;
-                }
-                let mut vols = shared.vols.write().unwrap();
-                if let Some(v) = vols.iter_mut().find(|v| v.letter == letter) {
-                    for r in &recs {
-                        index::apply(v, r);
-                    }
-                    v.next_usn = usn;
-                    v.compact_if_needed();
-                }
-                drop(vols);
-                forget_changed_folders(&shared, letter, &recs);
+        match volume_io::open(letter) {
+            Ok(h) => follow(&shared, letter, &h, &mut cursor),
+            Err(e) => diag::log(|| format!("index: open {letter}: {e}")),
+        }
+        if STOP.load(Ordering::SeqCst) {
+            return;
+        }
+        suspend(&shared, letter);
+        // 다시 만들 때까지 잠시마다 시도한다 (처음엔 곧, 실패가 이어지면 1분마다)
+        let mut wait = std::time::Duration::from_secs(5);
+        loop {
+            std::thread::sleep(wait);
+            if STOP.load(Ordering::SeqCst) {
+                return;
             }
-            Err(e) => {
-                diag::log(|| format!("index: journal {letter}: {e}, rebuilding"));
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                match volume_io::build(letter) {
-                    Ok(v) => {
-                        journal = v.journal_id;
-                        usn = v.next_usn;
-                        let mut vols = shared.vols.write().unwrap();
-                        if let Some(slot) = vols.iter_mut().find(|x| x.letter == letter) {
-                            *slot = v;
-                        }
-                        // 칸 번호가 모두 새로 매겨졌다
-                        shared.sessions.reset_volume(letter);
-                    }
-                    Err(_) => {
-                        // 다시 만들지 못하면 이 드라이브 결과는 더 이상 최신이 아니다
-                        shared.mark_failed(letter);
-                        return;
-                    }
+            match volume_io::build(letter) {
+                Ok(v) => {
+                    cursor = (v.journal_id, v.next_usn);
+                    resume(&shared, v);
+                    break;
+                }
+                Err(e) => {
+                    diag::log(|| format!("index: rebuild {letter}: {e}"));
+                    wait = std::time::Duration::from_secs(60);
                 }
             }
         }
     }
 }
 
+/// 저널을 읽어 반영한다. 오류가 나면 돌아온다
+fn follow(shared: &Shared, letter: char, h: &volume_io::VolumeHandle, cursor: &mut (u64, i64)) {
+    while !STOP.load(Ordering::SeqCst) {
+        let (next, recs) = match volume_io::read_changes(h, cursor.0, cursor.1) {
+            Ok(r) => r,
+            Err(e) => {
+                diag::log(|| format!("index: journal {letter}: {e}"));
+                return;
+            }
+        };
+        cursor.1 = next;
+        if recs.is_empty() {
+            continue;
+        }
+        let mut vols = shared.vols.write().unwrap();
+        let Some(v) = vols.iter_mut().find(|v| v.letter == letter) else { return };
+        for r in &recs {
+            index::apply(v, r);
+        }
+        v.next_usn = next;
+        v.compact_if_needed();
+        // 인덱스를 바꾼 것과 같은 쓰기 잠금 안에서 판정도 지운다. 잠금을 풀고 지우면 그사이 검색이
+        // 끼어들어, 아직 지우지 않은 부모의 옛 판정을 바탕으로 자식을 다시 '보임'으로 남길 수 있다
+        forget_changed_folders(&shared.sessions, v, &recs);
+    }
+}
+
+/// 감시가 끊긴 드라이브를 검색에서 빼고 실패로 알린다
+fn suspend(shared: &Shared, letter: char) {
+    let mut vols = shared.vols.write().unwrap();
+    vols.retain(|v| v.letter != letter);
+    shared.sessions.reset_volume(letter);
+    shared.mark_failed(letter);
+    diag::log(|| format!("index: {letter} left out of search until rebuilt"));
+}
+
+/// 다시 만든 드라이브를 검색에 넣는다. 칸 번호가 새로 매겨졌으니 판정도 모두 지운다
+fn resume(shared: &Shared, v: Volume) {
+    let letter = v.letter;
+    let mut vols = shared.vols.write().unwrap();
+    vols.retain(|x| x.letter != letter);
+    vols.push(v);
+    vols.sort_by_key(|v| v.letter);
+    shared.sessions.reset_volume(letter);
+    shared.failed.write().unwrap().retain(|c| c != letter);
+    diag::log(|| format!("index: {letter} back in search"));
+}
+
 /// 폴더가 생기거나 지워지면 그 칸의 계정별 판정을, 폴더가 옮겨지거나 권한이 바뀌면 그 폴더와 그 아래 폴더들의 판정을 지운다.
 /// (드라이브 전체를 지우면 그때마다 첫 검색이 몇 초씩 느려진다.)
-/// 파일의 권한은 목록에 보이는지와 상관없다 (담은 폴더를 열 수 있으면 이름이 보인다)
-fn forget_changed_folders(shared: &Shared, letter: char, recs: &[index::UsnRecord]) {
-    if !shared.sessions.any() {
+/// 파일의 권한은 목록에 보이는지와 상관없다 (담은 폴더를 열 수 있으면 이름이 보인다).
+/// 인덱스 쓰기 잠금을 쥔 채로 부른다
+fn forget_changed_folders(sessions: &acl::Sessions, v: &Volume, recs: &[index::UsnRecord]) {
+    if !sessions.any() {
         return;
     }
     let (mut slots, mut moved) = (Vec::new(), Vec::new());
@@ -163,14 +198,10 @@ fn forget_changed_folders(shared: &Shared, letter: char, recs: &[index::UsnRecor
         }
     }
     if !slots.is_empty() {
-        shared.sessions.reset_slots(letter, &slots);
+        sessions.reset_slots(v.letter, &slots);
     }
     if !moved.is_empty() {
-        let vols = shared.vols.read().unwrap();
-        match vols.iter().find(|v| v.letter == letter) {
-            Some(v) => shared.sessions.reset_subtrees(v, &moved),
-            None => shared.sessions.reset_volume(letter),
-        }
+        sessions.reset_subtrees(v, &moved);
     }
 }
 
@@ -645,6 +676,25 @@ mod tests {
         shared.mark_failed('D');
         let head = handle_request(&shared, "Q\t10\t없는이름", Asker::Everyone);
         assert!(head.starts_with("OK\t0\t") && head.lines().next().unwrap().ends_with("\t0\tD"), "{head}");
+    }
+
+    /// 감시가 끊긴 드라이브는 다시 만들 때까지 검색에서 빠지고 실패로 알린다 (오래된 목록·권한으로 답하지 않게)
+    #[test]
+    fn suspended_drive_is_left_out_until_rebuilt() {
+        let make = |letter: char| {
+            let mut v = Volume::new(letter);
+            v.upsert(100, 5, "보고서.docx", false);
+            v
+        };
+        let shared = Shared::new(vec![make('C'), make('D')], true);
+        let total = |s: &Shared| handle_request(s, "Q\t10\t보고서", Asker::Everyone).split('\t').nth(1).unwrap().to_string();
+        assert_eq!(total(&shared), "2");
+        suspend(&shared, 'D');
+        let head = handle_request(&shared, "Q\t10\t보고서", Asker::Everyone);
+        assert!(head.starts_with("OK\t1\t") && head.lines().next().unwrap().ends_with("\tD"), "{head}");
+        resume(&shared, make('D'));
+        assert_eq!(total(&shared), "2");
+        assert!(shared.failed.read().unwrap().is_empty());
     }
 
     /// 여러 검색어를 한 번에: 검색어마다 하나씩 물은 것과 같은 결과가 같은 순서로

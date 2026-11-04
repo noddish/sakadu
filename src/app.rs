@@ -205,6 +205,31 @@ struct RenameCtx {
     old: String,
 }
 
+/// 진행 중인 잘라내기 붙여넣기. 작업마다 번호를 매겨, 먼저 끝난 작업이 다른 작업의 표시까지 지우지 않게 한다
+#[derive(Default)]
+struct Moving {
+    next: u64,
+    /// (작업 번호, 옮기는 파일)
+    ops: Vec<(u64, Vec<String>)>,
+}
+
+impl Moving {
+    /// paths 가운데 하나라도 이미 옮기는 중인가
+    fn busy(&self, paths: &[String]) -> bool {
+        self.ops.iter().any(|(_, moving)| moving.iter().any(|m| paths.iter().any(|p| util::eq_path(m, p))))
+    }
+
+    fn begin(&mut self, paths: &[String]) -> u64 {
+        self.next += 1;
+        self.ops.push((self.next, paths.to_vec()));
+        self.next
+    }
+
+    fn end(&mut self, id: u64) {
+        self.ops.retain(|(i, _)| *i != id);
+    }
+}
+
 /// 화면 설정에서 바뀐 부분 (apply_look이 그만큼만 다시 만든다)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LookPart {
@@ -293,8 +318,8 @@ pub struct App {
     pal_gate: PalGate,
     /// Ctrl+Z로 되돌릴 작업 (마지막이 가장 최근)
     undo: Vec<crate::undo::Undo>,
-    /// 잘라내기 붙여넣기가 진행 중인 클립보드 목록 (끝나기 전에 같은 파일을 또 붙여넣지 않게)
-    moving_clip: Option<Vec<String>>,
+    /// 진행 중인 잘라내기 붙여넣기 (끝나기 전에 같은 파일을 또 붙여넣지 않게)
+    moving: Moving,
     /// 실제로 등록된 전역 검색 단축키
     hotkey: Option<String>,
     /// 화면 설정 (테마·강조 색·글꼴·크기)
@@ -427,6 +452,16 @@ fn tab_rects(g: &PaneGeom, n: usize, active: usize) -> Vec<R> {
             }
         })
         .collect()
+}
+
+/// 탭 줄의 x에 놓았을 때 들어갈 자리. 보이는 탭만 보고 정한다:
+/// 가려진 탭(폭 0)까지 세면 마지막으로 보이는 탭 바로 뒤에 놓아도 맨 끝으로 가 버린다
+fn drop_index(trs: &[R], x: f32) -> usize {
+    let visible: Vec<usize> = (0..trs.len()).filter(|&i| trs[i].w() > 0.0).collect();
+    match visible.iter().rev().find(|&&i| (trs[i].l + trs[i].r) / 2.0 < x) {
+        Some(&i) => i + 1,
+        None => visible.first().copied().unwrap_or(0),
+    }
 }
 
 fn close_rect(tr: R) -> R {
@@ -815,7 +850,7 @@ impl App {
             pal_seq: 0,
             pal_gate: PalGate::default(),
             undo: Vec::new(),
-            moving_clip: None,
+            moving: Moving::default(),
             hotkey: None,
             look,
             keys: crate::keys::Keymap::load(),
@@ -893,7 +928,16 @@ impl App {
                         (MOD_WIN | MOD_SHIFT, b'F' as u32, "Win+Shift+F"),
                         (MOD_CONTROL | MOD_ALT, b'F' as u32, "Ctrl+Alt+F"),
                     ];
-                    candidates.iter().find(|(m, vk, _)| RegisterHotKey(Some(self.hwnd), HOTKEY_SEARCH, *m | MOD_NOREPEAT, *vk).is_ok()).map(|c| c.2.to_string())
+                    // Sakadu 안 단축키로 정해 둔 키는 고르지 않는다 (어디서든 키가 먼저 가로채 그 동작을 키로 부를 수 없게 된다)
+                    let taken = |m: HOT_KEY_MODIFIERS, vk: u32| {
+                        let c = crate::keys::Combo { ctrl: m.contains(MOD_CONTROL), shift: m.contains(MOD_SHIFT), alt: m.contains(MOD_ALT), vk: vk as u16 };
+                        !m.contains(MOD_WIN) && self.keys.find(c).is_some()
+                    };
+                    candidates
+                        .iter()
+                        .filter(|(m, vk, _)| !taken(*m, *vk))
+                        .find(|(m, vk, _)| RegisterHotKey(Some(self.hwnd), HOTKEY_SEARCH, *m | MOD_NOREPEAT, *vk).is_ok())
+                        .map(|c| c.2.to_string())
                 }
             };
         }
@@ -1401,7 +1445,7 @@ impl App {
         let (q, r) = self.pane_rects().into_iter().find(|(_, r)| r.contains(x, y))?;
         let g = geom(r);
         let n = self.panes[q].tabs.len();
-        let at = if g.tabs.contains(x, y) { tab_rects(&g, n, self.panes[q].active).iter().filter(|tr| (tr.l + tr.r) / 2.0 < x).count() } else { n };
+        let at = if g.tabs.contains(x, y) { drop_index(&tab_rects(&g, n, self.panes[q].active), x) } else { n };
         Some((q, at))
     }
 
@@ -2007,7 +2051,7 @@ impl App {
     /// 잘라내기 붙여넣기가 끝나면 클립보드를 정리한다. 다 옮겼으면 비우고, 남은 파일이 있으면 그것만 다시 잘라 둔다.
     /// 그사이 사용자가 다른 것을 복사했으면 건드리지 않는다
     fn after_cut_paste(&mut self, cut: shell::CutLeft) {
-        self.moving_clip = None;
+        self.moving.end(cut.id);
         let untouched = shell::clipboard_seq() == cut.seq || shell::clipboard_files().is_some_and(|(paths, is_move)| is_move && paths == cut.clip);
         if !untouched || cut.left == cut.clip {
             return;
@@ -3541,15 +3585,14 @@ pub fn execute(hwnd: HWND, act: Deferred) {
             Some((clip, true)) if !clip.is_empty() => {
                 // 클립보드는 옮기기가 끝난 뒤에 정리한다 (같은 폴더·취소·실패면 다시 붙여넣을 수 있게)
                 let seq = shell::clipboard_seq();
-                let busy = with_app(|a| a.moving_clip.as_ref() == Some(&clip)).unwrap_or(false);
                 let paths: Vec<String> = clip.iter().filter(|p| !util::parent(p).is_some_and(|d| util::eq_path(&d, &dest))).cloned().collect();
+                let busy = with_app(|a| a.moving.busy(&paths)).unwrap_or(false);
                 if busy {
                     with_app(|a| a.flash(pane, "잘라낸 파일을 옮기는 중입니다"));
                 } else if paths.is_empty() {
                     with_app(|a| a.flash(pane, "이미 이 폴더에 있습니다 · 다른 폴더에 붙여넣으세요"));
-                } else {
-                    with_app(|a| a.moving_clip = Some(clip.clone()));
-                    shell::spawn_cut_paste(hwnd, paths, dest, seq, clip);
+                } else if let Some(id) = with_app(|a| a.moving.begin(&paths)) {
+                    shell::spawn_cut_paste(hwnd, paths, dest, seq, clip, id);
                 }
             }
             _ => {
@@ -3778,5 +3821,39 @@ mod tests {
         // 다 들어가면 예전과 같이 차례로
         let trs = tab_rects(&g, 3, 0);
         assert!(trs.windows(2).all(|w| w[0].r < w[1].l));
+    }
+
+    /// 회귀: 탭이 가려져 있어도 놓은 자리(보이는 탭 사이)에 들어간다
+    #[test]
+    fn drop_position_counts_only_visible_tabs() {
+        let g = geom(R::new(0.0, 0.0, 380.0, 600.0));
+        let trs = tab_rects(&g, 12, 6);
+        let visible: Vec<usize> = (0..12).filter(|&i| trs[i].w() > 0.0).collect();
+        let (first, last) = (visible[0], *visible.last().unwrap());
+        assert!(first > 0 && last < 11, "both sides hidden: {visible:?}");
+        // 마지막으로 보이는 탭 바로 뒤 → 그 탭 다음 자리 (맨 끝이 아니라)
+        assert_eq!(drop_index(&trs, trs[last].r + 1.0), last + 1);
+        // 첫 보이는 탭 앞 → 그 탭 자리 (맨 앞이 아니라)
+        assert_eq!(drop_index(&trs, trs[first].l + 1.0), first);
+        // 보이는 두 탭 사이
+        assert_eq!(drop_index(&trs, trs[first + 1].l), first + 1);
+        // 다 보일 때는 예전과 같다
+        let all = tab_rects(&g, 3, 0);
+        assert_eq!((drop_index(&all, 0.0), drop_index(&all, all[2].r + 1.0)), (0, 3));
+    }
+
+    /// 회귀: 이동 작업이 겹쳐도 먼저 끝난 작업이 다른 작업의 '옮기는 중' 표시를 지우지 않는다
+    #[test]
+    fn overlapping_moves_keep_each_other_busy() {
+        let (a, b) = (vec!["C:\\s\\a.txt".to_string()], vec!["C:\\s\\b.txt".to_string()]);
+        let mut m = Moving::default();
+        let ida = m.begin(&a);
+        let idb = m.begin(&b);
+        m.end(ida);
+        assert!(!m.busy(&a), "A finished");
+        assert!(m.busy(&b), "B still moving");
+        assert!(m.busy(&["c:\\S\\B.TXT".to_string(), "C:\\s\\c.txt".to_string()]), "any overlapping file counts");
+        m.end(idb);
+        assert!(!m.busy(&b));
     }
 }
