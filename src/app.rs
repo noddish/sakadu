@@ -32,7 +32,7 @@ mod fav_ui;
 mod palette;
 mod preview;
 mod settings_ui;
-use fav_ui::{G_STAR, TIMER_FLY, TIMER_FLY_CLOSE};
+use fav_ui::{G_STAR, TIMER_FAV_TIP, TIMER_FLY, TIMER_FLY_CLOSE};
 use palette::{G_SEARCH, PalGate, PalStatus, SEARCH_MIN_W, TIMER_SEARCH, TIMER_SEARCH_READY};
 use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
@@ -136,14 +136,12 @@ enum Hit {
     Pane(usize),
     FavButton,
     FavRow(usize),
-    FavEdit(usize),
-    FavRemove(usize),
     FavAdd,
     FavSort,
     FavNewGroup,
     /// 검색 창의 "이 폴더도 검색하기" 버튼
     PalAddFolder,
-    /// 즐겨찾기 그룹 옆 목록의 항목·빈 곳
+    /// 즐겨찾기 그룹의 오른쪽 메뉴: 항목·빈 곳
     FavFlyItem(usize),
     FavFlyPanel,
     FavPanel,
@@ -195,7 +193,7 @@ enum EditMode {
     Address(usize),
     Rename(usize),
     /// 즐겨찾기 표시 이름 바꾸기
-    FavRename(usize),
+    FavRename(crate::favorites::Row),
 }
 
 struct RenameCtx {
@@ -244,7 +242,7 @@ pub enum Deferred {
     Open { pane: usize, paths: Vec<String>, dir: Option<String> },
     Menu { pane: usize, paths: Vec<String>, dir: Option<String>, pt: POINT },
     PrepareMenu { paths: Vec<String>, dir: Option<String> },
-    FavMenu { index: usize, pt: POINT },
+    FavMenu { row: crate::favorites::Row, pt: POINT },
     FavSortMenu { pt: POINT },
     DragOut(Vec<String>),
     Verb { paths: Vec<String>, verb: &'static str },
@@ -300,8 +298,12 @@ pub struct App {
     fav_open: bool,
     fav_sel: usize,
     fav_scroll: f32,
-    /// 즐겨찾기 그룹에 마우스를 올리면 옆에 띄우는 목록: (그룹, 나타난 정도 0~1)
-    fav_fly: Option<(usize, f32)>,
+    /// 즐겨찾기 그룹의 오른쪽 메뉴 (그룹에 마우스를 올리거나 →)
+    fav_fly: Option<fav_ui::Fly>,
+    /// 경로를 보여 줄 즐겨찾기 줄과, 잠시 머물러 이제 보이는지
+    fav_tip: Option<(crate::favorites::Row, bool)>,
+    /// 바로 전 마우스 위치 (오른쪽 메뉴 쪽으로 가는 중인지 보는 데 씀)
+    fav_pointer: (f32, f32),
     search_edit: HWND,
     pal_open: bool,
     pal_results: Vec<(bool, String)>,
@@ -839,6 +841,8 @@ impl App {
             fav_sel: 0,
             fav_scroll: 0.0,
             fav_fly: None,
+            fav_tip: None,
+            fav_pointer: (0.0, 0.0),
             search_edit,
             pal_open: false,
             pal_results: Vec::new(),
@@ -1740,7 +1744,7 @@ impl App {
         place(self.addr_edit, addr);
         let ren = match self.edit_mode {
             EditMode::Rename(p) => self.rename_rect(p).map(|r| center(r, 4.0, 4.0)),
-            EditMode::FavRename(i) if self.fav_open => self.fav_rename_rect(i).map(|r| center(r, 4.0, 4.0)),
+            EditMode::FavRename(row) if self.fav_open => self.fav_rename_rect(row).map(|r| center(r, 4.0, 4.0)),
             _ => None,
         };
         place(self.rename_edit, ren);
@@ -1805,8 +1809,8 @@ impl App {
     }
 
     fn commit_rename(&mut self) {
-        if let EditMode::FavRename(i) = self.edit_mode {
-            self.commit_fav_rename(i);
+        if let EditMode::FavRename(row) = self.edit_mode {
+            self.commit_fav_rename(row);
             return;
         }
         let Some(ctx) = self.rename.take() else { return };
@@ -2288,7 +2292,7 @@ impl App {
                     if self.hover != Hit::None {
                         self.hover = Hit::None;
                         if self.fav_open {
-                            self.fav_fly_hover(Hit::None);
+                            self.fav_fly_hover(Hit::None, -1.0, -1.0);
                         }
                         self.update_tip();
                         self.invalidate();
@@ -2370,7 +2374,7 @@ impl App {
                         self.pal_run_query();
                     } else if id == TIMER_PREVIEW {
                         self.start_preview();
-                    } else if id == TIMER_FLY || id == TIMER_FLY_CLOSE {
+                    } else if id == TIMER_FLY || id == TIMER_FLY_CLOSE || id == TIMER_FAV_TIP {
                         self.fav_fly_timer(id);
                     } else if id == TIMER_TIP {
                         let _ = KillTimer(Some(hwnd), id);
@@ -2489,10 +2493,13 @@ impl App {
                 if h != self.hover {
                     self.hover = h;
                     if self.fav_open {
-                        self.fav_fly_hover(h);
+                        self.fav_fly_hover(h, x, y);
                     }
                     self.update_tip();
                     self.invalidate();
+                }
+                if self.fav_open {
+                    self.fav_pointer = (x, y);
                 }
                 if !self.tracking {
                     let mut tme = TRACKMOUSEEVENT {
@@ -2706,7 +2713,7 @@ impl App {
         }
         if self.fav_open {
             match hit {
-                Hit::FavRow(i) | Hit::FavEdit(i) | Hit::FavRemove(i) => {
+                Hit::FavRow(i) => {
                     self.end_edits_for_click();
                     self.fav_sel = i;
                 }
@@ -2763,15 +2770,10 @@ impl App {
             return true;
         }
         if self.fav_open {
-            let row = match self.hit(x, y) {
-                Hit::FavRow(i) | Hit::FavEdit(i) | Hit::FavRemove(i) => Some(i),
-                // 옆 목록의 항목은 그룹을 펼쳐 그 항목을 고른 뒤 같은 메뉴를 띄운다
-                Hit::FavFlyItem(j) => self.fav_fly_reveal(j),
-                _ => None,
-            };
-            if let Some(i) = row {
+            if let Some(row) = self.fav_row_at(self.hit(x, y)) {
+                self.fav_select(row);
                 let pt = self.to_screen(x, y);
-                self.pending.push(Deferred::FavMenu { index: i, pt });
+                self.pending.push(Deferred::FavMenu { row, pt });
             }
             return true;
         }
@@ -2792,8 +2794,8 @@ impl App {
             return;
         }
         if self.fav_open {
-            if let Hit::FavRow(i) = self.hit(x, y) {
-                self.fav_open_item(i, true);
+            if let Some(row) = self.fav_row_at(self.hit(x, y)) {
+                self.fav_open_row(row, true);
             }
             return;
         }
@@ -2824,8 +2826,9 @@ impl App {
             self.pal_wheel(-delta / 120.0 * 3.0 * ROW_H);
             return;
         }
-        if self.fav_open && self.fav_rect().contains(x, y) {
-            self.fav_wheel(-delta / 120.0 * 3.0 * ROW_H);
+        // 즐겨찾기가 열려 있으면 휠은 그 메뉴들 안에서만 (뒤쪽 파일 목록은 움직이지 않게)
+        if self.fav_open {
+            self.fav_wheel_at(x, y, -delta / 120.0 * 3.0 * ROW_H);
             return;
         }
         if self.preview_rect().is_some_and(|r| r.contains(x, y)) {
@@ -3601,7 +3604,7 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         },
         Deferred::Menu { pane, paths, dir, pt } => show_menu(hwnd, MenuRequest { pane, paths, dir, pt }),
         Deferred::PrepareMenu { paths, dir } => prepare_menu(hwnd, paths, dir),
-        Deferred::FavMenu { index, pt } => fav_ui::show_fav_menu(hwnd, index, pt),
+        Deferred::FavMenu { row, pt } => fav_ui::show_fav_menu(hwnd, row, pt),
         Deferred::FavSortMenu { pt } => fav_ui::show_fav_sort_menu(hwnd, pt),
         Deferred::PreviewSync => preview::sync_handler(),
         Deferred::Settings { ctl, index, pt } => settings_ui::run_deferred(hwnd, ctl, index, pt),

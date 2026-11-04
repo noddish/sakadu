@@ -47,15 +47,10 @@ const HEADER_V1: &str = "sakadu-favorites 1";
 const HEADER: &str = "sakadu-favorites 2";
 
 impl Favorites {
-    /// 보이는 줄: 그룹 없는 항목, 그다음 그룹마다 머리 줄과 (펼쳐져 있으면) 그 안의 항목
+    /// 팝업 왼쪽 목록의 줄: 그룹 없는 항목, 그다음 그룹마다 한 줄. 그룹 안 항목은 오른쪽 메뉴에 따로 보인다
     pub fn rows(&self) -> Vec<Row> {
         let mut rows: Vec<Row> = (0..self.items.len()).map(|index| Row::Item { group: None, index }).collect();
-        for (g, group) in self.groups.iter().enumerate() {
-            rows.push(Row::Group(g));
-            if !group.collapsed {
-                rows.extend((0..group.items.len()).map(|index| Row::Item { group: Some(g), index }));
-            }
-        }
+        rows.extend((0..self.groups.len()).map(Row::Group));
         rows
     }
 
@@ -179,24 +174,23 @@ impl Favorites {
         }
     }
 
-    /// 보이는 줄 사이 경계 slot(0..=줄 수)에 항목을 놓으면 들어갈 (그룹, 위치). 위치는 옮기기 전 기준
-    pub fn item_drop_target(&self, slot: usize) -> (Option<usize>, usize) {
-        let rows = self.rows();
-        if let Some(Row::Item { group, index }) = rows.get(slot) {
-            return (*group, *index);
+    /// 왼쪽 목록의 pos(줄 단위, 0.0이 첫 줄 위쪽 끝)에 항목을 놓으면 들어갈 (그룹, 위치). 위치는 옮기기 전 기준.
+    /// 그룹 줄 위에 놓으면 그 그룹 끝으로, 그 밖에는 그룹 없는 항목들 사이 가장 가까운 자리로
+    pub fn item_drop_target(&self, pos: f32) -> (Option<usize>, usize) {
+        let row = pos.floor();
+        let n = self.items.len();
+        if row >= n as f32 && (row as usize) < n + self.groups.len() {
+            let g = row as usize - n;
+            return (Some(g), self.groups[g].items.len());
         }
-        match slot.checked_sub(1).and_then(|i| rows.get(i)) {
-            Some(Row::Item { group, index }) => (*group, index + 1),
-            // 그룹 머리 줄 바로 아래(빈 그룹이거나 접힌 그룹): 그 그룹 끝
-            Some(Row::Group(g)) => (Some(*g), self.groups[*g].items.len()),
-            None => (None, 0),
-        }
+        (None, (pos.round().max(0.0) as usize).min(n))
     }
 
-    /// 그룹을 slot에 놓으면 들어갈 그룹 순서 (옮긴 뒤 기준)
-    pub fn group_drop_target(&self, slot: usize, dragged: usize) -> usize {
-        let rows = self.rows();
-        rows[..slot.min(rows.len())].iter().filter(|r| matches!(r, Row::Group(g) if *g != dragged)).count()
+    /// 그룹을 pos에 놓으면 들어갈 그룹 순서 (옮긴 뒤 기준). 그룹은 그룹끼리만 자리를 바꾼다
+    pub fn group_drop_target(&self, pos: f32, dragged: usize) -> usize {
+        let n = self.items.len();
+        let slot = (pos.round().max(0.0) as usize).clamp(n, n + self.groups.len()) - n;
+        if dragged < slot { slot - 1 } else { slot }
     }
 
     /// Ctrl+↑↓: 항목은 섹션 안에서 한 칸, 섹션 끝이면 이웃 섹션으로. 그룹은 이웃 그룹과 자리를 바꾼다
@@ -383,22 +377,28 @@ mod tests {
     }
 
     #[test]
-    fn rows_hide_collapsed_groups() {
-        assert_eq!(names(&sample()), "01.일간 업무,견적서,거래처,A사,B사,보관");
+    fn rows_show_each_group_as_one_line() {
+        // 그룹 안 항목은 왼쪽 목록에 펼치지 않는다 (오른쪽 메뉴에 보인다)
+        assert_eq!(names(&sample()), "01.일간 업무,견적서,거래처,보관");
         assert_eq!(sample().count(), 5);
     }
 
     #[test]
     fn drop_targets_follow_the_line_under_the_cursor() {
         let f = sample();
-        // 줄: 0 일간, 1 견적서, 2 [거래처], 3 A사, 4 B사, 5 [보관]
-        assert_eq!(f.item_drop_target(0), (None, 0));
-        assert_eq!(f.item_drop_target(2), (None, 2));
-        assert_eq!(f.item_drop_target(3), (Some(0), 0));
-        assert_eq!(f.item_drop_target(5), (Some(0), 2));
-        assert_eq!(f.item_drop_target(6), (Some(1), 1));
-        assert_eq!(f.group_drop_target(0, 1), 0);
-        assert_eq!(f.group_drop_target(6, 0), 1);
+        // 줄: 0 일간, 1 견적서, 2 [거래처], 3 [보관]
+        assert_eq!(f.item_drop_target(0.2), (None, 0));
+        assert_eq!(f.item_drop_target(0.7), (None, 1));
+        assert_eq!(f.item_drop_target(1.8), (None, 2));
+        // 그룹 줄 위에 놓으면 그 그룹 끝으로
+        assert_eq!(f.item_drop_target(2.5), (Some(0), 2));
+        assert_eq!(f.item_drop_target(3.1), (Some(1), 1));
+        // 목록 아래 빈 곳은 그룹 없는 항목 끝
+        assert_eq!(f.item_drop_target(9.0), (None, 2));
+        // 그룹은 그룹끼리: 보관을 거래처 앞으로, 거래처를 맨 뒤로
+        assert_eq!(f.group_drop_target(2.0, 1), 0);
+        assert_eq!(f.group_drop_target(0.0, 1), 0, "groups never go above loose items");
+        assert_eq!(f.group_drop_target(4.0, 0), 1);
     }
 
     #[test]
@@ -406,13 +406,12 @@ mod tests {
         let mut f = sample();
         // 견적서를 거래처 맨 앞으로
         assert_eq!(f.move_item((None, 1), Some(0), 0), Some((Some(0), 0)));
-        assert_eq!(names(&f), "01.일간 업무,거래처,견적서,A사,B사,보관");
+        assert_eq!(f.groups[0].items[0].name, "견적서");
         // 같은 섹션에서 뒤로: 옮기기 전 기준 위치 3(B사 뒤)
         assert_eq!(f.move_item((Some(0), 0), Some(0), 3), Some((Some(0), 2)));
-        assert_eq!(names(&f), "01.일간 업무,거래처,A사,B사,견적서,보관");
-        // 접힌 그룹으로 옮기면 펼친다
+        let names: Vec<_> = f.groups[0].items.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["A사", "B사", "견적서"]);
         f.move_item((Some(0), 2), Some(1), 0);
-        assert!(!f.groups[1].collapsed);
         assert_eq!(f.find("D:\\업무\\견적서.xlsx"), Some((Some(1), 0)));
     }
 
