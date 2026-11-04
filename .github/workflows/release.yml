@@ -25,7 +25,8 @@ jobs:
           Copy-Item target/release/sakadu.exe, README.md, LICENSE "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+          # 줄 끝을 LF로 맞춰야 Linux·Git Bash의 sha256sum -c가 파일 이름을 제대로 읽는다
+          "$hash  $name.zip`n" | Out-File -Encoding ascii -NoNewline "dist/$name.zip.sha256"
       - name: Create draft release
         shell: pwsh
         env:
