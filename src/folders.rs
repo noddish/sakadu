@@ -6,7 +6,7 @@
 use crate::index::{Hit, Query};
 use crate::listing::{self, Entry};
 use crate::util;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -138,8 +138,10 @@ impl Folders {
     pub fn observe(&self, dir: &str, entries: &[Entry]) {
         let Some(root) = self.root_for(dir) else { return };
         let rel = rel_path(&root.path, dir);
+        // 큰 공유폴더도 UI가 멈추지 않게 인덱스 쪽을 한 번 모아 두고 맞춰 본다 (항목마다 전체를 훑지 않음)
         let same = root.tree.read().unwrap().get(&rel).is_some_and(|old| {
-            old.len() == entries.len() && entries.iter().all(|e| old.iter().any(|(n, d)| *d == e.is_dir() && *n == e.name_string()))
+            let known: HashSet<(&str, bool)> = old.iter().map(|(n, d)| (n.as_str(), *d)).collect();
+            old.len() == entries.len() && entries.iter().all(|e| known.contains(&(e.name_string().as_str(), e.is_dir())))
         });
         if !same {
             std::thread::spawn(move || refresh_dir(&root, &rel));
@@ -262,15 +264,17 @@ fn refresh_dir(root: &Root, rel: &str) {
     let Some(old) = root.tree.read().unwrap().get(rel).cloned() else { return };
     // 못 읽으면(방금 지워진 폴더 등) 상위 폴더 쪽 변경에서 정리된다
     let Ok(items) = list(&root.path, rel) else { return };
+    let old_dirs: HashSet<&str> = old.iter().filter(|(_, d)| *d).map(|(n, _)| n.as_str()).collect();
+    let new_dirs: HashSet<&str> = items.iter().filter(|(_, d, _)| *d).map(|(n, ..)| n.as_str()).collect();
     let mut added = Tree::new();
     for (name, _, descend) in &items {
-        if *descend && !old.iter().any(|(n, d)| *d && n == name) {
+        if *descend && !old_dirs.contains(name.as_str()) {
             let _ = scan(&root.path, &join_rel(rel, name), &root.stop, &mut added);
         }
     }
     let mut tree = root.tree.write().unwrap();
     for (name, is_dir) in &old {
-        if *is_dir && !items.iter().any(|(n, d, _)| *d && n == name) {
+        if *is_dir && !new_dirs.contains(name.as_str()) {
             let gone = join_rel(rel, name);
             let prefix = format!("{gone}\\");
             tree.retain(|k, _| *k != gone && !k.starts_with(&prefix));
@@ -491,6 +495,26 @@ mod tests {
 
         f.remove_where(|_| true);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 성능: 1만 개가 든 넣은 폴더를 다시 열 때 읽은 목록을 인덱스와 맞춰 보는 시간 (UI 스레드에서 돈다)
+    /// (cargo test --release bench_observe_large_folder -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn bench_observe_large_folder() {
+        let names: Vec<String> = (0..10_000).map(|i| format!("scan_{i:05}.pdf")).collect();
+        let mut tree = Tree::new();
+        tree.insert(String::new(), names.iter().map(|n| (n.clone(), false)).collect());
+        let f = Folders::default();
+        let root = Root { path: "\\\\nas\\bench".into(), tree: RwLock::new(tree), state: Mutex::new(State::Ready(10_000)), stop: AtomicBool::new(false) };
+        f.roots.lock().unwrap().push(Arc::new(root));
+        // 탐색기 목록은 이름순이라 인덱스와 순서가 다를 수 있다: 거꾸로 넘긴다
+        let entries: Vec<Entry> = names.iter().rev().map(|n| Entry::from_str(n, crate::listing::Kind::File)).collect();
+        for round in 1..=3 {
+            let t0 = Instant::now();
+            f.observe("\\\\nas\\bench", &entries);
+            println!("round {round}: observe 10000 entries: {:?}", t0.elapsed());
+        }
     }
 
     /// 실제 공유폴더에서 훑기·검색 확인 (SAKADU_TEST_FOLDER, SAKADU_TEST_QUERY). 이름은 출력하지 않고 개수만

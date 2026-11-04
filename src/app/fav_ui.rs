@@ -26,9 +26,16 @@ const FAV_BUTTON_W: f32 = 100.0;
 impl App {
     /// 도구 막대 가운데에 즐겨찾기 버튼과 검색 상자를 한 묶음으로 둔다. 창이 좁으면 왼쪽 버튼들 바로 뒤에 붙는다
     pub(super) fn fav_button(&self) -> R {
-        let group = FAV_BUTTON_W + 6.0 + palette::SEARCH_W;
+        let w = if self.fav_button_compact() { 32.0 } else { FAV_BUTTON_W };
+        let group = w + 6.0 + palette::SEARCH_W;
         let l = (self.w / 2.0 - group / 2.0).max(hidden_button().r + 16.0);
-        R::new(l, 8.0, l + FAV_BUTTON_W, 38.0)
+        R::new(l, 8.0, l + w, 38.0)
+    }
+
+    /// 창이 좁으면(크기 150% 등) 즐겨찾기 버튼은 별 아이콘만 두어 검색 상자가 오른쪽 버튼을 덮지 않게 한다
+    pub(super) fn fav_button_compact(&self) -> bool {
+        let room = self.preview_button().l - 10.0 - (hidden_button().r + 16.0 + FAV_BUTTON_W + 6.0);
+        room < palette::SEARCH_MIN_W
     }
 }
 
@@ -488,6 +495,7 @@ impl App {
     /// 경로 상자의 별: 이 폴더를 즐겨찾기에 바로 넣거나 뺀다 (팝업을 열지 않는다)
     pub(super) fn toggle_star(&mut self, p: usize) {
         let Some(dir) = self.panes[p].tab().loc.dir().map(util::normalize) else { return };
+        let before = self.favs.clone();
         let msg = match self.favs.find(&dir) {
             Some((group, index)) => {
                 self.favs.remove_item(group, index);
@@ -498,8 +506,14 @@ impl App {
                 "즐겨찾기에 넣었습니다 · 이름과 그룹은 즐겨찾기 창에서 정리할 수 있어요"
             }
         };
-        self.save_favorites();
-        self.flash(p, msg);
+        // 저장하지 못했으면 별 표시도 원래대로 두고 오류만 보인다 (성공 문구로 덮지 않게)
+        match favorites::save(&self.favs) {
+            Ok(()) => self.flash(p, msg),
+            Err(e) => {
+                self.favs = before;
+                self.flash(p, format!("즐겨찾기를 저장하지 못해 바꾸지 않았습니다: {e}"));
+            }
+        }
     }
 
     fn save_favorites(&mut self) {

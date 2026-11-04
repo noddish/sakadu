@@ -33,7 +33,7 @@ mod palette;
 mod preview;
 mod settings_ui;
 use fav_ui::{G_STAR, TIMER_FLY, TIMER_FLY_CLOSE};
-use palette::{G_SEARCH, PalStatus, TIMER_SEARCH};
+use palette::{G_SEARCH, PalGate, PalStatus, SEARCH_MIN_W, TIMER_SEARCH, TIMER_SEARCH_READY};
 use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
 pub use preview::{TextReady, unload_handler};
@@ -205,6 +205,15 @@ struct RenameCtx {
     old: String,
 }
 
+/// 화면 설정에서 바뀐 부분 (apply_look이 그만큼만 다시 만든다)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LookPart {
+    /// 테마·강조 색
+    Colors,
+    Font,
+    Zoom,
+}
+
 pub enum Deferred {
     Close,
     Open { pane: usize, paths: Vec<String>, dir: Option<String> },
@@ -280,8 +289,12 @@ pub struct App {
     pal_status: PalStatus,
     /// 늦게 도착한 이전 검색 결과를 버리기 위한 순번
     pal_seq: u64,
+    /// 보이는 결과가 지금 검색어의 것인지, 결과보다 먼저 누른 Enter
+    pal_gate: PalGate,
     /// Ctrl+Z로 되돌릴 작업 (마지막이 가장 최근)
     undo: Vec<crate::undo::Undo>,
+    /// 잘라내기 붙여넣기가 진행 중인 클립보드 목록 (끝나기 전에 같은 파일을 또 붙여넣지 않게)
+    moving_clip: Option<Vec<String>>,
     /// 실제로 등록된 전역 검색 단축키
     hotkey: Option<String>,
     /// 화면 설정 (테마·강조 색·글꼴·크기)
@@ -392,13 +405,26 @@ fn columns(list: R, w: [f32; 3]) -> Cols {
     Cols { name: (list.l + 8.0, x.max(list.l + 120.0)), modified, kind, size }
 }
 
-fn tab_rects(g: &PaneGeom, n: usize) -> Vec<R> {
+/// 탭 자리. 칸이 좁아 다 들어가지 않으면 지금 탭(active)이 보이는 만큼만 보이고,
+/// 나머지는 폭 0으로 양 끝에 둔다(그리기·누르기에서 빠짐). 새 탭(+)은 늘 보이는 탭 바로 뒤
+fn tab_rects(g: &PaneGeom, n: usize, active: usize) -> Vec<R> {
     let avail = g.tabs.w() - 16.0 - 34.0;
-    let w = (avail / n.max(1) as f32).clamp(72.0, 200.0);
+    let w = ((avail + 2.0) / n.max(1) as f32 - 2.0).clamp(72.0, 200.0);
+    // 나눗셈 오차로 하나 덜 들어간다고 보지 않게 조금 여유를 둔다
+    let fits = ((avail + 2.0) / (w + 2.0) + 0.001).floor().max(1.0) as usize;
+    let first = if n > fits { (active + 1).saturating_sub(fits).min(n - fits) } else { 0 };
+    let start = g.tabs.l + 8.0;
+    let end = start + fits.min(n) as f32 * (w + 2.0) - 2.0;
     (0..n)
         .map(|i| {
-            let l = g.tabs.l + 8.0 + i as f32 * (w + 2.0);
-            R::new(l, g.tabs.t + 6.0, l + w, g.tabs.b - 2.0)
+            if i < first {
+                R::new(start, g.tabs.t + 6.0, start, g.tabs.b - 2.0)
+            } else if i >= first + fits {
+                R::new(end, g.tabs.t + 6.0, end, g.tabs.b - 2.0)
+            } else {
+                let l = start + (i - first) as f32 * (w + 2.0);
+                R::new(l, g.tabs.t + 6.0, l + w, g.tabs.b - 2.0)
+            }
         })
         .collect()
 }
@@ -408,7 +434,7 @@ fn close_rect(tr: R) -> R {
 }
 
 fn add_rect(g: &PaneGeom, tabs: &[R]) -> R {
-    let l = tabs.last().map(|r| r.r + 4.0).unwrap_or(g.tabs.l + 8.0);
+    let l = tabs.iter().map(|r| r.r + 4.0).fold(g.tabs.l + 8.0, f32::max);
     R::new(l, g.tabs.t + 8.0, l + 26.0, g.tabs.b - 4.0)
 }
 
@@ -787,7 +813,9 @@ impl App {
             pal_scroll: 0.0,
             pal_status: PalStatus::Idle,
             pal_seq: 0,
+            pal_gate: PalGate::default(),
             undo: Vec::new(),
+            moving_clip: None,
             hotkey: None,
             look,
             keys: crate::keys::Keymap::load(),
@@ -1042,7 +1070,7 @@ impl App {
             let pane = &self.panes[p];
             let tab = pane.tab();
             if g.tabs.contains(x, y) {
-                let trs = tab_rects(&g, pane.tabs.len());
+                let trs = tab_rects(&g, pane.tabs.len(), pane.active);
                 for (i, tr) in trs.iter().enumerate() {
                     if tr.contains(x, y) {
                         if pane.tabs.len() > 1 && close_rect(*tr).contains(x, y) {
@@ -1234,6 +1262,8 @@ impl App {
     /// 경로가 없으면(Win+E) 창만 앞으로
     pub fn open_external(&mut self, path: Option<String>) {
         let Some(raw) = path else { return };
+        // 설정 화면 뒤에 새 탭이 가려지지 않게 닫는다
+        self.close_settings();
         self.close_palette();
         self.close_favorites();
         let p = self.active;
@@ -1367,7 +1397,7 @@ impl App {
         let (q, r) = self.pane_rects().into_iter().find(|(_, r)| r.contains(x, y))?;
         let g = geom(r);
         let n = self.panes[q].tabs.len();
-        let at = if g.tabs.contains(x, y) { tab_rects(&g, n).iter().filter(|tr| (tr.l + tr.r) / 2.0 < x).count() } else { n };
+        let at = if g.tabs.contains(x, y) { tab_rects(&g, n, self.panes[q].active).iter().filter(|tr| (tr.l + tr.r) / 2.0 < x).count() } else { n };
         Some((q, at))
     }
 
@@ -1866,15 +1896,22 @@ impl App {
         if tab.loc == Location::Computer {
             return;
         }
-        let paths = tab.selected_paths();
-        if !paths.is_empty() {
-            shell::spawn_file_op(self.hwnd, FileOp::Delete { paths, permanent });
+        // 선택을 풀어 둔 상태에서는 커서 항목으로 대신하지 않는다
+        let paths = tab.marked_paths();
+        if paths.is_empty() {
+            self.flash(p, "지울 항목을 먼저 고르세요");
+            return;
         }
+        shell::spawn_file_op(self.hwnd, FileOp::Delete { paths, permanent });
     }
 
     fn copy(&mut self, p: usize, cut: bool) {
-        let paths = self.panes[p].tab().selected_paths();
+        let tab = self.panes[p].tab();
+        let paths = if cut { tab.marked_paths() } else { tab.selected_paths() };
         if paths.is_empty() {
+            if cut {
+                self.flash(p, "잘라낼 항목을 먼저 고르세요");
+            }
             return;
         }
         let n = paths.len();
@@ -1896,9 +1933,13 @@ impl App {
             name = format!("새 폴더 ({n})");
             n += 1;
         }
-        match std::fs::create_dir(util::join(&dir, &name)) {
+        let path = util::join(&dir, &name);
+        match std::fs::create_dir(&path) {
             Ok(()) => {
-                self.push_undo(crate::undo::Undo::Create(util::join(&dir, &name)));
+                // 만든 직후 표식을 남겨, 되돌릴 때 그사이 자료가 들어왔으면 지우지 않게 한다
+                if let Some(s) = crate::undo::stamp(&path, true) {
+                    self.push_undo(crate::undo::Undo::Create(path, s));
+                }
                 self.panes[p].tab_mut().restore = Some(Restore { rename: true, ..Restore::select(&name) });
                 self.load(p, true);
             }
@@ -1923,6 +1964,54 @@ impl App {
                 shell::spawn_file_op(self.hwnd, FileOp::Undo(u));
             }
             None => self.flash(p, "되돌릴 작업이 없습니다"),
+        }
+    }
+
+    fn on_file_op(&mut self, r: shell::OpReport) {
+        if let Some(u) = r.undo {
+            self.push_undo(u);
+        }
+        if let Some(o) = r.undone {
+            self.on_undone(o);
+        }
+        if let Some(cut) = r.cut {
+            self.after_cut_paste(cut);
+        }
+    }
+
+    /// 되돌리기가 일부만 됐으면 알리고, 실패한 항목은 기록으로 되돌려 놓아 다시 시도할 수 있게 한다
+    fn on_undone(&mut self, o: crate::undo::Undone) {
+        let failed = o.retry.as_ref().map_or(0, |r| r.len());
+        if let Some(r) = o.retry {
+            self.push_undo(r);
+        }
+        let key = self.keys.get(crate::keys::Action::Undo).map_or_else(|| "되돌리기".to_string(), |c| c.label());
+        let changed = match o.changed.as_slice() {
+            [] => String::new(),
+            [one] => format!("‘{}’은(는) 그사이 바뀌었거나 없어져 그대로 두었습니다", util::file_name(one)),
+            many => format!("{}개는 그사이 바뀌었거나 없어져 그대로 두었습니다", many.len()),
+        };
+        let msg = match (failed, changed.is_empty()) {
+            (0, true) => return,
+            (0, false) => changed,
+            (n, true) => format!("{n}개를 되돌리지 못했습니다 · {key}로 다시 시도"),
+            (n, false) => format!("{n}개를 되돌리지 못했습니다({key}로 다시 시도) · {changed}"),
+        };
+        self.flash(self.active, msg);
+    }
+
+    /// 잘라내기 붙여넣기가 끝나면 클립보드를 정리한다. 다 옮겼으면 비우고, 남은 파일이 있으면 그것만 다시 잘라 둔다.
+    /// 그사이 사용자가 다른 것을 복사했으면 건드리지 않는다
+    fn after_cut_paste(&mut self, cut: shell::CutLeft) {
+        self.moving_clip = None;
+        let untouched = shell::clipboard_seq() == cut.seq || shell::clipboard_files().is_some_and(|(paths, is_move)| is_move && paths == cut.clip);
+        if !untouched || cut.left == cut.clip {
+            return;
+        }
+        if cut.left.is_empty() {
+            shell::clear_clipboard();
+        } else if let Err(e) = shell::set_clipboard_files(self.hwnd, &cut.left, true) {
+            crate::diag::log(|| format!("cut: could not keep remaining files on clipboard: {e}"));
         }
     }
 
@@ -2053,19 +2142,29 @@ impl App {
         self.look.zoom as f32 / 100.0
     }
 
-    /// 화면 설정을 바꾼 뒤: 색·글꼴·크기를 다시 적용하고 저장한다
-    pub(super) fn apply_look(&mut self) {
+    /// 화면 설정을 바꾼 뒤: 바뀐 것만 다시 적용하고 저장한다.
+    /// 색(테마·강조 색)만 바뀌면 글꼴을 다시 만들거나 아이콘·썸네일을 비우지 않는다
+    pub(super) fn apply_look(&mut self, changed: LookPart) {
         self.theme = Theme::resolve(&self.look.theme, &self.look.accent);
-        if let Err(e) = self.gfx.set_font(&self.look.font) {
-            crate::diag::log(|| format!("font: {e}"));
+        if changed == LookPart::Font {
+            if let Err(e) = self.gfx.set_font(&self.look.font) {
+                crate::diag::log(|| format!("font: {e}"));
+            }
+            self.apply_edit_font();
         }
-        let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
-        self.on_dpi(dpi);
-        let mut rc = RECT::default();
-        unsafe {
-            let _ = GetClientRect(self.hwnd, &mut rc);
+        if changed == LookPart::Zoom {
+            // 크기가 바뀌면 아이콘·썸네일 비트맵 크기도 달라지므로 다시 만든다 (on_dpi)
+            let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
+            self.on_dpi(dpi);
+            let mut rc = RECT::default();
+            unsafe {
+                let _ = GetClientRect(self.hwnd, &mut rc);
+            }
+            self.on_size(rc.right as u32, rc.bottom as u32);
+        } else if changed == LookPart::Font {
+            // 글자 폭이 달라지므로 입력 상자 자리를 다시 잡는다
+            self.layout_edits();
         }
-        self.on_size(rc.right as u32, rc.bottom as u32);
         self.apply_window_theme();
         self.save_session();
     }
@@ -2217,7 +2316,9 @@ impl App {
                 }
                 WM_TIMER => {
                     let id = wp.0;
-                    if id == TIMER_SEARCH {
+                    if id == TIMER_SEARCH_READY {
+                        self.pal_ready_timer();
+                    } else if id == TIMER_SEARCH {
                         self.pal_run_query();
                     } else if id == TIMER_PREVIEW {
                         self.start_preview();
@@ -2258,7 +2359,7 @@ impl App {
                 WM_APP_LISTED => self.on_listed(*Box::from_raw(lp.0 as *mut Listed)),
                 WM_APP_ICONS => self.on_icons(*Box::from_raw(lp.0 as *mut IconsReady)),
                 WM_APP_SEARCH => self.on_search_done(*Box::from_raw(lp.0 as *mut SearchDone)),
-                crate::WM_APP_UNDO => self.push_undo(*Box::from_raw(lp.0 as *mut crate::undo::Undo)),
+                crate::WM_APP_FILEOP => self.on_file_op(*Box::from_raw(lp.0 as *mut shell::OpReport)),
                 crate::WM_APP_THUMB => self.on_thumb(*Box::from_raw(lp.0 as *mut crate::thumbs::Image)),
                 crate::WM_APP_PREVIEW => self.on_preview_text(*Box::from_raw(lp.0 as *mut TextReady)),
                 m if (WM_APP_NOTIFY..WM_APP_NOTIFY + 4).contains(&m) => {
@@ -2683,7 +2784,14 @@ impl App {
             self.preview_wheel(-delta / 120.0 * 3.0 * ROW_H);
             return;
         }
-        let p = self.hit(x, y).pane().unwrap_or(self.active);
+        let hit = self.hit(x, y);
+        // 탭 줄에서 휠: 옆 탭으로 (탭이 많아 가려진 탭도 닿게)
+        if let Hit::Tab(p, _) | Hit::TabClose(p, _) | Hit::TabStrip(p) | Hit::TabAdd(p) = hit {
+            self.cycle_tab(p, delta > 0.0);
+            self.invalidate();
+            return;
+        }
+        let p = hit.pane().unwrap_or(self.active);
         // 썸네일 보기에서는 한 칸에 한 줄씩
         let step = if self.panes[p].view == ViewMode::Thumbs { TILE_H } else { 3.0 * ROW_H };
         self.scroll_by(p, -delta / 120.0 * step);
@@ -2982,15 +3090,26 @@ impl App {
             g.glyph(glyph, R::new(r.l + 8.0, r.t, r.l + 28.0, r.b), false, fg);
             g.text(label, R::new(r.l + 32.0, r.t, r.r - 6.0, r.b), Font::Normal, fg);
         };
-        button(self.fav_button(), G_STAR, "즐겨찾기", self.fav_open, self.hover == Hit::FavButton);
-        // 검색 상자처럼 보이는 버튼: 누르면 Ctrl+F 팔레트
+        // 좁으면 별 아이콘만 (이름은 말풍선에)
+        let fav = self.fav_button();
+        if self.fav_button_compact() {
+            icon_button(fav, G_STAR, self.fav_open, self.hover == Hit::FavButton);
+        } else {
+            button(fav, G_STAR, "즐겨찾기", self.fav_open, self.hover == Hit::FavButton);
+        }
+        // 검색 상자처럼 보이는 버튼: 누르면 검색 팔레트. 좁으면 단축키·글자를 차례로 뺀다
         let sb = self.search_button();
         let on = self.pal_open || self.hover == Hit::SearchButton;
         g.fill_round(sb, 8.0, if on { t.pane } else { t.field });
         g.stroke_round(sb.inset(0.5, 0.5), 8.0, if self.pal_open { t.accent } else { t.border }, 1.0);
         g.glyph(G_SEARCH, R::new(sb.l + 8.0, sb.t, sb.l + 28.0, sb.b), true, t.dim);
-        g.text("검색", R::new(sb.l + 30.0, sb.t, sb.r - 8.0, sb.b), Font::Normal, t.dim);
-        g.text("Ctrl+F", R::new(sb.l + 30.0, sb.t, sb.r - 10.0, sb.b), Font::Right, t.faint);
+        if sb.w() >= 72.0 {
+            g.text("검색", R::new(sb.l + 30.0, sb.t, sb.r - 8.0, sb.b), Font::Normal, t.dim);
+        }
+        // 바꾼 검색 단축키를 그대로 보여 준다 (비워 두었으면 없음)
+        if let Some(c) = self.keys.get(crate::keys::Action::Search).filter(|_| sb.w() >= SEARCH_MIN_W) {
+            g.text(&c.label(), R::new(sb.l + 30.0, sb.t, sb.r - 10.0, sb.b), Font::Right, t.faint);
+        }
         icon_button(self.preview_button(), G_PREVIEW, self.preview.is_some(), self.hover == Hit::PreviewButton);
         icon_button(self.settings_button(), G_SETTINGS, false, self.hover == Hit::SettingsButton);
     }
@@ -3085,11 +3204,15 @@ impl App {
 
         // 탭
         gfx.clip(R::new(r.l + 1.0, g.tabs.t, r.r - 1.0, g.tabs.b));
-        let trs = tab_rects(&g, pane.tabs.len());
+        let trs = tab_rects(&g, pane.tabs.len(), pane.active);
         // 탭마다 칩 모양으로 경계를 보이고, 지금 탭은 본문과 이어 붙이고 위에 강조 색 줄을 둔다
         let chip = alpha(t.text, if t.dark { 0.07 } else { 0.05 });
         let chip_hot = alpha(t.text, if t.dark { 0.13 } else { 0.10 });
         for (i, tr) in trs.iter().enumerate() {
+            // 칸이 좁아 가려진 탭 (휠·Ctrl+Tab으로 닿는다)
+            if tr.w() <= 0.0 {
+                continue;
+            }
             let is_active = i == pane.active;
             let hovered = matches!(hover, Hit::Tab(hp, ht) | Hit::TabClose(hp, ht) if hp == p && ht == i);
             if is_active {
@@ -3410,11 +3533,19 @@ pub fn execute(hwnd: HWND, act: Deferred) {
             let _ = shell::invoke_verb(hwnd, &paths, verb);
         }
         Deferred::Paste { pane, dest } => match shell::clipboard_files() {
-            Some((paths, is_move)) if !paths.is_empty() => {
-                let op = if is_move { FileOp::Move { paths, dest } } else { FileOp::Copy { paths, dest } };
-                shell::spawn_file_op(hwnd, op);
-                if is_move {
-                    shell::clear_clipboard();
+            Some((paths, false)) if !paths.is_empty() => shell::spawn_file_op(hwnd, FileOp::Copy { paths, dest }),
+            Some((clip, true)) if !clip.is_empty() => {
+                // 클립보드는 옮기기가 끝난 뒤에 정리한다 (같은 폴더·취소·실패면 다시 붙여넣을 수 있게)
+                let seq = shell::clipboard_seq();
+                let busy = with_app(|a| a.moving_clip.as_ref() == Some(&clip)).unwrap_or(false);
+                let paths: Vec<String> = clip.iter().filter(|p| !util::parent(p).is_some_and(|d| util::eq_path(&d, &dest))).cloned().collect();
+                if busy {
+                    with_app(|a| a.flash(pane, "잘라낸 파일을 옮기는 중입니다"));
+                } else if paths.is_empty() {
+                    with_app(|a| a.flash(pane, "이미 이 폴더에 있습니다 · 다른 폴더에 붙여넣으세요"));
+                } else {
+                    with_app(|a| a.moving_clip = Some(clip.clone()));
+                    shell::spawn_cut_paste(hwnd, paths, dest, seq, clip);
                 }
             }
             _ => {
@@ -3432,7 +3563,7 @@ pub fn execute(hwnd: HWND, act: Deferred) {
 }
 
 fn remove_search_folder(hwnd: HWND, folders: &crate::folders::Folders, root: &str) {
-    let text = format!("이 폴더를 Ctrl+F 검색에서 뺄까요?\n{root}");
+    let text = format!("이 폴더를 디스크 검색에서 뺄까요?\n{root}");
     if unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), w!("Sakadu"), MB_YESNO | MB_ICONQUESTION) } != IDYES {
         return;
     }
@@ -3620,5 +3751,28 @@ pub unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             _ => {}
         }
         DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 좁은 칸에 탭이 많아도 지금 탭과 새 탭(+)은 탭 줄 안에 보이고 누를 수 있다
+    #[test]
+    fn many_tabs_keep_active_and_add_reachable() {
+        let g = geom(R::new(0.0, 0.0, 380.0, 600.0));
+        for (n, active) in [(3, 1), (12, 0), (12, 6), (12, 11), (40, 39)] {
+            let trs = tab_rects(&g, n, active);
+            let a = trs[active];
+            assert!(a.w() > 0.0 && a.l >= g.tabs.l && a.r <= g.tabs.r, "active tab visible: n={n} active={active} {a:?}");
+            let add = add_rect(&g, &trs);
+            assert!(add.r <= g.tabs.r, "add button inside strip: n={n} {add:?}");
+            let (x, y) = ((a.l + a.r) / 2.0, (a.t + a.b) / 2.0);
+            assert_eq!(trs.iter().filter(|r| r.contains(x, y)).count(), 1, "one tab under the cursor");
+        }
+        // 다 들어가면 예전과 같이 차례로
+        let trs = tab_rects(&g, 3, 0);
+        assert!(trs.windows(2).all(|w| w[0].r < w[1].l));
     }
 }

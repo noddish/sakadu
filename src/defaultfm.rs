@@ -115,17 +115,49 @@ pub fn register(classes: &str, exe: &Path) -> Result<(), String> {
         set(&format!("{verb}\\command"), "", &format!("\"{}\" \"%1\"", exe.display()))?;
         set(&shell, "", VERB)?;
     }
-    // Win+E: 원래 키가 없었으면 해제할 때 통째로 지운다
+    // Win+E: 다른 프로그램이 해 둔 연결을 백업해 두었다가 해제할 때 되돌린다.
+    // 이미 우리 것이면(다시 등록) 백업을 우리 값으로 덮어쓰지 않는다
     let win_e = format!("{classes}\\{WIN_E}");
-    if !key_exists(&win_e) {
-        set(STATE, &format!("WinEKeyCreated:{classes}"), "1")?;
-    }
     let cmd = format!("{win_e}\\shell\\opennewwindow\\command");
-    set(&cmd, "", &format!("\"{}\"", exe.display()))?;
+    let ours = format!("\"{}\"", exe.display());
+    if !win_e_is_ours(classes) {
+        if !key_exists(&win_e) {
+            set(STATE, &format!("WinEKeyCreated:{classes}"), "1")?;
+        }
+        set(STATE, &format!("WinEPrev:{classes}"), &get(&cmd, "").unwrap_or_else(|| NONE.to_string()))?;
+        set(STATE, &format!("WinEPrevDelegate:{classes}"), &get(&cmd, "DelegateExecute").unwrap_or_else(|| NONE.to_string()))?;
+    }
+    set(&cmd, "", &ours)?;
     // 비워 두어야 탐색기의 기본 처리 대신 위 명령이 실행된다
     set(&cmd, "DelegateExecute", "")?;
+    set(STATE, &format!("WinECmd:{classes}"), &ours)?;
     notify();
     Ok(())
+}
+
+/// 백업에서 "값이 없었음"
+const NONE: &str = "\u{1}none";
+
+/// Win+E가 아직 우리가 등록한 그대로인지 (그사이 사용자나 다른 프로그램이 바꿨으면 false)
+fn win_e_is_ours(classes: &str) -> bool {
+    let cmd = format!("{classes}\\{WIN_E}\\shell\\opennewwindow\\command");
+    get(STATE, &format!("WinECmd:{classes}")).is_some_and(|ours| get(&cmd, "").as_deref() == Some(ours.as_str()) && get(&cmd, "DelegateExecute").as_deref() == Some(""))
+}
+
+/// 하위 키도 값도 없으면 지운다 (우리가 만든 빈 껍데기만 정리)
+fn delete_if_empty(path: &str) {
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(path), None, KEY_READ, &mut key) != ERROR_SUCCESS {
+            return;
+        }
+        let (mut subkeys, mut values) = (0u32, 0u32);
+        let r = RegQueryInfoKeyW(key, None, None, None, Some(&mut subkeys), None, None, Some(&mut values), None, None, None, None);
+        let _ = RegCloseKey(key);
+        if r == ERROR_SUCCESS && subkeys == 0 && values == 0 {
+            let _ = RegDeleteKeyW(HKEY_CURRENT_USER, &HSTRING::from(path));
+        }
+    }
 }
 
 pub fn unregister(classes: &str) {
@@ -143,12 +175,34 @@ pub fn unregister(classes: &str) {
         delete_tree(&verb);
     }
     let win_e = format!("{classes}\\{WIN_E}");
+    let cmd = format!("{win_e}\\shell\\opennewwindow\\command");
     let created = format!("WinEKeyCreated:{classes}");
-    if get(STATE, &created).is_some() {
-        delete_tree(&win_e);
-        delete_value(STATE, &created);
-    } else {
-        delete_tree(&format!("{win_e}\\shell\\opennewwindow"));
+    let (prev, prev_delegate) = (format!("WinEPrev:{classes}"), format!("WinEPrevDelegate:{classes}"));
+    // 그사이 사용자가 Win+E를 다른 프로그램으로 바꿨으면 그 값을 그대로 둔다
+    if win_e_is_ours(classes) {
+        let restore = |name: &str, backup: Option<String>| match backup {
+            Some(v) if v != NONE => {
+                let _ = set(&cmd, name, &v);
+            }
+            _ => delete_value(&cmd, name),
+        };
+        let had_before = get(STATE, &prev).is_some();
+        if had_before {
+            restore("", get(STATE, &prev));
+            restore("DelegateExecute", get(STATE, &prev_delegate));
+        } else {
+            // 백업이 없던 예전 버전에서 등록한 경우: 예전처럼 우리 명령만 지운다
+            delete_tree(&format!("{win_e}\\shell\\opennewwindow"));
+        }
+        // 우리가 만든 키만 비어 있으면 정리한다 (다른 프로그램이 그 아래 더 넣었으면 남는다)
+        if get(STATE, &created).is_some() {
+            for path in [cmd.clone(), format!("{win_e}\\shell\\opennewwindow"), format!("{win_e}\\shell"), win_e.clone()] {
+                delete_if_empty(&path);
+            }
+        }
+    }
+    for name in [created, prev, prev_delegate, format!("WinECmd:{classes}")] {
+        delete_value(STATE, &name);
     }
     notify();
 }
@@ -192,5 +246,41 @@ mod tests {
         assert_eq!(get(&format!("{root}\\Drive\\shell"), ""), None);
         assert!(!key_exists(&format!("{root}\\{WIN_E}")));
         delete_tree("Software\\SakaduTest");
+    }
+
+    /// Win+E: 다른 프로그램의 연결은 해제할 때 되돌리고, 등록 뒤 사용자가 바꾼 값은 그대로 둔다
+    #[test]
+    #[ignore]
+    fn win_e_restores_previous_and_keeps_later_choice() {
+        let root = "Software\\SakaduTest2\\Classes";
+        delete_tree("Software\\SakaduTest2");
+        let cmd = format!("{root}\\{WIN_E}\\shell\\opennewwindow\\command");
+        let exe = Path::new("C:\\Tools\\sakadu.exe");
+
+        // 1) 다른 파일 관리자가 Win+E를 쓰고 있었다 → 껐다 켜면 그대로 돌아온다
+        set(&cmd, "", "\"C:\\Other\\fm.exe\"").unwrap();
+        register(root, exe).unwrap();
+        assert_eq!(get(&cmd, "").as_deref(), Some("\"C:\\Tools\\sakadu.exe\""));
+        register(root, exe).unwrap();
+        unregister(root);
+        assert_eq!(get(&cmd, "").as_deref(), Some("\"C:\\Other\\fm.exe\""));
+        assert_eq!(get(&cmd, "DelegateExecute"), None, "no leftover DelegateExecute");
+
+        // 2) 사카두 등록 뒤 사용자가 다른 프로그램으로 바꿨다 → 해제해도 사용자의 값을 지키고, 폴더 열기도 마찬가지
+        register(root, exe).unwrap();
+        set(&cmd, "", "\"C:\\New\\fm2.exe\"").unwrap();
+        set(&format!("{root}\\Directory\\shell"), "", "usertool").unwrap();
+        unregister(root);
+        assert_eq!(get(&cmd, "").as_deref(), Some("\"C:\\New\\fm2.exe\""));
+        assert_eq!(get(&cmd, "DelegateExecute").as_deref(), Some(""), "user's later values untouched");
+        assert_eq!(get(&format!("{root}\\Directory\\shell"), "").as_deref(), Some("usertool"));
+
+        // 3) 원래 연결이 없었다 → 해제하면 키도 남지 않는다
+        delete_tree("Software\\SakaduTest2");
+        register(root, exe).unwrap();
+        unregister(root);
+        assert!(!key_exists(&format!("{root}\\{WIN_E}")));
+        assert!(get(STATE, &format!("WinECmd:{root}")).is_none(), "state cleaned");
+        delete_tree("Software\\SakaduTest2");
     }
 }

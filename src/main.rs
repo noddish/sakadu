@@ -8,6 +8,7 @@ mod droptarget;
 mod favorites;
 mod folders;
 mod gfx;
+mod acl;
 mod index;
 mod keys;
 mod listing;
@@ -35,7 +36,8 @@ use windows::core::{Result, w};
 pub const WM_APP_LISTED: u32 = WM_APP + 1;
 pub const WM_APP_ICONS: u32 = WM_APP + 2;
 pub const WM_APP_SEARCH: u32 = WM_APP + 3;
-pub const WM_APP_UNDO: u32 = WM_APP + 4;
+/// 파일 작업 결과 (shell::OpReport)
+pub const WM_APP_FILEOP: u32 = WM_APP + 4;
 pub const WM_APP_THUMB: u32 = WM_APP + 5;
 pub const WM_APP_PREVIEW: u32 = WM_APP + 6;
 /// 알림 영역(트레이) 아이콘을 누르거나 메뉴를 열 때

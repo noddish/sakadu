@@ -172,13 +172,19 @@ impl Tab {
 
     /// 선택된 항목의 전체 경로(보이는 순서). 선택이 없으면 커서 항목
     pub fn selected_paths(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.selected_iter().filter_map(|e| self.path_of(e)).collect();
+        let mut v = self.marked_paths();
         if v.is_empty() {
             if let Some(p) = self.cursor_entry().and_then(|e| self.path_of(e)) {
                 v.push(p);
             }
         }
         v
+    }
+
+    /// 실제로 고른 항목만(커서로 대신하지 않음). 지우기·잘라내기처럼 대상이 분명해야 하는 작업에 쓴다.
+    /// 선택을 푼 뒤에도 커서는 남아 있어, 커서로 대신하면 방금 풀어 둔 파일이 지워질 수 있다
+    pub fn marked_paths(&self) -> Vec<String> {
+        self.selected_iter().filter_map(|e| self.path_of(e)).collect()
     }
 
     /// (선택 개수, 선택한 파일 크기 합)
@@ -224,9 +230,11 @@ impl Tab {
         self.cursor = 0;
         self.anchor = 0;
         let restore = self.restore.take();
-        if let Some(r) = &restore {
+        if let Some(r) = restore.as_ref().filter(|r| !r.selected.is_empty()) {
+            // 모두 고른 채 다시 읽어도(F5) 항목마다 목록 전체를 훑지 않게 한 번만 모아 둔다
+            let keep: std::collections::HashSet<&str> = r.selected.iter().map(String::as_str).collect();
             for e in self.entries.iter_mut() {
-                if !r.selected.is_empty() && r.selected.contains(&key_of(e)) {
+                if keep.contains(key_of(e).as_str()) {
                     e.selected = true;
                 }
             }
@@ -487,6 +495,23 @@ mod tests {
         assert_eq!(t.selection_stats().0, 1);
     }
 
+    /// 회귀: 파일을 고른 뒤 빈 곳 클릭·Esc로 선택을 풀면 지우기·잘라내기 대상이 없어야 한다
+    #[test]
+    fn cleared_selection_leaves_nothing_to_delete() {
+        let mut t = tab_with(&[("a.txt", Kind::File), ("b.txt", Kind::File), ("c.txt", Kind::File)]);
+        t.select_only(1);
+        assert_eq!(t.marked_paths(), ["C:\\t\\b.txt"]);
+        t.clear_selection();
+        assert!(t.marked_paths().is_empty());
+        // 열기·복사처럼 되돌릴 수 있는 작업은 지금처럼 커서 항목을 쓴다
+        assert_eq!(t.selected_paths(), ["C:\\t\\b.txt"]);
+        // 방향키로 고르면 다시 대상이 된다
+        t.move_cursor(2, false, false);
+        assert_eq!(t.marked_paths(), ["C:\\t\\c.txt"]);
+        // 폴더를 막 연 상태(커서만 첫 줄)도 대상이 없다
+        assert!(tab_with(&[("x.txt", Kind::File)]).marked_paths().is_empty());
+    }
+
     #[test]
     fn restore_reselects_by_name_after_reload() {
         let mut t = tab_with(&[("a", Kind::File), ("b", Kind::File), ("c", Kind::File)]);
@@ -514,6 +539,27 @@ mod tests {
         t.rebuild_view(Sort::default(), false);
         let t3 = std::time::Instant::now();
         println!("{n} entries: list {:?}, sort {:?}, filter {:?} ({} matches)", t1 - t0, t2 - t1, t3 - t2, t.view.len());
+    }
+
+    /// 성능: 1만 개를 모두 고른 채 다시 읽을 때(F5) 고른 항목을 이름으로 되살리는 시간
+    /// (cargo test --release bench_reload_all_selected -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn bench_reload_all_selected() {
+        let names: Vec<String> = (0..10_000).map(|i| format!("파일_{i:05}.txt")).collect();
+        let make = || names.iter().map(|n| Entry::from_str(n, Kind::File)).collect::<Vec<_>>();
+        let mut t = Tab::new(1, Location::Dir("C:\\t".into()));
+        t.set_entries(make(), Sort::default(), false);
+        t.select_all();
+        for round in 1..=3 {
+            t.restore = Some(t.snapshot());
+            let fresh = make();
+            let t0 = std::time::Instant::now();
+            t.set_entries(fresh, Sort::default(), false);
+            let took = t0.elapsed();
+            assert_eq!(t.selection_stats().0, 10_000);
+            println!("round {round}: reload with 10000 selected: {took:?}");
+        }
     }
 
     #[test]

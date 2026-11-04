@@ -6,7 +6,11 @@ use crate::keys::{ACTIONS, Action, Combo, Keymap};
 use crate::theme::ACCENTS;
 
 const SIDE_W: f32 = 220.0;
+/// 창이 좁으면(크기 150% 등) 분류를 아이콘만으로 줄인다
+const SIDE_W_COMPACT: f32 = 60.0;
 const CONTENT_W: f32 = 680.0;
+/// 줄 제목에 남겨 둘 최소 폭. 조작이 이보다 넓게 차지하면 조작을 제목 아래로 내린다
+const LABEL_MIN_W: f32 = 140.0;
 const ZOOMS: [u32; 5] = [90, 100, 110, 125, 150];
 const THEMES: [(&str, &str); 3] = [("system", "시스템"), ("light", "밝게"), ("dark", "어둡게")];
 const G_GEAR: u16 = 0xE713;
@@ -74,6 +78,8 @@ pub struct Settings {
     capture: Option<Ctl>,
     /// 마지막 안내 (겹친 단축키 등)
     note: Option<String>,
+    /// 키보드 초점 (Tab·방향키로 옮기고 Enter·Space로 누른다). 마우스로 누르면 지운다
+    focus: Option<SetHit>,
     // 레지스트리·서비스 상태와 넣을 수 있는 폴더는 열 때와 바꾼 뒤에만 읽는다
     default_fm: bool,
     tray: bool,
@@ -144,6 +150,7 @@ impl App {
             scroll: 0.0,
             capture: None,
             note: None,
+            focus: None,
             default_fm: false,
             tray: false,
             service: false,
@@ -274,10 +281,12 @@ impl App {
             }
             Page::Keys => {
                 let capturing = |c: Ctl| s.capture == Some(c);
-                let global = match (self.keys.global, &self.hotkey) {
-                    (Some(c), _) => c.label(),
-                    (None, Some(hk)) => format!("자동 ({hk})"),
-                    (None, None) => "없음".to_string(),
+                // 정한 키라도 Windows에 등록되지 않았으면(다른 프로그램이 먼저 씀) 동작하는 것처럼 보이지 않게 한다
+                let (global, global_desc) = match (self.keys.global, &self.hotkey) {
+                    (Some(c), Some(_)) => (c.label(), "다른 앱을 쓰다가도 바로 · 트레이 대기를 켜 두면 창을 닫아도 돼요".to_string()),
+                    (Some(c), None) => (format!("{} · 등록 안 됨", c.label()), "다른 프로그램이 이 키를 쓰고 있어 지금은 동작하지 않아요 · 눌러서 다른 키로".to_string()),
+                    (None, Some(hk)) => (format!("자동 ({hk})"), "다른 앱을 쓰다가도 바로 · 트레이 대기를 켜 두면 창을 닫아도 돼요".to_string()),
+                    (None, None) => ("없음".to_string(), "후보 키를 모두 다른 프로그램이 쓰고 있어요 · 눌러서 직접 정하기".to_string()),
                 };
                 let mut actions: Vec<Row> = ACTIONS
                     .iter()
@@ -289,7 +298,7 @@ impl App {
                     vec![
                         Card {
                             header: "어디서든".into(),
-                            rows: vec![row("검색 창 띄우기", "다른 앱을 쓰다가도 바로 · 트레이 대기를 켜 두면 창을 닫아도 돼요", Widget::Key(global, capturing(Ctl::Global), Ctl::Global))],
+                            rows: vec![row("검색 창 띄우기", global_desc, Widget::Key(global, capturing(Ctl::Global), Ctl::Global))],
                         },
                         Card { header: "Sakadu 안에서 · 줄을 누르고 새 키를 누르세요 (Esc 취소 · Backspace 지우기)".into(), rows: actions },
                     ],
@@ -317,7 +326,7 @@ impl App {
                                 tip("걸러 보기", "목록에서 글자를 치면 지금 폴더에서 바로 걸러요 · Esc로 풀기".into()),
                                 tip("여러 개 고르기", "빈 곳이나 날짜 칸에서 끌면 네모 상자로 · Ctrl을 누르면 더하기".into()),
                                 tip("탭 옮기기", "탭을 끌어 순서를 바꾸거나 다른 칸으로 · Ctrl+Tab 다음 탭".into()),
-                                tip("칸 이동", "Tab · Shift+Tab, 칸 나누기는 Ctrl+1~5".into()),
+                                tip("칸 이동", format!("Tab · Shift+Tab, 칸 나누기는 {}", layout_keys(&self.keys))),
                                 tip("되돌리기", format!("{} · 이름 바꾸기·이동·복사·휴지통 삭제를 마지막 것부터", k(Action::Undo))),
                             ],
                         },
@@ -348,20 +357,27 @@ impl App {
 
     // ---------- 배치 ----------
 
+    /// 왼쪽 분류의 폭 (좁은 창에서는 아이콘만)
+    fn side_w(&self) -> f32 {
+        if self.w < 640.0 { SIDE_W_COMPACT } else { SIDE_W }
+    }
+
     fn settings_items(&self) -> (Vec<Item>, f32) {
         let mut items = Vec::new();
         let Some(s) = &self.settings else { return (items, 0.0) };
         let g = &self.gfx;
+        let side = self.side_w();
         // 왼쪽 분류
-        items.push(Item::Back(R::new(10.0, 12.0, SIDE_W - 10.0, 44.0)));
+        items.push(Item::Back(R::new(10.0, 12.0, side - 10.0, 44.0)));
         for (i, (page, label, glyph)) in PAGES.iter().enumerate() {
             let y = 60.0 + i as f32 * 38.0;
-            items.push(Item::Nav { r: R::new(10.0, y, SIDE_W - 10.0, y + 34.0), label, glyph: *glyph, on: s.page == *page, hit: SetHit::Nav(*page) });
+            items.push(Item::Nav { r: R::new(10.0, y, side - 10.0, y + 34.0), label, glyph: *glyph, on: s.page == *page, hit: SetHit::Nav(*page) });
         }
-        // 오른쪽 내용
-        let avail = self.w - SIDE_W;
-        let w = CONTENT_W.min(avail - 48.0).max(320.0);
-        let l = SIDE_W + ((avail - w) / 2.0).max(24.0);
+        // 오른쪽 내용: 창이 좁아도(크기 150% 등) 오른쪽으로 넘치지 않게 여백부터 줄인다
+        let avail = self.w - side;
+        let margin = if avail > 480.0 { 24.0 } else { 12.0 };
+        let w = CONTENT_W.min(avail - 2.0 * margin).max(200.0);
+        let l = side + ((avail - w) / 2.0).max(margin);
         let r = l + w;
         let mut y = 32.0 - s.scroll;
         let (title, cards) = self.settings_cards(s);
@@ -379,12 +395,17 @@ impl App {
             let top = y;
             let mut parts = Vec::new();
             for (i, rw) in card.rows.into_iter().enumerate() {
-                let h = if rw.desc.is_empty() { 48.0 } else { 62.0 };
+                let label_h = if rw.desc.is_empty() { 48.0 } else { 62.0 };
                 if i > 0 {
                     parts.push(Item::Divider(R::new(l + 16.0, y, r - 16.0, y + 1.0)));
                 }
-                let cy = y + h / 2.0;
                 let cr = r - 16.0;
+                let tl = l + 16.0;
+                // 조작이 제목 자리를 너무 많이 먹으면 제목 아래 줄로 내린다
+                let (ww, wh) = widget_size(g, &rw.widget);
+                let stacked = ww > 0.0 && (cr - tl) - ww - 14.0 < LABEL_MIN_W;
+                let h = if stacked { label_h + wh + 10.0 } else { label_h };
+                let cy = if stacked { y + label_h + wh / 2.0 - 4.0 } else { y + h / 2.0 };
                 // 오른쪽 조작부터 놓고 남은 폭을 글자에 준다
                 let mut wl = cr;
                 match rw.widget {
@@ -433,10 +454,9 @@ impl App {
                         parts.push(Item::Key { r: br, label: shown, capturing, empty: label == "없음", hit: SetHit::Ctl(ctl, 0) });
                     }
                 }
-                let tl = l + 16.0;
-                let tr = (wl - 14.0).max(tl + 60.0);
+                let tr = if stacked { cr } else { (wl - 14.0).max(tl + 60.0) };
                 let (title, desc) = if rw.desc.is_empty() {
-                    (R::new(tl, y, tr, y + h), R::new(tl, y, tl, y))
+                    (R::new(tl, y, tr, y + label_h), R::new(tl, y, tl, y))
                 } else {
                     (R::new(tl, y + 10.0, tr, y + 32.0), R::new(tl, y + 32.0, tr, y + 52.0))
                 };
@@ -452,7 +472,8 @@ impl App {
 
     pub(super) fn settings_hit(&self, x: f32, y: f32) -> SetHit {
         let (items, _) = self.settings_items();
-        let content = x >= SIDE_W;
+        let side = self.side_w();
+        let content = x >= side;
         for item in items.iter().rev() {
             let (r, hit) = match item {
                 Item::Nav { r, hit, .. }
@@ -465,7 +486,7 @@ impl App {
                 _ => continue,
             };
             // 내용 쪽은 스크롤되어 왼쪽 분류 아래로 들어간 것을 누르지 않게
-            let in_side = r.r <= SIDE_W;
+            let in_side = r.r <= side;
             if r.contains(x, y) && in_side != content {
                 return hit;
             }
@@ -486,6 +507,7 @@ impl App {
 
     pub(super) fn settings_click(&mut self, hit: SetHit, x: f32, y: f32) {
         let Some(s) = &mut self.settings else { return };
+        s.focus = None;
         // 단축키를 받는 중에 다른 곳을 누르면 그만둔다
         if s.capture.is_some() && !matches!(hit, SetHit::Ctl(Ctl::Key(_) | Ctl::Global, _)) {
             s.capture = None;
@@ -511,15 +533,15 @@ impl App {
             Ctl::Preview => self.toggle_preview(),
             Ctl::Theme => {
                 self.look.theme = THEMES[i.min(THEMES.len() - 1)].0.to_string();
-                self.apply_look();
+                self.apply_look(LookPart::Colors);
             }
             Ctl::Accent => {
                 self.look.accent = ACCENTS[i.min(ACCENTS.len() - 1)].0.to_string();
-                self.apply_look();
+                self.apply_look(LookPart::Colors);
             }
             Ctl::Zoom => {
                 self.look.zoom = ZOOMS[i.min(ZOOMS.len() - 1)];
-                self.apply_look();
+                self.apply_look(LookPart::Zoom);
             }
             Ctl::Tray => {
                 let on = self.settings.as_ref().is_some_and(|s| s.tray);
@@ -600,13 +622,20 @@ impl App {
             self.invalidate();
             return true;
         }
+        // 바꿀 수 있는 단축키(설정·도움말)를 먼저 본다: Ctrl+Tab 같은 조합으로 정해 둘 수도 있다
+        if let Some(a @ (Action::Settings | Action::Help)) = self.keys.find(Combo::now(vk.0)) {
+            self.run_action(a);
+            return true;
+        }
         match vk {
             VK_ESCAPE => self.close_settings(),
-            _ => {
-                if let Some(a @ (Action::Settings | Action::Help)) = self.keys.find(Combo::now(vk.0)) {
-                    self.run_action(a);
-                }
+            VK_RETURN | VK_SPACE => {
+                self.settings_press_focus();
             }
+            VK_TAB | VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT => {
+                self.settings_nav_key(vk);
+            }
+            _ => {}
         }
         true
     }
@@ -619,14 +648,30 @@ impl App {
             Ctl::Global => {
                 let before = self.keys.global;
                 self.keys.global = combo;
-                if self.register_global_hotkey() || combo.is_none() {
-                    None
-                } else {
-                    // 다른 프로그램이 이미 쓰는 키: 예전 키로 되돌린다
-                    self.keys.global = before;
-                    self.register_global_hotkey();
-                    Some(format!("{}는 다른 프로그램이 이미 쓰고 있어요", combo.map(Combo::label).unwrap_or_default()))
+                match combo {
+                    None => {
+                        self.register_global_hotkey();
+                        None
+                    }
+                    Some(c) if self.register_global_hotkey() => {
+                        // 어디서든 키는 Windows가 먼저 가로채, 같은 키의 Sakadu 안 동작은 키로 부를 수 없게 된다.
+                        // 겹친 동작을 알려 주고 그쪽 단축키는 비운다 (Sakadu 안에서 키를 겹쳐 정할 때와 같은 방식)
+                        self.keys.find(c).map(|a| {
+                            self.keys.set(a, None);
+                            format!("{}는 ‘{}’에 쓰던 키예요. 이제 어디서든 검색 창을 띄우고, ‘{1}’ 단축키는 비웠어요", c.label(), crate::keys::name(a))
+                        })
+                    }
+                    Some(c) => {
+                        // 다른 프로그램이 이미 쓰는 키: 예전 키로 되돌린다
+                        self.keys.global = before;
+                        self.register_global_hotkey();
+                        Some(format!("{}는 다른 프로그램이 이미 쓰고 있어 등록하지 못했어요", c.label()))
+                    }
                 }
+            }
+            // 어디서든 검색 키와 같은 키는 Sakadu 안에 들어오지 않으므로 받지 않는다
+            Ctl::Key(_) if combo.is_some_and(|c| self.keys.global == Some(c) || self.hotkey.as_deref() == Some(c.label().as_str())) => {
+                Some(format!("{}는 어디서든 검색 창을 띄우는 키라서 여기에 쓸 수 없어요", combo.map(Combo::label).unwrap_or_default()))
             }
             Ctl::Key(a) => self.keys.set(a, combo).map(|other| format!("‘{}’에 쓰던 키라서 그쪽 단축키는 비웠어요", crate::keys::name(other))),
             _ => None,
@@ -651,10 +696,11 @@ impl App {
         let hot = |h: SetHit| hover == Hit::Set(h);
         let (items, _) = self.settings_items();
         g.fill(R::new(0.0, 0.0, self.w, self.h), t.window);
-        g.fill(R::new(0.0, 0.0, SIDE_W, self.h), t.strip);
-        g.fill(R::new(SIDE_W - 1.0, 0.0, SIDE_W, self.h), t.border);
+        let side = self.side_w();
+        g.fill(R::new(0.0, 0.0, side, self.h), t.strip);
+        g.fill(R::new(side - 1.0, 0.0, side, self.h), t.border);
         // 내용 먼저(스크롤되어 위로 넘어가도 분류를 가리지 않게 잘라서), 분류는 그 위에
-        g.clip(R::new(SIDE_W, 0.0, self.w, self.h));
+        g.clip(R::new(side, 0.0, self.w, self.h));
         for item in &items {
             match item {
                 Item::Title(r, text) => g.text(text, *r, Font::Title, t.text),
@@ -726,14 +772,20 @@ impl App {
             }
         }
         g.unclip();
+        // 좁은 창에서는 분류를 아이콘만 (글자는 마우스를 올리지 않아도 제목에 보인다)
+        let compact = self.side_w() < SIDE_W;
         for item in &items {
             match item {
                 Item::Back(r) => {
                     if hot(SetHit::Back) {
                         g.fill_round(*r, 7.0, t.hover);
                     }
-                    g.glyph(G_BACK, R::new(r.l + 6.0, r.t, r.l + 30.0, r.b), false, t.text);
-                    g.text("설정", R::new(r.l + 36.0, r.t, r.r, r.b), Font::Strong, t.text);
+                    if compact {
+                        g.glyph(G_BACK, *r, false, t.text);
+                    } else {
+                        g.glyph(G_BACK, R::new(r.l + 6.0, r.t, r.l + 30.0, r.b), false, t.text);
+                        g.text("설정", R::new(r.l + 36.0, r.t, r.r, r.b), Font::Strong, t.text);
+                    }
                 }
                 Item::Nav { r, label, glyph, on, hit } => {
                     if *on {
@@ -741,11 +793,187 @@ impl App {
                     } else if hot(*hit) {
                         g.fill_round(*r, 7.0, t.hover);
                     }
-                    g.glyph(*glyph, R::new(r.l + 8.0, r.t, r.l + 30.0, r.b), true, if *on { t.accent } else { t.dim });
-                    g.text(label, R::new(r.l + 38.0, r.t, r.r - 6.0, r.b), if *on { Font::Strong } else { Font::Normal }, t.text);
+                    let fg = if *on { t.accent } else { t.dim };
+                    if compact {
+                        g.glyph(*glyph, *r, true, fg);
+                    } else {
+                        g.glyph(*glyph, R::new(r.l + 8.0, r.t, r.l + 30.0, r.b), true, fg);
+                        g.text(label, R::new(r.l + 38.0, r.t, r.r - 6.0, r.b), if *on { Font::Strong } else { Font::Normal }, t.text);
+                    }
                 }
                 _ => {}
             }
+        }
+        // 키보드 초점 테두리
+        if let Some(r) = self.settings.as_ref().and_then(|s| s.focus).and_then(|f| self.focus_stops().into_iter().find(|(h, _)| *h == f)).map(|(_, r)| r) {
+            g.stroke_round(r.inset(-3.0, -3.0), 8.0, t.accent, 2.0);
+        }
+    }
+
+    // ---------- 키보드로 옮겨 다니기 ----------
+
+    /// Tab으로 멈추는 자리(그리는 순서). 테마·색·크기처럼 묶인 버튼은 한 자리로 치고,
+    /// 초점이 그 묶음 안에 있으면 그 칸, 아니면 지금 고른 칸에 멈춘다
+    fn focus_stops(&self) -> Vec<(SetHit, R)> {
+        let (items, _) = self.settings_items();
+        let focus = self.settings.as_ref().and_then(|s| s.focus);
+        let group = |item: &Item| match item {
+            Item::Seg { r, on, hit: h @ SetHit::Ctl(c, _), .. } | Item::Swatch { r, on, hit: h @ SetHit::Ctl(c, _), .. } => Some((*c, *h, *r, *on)),
+            _ => None,
+        };
+        let mut stops = Vec::new();
+        let mut seen: Vec<Ctl> = Vec::new();
+        for item in &items {
+            match item {
+                Item::Back(r) => stops.push((SetHit::Back, *r)),
+                Item::Nav { r, hit, .. } | Item::Toggle { r, hit, .. } | Item::Button { r, hit, .. } | Item::Key { r, hit, .. } => stops.push((*hit, *r)),
+                _ => {
+                    let Some((ctl, ..)) = group(item) else { continue };
+                    if seen.contains(&ctl) {
+                        continue;
+                    }
+                    seen.push(ctl);
+                    let members: Vec<(SetHit, R, bool)> = items.iter().filter_map(group).filter(|(c, ..)| *c == ctl).map(|(_, h, r, on)| (h, r, on)).collect();
+                    let pick = members
+                        .iter()
+                        .find(|(h, ..)| Some(*h) == focus)
+                        .or_else(|| members.iter().find(|(.., on)| *on))
+                        .or(members.first());
+                    if let Some((h, r, _)) = pick {
+                        stops.push((*h, *r));
+                    }
+                }
+            }
+        }
+        stops
+    }
+
+    /// 방향키·Tab 처리. 처리했으면 true
+    fn settings_nav_key(&mut self, vk: VIRTUAL_KEY) -> bool {
+        let shift = key_down(VK_SHIFT);
+        let stops = self.focus_stops();
+        let side = self.side_w();
+        let Some(s) = &self.settings else { return false };
+        let page = s.page;
+        let at = s.focus.and_then(|f| stops.iter().position(|(h, _)| *h == f));
+        let in_side = |i: usize| stops[i].1.r <= side;
+        let first_content = stops.iter().position(|(_, r)| r.r > side);
+        let next = match (vk, at) {
+            (VK_TAB, None) => if shift { stops.len().checked_sub(1) } else { first_content },
+            (VK_TAB, Some(i)) => Some(if shift { (i + stops.len() - 1) % stops.len() } else { (i + 1) % stops.len() }),
+            // 분류에서 위아래는 쪽을 바로 바꾼다
+            (VK_UP | VK_DOWN, None) => stops.iter().position(|(h, _)| *h == SetHit::Nav(page)),
+            (VK_UP | VK_DOWN, Some(i)) if matches!(stops[i].0, SetHit::Nav(_)) => {
+                let k = PAGES.iter().position(|(p, ..)| *p == page).unwrap_or(0);
+                let k = if vk == VK_UP { k.saturating_sub(1) } else { (k + 1).min(PAGES.len() - 1) };
+                self.settings_click(SetHit::Nav(PAGES[k].0), 0.0, 0.0);
+                if let Some(s) = &mut self.settings {
+                    s.focus = Some(SetHit::Nav(PAGES[k].0));
+                }
+                self.invalidate();
+                return true;
+            }
+            (VK_UP, Some(i)) => (i > 0 && !in_side(i - 1)).then(|| i - 1).or(Some(i)),
+            (VK_DOWN, Some(i)) => Some((i + 1).min(stops.len() - 1)),
+            // 묶음 안에서는 옆 칸으로, 내용에서 ←는 분류로, 분류에서 →는 내용으로
+            (VK_LEFT | VK_RIGHT, Some(i)) if matches!(stops[i].0, SetHit::Ctl(Ctl::Theme | Ctl::Accent | Ctl::Zoom, _)) => {
+                let SetHit::Ctl(ctl, k) = stops[i].0 else { return true };
+                let n = match ctl {
+                    Ctl::Theme => THEMES.len(),
+                    Ctl::Accent => ACCENTS.len(),
+                    _ => ZOOMS.len(),
+                };
+                let k = if vk == VK_LEFT { k.checked_sub(1) } else { (k + 1 < n).then_some(k + 1) };
+                match k {
+                    Some(k) => {
+                        if let Some(s) = &mut self.settings {
+                            s.focus = Some(SetHit::Ctl(ctl, k));
+                        }
+                        self.invalidate();
+                        return true;
+                    }
+                    None if vk == VK_LEFT => stops.iter().position(|(h, _)| *h == SetHit::Nav(page)),
+                    None => Some(i),
+                }
+            }
+            (VK_LEFT, _) => stops.iter().position(|(h, _)| *h == SetHit::Nav(page)),
+            (VK_RIGHT, Some(i)) if in_side(i) => first_content,
+            (VK_RIGHT, _) => at,
+            _ => return false,
+        };
+        if let Some((hit, r)) = next.and_then(|i| stops.get(i).copied()) {
+            if let Some(s) = &mut self.settings {
+                s.focus = Some(hit);
+            }
+            if r.r > side {
+                self.settings_scroll_into_view(r);
+            }
+        }
+        self.invalidate();
+        true
+    }
+
+    fn settings_scroll_into_view(&mut self, r: R) {
+        let (_, total) = self.settings_items();
+        let max = (total - self.h).max(0.0);
+        let h = self.h;
+        if let Some(s) = &mut self.settings {
+            if r.t < 16.0 {
+                s.scroll = (s.scroll - (16.0 - r.t)).clamp(0.0, max);
+            } else if r.b > h - 16.0 {
+                s.scroll = (s.scroll + (r.b - (h - 16.0))).clamp(0.0, max);
+            }
+        }
+    }
+
+    /// Enter·Space: 초점이 있는 조작을 누른다
+    fn settings_press_focus(&mut self) -> bool {
+        let Some(f) = self.settings.as_ref().and_then(|s| s.focus) else { return false };
+        let Some((_, r)) = self.focus_stops().into_iter().find(|(h, _)| *h == f) else { return false };
+        let (x, y) = ((r.l + r.r) / 2.0, r.b);
+        match f {
+            SetHit::Ctl(ctl, i) => {
+                if let Some(s) = &mut self.settings {
+                    s.capture = None;
+                }
+                self.settings_ctl(ctl, i, x, y);
+            }
+            other => self.settings_click(other, x, y),
+        }
+        // 누른 뒤에도 초점은 그 자리에 (쪽을 바꿨으면 그 쪽 분류에)
+        if let Some(s) = &mut self.settings {
+            s.focus = Some(match f {
+                SetHit::Nav(_) => SetHit::Nav(s.page),
+                other => other,
+            });
+        }
+        self.invalidate();
+        true
+    }
+}
+
+/// 칸 나누기 단축키들. 처음 그대로면 "Ctrl+1~5"로 줄인다
+fn layout_keys(keys: &Keymap) -> String {
+    let all: Vec<String> =
+        [Action::Layout1, Action::Layout2, Action::Layout3, Action::Layout4, Action::Layout5].iter().map(|a| keys.get(*a).map(Combo::label).unwrap_or_else(|| "없음".into())).collect();
+    if all.iter().enumerate().all(|(i, l)| *l == format!("Ctrl+{}", i + 1)) { "Ctrl+1~5".to_string() } else { all.join(" · ") }
+}
+
+/// 줄 오른쪽 조작이 차지하는 (폭, 높이). settings_items의 배치와 같아야 한다
+fn widget_size(g: &Gfx, w: &Widget) -> (f32, f32) {
+    match w {
+        Widget::None => (0.0, 0.0),
+        Widget::Toggle(..) => (40.0, 22.0),
+        Widget::Seg(labels, ..) => (labels.iter().map(|t| g.measure(t, Font::Normal) + 26.0).sum(), 30.0),
+        Widget::Swatches(colors, _) => {
+            let n = colors.len() as f32;
+            (n * 24.0 + (n - 1.0).max(0.0) * 10.0, 24.0)
+        }
+        Widget::Drop(label, _) => ((g.measure(label, Font::Normal) + 44.0).clamp(110.0, 260.0), 30.0),
+        Widget::Button(label, ..) => (g.measure(label, Font::Normal) + 30.0, 30.0),
+        Widget::Key(label, capturing, _) => {
+            let shown = if *capturing { "키를 누르세요…" } else { label.as_str() };
+            ((g.measure(shown, Font::Normal) + 28.0).max(96.0), 28.0)
         }
     }
 }
@@ -867,7 +1095,7 @@ fn font_menu(hwnd: HWND, pt: POINT) {
     };
     with_app(|a| {
         a.look.font = font;
-        a.apply_look();
+        a.apply_look(LookPart::Font);
     });
 }
 

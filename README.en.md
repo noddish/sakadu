@@ -99,7 +99,7 @@ Dark mode follows your Windows setting.
 - Nothing is written to disk, and neither the app nor the service has any network code, so nothing leaves your PC.
 - Reading the MFT needs admin rights, so it runs as a Windows service (SakaduIndex). The app talks to it over a local named pipe that refuses remote clients.
 - The index takes about 120 MB of memory for 1.8 million entries.
-- As with Everything, file **names** in other users' folders can show up in results.
+- Results only include what the searching Windows account can see: every folder from the drive root down to the file's folder must be listable by that account (what you could browse in Explorer). Hidden files are left out of both the results and the total count. See [docs/search-permissions-check.md](docs/search-permissions-check.md) for a two-account check (Korean).
 - Query syntax: space-separated words must all match. A word ending in `\`, like `work\`, matches the path. `|` means "or" (`quote 2026 | contract`). Pasting several lines joins them with `|`.
 - Results: Enter opens, Ctrl+Enter opens the containing folder in a new tab. Pick several with Ctrl+click, Shift+click or Shift+↑↓, then Enter opens them all and Ctrl+C copies the files. The right-click menu also has copy path and pick all.
 - The search window stays open while you visit other apps. Reopen it after closing and your last query is still there, selected: type to replace it, or press End to keep going.
