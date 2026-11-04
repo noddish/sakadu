@@ -85,6 +85,13 @@ fn start_indexing() -> Arc<Shared> {
         });
         diag::log(|| format!("index: {} entries in {:?}", s.vols.read().unwrap().iter().map(|v| v.len()).sum::<usize>(), t.elapsed()));
         s.ready.store(true, Ordering::SeqCst);
+        // 목록을 만드는 동안 먼저 물어 온 계정(로그인하며 켜진 앱 등)은 다 만든 지금 판정을 채워 둔다
+        for session in s.sessions.all() {
+            if session.begin_warm() {
+                warm(&s, &session);
+                session.end_warm();
+            }
+        }
     });
     shared
 }
@@ -140,19 +147,30 @@ fn watch(shared: Arc<Shared>, letter: char) {
     }
 }
 
-/// 폴더가 생기거나 지워지면 그 칸의 계정별 판정을, 폴더가 옮겨지거나 권한이 바뀌면 그 드라이브 판정을 모두 지운다.
+/// 폴더가 생기거나 지워지면 그 칸의 계정별 판정을, 폴더가 옮겨지거나 권한이 바뀌면 그 폴더와 그 아래 폴더들의 판정을 지운다.
+/// (드라이브 전체를 지우면 그때마다 첫 검색이 몇 초씩 느려진다.)
 /// 파일의 권한은 목록에 보이는지와 상관없다 (담은 폴더를 열 수 있으면 이름이 보인다)
 fn forget_changed_folders(shared: &Shared, letter: char, recs: &[index::UsnRecord]) {
-    let mut whole = false;
+    if !shared.sessions.any() {
+        return;
+    }
+    let (mut slots, mut moved) = (Vec::new(), Vec::new());
     for r in recs.iter().filter(|r| r.attrs & index::ATTR_DIR != 0) {
         if r.reason & (index::REASON_RENAME_NEW | index::REASON_SECURITY_CHANGE) != 0 {
-            whole = true;
+            moved.push(index::record_of(r.frn));
         } else if r.reason & (index::REASON_CREATE | index::REASON_DELETE) != 0 {
-            shared.sessions.reset_slot(letter, index::record_of(r.frn));
+            slots.push(index::record_of(r.frn));
         }
     }
-    if whole {
-        shared.sessions.reset_volume(letter);
+    if !slots.is_empty() {
+        shared.sessions.reset_slots(letter, &slots);
+    }
+    if !moved.is_empty() {
+        let vols = shared.vols.read().unwrap();
+        match vols.iter().find(|v| v.letter == letter) {
+            Some(v) => shared.sessions.reset_subtrees(v, &moved),
+            None => shared.sessions.reset_volume(letter),
+        }
     }
 }
 
@@ -225,19 +243,25 @@ fn warm(shared: &Shared, session: &Arc<acl::Session>) {
             if STOP.load(Ordering::SeqCst) {
                 return;
             }
-            let vols = shared.vols.read().unwrap();
-            let Some(v) = vols.iter().find(|v| v.letter == letter) else { break };
-            let viewer = shared.sessions.viewer(session, &[v]);
-            let end = (start + CHUNK).min(v.slots());
-            for i in start..end {
-                if v.is_dir_slot(i) {
-                    viewer.listable(&[v], 0, i as u32);
+            let (end, slots) = {
+                let vols = shared.vols.read().unwrap();
+                let Some(v) = vols.iter().find(|v| v.letter == letter) else { break };
+                let viewer = shared.sessions.viewer(session, &[v]);
+                let end = (start + CHUNK).min(v.slots());
+                for i in start..end {
+                    if v.is_dir_slot(i) {
+                        viewer.listable(&[v], 0, i as u32);
+                    }
                 }
-            }
-            if end >= v.slots() {
+                (end, v.slots())
+            };
+            if end >= slots {
                 break;
             }
             start = end;
+            // 인덱스 갱신(쓰기 잠금)이 끼어들 틈을 준다. 읽기 잠금을 곧바로 다시 잡으면
+            // Windows의 잠금은 쓰는 쪽을 먼저 들여보내지 않아 새 파일 반영이 몇 초씩 밀린다
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
     diag::log(|| format!("acl: warmed in {:?}", t.elapsed()));

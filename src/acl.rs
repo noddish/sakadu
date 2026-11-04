@@ -3,10 +3,11 @@
 //! 할 수 있어야 한다 (탐색기로 열어 볼 수 있는 범위와 같다). 볼 수 없는 항목은 경로·순위·전체 개수에도 넣지 않는다.
 //!
 //! 폴더마다 판정은 로그온 세션별로 기억해 둔다. 폴더가 새로 생기거나 지워지면 그 칸만,
-//! 폴더 이름이 바뀌거나(옮김 포함) 권한이 바뀌면 그 드라이브 판정을 모두 지우고 다시 한다.
+//! 폴더가 옮겨지거나(이름 바꾸기 포함) 권한이 바뀌면 그 폴더와 그 아래 폴더들의 판정을 지우고 다시 한다.
+//! 칸마다 세대 번호를 두어, 판정하는 동안 그 칸이 지워졌으면 그 결과는 남기지 않는다.
 
 use crate::index::{ROOT_RECORD, Volume};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -16,9 +17,11 @@ use windows::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 use windows::core::{BOOL, HSTRING};
 
-const UNKNOWN: u8 = 0;
-const ALLOWED: u8 = 1;
-const DENIED: u8 = 2;
+/// 칸 값의 아래 2비트: 판정. 나머지: 세대 (지울 때마다 1씩)
+const UNKNOWN: u32 = 0;
+const ALLOWED: u32 = 1;
+const DENIED: u32 = 2;
+const STATE: u32 = 3;
 /// 기억해 둘 로그온 세션 수 (오래 안 쓴 것부터 버린다)
 const MAX_SESSIONS: usize = 8;
 
@@ -61,8 +64,16 @@ impl Client {
     }
 }
 
-/// 칸별 판정 (모름·보임·안 보임). 검색 스레드들이 잠금 없이 함께 읽고 쓴다
-type States = Arc<Vec<AtomicU8>>;
+/// 칸별 판정 (세대 + 모름·보임·안 보임). 검색 스레드들이 잠금 없이 함께 읽고 쓴다
+type States = Arc<Vec<AtomicU32>>;
+
+/// 판정을 지운다: 세대를 올리고 모름으로. 진행 중이던 판정은 세대가 달라 남지 않는다
+fn forget(a: &AtomicU32) {
+    let mut v = a.load(Ordering::Acquire);
+    while let Err(now) = a.compare_exchange_weak(v, ((v >> 2).wrapping_add(1)) << 2 | UNKNOWN, Ordering::AcqRel, Ordering::Acquire) {
+        v = now;
+    }
+}
 
 /// 한 로그온 세션의 판정: 드라이브마다 칸별
 pub struct Session {
@@ -84,16 +95,13 @@ impl Session {
         self.warming.store(false, Ordering::Release);
     }
 
-    fn reset(&self, letter: char, slot: Option<u32>) {
+    /// slots의 판정을 지운다 (None이면 그 드라이브 전체)
+    fn reset(&self, letter: char, slots: Option<&[u32]>) {
         let vols = self.vols.read().unwrap();
         for (_, states) in vols.iter().filter(|(l, _)| *l == letter) {
-            match slot {
-                Some(s) => {
-                    if let Some(a) = states.get(s as usize) {
-                        a.store(UNKNOWN, Ordering::Relaxed);
-                    }
-                }
-                None => states.iter().for_each(|a| a.store(UNKNOWN, Ordering::Relaxed)),
+            match slots {
+                Some(list) => list.iter().filter_map(|&s| states.get(s as usize)).for_each(forget),
+                None => states.iter().for_each(forget),
             }
         }
     }
@@ -139,8 +147,8 @@ impl Sessions {
             let mut sv = session.vols.write().unwrap();
             vols.iter()
                 .map(|v| {
-                    let grown = |old: &[AtomicU8]| -> States {
-                        Arc::new((0..v.slots()).map(|i| AtomicU8::new(old.get(i).map_or(UNKNOWN, |a| a.load(Ordering::Relaxed)))).collect())
+                    let grown = |old: &[AtomicU32]| -> States {
+                        Arc::new((0..v.slots()).map(|i| AtomicU32::new(old.get(i).map_or(UNKNOWN, |a| a.load(Ordering::Acquire)))).collect())
                     };
                     match sv.iter_mut().find(|(l, _)| *l == v.letter) {
                         Some((_, states)) => {
@@ -161,19 +169,82 @@ impl Sessions {
         Viewer { session, states }
     }
 
-    /// 폴더 칸 하나가 새로 생기거나 지워졌다
-    pub fn reset_slot(&self, letter: char, slot: u32) {
+    /// 지금 기억하는 세션들
+    pub fn all(&self) -> Vec<Arc<Session>> {
+        self.list.lock().unwrap().clone()
+    }
+
+    /// 판정을 기억하는 세션이 있는지 (없으면 지울 것도 없다)
+    pub fn any(&self) -> bool {
+        !self.list.lock().unwrap().is_empty()
+    }
+
+    /// 폴더 칸들이 새로 생기거나 지워졌다
+    pub fn reset_slots(&self, letter: char, slots: &[u32]) {
         for s in self.list.lock().unwrap().iter() {
-            s.reset(letter, Some(slot));
+            s.reset(letter, Some(slots));
         }
     }
 
-    /// 폴더가 옮겨졌거나 권한이 바뀌었다: 그 아래 판정이 모두 달라질 수 있다
+    /// 폴더들이 옮겨졌거나 권한이 바뀌었다: 그 폴더와 그 아래 폴더들의 판정이 달라질 수 있다
+    pub fn reset_subtrees(&self, vol: &Volume, dirs: &[u32]) {
+        let under = folders_under(vol, dirs);
+        self.reset_slots(vol.letter, &under);
+    }
+
+    /// 칸 번호가 모두 새로 매겨졌다 (인덱스를 다시 만듦)
     pub fn reset_volume(&self, letter: char) {
         for s in self.list.lock().unwrap().iter() {
             s.reset(letter, None);
         }
     }
+}
+
+/// dirs 가운데 하나이거나 그 아래에 있는 폴더 칸들. 폴더마다 위로 한 번씩만 올라가도록 기억하며 훑는다
+fn folders_under(vol: &Volume, dirs: &[u32]) -> Vec<u32> {
+    const UNSEEN: u8 = 0;
+    const YES: u8 = 1;
+    const NO: u8 = 2;
+    let n = vol.slots();
+    let mut memo = vec![UNSEEN; n];
+    for &d in dirs {
+        if let Some(m) = memo.get_mut(d as usize) {
+            *m = YES;
+        }
+    }
+    let mut out = Vec::new();
+    let mut path = Vec::new();
+    for i in 0..n {
+        if !vol.is_dir_slot(i) {
+            continue;
+        }
+        path.clear();
+        let mut cur = i as u32;
+        let answer = loop {
+            match memo.get(cur as usize).copied() {
+                Some(YES) => break YES,
+                Some(NO) => break NO,
+                _ => {}
+            }
+            path.push(cur);
+            if cur == ROOT_RECORD || path.len() > 512 {
+                break NO;
+            }
+            match vol.parent_of(cur) {
+                Some(p) => cur = p,
+                None => break NO,
+            }
+        };
+        for &c in &path {
+            if let Some(m) = memo.get_mut(c as usize) {
+                *m = answer;
+            }
+        }
+        if answer == YES {
+            out.push(i as u32);
+        }
+    }
+    out
 }
 
 /// 한 요청 동안 쓰는 판정기. 검색 스레드들이 함께 쓴다
@@ -197,18 +268,18 @@ impl Viewer {
 }
 
 /// 루트부터 dir까지 모두 내용 보기가 되는가. 판정은 states에 기억한다 (모르는 칸만 check로 묻는다)
-fn dir_visible(vol: &Volume, dir: u32, states: &[AtomicU8], check: impl Fn(u32) -> bool) -> bool {
-    let state = |d: u32| states.get(d as usize).map_or(UNKNOWN, |a| a.load(Ordering::Relaxed));
-    // 위로 올라가며 아는 칸을 찾고, 모르는 칸은 위에서부터 판정한다
-    let mut chain = Vec::new();
+fn dir_visible(vol: &Volume, dir: u32, states: &[AtomicU32], check: impl Fn(u32) -> bool) -> bool {
+    // 위로 올라가며 아는 칸을 찾고, 모르는 칸은 (그때 본 값과 함께) 모아 위에서부터 판정한다
+    let mut chain: Vec<(u32, Option<u32>)> = Vec::new();
     let mut cur = dir;
     let mut ok = loop {
-        match state(cur) {
-            ALLOWED => break true,
-            DENIED => break false,
+        let seen = states.get(cur as usize).map(|a| a.load(Ordering::Acquire));
+        match seen.map(|v| v & STATE) {
+            Some(ALLOWED) => break true,
+            Some(DENIED) => break false,
             _ => {}
         }
-        chain.push(cur);
+        chain.push((cur, seen));
         if cur == ROOT_RECORD {
             break true;
         }
@@ -218,10 +289,11 @@ fn dir_visible(vol: &Volume, dir: u32, states: &[AtomicU8], check: impl Fn(u32) 
             _ => break false,
         }
     };
-    for d in chain.into_iter().rev() {
+    for (d, seen) in chain.into_iter().rev() {
         ok = ok && check(d);
-        if let Some(a) = states.get(d as usize) {
-            a.store(if ok { ALLOWED } else { DENIED }, Ordering::Relaxed);
+        // 판정하는 동안 이 칸이 지워졌으면(세대가 바뀜) 남기지 않는다
+        if let (Some(a), Some(seen)) = (states.get(d as usize), seen) {
+            let _ = a.compare_exchange(seen, (seen & !STATE) | if ok { ALLOWED } else { DENIED }, Ordering::AcqRel, Ordering::Relaxed);
         }
     }
     ok
@@ -277,7 +349,7 @@ mod tests {
     #[test]
     fn hidden_below_any_unlistable_folder() {
         let v = sample();
-        let states: Vec<AtomicU8> = (0..v.slots()).map(|_| AtomicU8::new(UNKNOWN)).collect();
+        let states: Vec<AtomicU32> = (0..v.slots()).map(|_| AtomicU32::new(UNKNOWN)).collect();
         let asked = Mutex::new(Vec::new());
         // bob은 alice 폴더를 열 수 없다 (secret 폴더 자체는 열 수 있게 되어 있어도)
         let check = |d: u32| {
@@ -293,10 +365,31 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(asked.len(), unique.len(), "each folder checked once: {asked:?}");
-        // 권한이 바뀌면 다시 묻는다
-        states[101].store(UNKNOWN, Ordering::Relaxed);
-        states[102].store(UNKNOWN, Ordering::Relaxed);
+        // 권한이 바뀌면(alice 폴더와 그 아래를 지움) 다시 묻는다
+        let under = folders_under(&v, &[101]);
+        assert_eq!(under, [101, 102], "alice and its subfolders only");
+        under.iter().for_each(|&s| forget(&states[s as usize]));
         assert!(dir_visible(&v, 102, &states, |_| true));
+    }
+
+    /// 판정하는 동안 그 칸이 지워지면(권한·폴더가 바뀜) 늦게 끝난 판정은 남지 않는다
+    #[test]
+    fn late_result_is_dropped_after_reset() {
+        let v = sample();
+        let states: Vec<AtomicU32> = (0..v.slots()).map(|_| AtomicU32::new(UNKNOWN)).collect();
+        // alice 폴더를 판정하는 도중에 그 폴더의 권한이 바뀌었다
+        let seen = dir_visible(&v, 101, &states, |d| {
+            if d == 101 {
+                forget(&states[101]);
+            }
+            true
+        });
+        assert!(seen, "this query still answers with what it checked");
+        assert_eq!(states[101].load(Ordering::Acquire) & STATE, UNKNOWN, "but the stale answer is not kept");
+        assert_eq!(states[100].load(Ordering::Acquire) & STATE, ALLOWED, "untouched parent is kept");
+        // 다음 판정은 새로 묻는다
+        assert!(!dir_visible(&v, 101, &states, |d| d != 101));
+        assert_eq!(states[101].load(Ordering::Acquire) & STATE, DENIED);
     }
 
     /// 이 프로세스 계정의 가장 토큰 (파이프 상대 대신)

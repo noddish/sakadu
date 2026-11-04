@@ -852,6 +852,10 @@ impl App {
             crate::diag::log(|| format!("RegisterDragDrop -> {r:?}, elevated={}", IsUserAnAdmin().as_bool()));
             shell::warm_up_menus();
         }
+        // 검색 서비스에 상태를 한 번 물어, 이 계정이 볼 수 있는 폴더 판정을 미리 채우게 한다 (로그인 직후 첫 검색이 느리지 않게)
+        std::thread::spawn(|| {
+            let _ = crate::service::status();
+        });
         self.register_global_hotkey();
         for p in 0..self.layout.count() {
             self.load(p, false);
