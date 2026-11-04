@@ -138,10 +138,24 @@ pub fn register(classes: &str, exe: &Path) -> Result<(), String> {
 /// 백업에서 "값이 없었음"
 const NONE: &str = "\u{1}none";
 
-/// Win+E가 아직 우리가 등록한 그대로인지 (그사이 사용자나 다른 프로그램이 바꿨으면 false)
+/// Win+E가 아직 우리가 등록한 그대로인지 (그사이 사용자나 다른 프로그램이 바꿨으면 false).
+/// 등록한 명령을 기록해 두지 않던 예전 버전(0.3.0까지)의 등록은 명령이 sakadu.exe를 가리키는지로 알아본다.
+/// 알아보지 못하면 해제해도 Win+E가 계속 Sakadu를 열고, 다시 등록할 때 우리 명령을 "원래 값"으로 백업하게 된다
 fn win_e_is_ours(classes: &str) -> bool {
     let cmd = format!("{classes}\\{WIN_E}\\shell\\opennewwindow\\command");
-    get(STATE, &format!("WinECmd:{classes}")).is_some_and(|ours| get(&cmd, "").as_deref() == Some(ours.as_str()) && get(&cmd, "DelegateExecute").as_deref() == Some(""))
+    if get(&cmd, "DelegateExecute").as_deref() != Some("") {
+        return false;
+    }
+    let now = get(&cmd, "");
+    match get(STATE, &format!("WinECmd:{classes}")) {
+        Some(ours) => now.as_deref() == Some(ours.as_str()),
+        None => now.is_some_and(|c| is_sakadu_command(&c)),
+    }
+}
+
+/// 예전 버전이 Win+E에 써 둔 명령: 따옴표로 감싼 sakadu.exe 경로
+fn is_sakadu_command(cmd: &str) -> bool {
+    crate::util::file_name(cmd.trim().trim_matches('"')).eq_ignore_ascii_case("sakadu.exe")
 }
 
 /// 하위 키도 값도 없으면 지운다 (우리가 만든 빈 껍데기만 정리)
@@ -281,6 +295,45 @@ mod tests {
         unregister(root);
         assert!(!key_exists(&format!("{root}\\{WIN_E}")));
         assert!(get(STATE, &format!("WinECmd:{root}")).is_none(), "state cleaned");
+
+        // 4) 예전 버전(0.3.0까지)이 등록해 둔 상태: 우리 명령을 기록해 두지 않았다 → 해제하면 Win+E에서 빠진다
+        let legacy = |root: &str| {
+            for class in ["Directory", "Drive"] {
+                let shell = format!("{root}\\{class}\\shell");
+                set(&format!("{shell}\\{VERB}\\command"), "", "\"C:\\Old\\sakadu.exe\" \"%1\"").unwrap();
+                set(&shell, "", VERB).unwrap();
+            }
+            set(STATE, &format!("WinEKeyCreated:{root}"), "1").unwrap();
+            set(&cmd, "", "\"C:\\Old\\sakadu.exe\"").unwrap();
+            set(&cmd, "DelegateExecute", "").unwrap();
+        };
         delete_tree("Software\\SakaduTest2");
+        legacy(root);
+        unregister(root);
+        assert!(!key_exists(&format!("{root}\\{WIN_E}")), "legacy Win+E removed");
+        assert!(!is_registered(root));
+        // 예전 등록 위에 다시 등록해도 우리 명령을 원래 값으로 백업하지 않는다
+        delete_tree("Software\\SakaduTest2");
+        legacy(root);
+        register(root, exe).unwrap();
+        assert!(get(STATE, &format!("WinEPrev:{root}")).is_none(), "own command not backed up");
+        unregister(root);
+        assert!(!key_exists(&format!("{root}\\{WIN_E}")));
+        // 예전 등록 뒤 다른 프로그램이 Win+E를 가져갔으면 그대로 둔다
+        delete_tree("Software\\SakaduTest2");
+        legacy(root);
+        set(&cmd, "", "\"C:\\Other\\fm.exe\"").unwrap();
+        unregister(root);
+        assert_eq!(get(&cmd, "").as_deref(), Some("\"C:\\Other\\fm.exe\""));
+        delete_tree("Software\\SakaduTest2");
+        delete_value(STATE, &format!("WinEKeyCreated:{root}"));
+    }
+
+    #[test]
+    fn recognizes_old_sakadu_command() {
+        assert!(is_sakadu_command("\"C:\\Users\\a\\AppData\\Local\\Programs\\Sakadu\\sakadu.exe\""));
+        assert!(is_sakadu_command("\"D:\\Tools\\SAKADU.EXE\""));
+        assert!(!is_sakadu_command("\"C:\\Other\\fm.exe\""));
+        assert!(!is_sakadu_command("\"C:\\Tools\\not-sakadu.exe\""));
     }
 }
