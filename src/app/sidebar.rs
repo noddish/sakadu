@@ -62,10 +62,16 @@ pub(super) struct Drive {
 }
 
 /// 뒤에서 읽어 오는 "내 PC"·드라이브 목록
-#[derive(Default)]
 pub struct Places {
+    /// 시스템 이미지 목록의 "내 PC" 아이콘. 읽기 전이나 없으면 -1 (글리프로 대신)
     computer_icon: i32,
     drives: Vec<Drive>,
+}
+
+impl Default for Places {
+    fn default() -> Places {
+        Places { computer_icon: -1, drives: Vec::new() }
+    }
 }
 
 /// 드라이브 목록을 뒤에서 읽어 WM_APP_PLACES로 보낸다 (네트워크·광 드라이브가 느릴 수 있어 UI 스레드에서 읽지 않는다)
@@ -208,6 +214,13 @@ impl App {
         let (_, content) = self.side_slots();
         let max = (content - self.side_list().h()).max(0.0);
         self.side_scroll = self.side_scroll.clamp(0.0, max);
+        // 이름을 바꾸는 줄이 목록 밖으로 밀려나면(휠·창 크기·다른 줄 추가) 입력을 확정한다.
+        // 입력 상자를 숨기기만 하면 키보드가 메인 창으로 가 Enter·Delete가 엉뚱한 곳에 먹는다
+        if let EditMode::FavRename(row) = self.edit_mode {
+            if self.fav_rename_rect(row).is_none() {
+                self.commit_rename();
+            }
+        }
     }
 
     /// 화면 위치 t..b가 목록 안에 보이도록 스크롤한다
@@ -227,6 +240,9 @@ impl App {
         if matches!(self.edit_mode, EditMode::FavRename(_)) {
             self.layout_edits();
         }
+        // 줄이 밀렸으니 강조·말풍선은 마우스 아래 새 줄로
+        self.refresh_hover();
+        self.update_tip();
         self.invalidate();
     }
 
@@ -332,6 +348,10 @@ impl App {
     }
 
     pub(super) fn side_mouse_down(&mut self, s: Side, y: f32, dbl: bool) {
+        // 즐겨찾기 줄 밖의 두 번째 누름(두 번 클릭)은 무시한다: 첫 누름에서 이미 했다 (새 그룹이 두 개 생기지 않게)
+        if dbl && !matches!(s, Side::Fav(_)) {
+            return;
+        }
         match s {
             Side::FavAdd => self.add_favorite(),
             Side::FavNewGroup => {
@@ -406,7 +426,10 @@ impl App {
             }
             _ => return None,
         };
-        Some((self.side_item_rect(s)?, text))
+        // 목록 밖으로 스크롤된 줄에는 말풍선을 붙이지 않는다
+        let r = self.side_item_rect(s)?;
+        let list = self.side_list();
+        (r.b > list.t && r.t < list.b).then_some((r, text))
     }
 
     // ---------- 드라이브 ----------
@@ -427,7 +450,12 @@ impl App {
         if std::mem::take(&mut self.places_again) {
             self.refresh_places();
         }
+        // 드라이브 수가 바뀌면 아래 줄들이 밀린다: 이름 바꾸기 상자와 마우스 아래 줄을 다시 맞춘다
         self.side_clamp_scroll();
+        self.refresh_hover();
+        if matches!(self.edit_mode, EditMode::FavRename(_)) {
+            self.layout_edits();
+        }
         self.invalidate();
     }
 
@@ -692,8 +720,16 @@ pub(super) fn show_side_menu(hwnd: HWND, side: Side, pt: POINT) {
     let cmd = fav_ui::popup_menu(hwnd, pt, &items);
     let dir = loc.dir().map(str::to_string);
     match (cmd, dir) {
+        // 메뉴가 떠 있는 동안 드라이브 목록이 바뀌었을 수 있으니 번호로 다시 찾지 않고 메뉴를 연 줄의 위치를 연다
         (1 | 2, _) => {
-            with_app(|a| a.side_open(side, cmd == 2));
+            with_app(|a| {
+                let p = a.active;
+                if cmd == 2 {
+                    a.new_tab(p, Some(loc), true);
+                } else {
+                    a.navigate(p, loc, None);
+                }
+            });
         }
         (3, Some(d)) => {
             let _ = shell::invoke_verb(hwnd, &[d], "properties");

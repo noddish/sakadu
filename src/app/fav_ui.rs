@@ -140,8 +140,13 @@ impl App {
     pub(super) fn toggle_fav_focus(&mut self) {
         if self.fav_focus {
             self.fav_blur();
-            return;
+        } else {
+            self.focus_favorites();
         }
+    }
+
+    /// 키보드를 사이드바 즐겨찾기로 옮긴다 (고른 줄이 보이게)
+    fn focus_favorites(&mut self) {
         self.close_palette();
         self.close_view_menu();
         if self.edit_mode != EditMode::None {
@@ -207,11 +212,15 @@ impl App {
         self.invalidate();
     }
 
-    /// 줄이 밀렸으니 마우스 아래 것을 다시 본다 (움직이기 전까지 엉뚱한 줄이 강조되지 않게)
-    fn refresh_hover(&mut self) {
+    /// 줄이 밀렸으니 마우스 아래 것을 다시 본다 (움직이기 전까지 엉뚱한 줄이 강조되지 않게).
+    /// 마우스가 다른 창 위에 있으면 아무것도 가리키지 않는다 (겹친 창 아래 좌표를 우리 줄로 착각하지 않게)
+    pub(super) fn refresh_hover(&mut self) {
         let mut pt = POINT::default();
+        if unsafe { GetCursorPos(&mut pt) }.is_err() || unsafe { WindowFromPoint(pt) } != self.hwnd {
+            self.hover = Hit::None;
+            return;
+        }
         unsafe {
-            let _ = GetCursorPos(&mut pt);
             let _ = ScreenToClient(self.hwnd, &mut pt);
         }
         let s = self.scale();
@@ -293,6 +302,8 @@ impl App {
     pub fn add_favorite_path(&mut self, path: &str, name: Option<String>) {
         let path = util::normalize(path);
         if let Some((group, index)) = self.favs.find(&path) {
+            // 어느 줄인지 보이게 그 줄을 고르고 키보드도 그쪽으로 옮긴다 (Esc로 칸으로)
+            self.focus_favorites();
             self.fav_select(Row::Item { group, index });
             let p = self.active;
             self.flash(p, "이미 즐겨찾기에 있습니다");
@@ -316,6 +327,7 @@ impl App {
 
     /// 파일 목록에서 끌어 사이드바 즐겨찾기에 놓은 항목들 (이미 있는 것은 건너뛴다)
     pub fn add_favorite_paths(&mut self, paths: &[String]) {
+        let before = self.favs.clone();
         let mut added = 0;
         let mut last = None;
         for path in paths {
@@ -329,14 +341,26 @@ impl App {
             added += 1;
         }
         let p = self.active;
-        match last {
-            Some(row) => {
-                self.save_favorites();
-                self.fav_changed(Some(row));
+        let Some(row) = last else {
+            self.flash(p, "이미 즐겨찾기에 있습니다");
+            return;
+        };
+        match favorites::save(&self.favs) {
+            Ok(()) => {
+                self.fav_select(row);
+                self.side_clamp_scroll();
+                self.refresh_hover();
+                self.layout_edits();
                 self.flash(p, format!("즐겨찾기에 {added}개를 넣었습니다"));
             }
-            None => self.flash(p, "이미 즐겨찾기에 있습니다"),
+            Err(e) => {
+                self.favs = before;
+                self.fav_sel = self.fav_sel.min(self.favs.rows().len().saturating_sub(1));
+                self.side_clamp_scroll();
+                self.flash(p, format!("즐겨찾기를 저장하지 못해 넣지 않았습니다: {e}"));
+            }
         }
+        self.invalidate();
     }
 
     /// 경로 오른쪽 별: 이 폴더를 즐겨찾기에 바로 넣거나 뺀다
