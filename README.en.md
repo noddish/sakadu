@@ -214,6 +214,7 @@ cargo test
   `$env:CARGO_TARGET_DIR = "$env:TEMP\sakadu-target"; cargo build --release`
 - Tests that touch the real shell or service, and benchmarks, are `#[ignore]`d: `cargo test --release -- --ignored --nocapture`
 - Force a theme: `SAKADU_THEME=dark` or `light`
+- Running a release build by hand, with "stay in tray" or "default file manager" on, replaces the copy in `%LOCALAPPDATA%\Programs\Sakadu` with that build and takes over from a different build that's running (debug builds don't). When launching test windows, point `LOCALAPPDATA` to another folder along with `APPDATA`.
 - Icons live in `assets/*.ico`. `build.rs` embeds them in the exe without a resource compiler.
 - Releases: bump `version` in `Cargo.toml` and push a tag like `v0.2.0`. GitHub Actions builds it and creates a **draft** release to check and publish.
 

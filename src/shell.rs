@@ -412,6 +412,8 @@ pub struct OpReport {
     pub undone: Option<Undone>,
     /// 잘라내기 붙여넣기 뒤처리
     pub cut: Option<CutLeft>,
+    /// 창이 이 알림을 처리할 때까지 작업 중으로 센다. 그 전에 끝나면 되돌리기 기록·잘라내기 뒤처리를 잃는다
+    _running: Option<RunningOp>,
 }
 
 /// 잘라낸 파일을 붙여넣은 결과. 클립보드가 그대로일 때만 left로 바꾼다
@@ -455,9 +457,8 @@ fn spawn_op(hwnd: HWND, op: FileOp, cut: Option<(u32, Vec<String>, u64)>) {
     RUNNING_OPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let running = RunningOp;
     std::thread::spawn(move || {
-        let _running = running;
         let _com = ComInit::sta();
-        let mut report = OpReport::default();
+        let mut report = OpReport { _running: Some(running), ..Default::default() };
         // 취소나 실패는 셸이 직접 안내 창을 띄우므로 여기서는 결과만 모은다
         let done = match &op {
             FileOp::Undo(u) => {
