@@ -458,7 +458,8 @@ pub struct Pane {
     pub view: ViewMode,
 }
 
-pub const DEFAULT_COLS: [f32; 3] = [140.0, 130.0, 84.0];
+/// 유형 열은 "Microsoft Excel 워크시트"가 잘리지 않는 너비
+pub const DEFAULT_COLS: [f32; 3] = [140.0, 180.0, 84.0];
 
 impl Pane {
     pub fn tab(&self) -> &Tab {

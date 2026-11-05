@@ -281,7 +281,9 @@ pub enum OpenMode {
 impl App {
     pub(super) fn pal_rect(&self) -> R {
         let w = PAL_W.min(self.w - 40.0).max(320.0);
-        let l = ((self.w - w) / 2.0).max(MARGIN);
+        // 도구 막대 검색 상자 바로 아래에 상자와 가운데를 맞춰 연다 (창 밖으로는 나가지 않게)
+        let sb = self.search_button();
+        let l = ((sb.l + sb.r) / 2.0 - w / 2.0).min(self.w - MARGIN - w).max(MARGIN);
         // 설치 안내·폴더 넣기 버튼 자리까지 필요하다
         let min_rows = if self.pal_status == PalStatus::NotInstalled || self.pal_shows_add_folder() { 5 } else { 3 };
         let rows = self.pal_results.len().clamp(min_rows, PAL_MAX_ROWS) as f32;
@@ -793,7 +795,8 @@ impl App {
         let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.5 } else { 0.16 } };
         gfx.fill_round(R::new(r.l - 3.0, r.t + 2.0, r.r + 3.0, r.b + 6.0), 14.0, shadow);
         gfx.fill_round(r, 12.0, t.pane);
-        gfx.stroke_round(r.inset(0.5, 0.5), 12.0, t.accent, 1.2);
+        // 테두리는 다른 팝업과 같은 중립색. 포커스는 입력 줄의 커서가 보여 준다
+        gfx.stroke_round(r.inset(0.5, 0.5), 12.0, t.pane_border, 1.0);
 
         // 입력 줄 (실제 입력은 위에 놓인 EDIT 컨트롤)
         gfx.glyph(G_SEARCH, R::new(r.l + 14.0, r.t, r.l + 40.0, r.t + PAL_HEAD_H), false, t.accent);

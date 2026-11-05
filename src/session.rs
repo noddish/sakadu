@@ -47,6 +47,8 @@ impl Default for Look {
 
 const HEADER: &str = "sakadu-session 1";
 pub const NEW_TAB_SAME: &str = "::same";
+/// 0.4.0까지의 열 너비 기본값 (수정한 날짜, 유형, 크기)
+const OLD_DEFAULT_COLS: [f32; 3] = [140.0, 130.0, 84.0];
 
 pub fn file_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Sakadu").join("session.txt"))
@@ -140,12 +142,14 @@ pub fn parse(text: &str) -> Option<Session> {
             "zoom" => s.look.zoom = value.parse::<u32>().unwrap_or(100).clamp(80, 200),
             "text" => s.look.text = value.to_string(),
             "pane" => {
-                let mut p = PaneState { tabs: Vec::new(), active: 0, cols: [140.0, 130.0, 84.0], sort_key: 0, sort_desc: false, view: 0 };
+                let mut p = PaneState { tabs: Vec::new(), active: 0, cols: crate::pane::DEFAULT_COLS, sort_key: 0, sort_desc: false, view: 0 };
                 for part in value.split(';') {
                     let Some((k, v)) = part.split_once(':') else { continue };
                     let nums: Vec<f32> = v.split(',').filter_map(|n| n.parse().ok()).collect();
                     match k {
                         "active" => p.active = v.parse().unwrap_or(0),
+                        // 한 번도 너비를 바꾸지 않은 예전 기본값이면 새 기본값으로 (유형 열이 잘리지 않게)
+                        "cols" if nums == OLD_DEFAULT_COLS => p.cols = crate::pane::DEFAULT_COLS,
                         "cols" if nums.len() == 3 => p.cols = [nums[0], nums[1], nums[2]],
                         "sort" if nums.len() == 2 => {
                             p.sort_key = nums[0] as u8;
@@ -194,10 +198,18 @@ mod tests {
                     sort_desc: true,
                     view: 1,
                 },
-                PaneState { tabs: vec!["D:\\".into()], active: 0, cols: [140.0, 130.0, 84.0], sort_key: 0, sort_desc: false, view: 0 },
+                PaneState { tabs: vec!["D:\\".into()], active: 0, cols: crate::pane::DEFAULT_COLS, sort_key: 0, sort_desc: false, view: 0 },
             ],
         };
         assert_eq!(parse(&serialize(&s)), Some(s));
+    }
+
+    #[test]
+    fn untouched_old_column_widths_move_to_new_default() {
+        let s = parse("sakadu-session 1\npane=cols:140,130,84\ntab=C:\\\npane=cols:140,131,84\ntab=C:\\\npane=active:0\ntab=C:\\").unwrap();
+        assert_eq!(s.panes[0].cols, crate::pane::DEFAULT_COLS);
+        assert_eq!(s.panes[1].cols, [140.0, 131.0, 84.0], "a width the user set stays");
+        assert_eq!(s.panes[2].cols, crate::pane::DEFAULT_COLS);
     }
 
     #[test]

@@ -47,7 +47,7 @@ const TAB_H: f32 = 36.0;
 const NAV_H: f32 = 38.0;
 const HEADER_H: f32 = 28.0;
 const ROW_H: f32 = 26.0;
-const STATUS_H: f32 = 32.0;
+const STATUS_H: f32 = 36.0;
 const SCROLL_W: f32 = 10.0;
 const RADIUS: f32 = crate::theme::R_PANE;
 const CHEV_W: f32 = 16.0;
@@ -410,7 +410,8 @@ fn geom(r: R) -> PaneGeom {
     let status = R::new(r.l, r.b - STATUS_H, r.r, r.b);
     let list = R::new(r.l, header.b, r.r, status.t.max(header.b));
     let fw = (status.w() * 0.45).clamp(120.0, 240.0);
-    let filter = R::new(status.r - fw - 8.0, status.t + 5.0, status.r - 8.0, status.b - 5.0);
+    // 왼쪽 상태 글자와 같은 안쪽 여백. 위 구분선·아래 칸 테두리와도 8px 떨어뜨려 붙어 보이지 않게
+    let filter = R::new(status.r - fw - 16.0, status.t + 8.0, status.r - 16.0, status.b - 8.0);
     PaneGeom { body: R::new(r.l, tabs.b, r.r, r.b), tabs, back, fwd, up, crumb, crumbs, star, view, header, list, status, filter }
 }
 
@@ -434,7 +435,7 @@ fn columns(list: R, w: [f32; 3]) -> Cols {
     let width = list.w();
     let size = Some((x - w[2], x));
     x -= w[2];
-    let kind = if width >= 540.0 {
+    let kind = if width >= 590.0 {
         let c = (x - w[1], x);
         x -= w[1];
         Some(c)
@@ -448,7 +449,22 @@ fn columns(list: R, w: [f32; 3]) -> Cols {
     } else {
         None
     };
-    Cols { name: (list.l + 8.0, x.max(list.l + 120.0)), modified, kind, size }
+    Cols { name: (list.l + 12.0, x.max(list.l + 124.0)), modified, kind, size }
+}
+
+/// 자세히 보기가 아닌 보기의 정렬 버튼 (기준, 이름, 자리). 머리글 줄 왼쪽부터 나란히 둔다.
+/// 열이 없는 격자 위에 자세히 보기의 열 머리글이 떠 있지 않게 한다. 지금 기준에만 화살표 자리가 붙는다
+fn sort_chips(gfx: &Gfx, header: R, current: SortKey) -> Vec<(SortKey, &'static str, R)> {
+    const KEYS: [(SortKey, &str); 4] = [(SortKey::Name, "이름"), (SortKey::Modified, "수정한 날짜"), (SortKey::Type, "유형"), (SortKey::Size, "크기")];
+    let mut x = header.l + 8.0;
+    KEYS.iter()
+        .map(|&(key, label)| {
+            let w = gfx.measure(label, Font::Normal) + if key == current { 38.0 } else { 20.0 };
+            let r = R::new(x, header.t + 4.0, x + w, header.b - 4.0);
+            x = r.r + 4.0;
+            (key, label, r)
+        })
+        .collect()
 }
 
 /// 탭 자리. 칸이 좁아 다 들어가지 않으면 지금 탭(active)이 보이는 만큼만 보이고,
@@ -536,19 +552,20 @@ impl Grid {
             Grid { ox: list.l + 6.0, oy: list.t + 6.0, cols, rows: 0, cell_w: usable / cols as f32, cell_h: thumb + 52.0, cell: CellKind::Tile(thumb), horiz: false }
         };
         match view {
-            ViewMode::Details => Grid { ox: list.l + 4.0, oy: list.t, cols: 1, rows: 0, cell_w: list.w() - SCROLL_W - 10.0, cell_h: ROW_H, cell: CellKind::Row, horiz: false },
+            // 줄 바탕은 머리글·상태 표시줄 구분선과 같은 8px 안쪽에서 시작한다 (활성 칸 테두리에 붙어 보이지 않게)
+            ViewMode::Details => Grid { ox: list.l + 8.0, oy: list.t, cols: 1, rows: 0, cell_w: list.w() - SCROLL_W - 14.0, cell_h: ROW_H, cell: CellKind::Row, horiz: false },
             ViewMode::Huge => tile(256.0, 280.0),
             ViewMode::Large => tile(THUMB, 124.0),
             ViewMode::Medium => tile(48.0, 88.0),
             ViewMode::Small => {
-                let usable = (list.w() - SCROLL_W - 10.0).max(SMALL_W);
+                let usable = (list.w() - SCROLL_W - 14.0).max(SMALL_W);
                 let cols = ((usable / SMALL_W).floor() as usize).max(1);
-                Grid { ox: list.l + 4.0, oy: list.t + 2.0, cols, rows: 0, cell_w: usable / cols as f32, cell_h: ROW_H, cell: CellKind::Icon, horiz: false }
+                Grid { ox: list.l + 8.0, oy: list.t + 2.0, cols, rows: 0, cell_w: usable / cols as f32, cell_h: ROW_H, cell: CellKind::Icon, horiz: false }
             }
             ViewMode::List => {
                 // 아래에 가로 스크롤 막대 자리를 남긴다
                 let rows = (((list.h() - 6.0 - SCROLL_W - 4.0) / ROW_H).floor() as usize).max(1);
-                Grid { ox: list.l + 4.0, oy: list.t + 2.0, cols: 0, rows, cell_w: LIST_W, cell_h: ROW_H, cell: CellKind::Icon, horiz: true }
+                Grid { ox: list.l + 8.0, oy: list.t + 2.0, cols: 0, rows, cell_w: LIST_W, cell_h: ROW_H, cell: CellKind::Icon, horiz: true }
             }
         }
     }
@@ -1274,6 +1291,12 @@ impl App {
                 };
             }
             if g.header.contains(x, y) {
+                if pane.view != ViewMode::Details {
+                    return match sort_chips(&self.gfx, g.header, pane.sort.key).into_iter().find(|(_, _, r)| r.contains(x, y)) {
+                        Some((key, _, _)) => Hit::Header(p, key),
+                        None => Hit::Pane(p),
+                    };
+                }
                 let cols = columns(g.list, pane.cols);
                 for (ci, c) in cols.resizable().iter().enumerate() {
                     if let Some((l, _)) = c {
@@ -3325,14 +3348,15 @@ impl App {
             }
             draw_layout_icon(g, *r, layout, if current { t.accent } else { t.dim });
         }
-        // 글자 없는 버튼: 올려 두면 이름과 단축키를 말풍선으로 보여 준다
+        // 글자 없는 버튼: 올려 두면 이름과 단축키를 말풍선으로 보여 준다.
+        // 쉴 때는 칸 나누기 그림과 같은 회색이라 아이콘마다 진하기가 달라 보이지 않는다
         let icon_button = |r: R, glyph: u16, on: bool, hovered: bool| {
             if on {
                 g.fill_round(r, 6.0, t.accent_soft);
             } else if hovered {
                 g.fill_round(r, 6.0, hover_bg);
             }
-            g.glyph(glyph, r, false, if on { t.accent } else { t.text });
+            g.glyph(glyph, r, false, if on { t.accent } else if hovered { t.text } else { t.dim });
         };
         icon_button(new_folder_button(), G_NEW_FOLDER, false, self.hover == Hit::NewFolder);
         icon_button(hidden_button(), G_HIDDEN, self.show_hidden, self.hover == Hit::Hidden);
@@ -3354,13 +3378,18 @@ impl App {
             button(fav, G_STAR, "즐겨찾기", self.fav_open, self.hover == Hit::FavButton);
         }
         // 검색 상자처럼 보이는 버튼: 누르면 검색 팔레트. 좁으면 단축키·글자를 차례로 뺀다
+        // 팔레트가 열려 있으면 입력 상자가 아니라 눌린 버튼으로 보인다 (입력은 팔레트 안에서만, 즐겨찾기 버튼과 같은 모양)
         let sb = self.search_button();
-        let on = self.pal_open || self.hover == Hit::SearchButton;
-        g.fill_round(sb, 8.0, if on { t.pane } else { t.field });
-        g.stroke_round(sb.inset(0.5, 0.5), 8.0, if self.pal_open { t.accent } else { t.border }, 1.0);
-        g.glyph(G_SEARCH, R::new(sb.l + 8.0, sb.t, sb.l + 28.0, sb.b), true, t.dim);
+        if self.pal_open {
+            g.fill_round(sb, 8.0, t.accent_soft);
+        } else {
+            g.fill_round(sb, 8.0, if self.hover == Hit::SearchButton { t.pane } else { t.field });
+            g.stroke_round(sb.inset(0.5, 0.5), 8.0, t.border, 1.0);
+        }
+        let fg = if self.pal_open { t.accent } else { t.dim };
+        g.glyph(G_SEARCH, R::new(sb.l + 8.0, sb.t, sb.l + 28.0, sb.b), true, fg);
         if sb.w() >= 72.0 {
-            g.text("검색", R::new(sb.l + 30.0, sb.t, sb.r - 8.0, sb.b), Font::Normal, t.dim);
+            g.text("검색", R::new(sb.l + 30.0, sb.t, sb.r - 8.0, sb.b), Font::Normal, fg);
         }
         // 바꾼 검색 단축키를 그대로 보여 준다 (비워 두었으면 없음)
         if let Some(c) = self.keys.get(crate::keys::Action::Search).filter(|_| sb.w() >= SEARCH_MIN_W) {
@@ -3615,17 +3644,39 @@ impl App {
                 gfx.glyph(glyph, R::new(gx, g.header.t, gx + 16.0, g.header.b), true, t.dim);
             }
         };
-        header(gfx, (cols.name.0 - 4.0, cols.name.1), "이름", SortKey::Name, false);
-        if let Some(c) = cols.modified {
-            header(gfx, c, "수정한 날짜", SortKey::Modified, false);
+        if pane.view == ViewMode::Details {
+            header(gfx, (cols.name.0 - 4.0, cols.name.1), "이름", SortKey::Name, false);
+            if let Some(c) = cols.modified {
+                header(gfx, c, "수정한 날짜", SortKey::Modified, false);
+            }
+            if let Some(c) = cols.kind {
+                header(gfx, c, "유형", SortKey::Type, false);
+            }
+            if let Some(c) = cols.size {
+                header(gfx, c, "크기", SortKey::Size, true);
+            }
+            gfx.fill(R::new(g.list.l + 8.0, g.header.b - 1.0, g.list.r - 8.0, g.header.b), t.border);
+        } else {
+            // 아이콘·목록 보기: 열 대신 정렬 버튼. 지금 기준은 바탕이 있는 버튼으로 보인다
+            for (key, label, cr) in sort_chips(gfx, g.header, pane.sort.key) {
+                let sorted = pane.sort.key == key;
+                let hot = hover == Hit::Header(p, key);
+                if sorted {
+                    gfx.fill_round(cr, 6.0, t.field);
+                    if t.high_contrast {
+                        gfx.stroke_round(cr.inset(0.5, 0.5), 6.0, t.border, 1.0);
+                    }
+                } else if hot {
+                    gfx.fill_round(cr, 6.0, t.hover);
+                }
+                let tr = R::new(cr.l + 10.0, cr.t, cr.r - if sorted { 28.0 } else { 10.0 }, cr.b);
+                gfx.text(label, tr, Font::Normal, if sorted || hot { t.text } else { t.dim });
+                if sorted {
+                    let glyph = if pane.sort.desc { G_SORT_DOWN } else { G_SORT_UP };
+                    gfx.glyph(glyph, R::new(cr.r - 26.0, cr.t, cr.r - 10.0, cr.b), true, t.dim);
+                }
+            }
         }
-        if let Some(c) = cols.kind {
-            header(gfx, c, "유형", SortKey::Type, false);
-        }
-        if let Some(c) = cols.size {
-            header(gfx, c, "크기", SortKey::Size, true);
-        }
-        gfx.fill(R::new(g.list.l + 8.0, g.header.b - 1.0, g.list.r - 8.0, g.header.b), t.border);
 
         // 행·칸: 보이는 부분만 그린다
         gfx.clip(g.list);
@@ -3709,7 +3760,7 @@ impl App {
                 continue;
             }
             let y = it.t;
-            let row = R::new(g.list.l + 4.0, y + 1.0, g.list.r - SCROLL_W - 6.0, y + ROW_H - 1.0);
+            let row = R::new(g.list.l + 8.0, y + 1.0, g.list.r - SCROLL_W - 6.0, y + ROW_H - 1.0);
             if e.selected {
                 gfx.fill_round(row, R_ROW, if active { t.sel } else { t.sel_inactive });
             } else if hover == Hit::Row(p, vi) {
@@ -3789,7 +3840,8 @@ impl App {
             }
         };
         let status_color = if tab.message.is_some() { t.accent } else { t.dim };
-        gfx.text(&status, R::new(g.status.l + 14.0, g.status.t, g.filter.l - 8.0, g.status.b), Font::Normal, status_color);
+        // 필터 상자와 같은 높이에 맞춰 두 글자의 가운데 줄을 맞춘다
+        gfx.text(&status, R::new(g.status.l + 16.0, g.filter.t, g.filter.l - 8.0, g.filter.b), Font::Normal, status_color);
         if active || !tab.filter.is_empty() {
             gfx.fill_round(g.filter, 6.0, t.field);
             let glyph_color = if tab.filter.is_empty() { t.faint } else { t.accent };

@@ -807,11 +807,12 @@ impl App {
                     } else if hot(*hit) {
                         g.fill_round(*r, 7.0, t.hover);
                     }
+                    // 아이콘은 글자와 어울리는 보통 크기(14px). 작은 크기는 글자 옆에서 흐릿하게 보인다
                     let fg = if *on { t.accent } else { t.dim };
                     if compact {
-                        g.glyph(*glyph, *r, true, fg);
+                        g.glyph(*glyph, *r, false, fg);
                     } else {
-                        g.glyph(*glyph, R::new(r.l + 8.0, r.t, r.l + 30.0, r.b), true, fg);
+                        g.glyph(*glyph, R::new(r.l + 8.0, r.t, r.l + 30.0, r.b), false, fg);
                         g.text(label, R::new(r.l + 38.0, r.t, r.r - 6.0, r.b), if *on { Font::Strong } else { Font::Normal }, t.text);
                     }
                 }
