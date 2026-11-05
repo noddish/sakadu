@@ -46,7 +46,7 @@ pub enum Action {
 /// (동작, 저장 이름, 화면 이름, 기본 키)
 pub const ACTIONS: [(Action, &str, &str, &str); 25] = [
     (Action::Search, "search", "디스크 검색", "Ctrl+F"),
-    (Action::Favorites, "favorites", "즐겨찾기 열기", "Ctrl+B"),
+    (Action::Favorites, "favorites", "즐겨찾기로 이동", "Ctrl+B"),
     (Action::AddFavorite, "add-favorite", "즐겨찾기에 추가", "Ctrl+D"),
     (Action::NewTab, "new-tab", "새 탭", "Ctrl+T"),
     (Action::CloseTab, "close-tab", "탭 닫기", "Ctrl+W"),

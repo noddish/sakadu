@@ -50,7 +50,7 @@ impl App {
             self.close_view_menu();
             return;
         }
-        self.close_favorites();
+        self.fav_blur();
         self.close_palette();
         self.end_edits_for_click();
         self.active = p;

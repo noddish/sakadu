@@ -81,7 +81,7 @@ impl App {
             return None;
         }
         // 팝업이 열려 있으면 빈 곳을 눌러 닫을 수 있게 그대로 둔다
-        if self.fav_open || self.pal_open || self.view_menu.is_some() {
+        if self.pal_open || self.view_menu.is_some() {
             return None;
         }
         match self.hit(x, y) {

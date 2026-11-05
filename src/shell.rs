@@ -350,6 +350,22 @@ pub fn display_info(path: &str) -> (String, i32) {
     (util::from_wide(&sfi.szDisplayName), sfi.iIcon)
 }
 
+/// "내 PC"의 작은 아이콘 (없으면 -1)
+pub fn computer_icon() -> i32 {
+    let Ok(p) = parse_pidl("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}") else { return -1 };
+    let mut sfi = SHFILEINFOW::default();
+    let ok = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(p.0 as *const u16),
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut sfi),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_PIDL | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
+        )
+    };
+    if ok == 0 { -1 } else { sfi.iIcon }
+}
+
 /// 확장자별 형식 이름과 아이콘 (디스크 접근 없음)
 pub fn type_info(ext: &str, dir: bool) -> (String, i32) {
     let (name, attrs) = if dir { ("folder".to_string(), FILE_ATTRIBUTE_DIRECTORY.0) } else { (format!("file.{ext}"), FILE_ATTRIBUTE_NORMAL.0) };

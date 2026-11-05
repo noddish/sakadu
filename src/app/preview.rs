@@ -233,7 +233,7 @@ impl App {
             }
         }
         // 처리기 창: 처리기를 쓸 때만, 팝업이 열려 있으면 가리지 않게 숨긴다
-        let want = match (&self.preview, self.fav_open || self.pal_open || self.settings.is_some()) {
+        let want = match (&self.preview, self.pal_open || self.settings.is_some()) {
             (Some(Preview { content: Content::Handler(_), .. }), false) => self.preview_body().map(|b| {
                 let s = self.scale();
                 RECT { left: (b.l * s).round() as i32, top: (b.t * s).round() as i32, right: (b.r * s).round() as i32, bottom: (b.b * s).round() as i32 }

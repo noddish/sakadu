@@ -35,9 +35,9 @@ mod settings_ui;
 mod view_menu;
 mod caption;
 mod sidebar;
-use fav_ui::{G_STAR, TIMER_FAV_TIP, TIMER_FLY, TIMER_FLY_CLOSE};
+use fav_ui::G_STAR;
 use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
-use sidebar::SIDEBAR_W;
+use sidebar::{SIDEBAR_W, Side};
 use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
 pub use preview::{TextReady, unload_handler};
@@ -147,17 +147,10 @@ enum Hit {
     Track(usize),
     Status(usize),
     Pane(usize),
-    FavButton,
-    FavRow(usize),
-    FavAdd,
-    FavSort,
-    FavNewGroup,
+    /// 사이드바 가운데 목록 (즐겨찾기·드라이브·검색 폴더)
+    Side(Side),
     /// 검색 창의 "이 폴더도 검색하기" 버튼
     PalAddFolder,
-    /// 즐겨찾기 그룹의 오른쪽 메뉴: 항목·빈 곳
-    FavFlyItem(usize),
-    FavFlyPanel,
-    FavPanel,
     SearchButton,
     PalRow(usize),
     PalInstall,
@@ -190,8 +183,9 @@ enum Drag {
     Col { pane: usize, col: usize, start_x: f32, start_w: f32 },
     Thumb { pane: usize, grab: f32 },
     Press { pane: usize, vi: usize, x: f32, y: f32, select_on_up: bool },
-    FavPress { index: usize, y: f32 },
-    FavMove { from: usize, y: f32 },
+    /// 사이드바 즐겨찾기 줄을 눌렀다. 조금 움직이면 FavMove
+    FavPress { row: crate::favorites::Row, y: f32 },
+    FavMove { from: crate::favorites::Row, y: f32 },
     /// 탭을 눌렀다. 조금 움직이면 TabMove
     TabPress { pane: usize, tab: usize, x: f32, y: f32 },
     /// 탭을 끄는 중. (x, y)는 지금 포인터 위치
@@ -261,6 +255,8 @@ pub enum Deferred {
     PrepareMenu { paths: Vec<String>, dir: Option<String> },
     FavMenu { row: crate::favorites::Row, pt: POINT },
     FavSortMenu { pt: POINT },
+    /// 사이드바의 내 PC·드라이브·검색 폴더 줄 메뉴
+    SideMenu { side: Side, pt: POINT },
     DragOut(Vec<String>),
     Verb { paths: Vec<String>, verb: &'static str },
     Paste { pane: usize, dest: String },
@@ -272,6 +268,14 @@ pub enum Deferred {
     Settings { ctl: settings_ui::Ctl, index: usize, pt: POINT },
     /// 검색 결과 오른쪽 버튼 메뉴
     PalMenu { pt: POINT },
+}
+
+/// 끌어 놓을 곳 (drop_dir_at)
+pub enum DropAt {
+    None,
+    Dir(String),
+    /// 사이드바 즐겨찾기: 놓으면 즐겨찾기에 넣는다
+    Favorites,
 }
 
 pub struct Listed {
@@ -320,15 +324,20 @@ pub struct App {
     favs: crate::favorites::Favorites,
     /// 열린 보기 방식 메뉴
     view_menu: Option<view_menu::ViewMenu>,
-    fav_open: bool,
+    /// 키보드가 사이드바 즐겨찾기에 있는가 (Ctrl+B)
+    fav_focus: bool,
+    /// 사이드바 즐겨찾기에서 고른 줄 (favs.rows() 번호)
     fav_sel: usize,
-    fav_scroll: f32,
-    /// 즐겨찾기 그룹의 오른쪽 메뉴 (그룹에 마우스를 올리거나 →)
-    fav_fly: Option<fav_ui::Fly>,
-    /// 경로를 보여 줄 즐겨찾기 줄과, 잠시 머물러 이제 보이는지
-    fav_tip: Option<(crate::favorites::Row, bool)>,
-    /// 바로 전 마우스 위치 (오른쪽 메뉴 쪽으로 가는 중인지 보는 데 씀)
-    fav_pointer: (f32, f32),
+    /// 사이드바 가운데 목록의 스크롤
+    side_scroll: f32,
+    /// 파일을 끌어 사이드바에 놓으려는 자리 (즐겨찾기 쪽이면 Side::FavEmpty)
+    side_drop: Option<Side>,
+    /// 사이드바의 내 PC·드라이브 (뒤에서 읽어 온다)
+    places: sidebar::Places,
+    places_busy: bool,
+    places_again: bool,
+    /// (폴더, 디스크 검색 밖인가): 드라이브 종류는 폴더가 바뀔 때만 묻는다
+    outside_cache: RefCell<(String, bool)>,
     search_edit: HWND,
     pal_open: bool,
     pal_results: Vec<(bool, String)>,
@@ -966,12 +975,14 @@ impl App {
             types: HashMap::new(),
             favs: crate::favorites::load(),
             view_menu: None,
-            fav_open: false,
+            fav_focus: false,
             fav_sel: 0,
-            fav_scroll: 0.0,
-            fav_fly: None,
-            fav_tip: None,
-            fav_pointer: (0.0, 0.0),
+            side_scroll: 0.0,
+            side_drop: None,
+            places: sidebar::Places::default(),
+            places_busy: false,
+            places_again: false,
+            outside_cache: RefCell::new((String::new(), false)),
             search_edit,
             pal_open: false,
             pal_results: Vec::new(),
@@ -1008,6 +1019,7 @@ impl App {
         }
         app.apply_edit_font();
         app.apply_window_theme();
+        app.refresh_places();
         Ok(app)
     }
 
@@ -1102,6 +1114,8 @@ impl App {
             EditMode::Address(_) => self.addr_edit,
             EditMode::Rename(_) | EditMode::FavRename(_) => self.rename_edit,
             EditMode::None if self.pal_open => self.search_edit,
+            // 즐겨찾기에 키보드가 있으면 메인 창이 키를 받는다 (필터 상자에 커서가 깜박이지 않게)
+            EditMode::None if self.fav_focus => self.hwnd,
             EditMode::None => self.filter_edit,
         }
     }
@@ -1215,11 +1229,6 @@ impl App {
         }
         if let Some(h) = self.view_menu_hit(x, y) {
             return h;
-        }
-        if self.fav_open {
-            if let Some(h) = self.fav_hit(x, y) {
-                return h;
-            }
         }
         if x < SIDEBAR_W {
             return self.sidebar_hit(x, y);
@@ -1452,7 +1461,7 @@ impl App {
         // 설정 화면 뒤에 새 탭이 가려지지 않게 닫는다
         self.close_settings();
         self.close_palette();
-        self.close_favorites();
+        self.fav_blur();
         let p = self.active;
         let path = util::normalize(&raw);
         if shell::is_dir(&path) {
@@ -1878,8 +1887,8 @@ impl App {
         };
         let edit_h = 20.0;
         let center = |b: R, lp: f32, rp: f32| R::new(b.l + lp, b.t + (b.h() - edit_h) / 2.0, b.r - rp, b.t + (b.h() + edit_h) / 2.0);
-        // 즐겨찾기 팝업이 열린 동안은 필터 상자(자식 창)가 팝업을 가리지 않게 화면 밖에 둔다. 포커스는 유지
-        let filter = if self.fav_open || self.pal_open || self.view_menu.is_some() || self.settings.is_some() {
+        // 팝업이 열린 동안은 필터 상자(자식 창)가 팝업을 가리지 않게 화면 밖에 둔다. 포커스는 유지
+        let filter = if self.pal_open || self.view_menu.is_some() || self.settings.is_some() {
             Some(R::new(-4000.0, -4000.0, -3800.0, -3980.0))
         } else {
             self.pane_rect(self.active).map(|r| center(geom(r).filter, 26.0, 8.0))
@@ -1893,7 +1902,7 @@ impl App {
         place(self.addr_edit, addr);
         let ren = match self.edit_mode {
             EditMode::Rename(p) => self.rename_rect(p).map(|r| center(r, 4.0, 4.0)),
-            EditMode::FavRename(row) if self.fav_open => self.fav_rename_rect(row).map(|r| center(r, 4.0, 4.0)),
+            EditMode::FavRename(row) => self.fav_rename_rect(row).map(|r| center(r, 4.0, 4.0)),
             _ => None,
         };
         place(self.rename_edit, ren);
@@ -2178,6 +2187,8 @@ impl App {
         if let Some(cut) = r.cut {
             self.after_cut_paste(cut);
         }
+        // 복사·이동·삭제로 남은 용량이 바뀌었다
+        self.refresh_places();
     }
 
     /// 되돌리기가 일부만 됐으면 알리고, 실패한 항목은 기록으로 되돌려 놓아 다시 시도할 수 있게 한다
@@ -2380,19 +2391,37 @@ impl App {
         for p in 0..self.layout.count() {
             self.clamp_scroll(p);
         }
+        self.side_clamp_scroll();
         self.layout_edits();
         self.invalidate();
     }
 
     // ---------- 드래그 앤 드롭 ----------
 
-    /// 드롭 위치의 대상 폴더. 폴더 행 위면 그 폴더, 패널 안 다른 곳이면 패널의 현재 폴더
-    pub fn drop_dir_at(&mut self, pt: POINTL) -> Option<String> {
+    /// 드롭 위치의 대상. 폴더 행 위면 그 폴더, 패널 안 다른 곳이면 패널의 현재 폴더.
+    /// 사이드바는 즐겨찾기 쪽이면 즐겨찾기에 넣기, 드라이브·검색 폴더 줄이면 그 폴더
+    pub fn drop_dir_at(&mut self, pt: POINTL) -> DropAt {
         let mut cp = POINT { x: pt.x, y: pt.y };
         unsafe {
             let _ = ScreenToClient(self.hwnd, &mut cp);
         }
         let (x, y) = (cp.x as f32 / self.scale(), cp.y as f32 / self.scale());
+        if x < SIDEBAR_W && self.settings.is_none() {
+            let (side, dir) = self.side_drop_at(x, y).map_or((None, None), |(s, d)| (Some(s), d));
+            let side = side.filter(|s| *s == Side::FavEmpty || dir.is_some());
+            if self.drop_hover.take().is_some() || side != self.side_drop {
+                self.side_drop = side;
+                self.invalidate();
+            }
+            return match (side, dir) {
+                (Some(Side::FavEmpty), _) => DropAt::Favorites,
+                (_, Some(d)) => DropAt::Dir(d),
+                _ => DropAt::None,
+            };
+        }
+        if self.side_drop.take().is_some() {
+            self.invalidate();
+        }
         let (hover, dir) = match self.hit(x, y) {
             Hit::Row(p, vi) => {
                 let tab = self.panes[p].tab();
@@ -2412,11 +2441,11 @@ impl App {
             self.drop_hover = hover;
             self.invalidate();
         }
-        dir
+        dir.map_or(DropAt::None, DropAt::Dir)
     }
 
     pub fn clear_drop_hover(&mut self) {
-        if self.drop_hover.take().is_some() {
+        if self.drop_hover.take().is_some() | self.side_drop.take().is_some() {
             self.invalidate();
         }
     }
@@ -2443,9 +2472,6 @@ impl App {
                     self.tracking = false;
                     if self.hover != Hit::None {
                         self.hover = Hit::None;
-                        if self.fav_open {
-                            self.fav_fly_hover(Hit::None, -1.0, -1.0);
-                        }
                         self.update_tip();
                         self.invalidate();
                     }
@@ -2499,16 +2525,17 @@ impl App {
                 }
                 WM_SETFOCUS => self.focus(),
                 WM_ACTIVATE => {
-                    // 다른 창으로 전환하면 즐겨찾기 팝업을 닫는다 (WA_INACTIVE).
+                    // 다른 창으로 전환하면 보기 메뉴를 닫는다 (WA_INACTIVE).
                     // 검색 창은 다른 앱에서 무언가 복사해 오는 동안에도 적어 둔 검색어가 그대로 있도록 열어 둔다
                     self.window_active = loword(wp.0) != 0;
                     self.invalidate();
                     if loword(wp.0) == 0 {
-                        self.close_favorites();
                         self.close_view_menu();
                     } else {
-                        // 관리자 승인(검색 서비스 설치) 등을 마치고 돌아오면 설정 창의 상태를 다시 읽는다
+                        // 관리자 승인(검색 서비스 설치) 등을 마치고 돌아오면 설정 창의 상태를 다시 읽는다.
+                        // 다른 곳에서 파일을 옮겼을 수 있으니 드라이브 남은 용량도 다시 읽는다
                         self.refresh_settings();
+                        self.refresh_places();
                     }
                     return None;
                 }
@@ -2529,8 +2556,6 @@ impl App {
                         self.pal_run_query();
                     } else if id == TIMER_PREVIEW {
                         self.start_preview();
-                    } else if id == TIMER_FLY || id == TIMER_FLY_CLOSE || id == TIMER_FAV_TIP {
-                        self.fav_fly_timer(id);
                     } else if id == TIMER_TIP {
                         let _ = KillTimer(Some(hwnd), id);
                         self.tip_shown = true;
@@ -2570,6 +2595,19 @@ impl App {
                     self.save_session();
                     self.pending.push(if self.tray.is_some() { Deferred::HideToTray } else { Deferred::Close });
                 }
+                // 즐겨찾기에 키보드가 있을 때의 글자: 그 글자로 시작하는 줄로
+                WM_CHAR if self.fav_focus => {
+                    self.fav_type_char(wp.0 as u16);
+                }
+                // USB·네트워크 드라이브를 꽂거나 빼면 사이드바 드라이브 목록을 다시 읽는다
+                // (DBT_DEVICEARRIVAL 0x8000, DBT_DEVICEREMOVECOMPLETE 0x8004)
+                WM_DEVICECHANGE => {
+                    if matches!(wp.0, 0x8000 | 0x8004) {
+                        self.refresh_places();
+                    }
+                    return None;
+                }
+                crate::WM_APP_PLACES => self.on_places(*Box::from_raw(lp.0 as *mut sidebar::Places)),
                 WM_APP_LISTED => self.on_listed(*Box::from_raw(lp.0 as *mut Listed)),
                 WM_APP_ICONS => self.on_icons(*Box::from_raw(lp.0 as *mut IconsReady)),
                 WM_APP_SEARCH => self.on_search_done(*Box::from_raw(lp.0 as *mut SearchDone)),
@@ -2659,14 +2697,8 @@ impl App {
                 if h != self.hover {
                     self.hover = h;
                     self.view_menu_hover(h);
-                    if self.fav_open {
-                        self.fav_fly_hover(h, x, y);
-                    }
                     self.update_tip();
                     self.invalidate();
-                }
-                if self.fav_open {
-                    self.fav_pointer = (x, y);
                 }
                 if !self.tracking {
                     let mut tme = TRACKMOUSEEVENT {
@@ -2735,11 +2767,9 @@ impl App {
             self.invalidate();
             return;
         }
-        if self.fav_open && hit != Hit::FavButton {
-            self.end_edits_for_click();
-            self.fav_mouse_down(hit, y);
-            self.invalidate();
-            return;
+        // 즐겨찾기 줄 밖을 누르면 키보드는 칸으로 돌아간다
+        if self.fav_focus && !matches!(hit, Hit::Side(Side::Fav(_))) {
+            self.fav_blur();
         }
         if let Some(p) = hit.pane() {
             self.activate_pane(p);
@@ -2753,7 +2783,7 @@ impl App {
         };
         match hit {
             Hit::Layout(i) => self.set_layout(Layout::ALL[i]),
-            Hit::FavButton => self.toggle_favorites(),
+            Hit::Side(s) => self.side_mouse_down(s, y, dbl),
             Hit::SearchButton => self.toggle_palette(),
             Hit::NewFolder => self.new_folder(self.active),
             Hit::Hidden => self.toggle_hidden(),
@@ -2890,22 +2920,14 @@ impl App {
             self.invalidate();
             return;
         }
-        if self.fav_open {
-            match hit {
-                Hit::FavRow(i) => {
-                    self.end_edits_for_click();
-                    self.fav_sel = i;
-                }
-                Hit::FavAdd | Hit::FavSort | Hit::FavNewGroup | Hit::FavPanel | Hit::FavButton | Hit::FavFlyItem(_) | Hit::FavFlyPanel => {}
-                _ => self.close_favorites(),
-            }
-            self.invalidate();
-            return;
-        }
         if let Some(p) = hit.pane() {
             self.activate_pane(p);
         }
         self.end_edits_for_click();
+        if let Hit::Side(_) = hit {
+            self.invalidate();
+            return;
+        }
         match hit {
             Hit::Row(p, vi) => {
                 let tab = self.panes[p].tab_mut();
@@ -2952,12 +2974,8 @@ impl App {
             self.close_view_menu();
             return true;
         }
-        if self.fav_open {
-            if let Some(row) = self.fav_row_at(self.hit(x, y)) {
-                self.fav_select(row);
-                let pt = self.to_screen(x, y);
-                self.pending.push(Deferred::FavMenu { row, pt });
-            }
+        if let Hit::Side(s) = self.hit(x, y) {
+            self.side_context_menu(s, x, y);
             return true;
         }
         let Some((pane, paths, dir)) = self.menu_target(x, y) else { return false };
@@ -2980,13 +2998,8 @@ impl App {
             self.close_view_menu();
             return;
         }
-        if self.fav_open {
-            if let Some(row) = self.fav_row_at(self.hit(x, y)) {
-                self.fav_open_row(row, true);
-            }
-            return;
-        }
         match self.hit(x, y) {
+            Hit::Side(s @ (Side::Fav(crate::favorites::Row::Item { .. }) | Side::Computer | Side::Drive(_) | Side::Folder(_))) => self.side_open(s, true),
             Hit::Tab(p, t) | Hit::TabClose(p, t) => self.close_tab(p, t),
             Hit::Row(p, vi) => {
                 let tab = self.panes[p].tab();
@@ -3017,9 +3030,8 @@ impl App {
         if self.view_menu.is_some() {
             return;
         }
-        // 즐겨찾기가 열려 있으면 휠은 그 메뉴들 안에서만 (뒤쪽 파일 목록은 움직이지 않게)
-        if self.fav_open {
-            self.fav_wheel_at(x, y, -delta / 120.0 * 3.0 * ROW_H);
+        if x < SIDEBAR_W {
+            self.side_wheel(-delta / 120.0 * 3.0 * ROW_H);
             return;
         }
         if self.preview_rect().is_some_and(|r| r.contains(x, y)) {
@@ -3131,7 +3143,7 @@ impl App {
         let p = self.active;
         match a {
             Action::Search => self.toggle_palette(),
-            Action::Favorites => self.toggle_favorites(),
+            Action::Favorites => self.toggle_fav_focus(),
             Action::AddFavorite => self.add_favorite(),
             Action::NewTab => self.new_tab(p, None, true),
             Action::CloseTab => {
@@ -3171,7 +3183,7 @@ impl App {
         if self.pal_open {
             return self.pal_key(vk);
         }
-        if self.fav_open {
+        if self.fav_focus {
             return self.fav_key(vk);
         }
         if let Some(a) = self.keys.find(crate::keys::Combo::now(vk.0)) {
@@ -3227,9 +3239,9 @@ impl App {
         let alt = key_down(VK_MENU);
         match id {
             ID_SEARCH => self.pal_key(vk),
-            // 즐겨찾기 팝업이 열려 있으면 필터 상자의 키는 팝업 조작에 쓴다
+            // 보기 메뉴가 열려 있거나 키보드가 즐겨찾기에 있으면 필터 상자의 키는 그쪽 조작에 쓴다
             ID_FILTER if self.view_menu.is_some() => self.view_menu_key(vk),
-            ID_FILTER if self.fav_open => self.fav_key(vk),
+            ID_FILTER if self.fav_focus => self.fav_key(vk),
             ID_FILTER => {
                 let empty = unsafe { GetWindowTextLengthW(self.filter_edit) } == 0;
                 let text_key = matches!(vk, VK_BACK | VK_DELETE | VK_HOME | VK_END | VK_LEFT | VK_RIGHT);
@@ -3322,9 +3334,6 @@ impl App {
         if self.view_menu.is_some() {
             self.paint_view_menu();
         }
-        if self.fav_open {
-            self.paint_favorites();
-        }
         if self.pal_open {
             self.paint_palette();
         }
@@ -3368,7 +3377,7 @@ impl App {
 
     /// 도구 막대 버튼에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
     fn tip(&self) -> Option<(R, String)> {
-        if self.fav_open || self.pal_open || self.view_menu.is_some() || self.settings.is_some() {
+        if self.pal_open || self.view_menu.is_some() || self.settings.is_some() || !matches!(self.drag, Drag::None) {
             return None;
         }
         use crate::keys::Action;
@@ -3382,7 +3391,7 @@ impl App {
             Hit::Layout(i) => (layout_buttons()[i], named(LAYOUTS[i], crate::keys::name(LAYOUTS[i]))),
             Hit::NewFolder => (new_folder_button(), named(Action::NewFolder, "새 폴더")),
             Hit::Hidden => (self.hidden_button(), named(Action::Hidden, if self.show_hidden { "숨김 항목 감추기" } else { "숨김 항목 보기" })),
-            Hit::FavButton => (self.fav_button(), named(Action::Favorites, "즐겨찾기")),
+            Hit::Side(s) => return self.side_tip(s),
             Hit::SearchButton => (
                 self.search_button(),
                 match &self.hotkey {
@@ -3925,6 +3934,7 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         Deferred::PrepareMenu { paths, dir } => prepare_menu(hwnd, paths, dir),
         Deferred::FavMenu { row, pt } => fav_ui::show_fav_menu(hwnd, row, pt),
         Deferred::FavSortMenu { pt } => fav_ui::show_fav_sort_menu(hwnd, pt),
+        Deferred::SideMenu { side, pt } => sidebar::show_side_menu(hwnd, side, pt),
         Deferred::PreviewSync => preview::sync_handler(),
         Deferred::Settings { ctl, index, pt } => settings_ui::run_deferred(hwnd, ctl, index, pt),
         Deferred::PalMenu { pt } => palette::show_pal_menu(hwnd, pt),
@@ -4108,7 +4118,7 @@ pub unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 if id as i32 == ID_FILTER && with_app(|app| app.view_menu.is_some()).unwrap_or(false) {
                     return LRESULT(0);
                 }
-                // 즐겨찾기 팝업이 열려 있으면 글자는 필터 대신 항목 찾기에 쓴다
+                // 키보드가 즐겨찾기에 있으면 글자는 필터 대신 줄 찾기에 쓴다
                 if msg == WM_CHAR && id as i32 == ID_FILTER && with_app(|app| app.fav_type_char(wp.0 as u16)).unwrap_or(false) {
                     return LRESULT(0);
                 }

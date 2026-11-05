@@ -42,6 +42,8 @@ pub const WM_APP_THUMB: u32 = WM_APP + 5;
 pub const WM_APP_PREVIEW: u32 = WM_APP + 6;
 /// 알림 영역(트레이) 아이콘을 누르거나 메뉴를 열 때
 pub const WM_APP_TRAY: u32 = WM_APP + 7;
+/// 사이드바 드라이브 목록 (app::sidebar::Places)
+pub const WM_APP_PLACES: u32 = WM_APP + 8;
 /// 패널별 폴더 변경 알림 (WM_APP_NOTIFY + 패널 번호)
 pub const WM_APP_NOTIFY: u32 = WM_APP + 0x10;
 

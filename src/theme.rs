@@ -61,8 +61,6 @@ pub struct Theme {
     pub tab_hover: Color,
     /// 키보드 포커스 테두리
     pub focus: Color,
-    /// 즐겨찾기: 오른쪽 메뉴가 열려 있는 줄
-    pub menu_open: Color,
 }
 
 impl Theme {
@@ -90,7 +88,6 @@ impl Theme {
         tab_text: hex(0x4A4E56),
         tab_hover: hex(0xE7E9EC),
         focus: hex(0x6A6F78),
-        menu_open: hex(0xE2E4E8),
     };
 
     /// 라이트를 뒤집지 않고 어두운 바탕에서의 명암에 맞췄다: 활성 칸의 지금 탭은 밝은 회색, 선택은 어두운 파랑
@@ -118,7 +115,6 @@ impl Theme {
         tab_text: hex(0xB4B8C0),
         tab_hover: hex(0x24262B),
         focus: hex(0xA3A8B2),
-        menu_open: hex(0x34373D),
     };
 
     /// 고대비 모드: 시스템 색으로만 만든다. 활성 칸의 지금 탭과 선택은 강조(Highlight), 포커스는 HotLight 색
@@ -149,7 +145,6 @@ impl Theme {
             tab_text: text,
             tab_hover: soft,
             focus: hot,
-            menu_open: mix(window, text, 0.3),
         }
     }
 
