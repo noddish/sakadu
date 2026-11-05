@@ -2388,6 +2388,7 @@ impl App {
                 rename: self.rename_edit,
                 preview_host: self.preview_host,
                 filter: self.filter_edit,
+                search: self.search_edit,
             }
         };
         if let Some(old) = EDIT_COLORS.replace(Some(colors)) {
@@ -4150,6 +4151,8 @@ struct EditColors {
     rename: HWND,
     preview_host: HWND,
     filter: HWND,
+    /// 검색 창 입력 상자 (판과 같은 바탕, 상자 없이)
+    search: HWND,
 }
 
 thread_local! {
@@ -4163,7 +4166,7 @@ pub fn edit_ctl_color(wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     let c = EDIT_COLORS.get()?;
     let hdc = HDC(wp.0 as *mut c_void);
     let target = HWND(lp.0 as *mut c_void);
-    let (bg, brush) = if target == c.rename || target == c.preview_host {
+    let (bg, brush) = if target == c.rename || target == c.preview_host || target == c.search {
         (c.pane, c.pane_brush)
     } else if target == c.filter {
         (c.chip, c.chip_brush)

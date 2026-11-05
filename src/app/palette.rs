@@ -5,11 +5,13 @@ use crate::service::{self, SearchError, SearchResponse};
 use windows::Win32::UI::Controls::EM_GETSEL;
 use windows::Win32::UI::Shell::ShellExecuteW;
 
-const PAL_W: f32 = 760.0;
-const PAL_HEAD_H: f32 = 52.0;
-const PAL_FOOT_H: f32 = 30.0;
-const PAL_ROW_H: f32 = 34.0;
-const PAL_MAX_ROWS: usize = 12;
+const PAL_W: f32 = 640.0;
+const PAL_HEAD_H: f32 = 54.0;
+const PAL_FOOT_H: f32 = 38.0;
+/// 결과 한 줄: 이름, 그 아래 상위 폴더
+const PAL_ROW_H: f32 = 46.0;
+const PAL_MAX_ROWS: usize = 10;
+const G_CHECK: u16 = 0xE73E;
 const PAL_LIMIT: usize = 200;
 pub(super) const G_SEARCH: u16 = 0xE721;
 pub(super) const TIMER_SEARCH: usize = 20;
@@ -280,12 +282,12 @@ impl App {
 
     fn pal_list(&self) -> R {
         let r = self.pal_rect();
-        R::new(r.l + 6.0, r.t + PAL_HEAD_H, r.r - 6.0, r.b - PAL_FOOT_H)
+        R::new(r.l + 6.0, r.t + PAL_HEAD_H + 4.0, r.r - 6.0, r.b - PAL_FOOT_H - 4.0)
     }
 
     pub(super) fn pal_input_rect(&self) -> R {
         let r = self.pal_rect();
-        R::new(r.l + 44.0, r.t + 10.0, r.r - 14.0, r.t + PAL_HEAD_H - 10.0)
+        R::new(r.l + 46.0, r.t + 10.0, r.r - 16.0, r.t + PAL_HEAD_H - 10.0)
     }
 
     fn pal_install_button(&self) -> R {
@@ -760,7 +762,6 @@ impl App {
         let t = self.theme;
         let r = self.pal_rect();
         let list = self.pal_list();
-        let input = self.pal_input_rect();
         let install = self.pal_install_button();
         let (hover, sel, scroll) = (self.hover, self.pal_sel, self.pal_scroll);
         let status = self.pal_status.clone();
@@ -777,18 +778,26 @@ impl App {
                 crate::diag::log(|| format!("search: {pieces} piece(s), {} hit(s) shown {:.1}ms after typing", self.pal_results.len(), d.as_secs_f64() * 1000.0));
             }
         }
+        let (win_w, win_h) = (self.w, self.h);
         let App { gfx, pal_results, pal_picked, types, .. } = self;
 
-        let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.5 } else { 0.16 } };
-        gfx.fill_round(R::new(r.l - 3.0, r.t + 2.0, r.r + 3.0, r.b + 6.0), 14.0, shadow);
+        // 뒤를 살짝 어둡게 해 검색에 집중하게 한다 (누르면 닫힌다)
+        gfx.fill(R::new(0.0, 0.0, win_w, win_h), Color { r: 0.06, g: 0.07, b: 0.09, a: if t.dark { 0.35 } else { 0.12 } });
+        // 떠 있는 판: 아래로 번지는 그림자 몇 겹
+        if !t.high_contrast {
+            let k = if t.dark { 3.0 } else { 1.0 };
+            let ink = |a: f32| Color { r: 0.06, g: 0.09, b: 0.16, a: (a * k).min(0.6) };
+            gfx.fill_round(R::new(r.l + 6.0, r.t + 14.0, r.r - 6.0, r.b + 22.0), 18.0, ink(0.05));
+            gfx.fill_round(R::new(r.l + 2.0, r.t + 8.0, r.r - 2.0, r.b + 12.0), 15.0, ink(0.07));
+            gfx.fill_round(R::new(r.l - 1.0, r.t + 1.0, r.r + 1.0, r.b + 3.0), 13.0, ink(0.06));
+        }
         gfx.fill_round(r, 12.0, t.pane);
         // 테두리는 다른 팝업과 같은 중립색. 포커스는 입력 줄의 커서가 보여 준다
         gfx.stroke_round(r.inset(0.5, 0.5), 12.0, t.pane_border, 1.0);
 
-        // 입력 줄 (실제 입력은 위에 놓인 EDIT 컨트롤)
-        gfx.glyph(G_SEARCH, R::new(r.l + 14.0, r.t, r.l + 40.0, r.t + PAL_HEAD_H), false, t.accent);
-        gfx.fill_round(input.inset(-4.0, 0.0), 8.0, t.field);
-        gfx.fill(R::new(r.l + 10.0, r.t + PAL_HEAD_H - 1.0, r.r - 10.0, r.t + PAL_HEAD_H), t.border);
+        // 입력 줄 (실제 입력은 위에 놓인 EDIT 컨트롤, 바탕은 판과 같은 색)
+        gfx.glyph(G_SEARCH, R::new(r.l + 16.0, r.t, r.l + 40.0, r.t + PAL_HEAD_H), false, t.accent);
+        gfx.fill(R::new(r.l, r.t + PAL_HEAD_H - 1.0, r.r, r.t + PAL_HEAD_H), t.border);
 
         gfx.clip(list);
         let message: Option<String> = match &status {
@@ -820,7 +829,7 @@ impl App {
             _ => None,
         };
         if let Some(m) = message {
-            gfx.text(&m, R::new(list.l + 16.0, list.t + 10.0, list.r - 16.0, list.t + 90.0), Font::Hint, t.faint);
+            gfx.text(&m, R::new(list.l + 16.0, list.t + 14.0, list.r - 16.0, list.t + 90.0), Font::Hint, t.faint);
         }
         let button = match (&status, &add_folder) {
             (PalStatus::NotInstalled, _) => Some(("검색 서비스 설치", Hit::PalInstall)),
@@ -837,39 +846,41 @@ impl App {
             let (is_dir, path) = &pal_results[i];
             let y = list.t + i as f32 * PAL_ROW_H - scroll;
             let row = R::new(list.l, y, list.r, y + PAL_ROW_H);
-            // 고른 줄은 선택 색, 고른 게 있을 때 지금 줄은 테두리로만 표시
+            // 지금 줄은 옅은 강조 색, 골라 둔 줄은 더 옅은 강조 색과 왼쪽 체크
             let picked = pal_picked.get(i).copied().unwrap_or(false);
-            if picked || (i == sel && picks == 0) {
-                gfx.fill_round(row.inset(2.0, 1.0), 6.0, t.sel);
+            let current = i == sel;
+            if current {
+                gfx.fill_round(row, 8.0, t.accent_soft);
+            } else if picked {
+                gfx.fill_round(row, 8.0, alpha(t.accent, if t.dark { 0.12 } else { 0.07 }));
             } else if hover == Hit::PalRow(i) {
-                gfx.fill_round(row.inset(2.0, 1.0), 6.0, t.hover);
+                gfx.fill_round(row, 8.0, t.hover);
             }
-            if i == sel && picks > 0 {
-                gfx.stroke_round(row.inset(2.75, 1.75), 6.0, t.accent, 1.5);
+            if t.high_contrast && (current || picked) {
+                gfx.stroke_round(row.inset(0.75, 0.75), 8.0, if current { t.focus } else { t.border }, 1.5);
+            }
+            if picked {
+                gfx.glyph(G_CHECK, R::new(row.l + 4.0, y, row.l + 18.0, y + PAL_ROW_H), true, t.accent);
             }
             let name = util::file_name(path);
             let ext = if *is_dir { String::new() } else { name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default() };
             let key = if *is_dir { "\\dir".to_string() } else { ext.clone() };
             let icon = types.entry(key).or_insert_with(|| shell::type_info(&ext, *is_dir)).1;
-            gfx.icon(icon, R::new(row.l + 12.0, y + 9.0, row.l + 28.0, y + 25.0));
-            let split = row.l + 38.0 + (row.w() - 38.0) * 0.42;
-            gfx.text(name, R::new(row.l + 40.0, y, split - 8.0, y + PAL_ROW_H), Font::Normal, t.text);
+            gfx.icon(icon, R::new(row.l + 28.0, y + 7.0, row.l + 44.0, y + 23.0));
+            let (font, fg) = if current && !t.high_contrast { (Font::Strong, t.chip_text) } else { (Font::Normal, t.text) };
+            gfx.text(name, R::new(row.l + 54.0, y + 5.0, row.r - 12.0, y + 24.0), font, fg);
+            // 같은 이름의 파일을 폴더로 구별할 수 있게 경로는 흐린 색이 아닌 보조 글자색으로 (넘치면 가운데를 줄인다)
             let parent = util::parent(path).unwrap_or_default();
-            // 같은 이름의 파일을 폴더로 구별할 수 있게 경로는 흐린 색이 아닌 보조 글자색으로
-            gfx.text(&parent, R::new(split, y, row.r - 12.0, y + PAL_ROW_H), Font::Path, t.dim);
+            gfx.text(&parent, R::new(row.l + 54.0, y + 24.0, row.r - 12.0, y + 42.0), Font::Path, t.dim);
         }
         if stale {
             gfx.fill(list, alpha(t.pane, 0.6));
         }
         gfx.unclip();
 
-        let foot = R::new(r.l + 16.0, r.b - PAL_FOOT_H, r.r - 14.0, r.b - 2.0);
-        let foot_text = if picks > 0 {
-            format!("{picks}개 고름 · Enter 모두 열기 · Ctrl+C 복사")
-        } else {
-            format!("Enter 열기 · Ctrl+Enter 위치{}", help.as_deref().map(|h| format!(" · {h} 도움말")).unwrap_or_default())
-        };
-        gfx.text(&foot_text, foot, Font::Normal, t.faint);
+        // 아래: 키 안내 (왼쪽)와 결과 수·걸린 시간 (오른쪽)
+        let foot = R::new(r.l + 18.0, r.b - PAL_FOOT_H, r.r - 18.0, r.b);
+        gfx.fill(R::new(r.l, foot.t, r.r, foot.t + 1.0), t.border);
         let right = match &status {
             _ if stale => "찾는 중…".to_string(),
             PalStatus::Done { ready: false, .. } => format!("준비 중 · {}개 먼저 보여 줌", pal_results.len()),
@@ -882,8 +893,54 @@ impl App {
             PalStatus::Ready(n) => format!("인덱스 {n}개"),
             _ => String::new(),
         };
-        gfx.text(&right, foot, Font::Right, t.faint);
+        let rw = gfx.measure(&right, Font::Small);
+        gfx.text(&right, R::new(foot.r - rw, foot.t, foot.r, foot.b), Font::Small, t.faint);
+        let help_hint = help.as_deref().map(|h| (vec![h.to_string()], "도움말"));
+        let hints: Vec<(Vec<String>, &str)> = if picks > 0 {
+            vec![(vec!["Enter".into()], "모두 열기"), (vec!["Ctrl".into(), "C".into()], "파일째 복사")]
+        } else {
+            [
+                Some((vec!["↑↓".to_string()], "이동")),
+                Some((vec!["Enter".to_string()], "열기")),
+                Some((vec!["Ctrl".to_string(), "Enter".to_string()], "위치 열기")),
+                Some((vec!["Ctrl".to_string(), "Shift".to_string()], "여러 개")),
+                help_hint,
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        };
+        let cy = (foot.t + foot.b) / 2.0;
+        let limit = foot.r - rw - 16.0;
+        let mut x = foot.l;
+        if picks > 0 {
+            let label = format!("{picks}개 고름");
+            let w = gfx.measure(&label, Font::Small);
+            gfx.text(&label, R::new(x, foot.t, x + w + 2.0, foot.b), Font::Small, t.chip_text);
+            x += w + 16.0;
+        }
+        for (keys, label) in hints {
+            let need = keys.iter().map(|k| gfx.measure(k, Font::Small) + 14.0).sum::<f32>() + gfx.measure(label, Font::Small) + 6.0;
+            if x + need > limit {
+                break;
+            }
+            for k in &keys {
+                x = kbd(gfx, &t, x, cy, k) + 4.0;
+            }
+            let w = gfx.measure(label, Font::Small);
+            gfx.text(label, R::new(x + 2.0, foot.t, x + w + 4.0, foot.b), Font::Small, t.dim);
+            x += w + 18.0;
+        }
     }
+}
+
+/// 키 모양 작은 칩. 오른쪽 끝 x를 돌려준다
+fn kbd(gfx: &Gfx, t: &Theme, x: f32, cy: f32, label: &str) -> f32 {
+    let w = gfx.measure(label, Font::Small) + 10.0;
+    let r = R::new(x, cy - 10.0, x + w, cy + 10.0);
+    gfx.fill_round(r, 4.0, super::sidebar::well(t));
+    gfx.text(label, R::new(r.l + 5.0, r.t, r.r, r.b), Font::Small, t.text);
+    r.r
 }
 
 #[cfg(test)]
