@@ -1,5 +1,5 @@
-//! 보기 방식 메뉴: 경로 상자 오른쪽 보기 버튼을 누르면 버튼 아래에 뜨는 메뉴.
-//! Windows 기본 메뉴 대신 즐겨찾기 팝업과 같은 모양(그림자·둥근 모서리·테마 색)으로 직접 그린다
+//! 보기 방식 메뉴: 경로 줄 오른쪽 보기 버튼을 누르면 버튼 아래에 뜨는 메뉴.
+//! Windows 기본 메뉴 대신 검색 팔레트와 같은 결(그림자·둥근 모서리·테마 색)로 직접 그린다
 
 use super::*;
 
@@ -138,7 +138,7 @@ impl App {
         let gfx = &self.gfx;
         let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.45 } else { 0.12 } };
 
-        // 그림자 + 본체 (즐겨찾기 팝업과 같은 모양)
+        // 그림자 + 본체
         gfx.fill_round(R::new(r.l - 2.0, r.t + 1.0, r.r + 2.0, r.b + 4.0), R_PANE + 2.0, shadow);
         gfx.fill_round(r, R_PANE, t.pane);
         gfx.stroke_round(r.inset(0.5, 0.5), R_PANE, t.pane_border, 1.0);

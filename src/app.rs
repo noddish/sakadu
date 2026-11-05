@@ -69,7 +69,7 @@ pub const COPYDATA_OPEN: usize = 0x5150_0001;
 const ID_OPEN_TAB: u32 = shell::MENU_CUSTOM;
 const ID_ADD_FAV: u32 = shell::MENU_CUSTOM + 1;
 const TIMER_REFRESH: usize = 10;
-/// 도구 막대 버튼 말풍선을 띄우기까지
+/// 작업 줄·사이드바 단추 말풍선을 띄우기까지
 const TIMER_TIP: usize = 42;
 /// 칸 아래 알림(flash)을 지우기까지
 const TIMER_FLASH: usize = 44;
@@ -168,7 +168,7 @@ enum Hit {
     HelpButton,
     /// 설정 창 안
     Set(settings_ui::SetHit),
-    /// 경로 상자 오른쪽 끝의 즐겨찾기 별
+    /// 경로 오른쪽 끝의 즐겨찾기 별
     Star(usize),
 }
 
@@ -385,7 +385,7 @@ pub struct App {
     marquee_base: Vec<bool>,
     /// 새 탭을 열 위치 (세션 형식, session::NEW_TAB_SAME이면 지금 탭과 같은 폴더)
     new_tab_home: String,
-    /// 도구 막대 버튼 말풍선이 떠 있는지
+    /// 단추 말풍선이 떠 있는지
     tip_shown: bool,
     /// 설정 창 (열려 있으면 창 전체를 덮는다)
     settings: Option<settings_ui::Settings>,
@@ -597,7 +597,7 @@ impl Grid {
             Grid { ox: list.l + 6.0, oy: list.t + 6.0, cols, rows: 0, cell_w: usable / cols as f32, cell_h: thumb + 52.0, cell: CellKind::Tile(thumb), horiz: false }
         };
         match view {
-            // 줄 바탕은 머리글·상태 표시줄 구분선과 같은 8px 안쪽에서 시작한다 (활성 칸 테두리에 붙어 보이지 않게)
+            // 줄 바탕은 머리글 구분선과 같은 8px 안쪽에서 시작한다 (칸 테두리에 붙어 보이지 않게)
             ViewMode::Details => Grid { ox: list.l + 8.0, oy: list.t, cols: 1, rows: 0, cell_w: list.w() - SCROLL_W - 14.0, cell_h: ROW_H, cell: CellKind::Row, horiz: false },
             ViewMode::Huge => tile(256.0, 280.0),
             ViewMode::Large => tile(THUMB, 124.0),
@@ -2369,7 +2369,7 @@ impl App {
         unsafe {
             let dark = BOOL::from(self.theme.dark);
             let _ = DwmSetWindowAttribute(self.hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const c_void, 4);
-            // 제목 표시줄을 도구 막대 색과 맞춰 한 덩어리처럼 보이게 (Windows 11)
+            // 제목 표시줄을 창 바탕색과 맞춰 한 덩어리처럼 보이게 (Windows 11)
             let caption = colorref(self.theme.window);
             let _ = DwmSetWindowAttribute(self.hwnd, DWMWA_CAPTION_COLOR, &caption as *const _ as *const c_void, 4);
             let text = colorref(self.theme.text);
@@ -3485,7 +3485,7 @@ impl App {
         icon_button(self.preview_button(), G_PREVIEW, self.preview.is_some(), self.hover == Hit::PreviewButton);
     }
 
-    /// 도구 막대 버튼에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
+    /// 단추에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
     fn tip(&self) -> Option<(R, String)> {
         if self.pal_open || self.view_menu.is_some() || self.settings.is_some() || !matches!(self.drag, Drag::None) {
             return None;
@@ -3560,7 +3560,7 @@ impl App {
             Drag::TabMove { pane, tab, x, y } => (Some((pane, tab)), self.tab_drop_target(x, y)),
             _ => (None, None),
         };
-        // 경로 상자의 즐겨찾기 별: 폴더일 때만 (켜짐 여부)
+        // 경로 오른쪽 즐겨찾기 별: 폴더일 때만 (켜짐 여부)
         let view_menu_open = self.view_menu.is_some_and(|m| m.pane == p);
         let starred = self.panes[p].tab().loc.dir().map(|d| self.favs.find(&util::normalize(d)).is_some());
         // 네모 상자 고르기 (화면 좌표)
@@ -4237,7 +4237,7 @@ pub unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
 mod tests {
     use super::*;
 
-    /// 모든 보기에서 칸 가운데를 누르면 그 항목이 잡히고, 보이는 범위에 들어 있고, 경로 상자 오른쪽 보기 버튼과 겹치지 않는다
+    /// 모든 보기에서 칸 가운데를 누르면 그 항목이 잡히고, 보이는 범위에 들어 있고, 경로 줄 오른쪽 보기 버튼과 겹치지 않는다
     #[test]
     fn every_view_maps_items_and_clicks_consistently() {
         let g = geom(R::new(0.0, 0.0, 700.0, 520.0));

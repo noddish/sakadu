@@ -339,7 +339,7 @@ impl App {
         }
     }
 
-    /// 경로 상자의 별: 이 폴더를 즐겨찾기에 바로 넣거나 뺀다
+    /// 경로 오른쪽 별: 이 폴더를 즐겨찾기에 바로 넣거나 뺀다
     pub(super) fn toggle_star(&mut self, p: usize) {
         let Some(dir) = self.panes[p].tab().loc.dir().map(util::normalize) else { return };
         let before = self.favs.clone();

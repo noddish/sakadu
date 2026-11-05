@@ -527,7 +527,7 @@ impl App {
                     if side_drop == Some(Side::FavEmpty) {
                         g.fill_round(r, 6.0, alpha(t.accent, 0.10));
                     }
-                    let how = add_key.as_deref().map(|k| format!("별(☆)이나 {k}로 넣어 보세요")).unwrap_or_else(|| "경로 상자의 별(☆)로 넣어 보세요".to_string());
+                    let how = add_key.as_deref().map(|k| format!("별(☆)이나 {k}로 넣어 보세요")).unwrap_or_else(|| "경로 오른쪽 별(☆)로 넣어 보세요".to_string());
                     g.text("즐겨찾기가 비어 있어요", R::new(r.l + 10.0, r.t + 4.0, r.r - 6.0, r.t + 22.0), Font::Small, t.faint);
                     g.text(&how, R::new(r.l + 10.0, r.t + 22.0, r.r - 6.0, r.t + 40.0), Font::Small, t.faint);
                 }

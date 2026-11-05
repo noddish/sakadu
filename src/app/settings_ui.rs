@@ -338,7 +338,7 @@ impl App {
                         Card {
                             header: format!("즐겨찾기 ({})", k(Action::Favorites)),
                             rows: vec![
-                                tip("추가", format!("{} · 고른 폴더·파일, 없으면 지금 폴더 · 경로 상자의 별", k(Action::AddFavorite))),
+                                tip("추가", format!("{} · 고른 폴더·파일, 없으면 지금 폴더 · 경로 오른쪽 별 · 파일을 끌어 놓기", k(Action::AddFavorite))),
                                 tip("그룹", "그룹 줄을 누르거나 →·←로 펼치고 접어요 · 끌어서 순서를 바꾸거나 그룹에 넣기".into()),
                             ],
                         },
