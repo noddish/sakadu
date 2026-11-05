@@ -231,6 +231,7 @@ impl App {
 
     /// 줄을 고르고 보이게 한 뒤 저장한다 (항목을 옮기거나 그룹을 바꾼 다음)
     fn fav_changed(&mut self, select: Option<Row>) {
+        self.fav_flash = None;
         self.fav_sel = self.fav_sel.min(self.favs.rows().len().saturating_sub(1));
         if let Some(row) = select {
             self.fav_select(row);
@@ -302,9 +303,12 @@ impl App {
     pub fn add_favorite_path(&mut self, path: &str, name: Option<String>) {
         let path = util::normalize(path);
         if let Some((group, index)) = self.favs.find(&path) {
-            // 어느 줄인지 보이게 그 줄을 고르고 키보드도 그쪽으로 옮긴다 (Esc로 칸으로)
-            self.focus_favorites();
-            self.fav_select(Row::Item { group, index });
+            // 어느 줄인지 보이게 그 줄을 펼쳐 보이고 잠깐 강조한다. 키보드는 옮기지 않는다
+            // (이어서 누른 Delete가 칸의 파일 대신 즐겨찾기를 지우지 않게)
+            let row = Row::Item { group, index };
+            self.fav_select(row);
+            self.fav_flash = Some(row);
+            unsafe { SetTimer(Some(self.hwnd), super::TIMER_FAV_FLASH, 1500, None) };
             let p = self.active;
             self.flash(p, "이미 즐겨찾기에 있습니다");
             return;

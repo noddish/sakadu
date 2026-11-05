@@ -74,6 +74,8 @@ const TIMER_TIP: usize = 42;
 /// 칸 아래 알림(flash)을 지우기까지
 const TIMER_FLASH: usize = 44;
 const FLASH_MS: u32 = 5000;
+/// 이미 있는 즐겨찾기를 다시 넣으려 할 때 그 줄을 잠깐 강조하는 시간
+const TIMER_FAV_FLASH: usize = 45;
 
 // Segoe Fluent Icons / Segoe MDL2 Assets 글리프
 const G_BACK: u16 = 0xE72B;
@@ -351,6 +353,8 @@ pub struct App {
     swallow_dbl: bool,
     /// 필터 상자를 마지막으로 둔 자리 (픽셀 x, y, 너비, 높이)
     filter_placed: Cell<(i32, i32, i32, i32)>,
+    /// 잠깐 강조할 즐겨찾기 줄 (이미 있는 것을 다시 넣으려 할 때. 키보드는 옮기지 않는다)
+    fav_flash: Option<crate::favorites::Row>,
     search_edit: HWND,
     pal_open: bool,
     pal_results: Vec<(bool, String)>,
@@ -1026,6 +1030,7 @@ impl App {
             swallow_rbutton_up: false,
             swallow_dbl: false,
             filter_placed: Cell::new((0, 0, 0, 0)),
+            fav_flash: None,
             search_edit,
             pal_open: false,
             pal_results: Vec::new(),
@@ -2744,6 +2749,11 @@ impl App {
                         self.pal_run_query();
                     } else if id == TIMER_PREVIEW {
                         self.start_preview();
+                    } else if id == TIMER_FAV_FLASH {
+                        let _ = KillTimer(Some(hwnd), id);
+                        if self.fav_flash.take().is_some() {
+                            self.invalidate();
+                        }
                     } else if id == TIMER_FLASH {
                         let _ = KillTimer(Some(hwnd), id);
                         // 다른 앱을 쓰거나 트레이에 숨어 있는 동안 끝난 작업의 알림은 돌아왔을 때 보이게 남겨 둔다

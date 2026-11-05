@@ -477,6 +477,7 @@ impl App {
         let hover = self.hover;
         let fav_rows = self.favs.rows();
         let sel_row = self.fav_focus.then(|| fav_rows.get(self.fav_sel).copied()).flatten();
+        let flash_row = self.fav_flash;
         let editing = match self.edit_mode {
             EditMode::FavRename(r) => Some(r),
             _ => None,
@@ -590,6 +591,11 @@ impl App {
                             let icon = fav_icons.next().unwrap_or(-1);
                             let Some(f) = favs.item(group, index) else { continue };
                             row_bg(g, r, f.is_dir && is_current(&f.path), hover == Hit::Side(s));
+                            // 이미 있는 것을 다시 넣으려 했을 때: 그 줄을 잠깐 강조
+                            if flash_row == Some(row) {
+                                g.fill_round(r, 6.0, t.accent_soft);
+                                g.stroke_round(r.inset(0.75, 0.75), 6.0, t.accent, 1.5);
+                            }
                             let il = lx - 26.0;
                             g.icon(icon, R::new(il, r.t + 7.0, il + 16.0, r.t + 23.0));
                             if editing != Some(row) {
