@@ -2002,8 +2002,18 @@ impl App {
         Some(R::new(cols.name.0 + 24.0, it.t + 2.0, cols.name.1 - 4.0, it.b - 2.0))
     }
 
-    /// 실제 Win32 입력 상자(한글 IME 지원)를 그려 둔 자리 위에 맞춘다
-    fn layout_edits(&self) {
+    /// 실제 Win32 입력 상자(한글 IME 지원)를 그려 둔 자리 위에 맞춘다.
+    /// 이름을 바꾸는 줄(파일·즐겨찾기)이 보이는 곳 밖으로 밀려났으면(휠·스크롤 막대·창 크기·칸 나누기 등) 입력을 확정한다:
+    /// 입력 상자를 숨기기만 하면 키보드가 메인 창으로 가, 이어서 누른 Enter·Delete가 고른 파일에 먹는다
+    fn layout_edits(&mut self) {
+        let lost = match self.edit_mode {
+            EditMode::Rename(p) => self.rename_rect(p).is_none(),
+            EditMode::FavRename(row) => self.fav_rename_rect(row).is_none(),
+            _ => false,
+        };
+        if lost {
+            self.commit_rename();
+        }
         let s = self.scale();
         let place = |h: HWND, r: Option<R>| unsafe {
             match r {

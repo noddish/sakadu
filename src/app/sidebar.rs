@@ -214,13 +214,6 @@ impl App {
         let (_, content) = self.side_slots();
         let max = (content - self.side_list().h()).max(0.0);
         self.side_scroll = self.side_scroll.clamp(0.0, max);
-        // 이름을 바꾸는 줄이 목록 밖으로 밀려나면(휠·창 크기·다른 줄 추가) 입력을 확정한다.
-        // 입력 상자를 숨기기만 하면 키보드가 메인 창으로 가 Enter·Delete가 엉뚱한 곳에 먹는다
-        if let EditMode::FavRename(row) = self.edit_mode {
-            if self.fav_rename_rect(row).is_none() {
-                self.commit_rename();
-            }
-        }
     }
 
     /// 화면 위치 t..b가 목록 안에 보이도록 스크롤한다
