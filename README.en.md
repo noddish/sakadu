@@ -4,9 +4,9 @@
 
 A Windows file manager that keeps several folders open side by side and finds any file on your disk as you type its name.
 
-![Sakadu with two panes, thumbnails and the preview pane](docs/screenshot-main.png)
+![Sakadu with the sidebar, two panes, thumbnails and the preview pane](docs/screenshot-main.png)
 
-**[Download the latest release](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · a single 0.7 MB exe, no installer · free and open source
+**[Download the latest release](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · a single 1.1 MB exe, no installer · free and open source
 
 > The interface is Korean only for now.
 
@@ -196,7 +196,7 @@ Settings, window state and favorites all live in `%APPDATA%\Sakadu`.
 Please open an [issue](https://github.com/noddish/sakadu/issues). For something hard to reproduce, run `sakadu.exe --log`
 and attach `%TEMP%\sakadu.log`. The log contains folder paths, so give it a look before posting.
 
-When Sakadu runs as administrator (the title says "(관리자)"), Windows (UIPI) blocks drag and drop with a normal Explorer window.
+When Sakadu runs as administrator (the window title on the taskbar and in Alt+Tab says "(관리자)"), Windows (UIPI) blocks drag and drop with a normal Explorer window.
 
 ## Building
 
@@ -223,7 +223,7 @@ cargo test
 | `app.rs` | Layout, input, drawing, pane and tab behavior |
 | `app/settings_ui.rs` | Settings window (general, appearance, search, shortcuts, help, about) |
 | `keys.rs` | Remappable shortcuts (key map, saving) |
-| `app/sidebar.rs` · `app/fav_ui.rs` | Sidebar (search box, favorites, drives, search folders, settings) · favorites actions |
+| `app/sidebar.rs` · `app/fav_ui.rs` | Sidebar (search box, favorites, drives, search folders, settings, help) · favorites actions |
 | `app/palette.rs` · `app/preview.rs` | Ctrl+F search · preview pane |
 | `pane.rs` | Tab state (history, sort, filter, selection) |
 | `listing.rs` | Folder listing, This PC, display formatting |

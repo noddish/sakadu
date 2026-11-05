@@ -5,9 +5,9 @@
 
 use super::*;
 
-/// 창 조절 버튼 하나의 크기 (Windows 11과 같은 너비)
+/// 창 조절 버튼 하나의 크기 (Windows 11과 같은 너비). 높이는 작업 줄과 같아서 글리프가 작업 줄의 다른 단추와 같은 줄에 온다
 pub(super) const CAPTION_BTN_W: f32 = 46.0;
-const CAPTION_BTN_H: f32 = 40.0;
+const CAPTION_BTN_H: f32 = WORKBAR_H;
 const G_MINIMIZE: u16 = 0xE921;
 const G_MAXIMIZE: u16 = 0xE922;
 const G_RESTORE: u16 = 0xE923;

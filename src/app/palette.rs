@@ -272,7 +272,8 @@ impl App {
         let a = self.area();
         let w = PAL_W.min(a.w() - 32.0).max(320.0);
         let l = ((a.l + a.r) / 2.0 - w / 2.0).min(self.w - MARGIN - w).max(MARGIN);
-        let top = WORKBAR_H + 20.0;
+        // 윗변은 탭 칩 줄 윗변(칸 위쪽 + 8)에 맞춘다. 더 내려가면 칩 글자 가운데를 지나 반쪽 글자 줄이 남는다
+        let top = a.t + 8.0;
         // 설치 안내·폴더 넣기 버튼 자리까지 필요하다
         let min_rows = if self.pal_status == PalStatus::NotInstalled || self.pal_shows_add_folder() { 5 } else { 3 };
         let rows = self.pal_results.len().clamp(min_rows, PAL_MAX_ROWS) as f32;

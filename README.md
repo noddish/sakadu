@@ -4,9 +4,9 @@
 
 폴더 여러 개를 한 창에 띄워 놓고, 디스크 어디에 있는 파일이든 이름만 치면 바로 찾는 Windows 파일 관리자.
 
-![Sakadu 2분할 화면과 썸네일, 미리 보기](docs/screenshot-main.png)
+![Sakadu 사이드바와 2분할 화면, 썸네일, 미리 보기](docs/screenshot-main.png)
 
-**[최신 버전 받기](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · 설치 없이 exe 하나(0.7MB) · 무료 오픈소스
+**[최신 버전 받기](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · 설치 없이 exe 하나(1.1MB) · 무료 오픈소스
 
 ## 이런 점이 좋아요
 
@@ -194,7 +194,7 @@ Sakadu가 켜져 있으면 다른 앱을 쓰다가도 단축키 한 번으로 �
 [Issues](https://github.com/noddish/sakadu/issues)에 남겨 주세요. 다시 일으키기 어려운 문제는 `sakadu.exe --log`로 실행한 뒤
 `%TEMP%\sakadu.log`를 함께 올려 주시면 큰 도움이 돼요. 로그에 폴더 경로가 들어 있으니 올리기 전에 한 번 확인해 주세요.
 
-관리자 권한으로 실행하면(제목에 "(관리자)" 표시) Windows 보안 정책(UIPI) 때문에 일반 탐색기와 끌어서 놓기가 안 돼요.
+관리자 권한으로 실행하면(작업 표시줄·Alt+Tab의 창 제목에 "(관리자)" 표시) Windows 보안 정책(UIPI) 때문에 일반 탐색기와 끌어서 놓기가 안 돼요.
 
 ## 직접 빌드하기
 
@@ -221,7 +221,7 @@ cargo test
 | `app.rs` | 레이아웃, 입력, 그리기, 칸·탭 동작 |
 | `app/settings_ui.rs` | 설정 창(일반·화면·검색·단축키·도움말·정보) |
 | `keys.rs` | 바꿀 수 있는 단축키(키 맵, 저장) |
-| `app/sidebar.rs` · `app/fav_ui.rs` | 사이드바(검색 상자·즐겨찾기·드라이브·검색 폴더·설정) · 즐겨찾기 동작 |
+| `app/sidebar.rs` · `app/fav_ui.rs` | 사이드바(검색 상자·즐겨찾기·드라이브·검색 폴더·설정·도움말) · 즐겨찾기 동작 |
 | `app/palette.rs` · `app/preview.rs` | Ctrl+F 검색 창 · 미리 보기 창 |
 | `pane.rs` | 탭 상태(기록·정렬·필터·선택) |
 | `listing.rs` | 폴더 열거, 내 PC, 표시 형식 |
