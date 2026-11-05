@@ -103,6 +103,22 @@ impl Volume {
     }
 
     /// "C:\폴더\파일" 형태의 전체 경로. 부모 사슬이 끊겼으면 None (삭제 중인 항목 등)
+    /// 항목 칸 수 (지운 칸 포함). 칸 번호별로 따로 기억해 둘 때 크기로 쓴다
+    pub fn slots(&self) -> usize {
+        self.flags.len()
+    }
+
+    /// 칸 i가 지금 쓰이는 폴더인가
+    pub fn is_dir_slot(&self, i: usize) -> bool {
+        i < self.flags.len() && self.used(i) && self.flags[i] & FLAG_DIR != 0
+    }
+
+    /// 담은 폴더의 칸 (없거나 지운 항목이면 None)
+    pub fn parent_of(&self, i: u32) -> Option<u32> {
+        let c = i as usize;
+        (c < self.flags.len() && self.used(c) && self.parent[c] != NO_PARENT).then(|| self.parent[c])
+    }
+
     pub fn path(&self, i: u32) -> Option<String> {
         let mut parts: Vec<&[u8]> = Vec::new();
         let mut cur = i;
@@ -216,7 +232,9 @@ pub const REASON_CREATE: u32 = 0x100;
 pub const REASON_DELETE: u32 = 0x200;
 pub const REASON_RENAME_OLD: u32 = 0x1000;
 pub const REASON_RENAME_NEW: u32 = 0x2000;
-const ATTR_DIR: u32 = 0x10;
+/// 권한(보안 설명자)이 바뀜. 검색 서비스가 계정별로 기억해 둔 폴더 판정을 다시 하게 한다
+pub const REASON_SECURITY_CHANGE: u32 = 0x800;
+pub const ATTR_DIR: u32 = 0x10;
 
 /// 저널 변경 하나를 인덱스에 반영
 pub fn apply(vol: &mut Volume, r: &UsnRecord) {
@@ -453,7 +471,13 @@ fn path_matches(vol: &Volume, i: usize, terms: &[String], memo: &[AtomicU32], bu
 }
 
 /// 여러 볼륨에서 찾는다. (상위 결과, 전체 일치 개수)
+#[cfg(test)]
 pub fn search(vols: &[&Volume], q: &Query, limit: usize) -> (Vec<Hit>, usize) {
+    search_visible(vols, q, limit, &|_, _| true)
+}
+
+/// visible(볼륨 번호, 칸)이 false인 항목은 순위·전체 개수에서도 빠진다 (요청한 계정이 볼 수 없는 항목)
+pub fn search_visible(vols: &[&Volume], q: &Query, limit: usize, visible: &(dyn Fn(usize, u32) -> bool + Sync)) -> (Vec<Hit>, usize) {
     if q.is_empty() {
         return (Vec::new(), 0);
     }
@@ -485,6 +509,9 @@ pub fn search(vols: &[&Volume], q: &Query, limit: usize) -> (Vec<Hit>, usize) {
                             let score = if q.terms.is_empty() { Some(0) } else { name_score(vol.name_bytes(i), &q.terms, vol.flags[i] & FLAG_DIR != 0) };
                             if let Some(s) = score {
                                 if !q.path_terms.is_empty() && !path_matches(vol, i, &q.path_terms, memo, &mut prefix) {
+                                    continue;
+                                }
+                                if !visible(vi, i as u32) {
                                     continue;
                                 }
                                 count += 1;
@@ -674,7 +701,7 @@ pub mod volume_io {
     pub fn read_changes(h: &VolumeHandle, journal_id: u64, start_usn: i64) -> windows::core::Result<(i64, Vec<UsnRecord>)> {
         let rd = ReadJournalDataV0 {
             start_usn,
-            reason_mask: REASON_CREATE | REASON_DELETE | REASON_RENAME_OLD | REASON_RENAME_NEW,
+            reason_mask: REASON_CREATE | REASON_DELETE | REASON_RENAME_OLD | REASON_RENAME_NEW | REASON_SECURITY_CHANGE,
             return_only_on_close: 0,
             timeout: 0,
             bytes_to_wait_for: 1,

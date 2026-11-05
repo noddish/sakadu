@@ -18,7 +18,9 @@ use windows::core::{GUID, Interface, PWSTR};
 pub(super) const PREVIEW_W: f32 = 340.0;
 pub(super) const TIMER_PREVIEW: usize = 30;
 pub(super) const G_PREVIEW: u16 = 0xE90D;
-const HEAD_H: f32 = 56.0;
+const HEAD_H: f32 = 64.0;
+/// 아래 정보 줄 (수정한 날짜·위치) 높이
+const INFO_H: f32 = 74.0;
 /// 정보 카드의 그림 크기(DIP)
 const INFO_IMG: f32 = 128.0;
 /// 이 크기 이하면 확장자를 몰라도 텍스트인지 열어 본다
@@ -171,11 +173,15 @@ impl App {
 
     pub(super) fn preview_rect(&self) -> Option<R> {
         self.preview.as_ref()?;
-        Some(R::new(self.w - MARGIN - self.preview_w(), TOOLBAR_H, self.w - MARGIN, (self.h - MARGIN).max(TOOLBAR_H + 100.0)))
+        Some(R::new(self.w - MARGIN - self.preview_w(), WORKBAR_H, self.w - MARGIN, (self.h - MARGIN).max(WORKBAR_H + 100.0)))
     }
 
+    /// 머리(아이콘·이름·종류)와 아래 정보 줄 사이
     fn preview_body(&self) -> Option<R> {
-        self.preview_rect().map(|pr| R::new(pr.l + 8.0, pr.t + HEAD_H + 6.0, pr.r - 8.0, (pr.b - 8.0).max(pr.t + HEAD_H + 40.0)))
+        self.preview_rect().map(|pr| {
+            let t = pr.t + HEAD_H + 12.0;
+            R::new(pr.l + 12.0, t, pr.r - 12.0, (pr.b - INFO_H - 12.0).max(t + 40.0))
+        })
     }
 
     pub(super) fn toggle_preview(&mut self) {
@@ -233,7 +239,7 @@ impl App {
             }
         }
         // 처리기 창: 처리기를 쓸 때만, 팝업이 열려 있으면 가리지 않게 숨긴다
-        let want = match (&self.preview, self.fav_open || self.pal_open || self.settings.is_some()) {
+        let want = match (&self.preview, self.pal_open || self.settings.is_some()) {
             (Some(Preview { content: Content::Handler(_), .. }), false) => self.preview_body().map(|b| {
                 let s = self.scale();
                 RECT { left: (b.l * s).round() as i32, top: (b.t * s).round() as i32, right: (b.r * s).round() as i32, bottom: (b.b * s).round() as i32 }
@@ -344,19 +350,38 @@ impl App {
         let App { gfx, preview, thumb_failed, .. } = self;
         let Some(pv) = preview.as_mut() else { return };
         gfx.fill_round(pr, RADIUS, t.pane);
-        gfx.stroke_round(pr.inset(0.5, 0.5), RADIUS, t.border, 1.0);
+        gfx.stroke_round(pr.inset(0.5, 0.5), RADIUS, t.pane_border, 1.0);
         let Some(target) = &pv.target else {
-            gfx.text("파일을 선택하면\n여기에서 미리 봅니다", R::new(body.l + 16.0, body.t + 40.0, body.r - 16.0, body.t + 120.0), Font::Hint, t.faint);
+            gfx.text("파일을 선택하면\n여기에서 미리 봅니다", R::new(pr.l + 16.0, pr.t + 40.0, pr.r - 16.0, pr.t + 120.0), Font::Hint, t.faint);
             return;
         };
-        gfx.icon(target.icon, R::new(pr.l + 14.0, pr.t + 12.0, pr.l + 30.0, pr.t + 28.0));
-        gfx.text(&target.name, R::new(pr.l + 38.0, pr.t + 8.0, pr.r - 14.0, pr.t + 32.0), Font::Strong, t.text);
+        // 머리: 아이콘, 이름, 종류 · 크기
+        gfx.icon(target.icon, R::new(pr.l + 16.0, pr.t + 18.0, pr.l + 32.0, pr.t + 34.0));
+        gfx.text(&target.name, R::new(pr.l + 42.0, pr.t + 12.0, pr.r - 16.0, pr.t + 34.0), Font::Strong, t.text);
         let sub = match target.kind {
             Kind::File => format!("{} · {}", target.type_name, format_size(target.size)),
             _ => target.type_name.clone(),
         };
-        gfx.text(&sub, R::new(pr.l + 38.0, pr.t + 28.0, pr.r - 14.0, pr.t + 50.0), Font::Normal, t.dim);
-        gfx.fill(R::new(pr.l + 10.0, pr.t + HEAD_H - 1.0, pr.r - 10.0, pr.t + HEAD_H), t.border);
+        gfx.text(&sub, R::new(pr.l + 42.0, pr.t + 34.0, pr.r - 16.0, pr.t + 52.0), Font::Small, t.dim);
+        gfx.fill(R::new(pr.l, pr.t + HEAD_H - 1.0, pr.r, pr.t + HEAD_H), t.border);
+
+        // 아래 정보 줄: 수정한 날짜, 위치
+        let info = R::new(pr.l, pr.b - INFO_H, pr.r, pr.b);
+        gfx.fill(R::new(pr.l, info.t, pr.r, info.t + 1.0), t.border);
+        let label_w = gfx.measure("수정한 날짜", Font::Small) + 14.0;
+        let mut y = info.t + 12.0;
+        let mut row = |label: &str, value: &str| {
+            if value.is_empty() {
+                return;
+            }
+            gfx.text(label, R::new(info.l + 16.0, y, info.l + 16.0 + label_w, y + 20.0), Font::Small, t.faint);
+            gfx.text(value, R::new(info.l + 16.0 + label_w, y, info.r - 16.0, y + 20.0), Font::Path, t.text);
+            y += 24.0;
+        };
+        if target.kind != Kind::Drive {
+            row("수정한 날짜", &format_time(target.modified));
+        }
+        row("위치", &util::parent(&target.path).unwrap_or_default());
 
         // 그림이 있으면 그리고, 없으면 요청 목록에 넣는다
         let mut image = |gfx: &mut Gfx, r: R, px: u32| -> bool {
@@ -374,41 +399,29 @@ impl App {
             Content::Waiting | Content::Handler(_) => {}
             Content::Image => {
                 let px = image_px(body.w().max(body.h()), scale);
-                if !image(gfx, body.inset(4.0, 4.0), px) {
+                if !image(gfx, body, px) {
                     gfx.text("불러오는 중…", body, Font::Hint, t.faint);
                 }
             }
             Content::Text(s) => {
-                gfx.fill_round(body, 6.0, t.field);
-                let w = body.w() - 20.0;
+                gfx.fill_round(body, 8.0, t.field);
+                let w = body.w() - 24.0;
                 if pv.layout.as_ref().is_none_or(|(lw, _)| (*lw - w).abs() > 0.5) {
                     pv.layout = gfx.layout(s, Font::Mono, w).map(|l| (w, l));
                 }
                 if let Some((_, l)) = &pv.layout {
                     gfx.clip(body.inset(1.0, 1.0));
-                    gfx.draw_layout(l, body.l + 10.0, body.t + 8.0 - pv.scroll, t.text);
+                    gfx.draw_layout(l, body.l + 12.0, body.t + 10.0 - pv.scroll, t.text);
                     gfx.unclip();
                 }
             }
+            // 폴더·드라이브·알 수 없는 파일: 큰 그림(없으면 아이콘)만 가운데에
             Content::Info => {
-                let cx = (body.l + body.r) / 2.0;
-                let ir = R::new(cx - INFO_IMG / 2.0, body.t + 16.0, cx + INFO_IMG / 2.0, body.t + 16.0 + INFO_IMG);
+                let (cx, cy) = ((body.l + body.r) / 2.0, (body.t + body.b) / 2.0);
+                let ir = R::new(cx - INFO_IMG / 2.0, cy - INFO_IMG / 2.0, cx + INFO_IMG / 2.0, cy + INFO_IMG / 2.0);
                 if !image(gfx, ir, (INFO_IMG * scale).round() as u32) {
-                    gfx.icon(target.icon, R::new(cx - 16.0, ir.t + INFO_IMG / 2.0 - 16.0, cx + 16.0, ir.t + INFO_IMG / 2.0 + 16.0));
+                    gfx.icon(target.icon, R::new(cx - 16.0, cy - 16.0, cx + 16.0, cy + 16.0));
                 }
-                let mut y = ir.b + 20.0;
-                let mut row = |label: &str, value: &str| {
-                    if value.is_empty() {
-                        return;
-                    }
-                    gfx.text(label, R::new(body.l + 8.0, y, body.r - 8.0, y + 20.0), Font::Normal, t.faint);
-                    gfx.text(value, R::new(body.l + 8.0, y + 20.0, body.r - 8.0, y + 40.0), Font::Path, t.text);
-                    y += 48.0;
-                };
-                if target.kind != Kind::Drive {
-                    row("수정한 날짜", &format_time(target.modified));
-                }
-                row("위치", &util::parent(&target.path).unwrap_or_default());
             }
         }
     }

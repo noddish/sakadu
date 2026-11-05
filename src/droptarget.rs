@@ -3,12 +3,13 @@
 //! 그 밖의 데이터나 바로 가기(Alt)·오른쪽 버튼 끌기(메뉴)는 커서 아래 폴더의 셸 드롭 대상에 맡긴다.
 //! 기본 동작은 복사, Shift를 누르면 이동.
 
+use crate::app::DropAt;
 use crate::shell::{self, FileOp};
 use crate::{util, with_app};
 use std::cell::RefCell;
 use windows::Win32::Foundation::{HWND, POINT, POINTL};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IDataObject};
-use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl, MK_ALT};
+use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl, MK_ALT};
 use windows::Win32::System::SystemServices::{MK_CONTROL, MK_RBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::{CLSID_DragDropHelper, IDropTargetHelper};
 use windows::core::{Ref, Result, implement};
@@ -25,6 +26,8 @@ struct State {
     /// 끌어온 파일 경로 (파일이 아닌 데이터면 None)
     files: Option<Vec<String>>,
     dir: Option<String>,
+    /// 사이드바 즐겨찾기 위: 놓으면 즐겨찾기에 넣는다 (파일은 그대로)
+    favorites: bool,
     /// 마지막으로 정한 처리 방식: true면 앱이 직접, false면 셸 드롭 대상
     own: bool,
     target: Option<IDropTarget>,
@@ -39,6 +42,17 @@ fn handle_ourselves(files: &Option<Vec<String>>, keys: MODIFIERKEYS_FLAGS) -> bo
 fn is_inside(folder: &str, path: &str) -> bool {
     let prefix = format!("{}\\", folder.trim_end_matches('\\').to_lowercase());
     path.to_lowercase().starts_with(&prefix)
+}
+
+/// 즐겨찾기에 넣을 때의 커서: 바로 가기(링크)처럼 보이게, 안 되면 복사
+fn fav_effect(allowed: DROPEFFECT) -> DROPEFFECT {
+    if allowed.0 & DROPEFFECT_LINK.0 != 0 {
+        DROPEFFECT_LINK
+    } else if allowed.0 & DROPEFFECT_COPY.0 != 0 {
+        DROPEFFECT_COPY
+    } else {
+        DROPEFFECT_NONE
+    }
 }
 
 /// 직접 처리할 때의 동작. 자기 자신·하위 폴더에 놓기와 같은 폴더로 이동은 막는다
@@ -73,9 +87,14 @@ impl DropTarget {
         if found.is_none() {
             crate::diag::log(|| "drop: app busy, cannot resolve folder".to_string());
         }
-        let dir = found.flatten();
+        let (dir, favorites) = match found {
+            Some(DropAt::Dir(d)) => (Some(d), false),
+            Some(DropAt::Favorites) => (None, true),
+            _ => (None, false),
+        };
         let mut st = self.state.borrow_mut();
         st.own = handle_ourselves(&st.files, keys);
+        st.favorites = favorites;
         unsafe {
             if st.own {
                 if let Some(t) = st.target.take() {
@@ -87,6 +106,7 @@ impl DropTarget {
                 st.dir = dir;
                 *effect = match (&st.dir, &st.files) {
                     (Some(d), Some(f)) => own_effect(f, d, keys, *effect),
+                    (None, Some(_)) if favorites => fav_effect(*effect),
                     _ => DROPEFFECT_NONE,
                 };
                 return;
@@ -126,6 +146,7 @@ impl DropTarget {
             st.data = None;
             st.files = None;
             st.dir = None;
+            st.favorites = false;
             st.target = None;
         }
         with_app(|app| app.clear_drop_hover());
@@ -186,14 +207,15 @@ impl IDropTarget_Impl for DropTarget_Impl {
     /// 놓을 때는 버튼이 이미 떼어져 키 상태로 방식을 다시 정할 수 없으므로 마지막 DragOver의 결정을 따른다
     fn Drop(&self, pdataobj: Ref<IDataObject>, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let data = pdataobj.ok()?.clone();
-        let (own, target, helper, dir, files) = {
+        let (own, target, helper, dir, files, favorites) = {
             let mut st = self.state.borrow_mut();
-            (st.own, st.target.take(), st.helper.clone(), st.dir.clone(), st.files.take())
+            (st.own, st.target.take(), st.helper.clone(), st.dir.clone(), st.files.take(), st.favorites)
         };
         unsafe {
             if own {
                 *effect = match (&dir, &files) {
                     (Some(d), Some(f)) => own_effect(f, d, keys, *effect),
+                    (None, Some(_)) if favorites => fav_effect(*effect),
                     _ => DROPEFFECT_NONE,
                 };
             }
@@ -211,6 +233,11 @@ impl IDropTarget_Impl for DropTarget_Impl {
                         // 이미 옮겼으므로 끌어온 쪽이 원본을 지우지 않도록 NONE으로 알린다 (최적화된 이동)
                         *effect = DROPEFFECT_NONE;
                     }
+                }
+                // 즐겨찾기에 넣기만 하고 파일은 건드리지 않는다
+                (true, None, Some(paths), _) if favorites && *effect != DROPEFFECT_NONE => {
+                    crate::diag::log(|| format!("drop: add {} item(s) to favorites", paths.len()));
+                    with_app(|app| app.add_favorite_paths(&paths));
                 }
                 (false, _, _, Some(t)) => {
                     let r = t.Drop(&data, shell::copy_by_default(keys), *pt, effect);

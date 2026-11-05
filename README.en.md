@@ -56,7 +56,7 @@ Dark mode follows your Windows setting.
 | Tab / Shift+Tab | Next / previous pane |
 | Ctrl+T / Ctrl+W | New tab / close tab |
 | Alt+P | Preview pane |
-| Ctrl+B / Ctrl+D | Open favorites / add to favorites |
+| Ctrl+B / Ctrl+D | Go to the favorites in the sidebar / add to favorites |
 | Ctrl+Z | Undo the last file operation |
 
 <details>
@@ -73,7 +73,7 @@ Dark mode follows your Windows setting.
 | Drag a tab | Reorder, or move to another pane |
 | Drag from empty space or the date column | Select with a rectangle (hold Ctrl to add to the selection) |
 | Ctrl+1 – Ctrl+5 | Pane layout |
-| Ctrl+Shift+2 / Ctrl+Shift+6 | Thumbnail view / details view |
+| Ctrl+Shift+1 ~ Ctrl+Shift+6 | Extra large, large, medium, small icons, list, details (same as Explorer) |
 | Alt+P | Preview pane |
 | F2 / F5 | Rename / refresh |
 | F4, Ctrl+L, Alt+D | Edit the path |
@@ -83,7 +83,7 @@ Dark mode follows your Windows setting.
 | Ctrl+H | Show hidden items |
 | Ctrl+F | Whole-disk search |
 | Ctrl+Z | Undo the last file operation |
-| Ctrl+B | Favorites (while open: ↑↓, Enter, F2, Del, Ctrl+↑↓, ←→ collapse/expand groups, type to jump) |
+| Ctrl+B | Move the keyboard to the sidebar favorites (↑↓, Enter, F2, Del, Ctrl+↑↓, ←→ collapse/expand groups, type to jump, Esc back to the pane) |
 | Ctrl+D | Add to favorites (the selected folder or file, or the current folder) |
 | Alt+Enter | Properties |
 | Menu key, Shift+F10 | Context menu |
@@ -99,11 +99,11 @@ Dark mode follows your Windows setting.
 - Nothing is written to disk, and neither the app nor the service has any network code, so nothing leaves your PC.
 - Reading the MFT needs admin rights, so it runs as a Windows service (SakaduIndex). The app talks to it over a local named pipe that refuses remote clients.
 - The index takes about 120 MB of memory for 1.8 million entries.
-- As with Everything, file **names** in other users' folders can show up in results.
+- Results only include what the searching Windows account can see: every folder from the drive root down to the file's folder must be listable by that account (what you could browse in Explorer). Hidden files are left out of both the results and the total count. See [docs/search-permissions-check.md](docs/search-permissions-check.md) for a two-account check (Korean).
 - Query syntax: space-separated words must all match. A word ending in `\`, like `work\`, matches the path. `|` means "or" (`quote 2026 | contract`). Pasting several lines joins them with `|`.
 - Results: Enter opens, Ctrl+Enter opens the containing folder in a new tab. Pick several with Ctrl+click, Shift+click or Shift+↑↓, then Enter opens them all and Ctrl+C copies the files. The right-click menu also has copy path and pick all.
 - The search window stays open while you visit other apps. Reopen it after closing and your last query is still there, selected: type to replace it, or press End to keep going.
-- The global hotkey is the first free one of Ctrl+Alt+Space, Win+Shift+F and Ctrl+Alt+F. The toolbar shows which one you got.
+- The global hotkey is the first free one of Ctrl+Alt+Space, Win+Shift+F and Ctrl+Alt+F. Hover over the search box at the top left to see which one you got.
 - The service exe is copied to `C:\Program Files\Sakadu`. After updating Sakadu, reinstall the service to update it too.
 
 </details>
@@ -114,7 +114,8 @@ Dark mode follows your Windows setting.
 The search service only reads this PC's own (NTFS) disks. Shared folders (`\\server\share`), NAS and USB drives are searched once you add them.
 
 - Open the folder in any pane and search with Ctrl+F. If nothing turns up, click **이 폴더도 검색하기** (search this folder too) in the search window.
-- Settings → **검색** (Search) → **검색에 넣은 폴더** (added folders) lists them, lets you remove one, and adds folders you have open.
+- The sidebar's **검색에 넣은 폴더** (added folders) section lists them. When the current pane shows a folder outside the search, the **+** in that section adds it; right-click a folder to remove it.
+- Settings → **검색** (Search) → **검색에 넣은 폴더** also lists them, lets you remove one, and adds folders you have open.
 - The app walks the folder once with your own account and keeps the names in memory. Nothing is written to disk, so it walks the folder again each time the app starts.
 - Changes come in through folder change notifications. In case a server doesn't send them, the folder is walked again every few hours, and opening it in Sakadu also brings it up to date.
 - If the connection drops, the last results stay searchable and Sakadu tries to reconnect every 5 minutes.
@@ -152,12 +153,14 @@ When turned on in Settings → General, closing the window doesn't quit Sakadu. 
 <details>
 <summary>Thumbnails, preview, favorites, undo</summary>
 
-- **Thumbnail view** is Ctrl+Shift+2, details view is Ctrl+Shift+6. Each pane remembers its own.
+- The **view button** at the right end of the path row picks extra large, large, medium or small icons, list, or details. Shortcuts match Explorer (Ctrl+Shift+1–6), and each pane remembers its own. Icon views show thumbnails for photos and PDFs.
 - **New tabs** (Ctrl+T, +) open at This PC. Change it in Settings → General → **새 탭을 열 위치** (new tab location): the same folder as the current tab, or a folder of your choice.
-- The **star** at the right end of the path box adds the current folder to favorites in one click (it turns yellow). Click again to remove it.
-- Hover over a toolbar button for a moment to see its name and shortcut.
+- The **star** at the right end of the path adds the current folder to favorites in one click (it turns yellow). Click again to remove it. The button next to it makes a **new folder**.
+- Hover over a button on the work bar above the panes (split, hidden items, preview) or in the sidebar for a moment to see its name and shortcut.
+- Each pane shows its tabs as chips along the top, with the item count and the selection's count and size on the right. Typing turns that spot into a **filter chip**; × or Esc clears it.
+- The sidebar always shows favorites, drives (with a free-space bar) and added search folders. Drop files on a drive or folder row to copy them there (Shift moves).
 - **Preview pane** (Alt+P) shows photos large and the start of text and code files (UTF-8, UTF-16 and CP949 detected). PDF and Office files use the preview handlers registered in Windows, run out of process so a crashing handler can't take the app down.
-- **Favorites** (Ctrl+B) can be folders or files, with their own display names like "01. Daily work", independent of the real name (F2). Drag to reorder. **Groups** open to the side when you hover over a folded group; click a group to unfold it in place for tidying. Drag an item into a group, or right-click → **그룹으로 이동** (move to group). Clicking a file opens it, and Ctrl+Enter opens its folder in a new tab.
+- **Favorites** live in the sidebar. They can be folders or files (add with the star, Ctrl+D, or by dragging from a file list), with their own display names like "01. Daily work", independent of the real name (F2). Drag to reorder. Click a **group** to fold or unfold it in place; drag an item onto a group, or right-click → **그룹으로 이동** (move to group). Clicking a file opens it, and Ctrl+click (Ctrl+Enter from the keyboard) opens its folder in a new tab. Ctrl+B moves the keyboard to the favorites.
 - **Undo** (Ctrl+Z) reverses renames, moves, copies, Recycle Bin deletes, new folders, pastes and drag and drop, newest first. Permanent deletes and actions from the context menu can't be undone.
 
 </details>
@@ -220,7 +223,8 @@ cargo test
 | `app.rs` | Layout, input, drawing, pane and tab behavior |
 | `app/settings_ui.rs` | Settings window (general, appearance, search, shortcuts, help, about) |
 | `keys.rs` | Remappable shortcuts (key map, saving) |
-| `app/fav_ui.rs` · `app/palette.rs` · `app/preview.rs` | Favorites popup · Ctrl+F search · preview pane |
+| `app/sidebar.rs` · `app/fav_ui.rs` | Sidebar (search box, favorites, drives, search folders, settings) · favorites actions |
+| `app/palette.rs` · `app/preview.rs` | Ctrl+F search · preview pane |
 | `pane.rs` | Tab state (history, sort, filter, selection) |
 | `listing.rs` | Folder listing, This PC, display formatting |
 | `shell.rs` | Shell menus, file operations, clipboard, drag, change notifications, icons |

@@ -168,6 +168,13 @@ pub fn list_computer() -> Vec<Entry> {
             out.push(e);
         }
     }
+    out.extend(list_drives());
+    out
+}
+
+/// 드라이브마다 표시 이름·아이콘·종류·남은/전체 용량. 네트워크·광 드라이브는 느릴 수 있으니 백그라운드에서 부른다
+pub fn list_drives() -> Vec<Entry> {
+    let mut out = Vec::new();
     let mask = unsafe { GetLogicalDrives() };
     for i in 0..26u8 {
         if mask & (1 << i) == 0 {
