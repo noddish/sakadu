@@ -171,7 +171,7 @@ impl App {
 
     pub(super) fn preview_rect(&self) -> Option<R> {
         self.preview.as_ref()?;
-        Some(R::new(self.w - MARGIN - self.preview_w(), TOOLBAR_H, self.w - MARGIN, (self.h - MARGIN).max(TOOLBAR_H + 100.0)))
+        Some(R::new(self.w - MARGIN - self.preview_w(), WORKBAR_H, self.w - MARGIN, (self.h - MARGIN).max(WORKBAR_H + 100.0)))
     }
 
     fn preview_body(&self) -> Option<R> {

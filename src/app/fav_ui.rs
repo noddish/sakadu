@@ -21,8 +21,6 @@ pub(super) const TIMER_FLY_CLOSE: usize = 41;
 pub(super) const TIMER_FAV_TIP: usize = 43;
 const FLY_W: f32 = 300.0;
 
-const FAV_BUTTON_W: f32 = 100.0;
-
 /// 그룹의 오른쪽 메뉴
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Fly {
@@ -32,22 +30,6 @@ pub(super) struct Fly {
     /// 키보드가 오른쪽 메뉴에 있으면 그 줄 (마우스를 올린 줄도)
     sel: Option<usize>,
     scroll: f32,
-}
-
-impl App {
-    /// 도구 막대 가운데에 즐겨찾기 버튼과 검색 상자를 한 묶음으로 둔다. 창이 좁으면 왼쪽 버튼들 바로 뒤에 붙는다
-    pub(super) fn fav_button(&self) -> R {
-        let w = if self.fav_button_compact() { 32.0 } else { FAV_BUTTON_W };
-        let group = w + 6.0 + palette::SEARCH_W;
-        let l = (self.w / 2.0 - group / 2.0).max(hidden_button().r + 16.0);
-        R::new(l, 8.0, l + w, 38.0)
-    }
-
-    /// 창이 좁으면(크기 150% 등) 즐겨찾기 버튼은 별 아이콘만 두어 검색 상자가 오른쪽 버튼을 덮지 않게 한다
-    pub(super) fn fav_button_compact(&self) -> bool {
-        let room = self.preview_button().l - 10.0 - (hidden_button().r + 16.0 + FAV_BUTTON_W + 6.0);
-        room < palette::SEARCH_MIN_W
-    }
 }
 
 /// 네이티브 팝업 메뉴. id 0은 구분선. 고른 id(없으면 0)
@@ -192,9 +174,10 @@ impl App {
         let w = FAV_W.min(self.w - 2.0 * MARGIN).max(200.0);
         let l = b.l.min(self.w - MARGIN - w).max(MARGIN);
         let rows = self.favs.rows().len().max(2) as f32;
-        let max_h = (self.h - TOOLBAR_H - 12.0).max(160.0);
+        let top = b.b + 4.0;
+        let max_h = (self.h - top - 8.0).max(160.0);
         let h = (FAV_HEAD_H + rows * FAV_ROW_H + FAV_FOOT_H + 8.0).min(max_h);
-        R::new(l, TOOLBAR_H - 4.0, l + w, TOOLBAR_H - 4.0 + h)
+        R::new(l, top, l + w, top + h)
     }
 
     fn fav_list(&self) -> R {
@@ -223,7 +206,7 @@ impl App {
         let n = self.favs.groups.get(fly.group)?.items.len();
         let pop = self.fav_rect();
         let row = self.favs.row_index(Row::Group(fly.group)).map(|i| self.fav_row(i)).unwrap_or(pop);
-        let top_min = TOOLBAR_H - 4.0;
+        let top_min = WORKBAR_H - 4.0;
         let h = (n.max(1) as f32 * FAV_ROW_H + 12.0).min((self.h - 8.0 - top_min).max(FAV_ROW_H + 12.0));
         let l = if pop.r + 4.0 + FLY_W <= self.w - MARGIN {
             pop.r + 4.0

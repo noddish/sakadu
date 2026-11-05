@@ -94,20 +94,6 @@ impl PalGate {
     }
 }
 
-/// 도구 막대 검색 상자의 너비 (창이 좁으면 줄어든다)
-pub(super) const SEARCH_W: f32 = 300.0;
-/// 이보다 좁아지면 즐겨찾기 버튼을 아이콘만으로 줄인다
-pub(super) const SEARCH_MIN_W: f32 = 140.0;
-
-impl App {
-    /// 오른쪽 버튼(미리 보기·설정)을 넘지 않는 만큼만 차지한다
-    pub(super) fn search_button(&self) -> R {
-        let l = self.fav_button().r + 6.0;
-        let r = (l + SEARCH_W).min(self.preview_button().l - 10.0).max(l + 32.0);
-        R::new(l, 8.0, r, 38.0)
-    }
-}
-
 fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>, folders: crate::folders::Folders) {
     let owner = shell::SendHwnd(hwnd);
     std::thread::spawn(move || {
@@ -280,15 +266,16 @@ pub enum OpenMode {
 
 impl App {
     pub(super) fn pal_rect(&self) -> R {
-        let w = PAL_W.min(self.w - 40.0).max(320.0);
-        // 도구 막대 검색 상자 바로 아래에 상자와 가운데를 맞춰 연다 (창 밖으로는 나가지 않게)
-        let sb = self.search_button();
-        let l = ((sb.l + sb.r) / 2.0 - w / 2.0).min(self.w - MARGIN - w).max(MARGIN);
+        // 칸 영역 가운데 위쪽에 뜬다 (창 밖으로는 나가지 않게)
+        let a = self.area();
+        let w = PAL_W.min(a.w() - 32.0).max(320.0);
+        let l = ((a.l + a.r) / 2.0 - w / 2.0).min(self.w - MARGIN - w).max(MARGIN);
+        let top = WORKBAR_H + 20.0;
         // 설치 안내·폴더 넣기 버튼 자리까지 필요하다
         let min_rows = if self.pal_status == PalStatus::NotInstalled || self.pal_shows_add_folder() { 5 } else { 3 };
         let rows = self.pal_results.len().clamp(min_rows, PAL_MAX_ROWS) as f32;
-        let h = (PAL_HEAD_H + rows * PAL_ROW_H + PAL_FOOT_H + 8.0).min((self.h - TOOLBAR_H - 16.0).max(180.0));
-        R::new(l, TOOLBAR_H + 6.0, l + w, TOOLBAR_H + 6.0 + h)
+        let h = (PAL_HEAD_H + rows * PAL_ROW_H + PAL_FOOT_H + 8.0).min((self.h - top - 16.0).max(180.0));
+        R::new(l, top, l + w, top + h)
     }
 
     fn pal_list(&self) -> R {

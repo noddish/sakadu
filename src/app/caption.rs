@@ -1,6 +1,6 @@
-//! 제목 표시줄을 도구 막대와 합친다: Windows 기본 제목 줄 대신 도구 막대가 창 맨 위에 오고,
+//! 제목 표시줄을 작업 줄과 합친다: Windows 기본 제목 줄 대신 칸 영역 위 작업 줄과 사이드바 맨 위가 창 맨 위에 오고,
 //! 오른쪽 끝에 최소화·최대화·닫기를 직접 그린다.
-//! 도구 막대의 빈 곳은 Windows에 제목 줄(HTCAPTION)이라고 알려 끌기·두 번 눌러 최대화·창 메뉴가 그대로 되고,
+//! 그 줄의 빈 곳은 Windows에 제목 줄(HTCAPTION)이라고 알려 끌기·두 번 눌러 최대화·창 메뉴가 그대로 되고,
 //! 최대화 버튼은 HTMAXBUTTON으로 알려 Windows 11 스냅 레이아웃이 뜬다
 
 use super::*;
@@ -37,7 +37,7 @@ impl CaptionButton {
 }
 
 impl App {
-    /// 도구 막대에서 창 조절 버튼이 차지하는 왼쪽 끝 (DIP)
+    /// 작업 줄에서 창 조절 버튼이 차지하는 왼쪽 끝 (DIP)
     pub(super) fn caption_left(&self) -> f32 {
         self.w - 3.0 * CAPTION_BTN_W
     }
@@ -77,10 +77,10 @@ impl App {
                 });
             }
         }
-        if y >= TOOLBAR_H {
+        if y >= WORKBAR_H {
             return None;
         }
-        // 팝업이 열려 있으면 도구 막대 빈 곳을 눌러 닫을 수 있게 그대로 둔다
+        // 팝업이 열려 있으면 빈 곳을 눌러 닫을 수 있게 그대로 둔다
         if self.fav_open || self.pal_open || self.view_menu.is_some() {
             return None;
         }

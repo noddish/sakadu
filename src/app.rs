@@ -34,13 +34,16 @@ mod preview;
 mod settings_ui;
 mod view_menu;
 mod caption;
+mod sidebar;
 use fav_ui::{G_STAR, TIMER_FAV_TIP, TIMER_FLY, TIMER_FLY_CLOSE};
-use palette::{G_SEARCH, PalGate, PalStatus, SEARCH_MIN_W, TIMER_SEARCH, TIMER_SEARCH_READY};
+use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
+use sidebar::SIDEBAR_W;
 use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
 pub use preview::{TextReady, unload_handler};
 
-const TOOLBAR_H: f32 = 46.0;
+/// 칸 영역 위 작업 줄 (칸 나누기·숨김·미리 보기·창 단추). 빈 곳은 창을 끄는 제목 줄 역할도 한다
+const WORKBAR_H: f32 = 44.0;
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 6.0;
 const TAB_H: f32 = 36.0;
@@ -161,6 +164,8 @@ enum Hit {
     PalPanel,
     PreviewButton,
     SettingsButton,
+    /// 사이드바 아래쪽 도움말
+    HelpButton,
     /// 설정 창 안
     Set(settings_ui::SetHit),
     /// 경로 상자 오른쪽 끝의 즐겨찾기 별
@@ -721,26 +726,22 @@ fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
     }
 }
 
-/// 칸 나누기 버튼 5개를 한 덩어리로 담는 판
+/// 칸 나누기 버튼 5개를 한 덩어리로 담는 판. 작업 줄 왼쪽 끝, 칸과 같은 왼쪽 선
 fn layout_pill() -> R {
-    R::new(MARGIN, 8.0, MARGIN + 6.0 + 5.0 * 32.0, 38.0)
+    let l = SIDEBAR_W + MARGIN;
+    R::new(l, 7.0, l + 6.0 + 5.0 * 32.0, 37.0)
 }
 
 fn layout_buttons() -> [R; 5] {
     std::array::from_fn(|i| {
-        let l = MARGIN + 3.0 + i as f32 * 32.0;
-        R::new(l, 11.0, l + 32.0, 35.0)
+        let l = SIDEBAR_W + MARGIN + 3.0 + i as f32 * 32.0;
+        R::new(l, 10.0, l + 32.0, 34.0)
     })
 }
 
 fn new_folder_button() -> R {
     let l = layout_pill().r + 12.0;
-    R::new(l, 8.0, l + 32.0, 38.0)
-}
-
-fn hidden_button() -> R {
-    let l = new_folder_button().r + 4.0;
-    R::new(l, 8.0, l + 32.0, 38.0)
+    R::new(l, 7.0, l + 32.0, 37.0)
 }
 
 fn type_info(types: &mut HashMap<String, (String, i32)>, e: &Entry) -> (String, i32) {
@@ -1136,20 +1137,22 @@ impl App {
 
     // ---------- 레이아웃 ----------
 
+    /// 칸이 놓이는 곳: 사이드바 오른쪽, 작업 줄 아래 (미리 보기가 열려 있으면 그만큼 비운다)
     fn area(&self) -> R {
+        let l = SIDEBAR_W + MARGIN;
         let right = self.w - MARGIN - if self.preview.is_some() { self.preview_w() + GAP } else { 0.0 };
-        R::new(MARGIN, TOOLBAR_H, right.max(MARGIN + 100.0), (self.h - MARGIN).max(TOOLBAR_H + 100.0))
+        R::new(l, WORKBAR_H, right.max(l + 100.0), (self.h - MARGIN).max(WORKBAR_H + 100.0))
     }
 
-    /// 도구 막대 오른쪽 끝: 설정
-    fn settings_button(&self) -> R {
-        let r = self.caption_left() - 8.0;
-        R::new(r - 32.0, 8.0, r, 38.0)
-    }
-
+    /// 작업 줄 오른쪽: 창 단추 바로 앞에 미리 보기, 그 앞에 숨김 항목
     fn preview_button(&self) -> R {
-        let s = self.settings_button();
-        R::new(s.l - 36.0, 8.0, s.l - 4.0, 38.0)
+        let r = self.caption_left() - 8.0;
+        R::new(r - 32.0, 7.0, r, 37.0)
+    }
+
+    fn hidden_button(&self) -> R {
+        let p = self.preview_button();
+        R::new(p.l - 36.0, 7.0, p.l - 4.0, 37.0)
     }
 
     fn split_points(&self) -> (f32, f32) {
@@ -1207,7 +1210,7 @@ impl App {
                 return h;
             }
         }
-        if y < TOOLBAR_H && self.search_button().contains(x, y) {
+        if self.search_button().contains(x, y) {
             return Hit::SearchButton;
         }
         if let Some(h) = self.view_menu_hit(x, y) {
@@ -1218,24 +1221,21 @@ impl App {
                 return h;
             }
         }
-        if y < TOOLBAR_H {
-            if self.fav_button().contains(x, y) {
-                return Hit::FavButton;
-            }
+        if x < SIDEBAR_W {
+            return self.sidebar_hit(x, y);
+        }
+        if y < WORKBAR_H {
             if let Some(i) = layout_buttons().iter().position(|r| r.contains(x, y)) {
                 return Hit::Layout(i);
             }
             if new_folder_button().contains(x, y) {
                 return Hit::NewFolder;
             }
-            if hidden_button().contains(x, y) {
+            if self.hidden_button().contains(x, y) {
                 return Hit::Hidden;
             }
             if self.preview_button().contains(x, y) {
                 return Hit::PreviewButton;
-            }
-            if self.settings_button().contains(x, y) {
-                return Hit::SettingsButton;
             }
             return Hit::None;
         }
@@ -2759,6 +2759,7 @@ impl App {
             Hit::Hidden => self.toggle_hidden(),
             Hit::PreviewButton => self.toggle_preview(),
             Hit::SettingsButton => self.toggle_settings(settings_ui::Page::General),
+            Hit::HelpButton => self.toggle_settings(settings_ui::Page::Help),
             Hit::View(p) => self.toggle_view_menu(p),
             Hit::SplitX => capture(self, Drag::SplitX),
             Hit::SplitY => capture(self, Drag::SplitY),
@@ -3298,7 +3299,8 @@ impl App {
             self.gfx.end();
             return;
         }
-        self.paint_toolbar();
+        self.paint_sidebar();
+        self.paint_workbar();
         self.paint_caption();
         let mut missing = Vec::new();
         for (p, r) in self.pane_rects() {
@@ -3331,12 +3333,13 @@ impl App {
         self.request_thumbs(missing);
     }
 
-    fn paint_toolbar(&self) {
+    /// 칸 영역 위 작업 줄: 칸 나누기, (새 폴더), 숨김 항목, 미리 보기. 창 단추는 paint_caption
+    fn paint_workbar(&self) {
         let t = self.theme;
         let g = &self.gfx;
         let hover_bg = t.sel_inactive;
         // 칸 나누기: 한 덩어리 판 위에 지금 고른 것만 도드라지게
-        g.fill_round(layout_pill(), 8.0, t.field);
+        g.fill_round(layout_pill(), 8.0, sidebar::well(&t));
         for (i, r) in layout_buttons().iter().enumerate() {
             let layout = Layout::ALL[i];
             let current = layout == self.layout;
@@ -3359,44 +3362,8 @@ impl App {
             g.glyph(glyph, r, false, if on { t.accent } else if hovered { t.text } else { t.dim });
         };
         icon_button(new_folder_button(), G_NEW_FOLDER, false, self.hover == Hit::NewFolder);
-        icon_button(hidden_button(), G_HIDDEN, self.show_hidden, self.hover == Hit::Hidden);
-        let button = |r: R, glyph: u16, label: &str, on: bool, hovered: bool| {
-            if on {
-                g.fill_round(r, 6.0, t.accent_soft);
-            } else if hovered {
-                g.fill_round(r, 6.0, hover_bg);
-            }
-            let fg = if on { t.accent } else { t.text };
-            g.glyph(glyph, R::new(r.l + 8.0, r.t, r.l + 28.0, r.b), false, fg);
-            g.text(label, R::new(r.l + 32.0, r.t, r.r - 6.0, r.b), Font::Normal, fg);
-        };
-        // 좁으면 별 아이콘만 (이름은 말풍선에)
-        let fav = self.fav_button();
-        if self.fav_button_compact() {
-            icon_button(fav, G_STAR, self.fav_open, self.hover == Hit::FavButton);
-        } else {
-            button(fav, G_STAR, "즐겨찾기", self.fav_open, self.hover == Hit::FavButton);
-        }
-        // 검색 상자처럼 보이는 버튼: 누르면 검색 팔레트. 좁으면 단축키·글자를 차례로 뺀다
-        // 팔레트가 열려 있으면 입력 상자가 아니라 눌린 버튼으로 보인다 (입력은 팔레트 안에서만, 즐겨찾기 버튼과 같은 모양)
-        let sb = self.search_button();
-        if self.pal_open {
-            g.fill_round(sb, 8.0, t.accent_soft);
-        } else {
-            g.fill_round(sb, 8.0, if self.hover == Hit::SearchButton { t.pane } else { t.field });
-            g.stroke_round(sb.inset(0.5, 0.5), 8.0, t.border, 1.0);
-        }
-        let fg = if self.pal_open { t.accent } else { t.dim };
-        g.glyph(G_SEARCH, R::new(sb.l + 8.0, sb.t, sb.l + 28.0, sb.b), true, fg);
-        if sb.w() >= 72.0 {
-            g.text("검색", R::new(sb.l + 30.0, sb.t, sb.r - 8.0, sb.b), Font::Normal, fg);
-        }
-        // 바꾼 검색 단축키를 그대로 보여 준다 (비워 두었으면 없음)
-        if let Some(c) = self.keys.get(crate::keys::Action::Search).filter(|_| sb.w() >= SEARCH_MIN_W) {
-            g.text(&c.label(), R::new(sb.l + 30.0, sb.t, sb.r - 10.0, sb.b), Font::Right, t.faint);
-        }
+        icon_button(self.hidden_button(), G_HIDDEN, self.show_hidden, self.hover == Hit::Hidden);
         icon_button(self.preview_button(), G_PREVIEW, self.preview.is_some(), self.hover == Hit::PreviewButton);
-        icon_button(self.settings_button(), G_SETTINGS, false, self.hover == Hit::SettingsButton);
     }
 
     /// 도구 막대 버튼에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
@@ -3414,7 +3381,7 @@ impl App {
         Some(match self.hover {
             Hit::Layout(i) => (layout_buttons()[i], named(LAYOUTS[i], crate::keys::name(LAYOUTS[i]))),
             Hit::NewFolder => (new_folder_button(), named(Action::NewFolder, "새 폴더")),
-            Hit::Hidden => (hidden_button(), named(Action::Hidden, if self.show_hidden { "숨김 항목 감추기" } else { "숨김 항목 보기" })),
+            Hit::Hidden => (self.hidden_button(), named(Action::Hidden, if self.show_hidden { "숨김 항목 감추기" } else { "숨김 항목 보기" })),
             Hit::FavButton => (self.fav_button(), named(Action::Favorites, "즐겨찾기")),
             Hit::SearchButton => (
                 self.search_button(),
@@ -3425,6 +3392,7 @@ impl App {
             ),
             Hit::PreviewButton => (self.preview_button(), named(Action::Preview, "미리 보기 창")),
             Hit::SettingsButton => (self.settings_button(), named(Action::Settings, "설정")),
+            Hit::HelpButton => (self.help_button(), named(Action::Help, "도움말")),
             _ => return None,
         })
     }
@@ -3445,8 +3413,14 @@ impl App {
         let Some((b, text)) = self.tip().filter(|_| self.tip_shown) else { return };
         let t = self.theme;
         let w = self.gfx.measure(&text, Font::Normal) + 20.0;
-        let l = ((b.l + b.r) / 2.0 - w / 2.0).clamp(MARGIN, (self.w - MARGIN - w).max(MARGIN));
-        let r = R::new(l, b.b + 6.0, l + w, b.b + 32.0);
+        // 사이드바 단추는 오른쪽에(아래쪽 단추가 창 밖으로 나가지 않게), 작업 줄 단추는 아래에
+        let r = if b.r <= SIDEBAR_W {
+            let cy = (b.t + b.b) / 2.0;
+            R::new(b.r + 8.0, cy - 13.0, b.r + 8.0 + w, cy + 13.0)
+        } else {
+            let l = ((b.l + b.r) / 2.0 - w / 2.0).clamp(MARGIN, (self.w - MARGIN - w).max(MARGIN));
+            R::new(l, b.b + 6.0, l + w, b.b + 32.0)
+        };
         let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.4 } else { 0.1 } };
         self.gfx.fill_round(R::new(r.l - 1.0, r.t + 1.0, r.r + 1.0, r.b + 3.0), 7.0, shadow);
         self.gfx.fill_round(r, 6.0, t.pane);
