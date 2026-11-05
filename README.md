@@ -130,7 +130,7 @@ Sakadu가 켜져 있으면 다른 앱을 쓰다가도 단축키 한 번으로 �
 - Win+E는 탐색기가 예전 설정을 기억하고 있어서, 다시 로그인하거나 PC를 다시 시작한 뒤에 바뀔 수 있어요. 폴더 열기는 바로 바뀌어요.
 - 바탕 화면, 작업 표시줄, 제어판·휴지통 같은 특수 폴더는 계속 탐색기가 맡아요.
 - Sakadu가 이미 떠 있으면 새 탭으로 열려요. 그 창이 응답하지 않으면 폴더가 안 열리는 일이 없도록 탐색기로 대신 열어요.
-- 실행 파일은 `%LOCALAPPDATA%\Programs\Sakadu`에 복사해서 등록해요. 새 버전으로 바꾸면 한 번 껐다 켜 주세요.
+- 실행 파일은 `%LOCALAPPDATA%\Programs\Sakadu`에 복사해서 등록해요. 새로 받은 `sakadu.exe`를 한 번 실행하면 이 사본도 그 버전으로 바뀌어요.
 - 명령줄: `sakadu.exe --register-default` / `--unregister-default`
 
 </details>
@@ -144,7 +144,7 @@ Sakadu가 켜져 있으면 다른 앱을 쓰다가도 단축키 한 번으로 �
 - 로그인할 때 창 없이 시작하도록 현재 사용자의 시작 프로그램(HKCU Run)에 등록해요. 끄면 등록을 지워요.
 - 완전히 끝내려면 트레이 아이콘을 오른쪽 클릭하고 **끝내기**를 눌러요.
 - 숨어 있는 동안 메모리는 30MB쯤 써요. 열어 둔 폴더가 바뀌어도 바로 읽지 않고 창을 다시 띄울 때 한 번만 읽어요.
-- 실행 파일은 기본 파일 관리자와 같은 `%LOCALAPPDATA%\Programs\Sakadu`에 복사해서 등록해요. 새 버전으로 바꾸면 한 번 껐다 켜 주세요.
+- 실행 파일은 기본 파일 관리자와 같은 `%LOCALAPPDATA%\Programs\Sakadu`에 복사해서 등록해요. 새로 받은 `sakadu.exe`를 실행하면 트레이에 있던 이전 버전을 끝내고 이어받고, 이 사본도 그 버전으로 바꿔요. 0.5.1까지의 버전이 떠 있으면 먼저 트레이에서 끝내 달라고 안내해요.
 
 </details>
 
@@ -212,12 +212,13 @@ cargo test
   `$env:CARGO_TARGET_DIR = "$env:TEMP\sakadu-target"; cargo build --release`
 - 셸·서비스와 실제로 붙는 테스트와 성능 측정은 `#[ignore]`로 빠져 있어요: `cargo test --release -- --ignored --nocapture`
 - 테마 강제: `SAKADU_THEME=dark` 또는 `light`
+- 릴리스 빌드를 직접 실행하면, 트레이 대기나 기본 파일 관리자가 켜져 있을 때 `%LOCALAPPDATA%\Programs\Sakadu`의 사본을 그 빌드로 바꾸고 떠 있는 다른 빌드를 이어받아요(디버그 빌드는 하지 않아요). 시험 창을 띄울 때는 `APPDATA`와 함께 `LOCALAPPDATA`도 다른 폴더로 돌려 두세요.
 - 아이콘은 `assets/*.ico`예요. `build.rs`가 리소스 컴파일러 없이 실행 파일에 넣어요.
 - 릴리스: `Cargo.toml`의 `version`을 올리고 `v0.2.0` 같은 태그를 푸시하면 GitHub Actions가 빌드해서 **초안** 릴리스를 만들어요. 확인한 뒤 게시해요.
 
 | 파일 | 역할 |
 |---|---|
-| `main.rs` | 창 생성, 메시지 루프, 재진입 처리, 명령줄, 한 창만 실행 |
+| `main.rs` | 창 생성, 메시지 루프, 재진입 처리, 명령줄, 한 창만 실행(다른 버전이 떠 있으면 이어받기) |
 | `app.rs` | 레이아웃, 입력, 그리기, 칸·탭 동작 |
 | `app/settings_ui.rs` | 설정 창(일반·화면·검색·단축키·도움말·정보) |
 | `keys.rs` | 바꿀 수 있는 단축키(키 맵, 저장) |
@@ -230,7 +231,7 @@ cargo test
 | `thumbs.rs` | 썸네일 백그라운드 생성 |
 | `index.rs` · `service.rs` | NTFS 이름 인덱스(MFT 열거·USN 갱신·검색 순위) · 검색 서비스·파이프·설치 |
 | `folders.rs` | 검색에 넣은 폴더(공유폴더·USB) 훑기·변경 반영·검색 |
-| `defaultfm.rs` | 기본 파일 관리자 등록·해제(HKCU, 백업·복원) |
+| `defaultfm.rs` | 기본 파일 관리자 등록·해제(HKCU, 백업·복원), 설치 사본 복사·갱신 |
 | `tray.rs` | 트레이 대기(알림 영역 아이콘·메뉴, 로그인할 때 시작 등록) |
 | `undo.rs` | 되돌리기 기록(셸 진행 알림) |
 | `favorites.rs`, `session.rs` | 즐겨찾기·세션 저장 |

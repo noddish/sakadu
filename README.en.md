@@ -132,7 +132,7 @@ When turned on in Settings → General, opening folders and drives, and Win+E, g
 - Explorer caches the old Win+E command, so Win+E may only switch after you sign out and back in or restart. Opening folders switches right away.
 - The desktop, taskbar and special folders like Control Panel and Recycle Bin still open in Explorer.
 - If Sakadu is already running, the folder opens in a new tab. If that window isn't responding, the folder opens in Explorer instead so it never fails to open.
-- The exe is copied to `%LOCALAPPDATA%\Programs\Sakadu`. After updating, turn the option off and on once.
+- The exe is copied to `%LOCALAPPDATA%\Programs\Sakadu`. Running a newly downloaded `sakadu.exe` once updates that copy too.
 - Command line: `sakadu.exe --register-default` / `--unregister-default`
 
 </details>
@@ -146,7 +146,7 @@ When turned on in Settings → General, closing the window doesn't quit Sakadu. 
 - It's added to your user's startup programs (HKCU Run) so it starts at sign-in without a window. Turning it off removes that entry.
 - To quit completely, right-click the tray icon and choose **끝내기** (quit).
 - While hidden it uses about 30 MB of memory. If an open folder changes, Sakadu doesn't reread it until the window comes back.
-- The exe is copied to `%LOCALAPPDATA%\Programs\Sakadu`, the same place the default file manager option uses. After updating, turn the option off and on once.
+- The exe is copied to `%LOCALAPPDATA%\Programs\Sakadu`, the same place the default file manager option uses. Running a newly downloaded `sakadu.exe` quits the older one waiting in the tray, takes its place, and updates that copy. If version 0.5.1 or older is running, Sakadu asks you to quit it from the tray first.
 
 </details>
 
@@ -214,12 +214,13 @@ cargo test
   `$env:CARGO_TARGET_DIR = "$env:TEMP\sakadu-target"; cargo build --release`
 - Tests that touch the real shell or service, and benchmarks, are `#[ignore]`d: `cargo test --release -- --ignored --nocapture`
 - Force a theme: `SAKADU_THEME=dark` or `light`
+- Running a release build by hand, with "stay in tray" or "default file manager" on, replaces the copy in `%LOCALAPPDATA%\Programs\Sakadu` with that build and takes over from a different build that's running (debug builds don't). When launching test windows, point `LOCALAPPDATA` to another folder along with `APPDATA`.
 - Icons live in `assets/*.ico`. `build.rs` embeds them in the exe without a resource compiler.
 - Releases: bump `version` in `Cargo.toml` and push a tag like `v0.2.0`. GitHub Actions builds it and creates a **draft** release to check and publish.
 
 | File | Role |
 |---|---|
-| `main.rs` | Window creation, message loop, re-entrancy, command line, single instance |
+| `main.rs` | Window creation, message loop, re-entrancy, command line, single instance (takes over from a different running version) |
 | `app.rs` | Layout, input, drawing, pane and tab behavior |
 | `app/settings_ui.rs` | Settings window (general, appearance, search, shortcuts, help, about) |
 | `keys.rs` | Remappable shortcuts (key map, saving) |
@@ -232,7 +233,7 @@ cargo test
 | `thumbs.rs` | Background thumbnail generation |
 | `index.rs` · `service.rs` | NTFS name index (MFT scan, USN updates, ranking) · search service, pipe, install |
 | `folders.rs` | Added folders (shares, USB): walking, change tracking, search |
-| `defaultfm.rs` | Default file manager register/unregister (HKCU, backup and restore) |
+| `defaultfm.rs` | Default file manager register/unregister (HKCU, backup and restore), copying and updating the installed copy |
 | `tray.rs` | Staying in the tray (notification icon and menu, start at sign-in) |
 | `undo.rs` | Undo history (shell progress sink) |
 | `favorites.rs`, `session.rs` | Saving favorites and sessions |

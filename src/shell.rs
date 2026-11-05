@@ -412,6 +412,8 @@ pub struct OpReport {
     pub undone: Option<Undone>,
     /// 잘라내기 붙여넣기 뒤처리
     pub cut: Option<CutLeft>,
+    /// 창이 이 알림을 처리할 때까지 작업 중으로 센다. 그 전에 끝나면 되돌리기 기록·잘라내기 뒤처리를 잃는다
+    _running: Option<RunningOp>,
 }
 
 /// 잘라낸 파일을 붙여넣은 결과. 클립보드가 그대로일 때만 left로 바꾼다
@@ -436,11 +438,27 @@ pub fn spawn_cut_paste(hwnd: HWND, paths: Vec<String>, dest: String, seq: u32, c
     spawn_op(hwnd, FileOp::Move { paths, dest }, Some((seq, clip, id)));
 }
 
+/// 진행 중인 파일 작업 수. 다른 버전이 이어받으려 할 때 복사·이동 도중에 끝나지 않도록 본다
+static RUNNING_OPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn file_ops_running() -> bool {
+    RUNNING_OPS.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
+struct RunningOp;
+impl Drop for RunningOp {
+    fn drop(&mut self) {
+        RUNNING_OPS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn spawn_op(hwnd: HWND, op: FileOp, cut: Option<(u32, Vec<String>, u64)>) {
     let owner = SendHwnd(hwnd);
+    RUNNING_OPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let running = RunningOp;
     std::thread::spawn(move || {
         let _com = ComInit::sta();
-        let mut report = OpReport::default();
+        let mut report = OpReport { _running: Some(running), ..Default::default() };
         // 취소나 실패는 셸이 직접 안내 창을 띄우므로 여기서는 결과만 모은다
         let done = match &op {
             FileOp::Undo(u) => {

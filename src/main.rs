@@ -51,6 +51,8 @@ thread_local! {
     static APP: RefCell<Option<Box<app::App>>> = const { RefCell::new(None) };
     /// 트레이에서 창 없이 시작했을 때, 처음 보일 때 쓸 표시 방법(세션의 최대화 여부)
     static FIRST_SHOW: Cell<Option<SHOW_WINDOW_CMD>> = const { Cell::new(None) };
+    /// 다른 버전에 이어받기를 허락해 끝내는 중
+    static QUITTING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// UI 스레드의 App에 접근. 이미 처리 중이면(재진입) None
@@ -156,6 +158,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     run_deferred(hwnd);
                     return LRESULT(1);
                 }
+                if cds.dwData == app::COPYDATA_QUIT {
+                    // 이미 끝내는 중이면(창을 닫으며 정리하는 동안 다시 요청받음) 그대로 둔다
+                    if QUITTING.get() {
+                        return LRESULT(app::QUIT_OK);
+                    }
+                    // 다른 버전의 Sakadu가 이어받으려 한다. 지금 끝나면 하던 일을 잃으면 거절한다
+                    if quit_would_lose_work(hwnd) || with_app(|a| a.quit()).is_none() {
+                        return LRESULT(app::QUIT_BUSY);
+                    }
+                    QUITTING.set(true);
+                    // 보낸 쪽을 먼저 풀어 준다. 다른 프로세스가 보낸 메시지를 처리하는 동안에는
+                    // 밖으로 나가는 COM 호출(미리 보기 처리기 정리 등)이 막혀 창을 닫으며 정리하지 못한다
+                    let _ = ReplyMessage(LRESULT(app::QUIT_OK));
+                    run_deferred(hwnd);
+                    return LRESULT(app::QUIT_OK);
+                }
             }
             WM_HOTKEY if wp.0 as i32 == app::HOTKEY_SEARCH => {
                 // 다른 앱 위에서 눌러도 창을 앞으로 가져와 바로 검색 (App 빌림 밖에서 창 표시)
@@ -248,14 +266,47 @@ fn path_arg() -> Option<String> {
     std::env::args().skip(1).find(|a| !a.starts_with("--")).map(|a| a.trim_matches('"').to_string()).filter(|a| !a.is_empty())
 }
 
-/// 이미 떠 있는 Sakadu가 있으면 경로를 넘기고 true.
-/// 그 창이 응답하지 않으면 폴더가 안 열리는 일이 없도록 탐색기로 대신 연다
-fn forward_to_running(path: &Option<String>) -> bool {
-    unsafe {
-        let Ok(existing) = FindWindowW(w!("SakaduWindow"), windows::core::PCWSTR::null()) else { return false };
-        if existing.is_invalid() {
-            return false;
+/// 지금 끝나면 하던 일을 잃는지: Sakadu가 시작한 파일 작업이 끝나지 않았거나, 확인 창이 떠 있거나(창이 비활성),
+/// 이 프로세스에 다른 창이 보인다. 셸이 이 프로세스 안에서 하는 일(우클릭 메뉴의 붙여넣기·압축, 셸에 맡긴 끌어 놓기,
+/// 속성 창)은 따로 셀 수 없어, 그 진행 창·속성 창이 보이는지로 대신 본다
+fn quit_would_lose_work(main: HWND) -> bool {
+    if shell::file_ops_running() || !unsafe { windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(main) }.as_bool() {
+        return true;
+    }
+    struct Find {
+        main: HWND,
+        pid: u32,
+        found: bool,
+    }
+    unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> windows::core::BOOL {
+        let f = unsafe { &mut *(lp.0 as *mut Find) };
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+        if h != f.main && pid == f.pid && unsafe { IsWindowVisible(h) }.as_bool() {
+            // 디버그 빌드에 붙은 콘솔 창은 셈하지 않는다
+            let mut class = [0u16; 32];
+            let n = unsafe { GetClassNameW(h, &mut class) }.max(0) as usize;
+            if String::from_utf16_lossy(&class[..n]) != "ConsoleWindowClass" {
+                f.found = true;
+                return windows::core::BOOL(0);
+            }
         }
+        windows::core::BOOL(1)
+    }
+    let mut f = Find { main, pid: unsafe { windows::Win32::System::Threading::GetCurrentProcessId() }, found: false };
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut f as *mut Find as isize)) };
+    f.found
+}
+
+/// 이미 떠 있는 Sakadu 창
+fn running_window() -> Option<HWND> {
+    unsafe { FindWindowW(w!("SakaduWindow"), windows::core::PCWSTR::null()) }.ok().filter(|h| !h.is_invalid())
+}
+
+/// 떠 있는 Sakadu에 경로를 넘긴다.
+/// 그 창이 응답하지 않으면 폴더가 안 열리는 일이 없도록 탐색기로 대신 연다
+fn forward_to_running(existing: HWND, path: &Option<String>) {
+    unsafe {
         let mut pid = 0u32;
         GetWindowThreadProcessId(existing, Some(&mut pid));
         // 사용자가 방금 실행했으므로 이 프로세스에 앞으로 가져올 권한이 있다. 그 권한을 기존 창에 넘긴다
@@ -272,7 +323,215 @@ fn forward_to_running(path: &Option<String>) -> bool {
                 windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), w!("explorer.exe"), &windows::core::HSTRING::from(format!("\"{p}\"")), windows::core::PCWSTR::null(), SW_SHOWNORMAL);
             }
         }
-        true
+    }
+}
+
+/// 떠 있는 다른 Sakadu 프로세스. 실행 파일 위치를 읽고 끝나기를 기다리는 데만 쓴다
+struct Process(HANDLE);
+
+impl Process {
+    fn of_window(hwnd: HWND) -> Option<Process> {
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if pid == 0 {
+            return None;
+        }
+        // 관리자 권한으로 떠 있어도 이 권한으로는 열린다
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok().map(Process)
+    }
+
+    fn exe(&self) -> Option<std::path::PathBuf> {
+        use windows::Win32::System::Threading::{PROCESS_NAME_WIN32, QueryFullProcessImageNameW};
+        let mut buf = vec![0u16; 32768];
+        let mut len = buf.len() as u32;
+        unsafe { QueryFullProcessImageNameW(self.0, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len) }.ok()?;
+        Some(String::from_utf16_lossy(&buf[..len as usize]).into())
+    }
+
+    /// ms 안에 끝나면 true. 기다리기(SYNCHRONIZE) 권한이 없을 수 있어 끝남 코드를 읽어 본다
+    fn wait_exit(&self, ms: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        loop {
+            let mut code = 0u32;
+            if unsafe { windows::Win32::System::Threading::GetExitCodeProcess(self.0, &mut code) }.is_err() {
+                return false;
+            }
+            if code != STILL_ACTIVE.0 as u32 {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// 관리자 권한(UAC 상승)으로 실행 중인지. 알 수 없으면 None
+fn elevated(process: HANDLE) -> Option<bool> {
+    use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+    unsafe {
+        let mut token = HANDLE::default();
+        windows::Win32::System::Threading::OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?;
+        let mut e = TOKEN_ELEVATION::default();
+        let mut len = 0u32;
+        let r = GetTokenInformation(token, TokenElevation, Some(&mut e as *mut _ as *mut _), size_of::<TOKEN_ELEVATION>() as u32, &mut len);
+        let _ = CloseHandle(token);
+        r.ok()?;
+        Some(e.TokenIsElevated != 0)
+    }
+}
+
+/// 시작 순서 잠금. 떠 있는 창을 찾는 데서 새 창을 띄울 때까지 한 번에 한 실행만 지나가게 한다.
+/// 이어받는 몇 초(이전 프로세스가 끝나기를 기다리고 사본을 바꾸는 동안) 사이에 다른 실행(폴더 열기, 두 번 누름,
+/// 로그인할 때 시작)이 끼어들어 창이 둘 뜨거나 사본을 함께 쓰지 않게 한다
+struct StartupLock {
+    mutex: HANDLE,
+    held: bool,
+}
+
+impl StartupLock {
+    fn acquire() -> StartupLock {
+        use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+        use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+        use windows::Win32::System::Threading::{CreateMutexW, MUTEX_MODIFY_STATE, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+        let name = w!("Local\\SakaduStartup");
+        // 관리자 권한으로 실행된 Sakadu가 먼저 만들어도 일반 권한 실행이 열 수 있게, 로그인한(대화형) 사용자에게도 연다.
+        // 그래도 무결성 수준 때문에 전체 권한으로는 못 여니, 기다리고 놓는 권한만으로 다시 연다
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let made = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)"), SDDL_REVISION_1, &mut sd, None) }.is_ok();
+        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: false.into() };
+        let mutex = unsafe { CreateMutexW(made.then_some(&sa as *const _), false, name) }
+            .or_else(|_| unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE, false, name) });
+        if made {
+            let _ = unsafe { LocalFree(Some(HLOCAL(sd.0))) };
+        }
+        if let Err(e) = &mutex {
+            diag::log(|| format!("startup lock unavailable: {e}"));
+        }
+        let mut lock = StartupLock { mutex: mutex.unwrap_or_default(), held: false };
+        lock.wait();
+        lock
+    }
+
+    /// 다른 실행이 너무 오래 붙잡고 있으면(응답 없음 등) 기다리다 그냥 지나간다
+    fn wait(&mut self) {
+        if self.held || self.mutex.is_invalid() {
+            return;
+        }
+        let r = unsafe { windows::Win32::System::Threading::WaitForSingleObject(self.mutex, 30_000) };
+        self.held = r == WAIT_OBJECT_0 || r == WAIT_ABANDONED;
+    }
+
+    fn release(&mut self) {
+        if std::mem::take(&mut self.held) {
+            let _ = unsafe { windows::Win32::System::Threading::ReleaseMutex(self.mutex) };
+        }
+    }
+}
+
+impl Drop for StartupLock {
+    fn drop(&mut self) {
+        self.release();
+        if !self.mutex.is_invalid() {
+            let _ = unsafe { CloseHandle(self.mutex) };
+        }
+    }
+}
+
+/// 설치 사본을 바꾸지 못했다고 알린다
+fn warn_sync_failed(owner: Option<HWND>, e: &str) {
+    let text = format!(
+        "로그인할 때와 폴더를 열 때 쓰는 Sakadu를 이 버전으로 바꾸지 못했어요.\n{e}\n\n\
+         지금 쓰는 창은 이 버전이지만, 다음에 로그인하거나 폴더를 열면 이전 버전이 열릴 수 있어요. \
+         이 파일을 다시 실행하면 다시 바꿔 봐요."
+    );
+    unsafe { MessageBoxW(owner, &windows::core::HSTRING::from(text), w!("Sakadu"), MB_OK | MB_ICONWARNING | MB_SETFOREGROUND) };
+}
+
+/// 떠 있는 Sakadu에 끝내 달라고 한다 (app::QUIT_OK·QUIT_BUSY).
+/// 0이면 이 요청을 모르는 0.5.1까지의 버전이거나, 관리자 권한으로 떠 있어 메시지가 막혔거나, 응답이 없다
+fn ask_to_quit(existing: HWND) -> isize {
+    let cds = windows::Win32::System::DataExchange::COPYDATASTRUCT { dwData: app::COPYDATA_QUIT, cbData: 0, lpData: std::ptr::null_mut() };
+    let mut result = 0usize;
+    let r = unsafe { SendMessageTimeoutW(existing, WM_COPYDATA, WPARAM(0), LPARAM(&cds as *const _ as isize), SMTO_ABORTIFHUNG | SMTO_BLOCK, 5000, Some(&mut result)) };
+    if r.0 == 0 { 0 } else { result as isize }
+}
+
+/// 떠 있는 Sakadu를 두고 어떻게 할지 (take_over의 결과)
+#[derive(PartialEq)]
+enum TakeOver {
+    /// 떠 있는 창에 경로만 넘긴다
+    Forward,
+    /// 직접 실행한 이 exe와 같은 빌드가 떠 있다. 경로를 넘기기 전에 설치 사본을 맞춰 둔다
+    /// (사본을 바꾸지 못한 뒤에 같은 파일을 다시 실행한 경우)
+    SameBuild,
+    /// 떠 있던 Sakadu가 끝났다. 떠 있는 창을 다시 살핀 뒤 이 버전으로 시작한다
+    Gone,
+}
+
+/// 떠 있는 Sakadu가 지금 직접 실행한 것과 다른 빌드면 그 프로세스를 끝내게 한다.
+/// 이쪽이 로그인할 때·폴더를 열 때 실행된 설치 사본이면 이어받지 않고 경로만 넘긴다.
+/// 안내 창이 떠 있는 동안은 lock을 풀어, 그사이 폴더 열기가 기다리지 않고 떠 있는 창으로 가게 한다
+fn take_over(existing: HWND, lock: &mut StartupLock) -> TakeOver {
+    // 디버그 빌드는 콘솔 창이 붙어 있어, 설치 사본이 되면 로그인할 때와 폴더를 열 때마다 콘솔이 뜬다
+    if cfg!(debug_assertions) {
+        return TakeOver::Forward;
+    }
+    let Ok(me) = std::env::current_exe() else { return TakeOver::Forward };
+    if defaultfm::is_install_copy(&me) {
+        return TakeOver::Forward;
+    }
+    let Some(process) = Process::of_window(existing) else { return TakeOver::Forward };
+    let Some(theirs) = process.exe() else { return TakeOver::Forward };
+    if defaultfm::same_build(&me, &theirs) {
+        return TakeOver::SameBuild;
+    }
+    // 관리자 권한으로 실행한 이쪽이 일반 권한 창을 이어받지는 않는다. 일반 권한으로 실행되는 설치 사본(폴더 열기·Win+E)이
+    // 관리자 권한 창에는 경로를 넘기지 못한다(UIPI). 일반 권한인 이쪽이 관리자 권한 창을 만나면 요청이 막혀(0) 안내 창으로 간다
+    match elevated(unsafe { windows::Win32::System::Threading::GetCurrentProcess() }) {
+        Some(false) => {}
+        Some(true) if elevated(process.0) == Some(true) => {}
+        _ => return TakeOver::Forward,
+    }
+    diag::log(|| format!("take over: running {} differs from {}", theirs.display(), me.display()));
+    loop {
+        let answer = ask_to_quit(existing);
+        diag::log(|| format!("take over: quit request -> {answer}"));
+        // 끝내 달라는 요청을 받아들였거나, 그사이 사용자가 끝냈다.
+        // 프로세스가 늦게 끝나 사본이 잠겨 있어도 copy_self가 비켜 두고 바꾼다
+        if answer == app::QUIT_OK || !unsafe { IsWindow(Some(existing)) }.as_bool() {
+            process.wait_exit(10_000);
+            return TakeOver::Gone;
+        }
+        let first = if answer == app::QUIT_BUSY {
+            "실행 중인 Sakadu가 복사·이동 중이거나 진행 창·확인 창이 떠 있어서 바로 바꾸지 못했어요.\n\
+             작업을 마친 뒤 [다시 시도]를 누르면 이 버전으로 열려요."
+        } else {
+            "다른 버전의 Sakadu가 이미 실행 중이에요.\n\
+             트레이의 Sakadu 아이콘을 오른쪽 클릭해 [끝내기]를 누른 뒤(트레이 아이콘이 없으면 창을 닫은 뒤) [다시 시도]를 누르면 이 버전으로 열려요."
+        };
+        let copy = if defaultfm::install_copy_in_use() { "\n로그인할 때와 폴더를 열 때도 이 버전이 열리도록 바꿔요." } else { "" };
+        let text = format!("{first}{copy}\n\n실행 중: {}\n지금 실행: {}\n\n[취소]를 누르면 실행 중인 창을 그대로 열어요.", theirs.display(), me.display());
+        lock.release();
+        let pick = unsafe { MessageBoxW(None, &windows::core::HSTRING::from(text), w!("Sakadu"), MB_RETRYCANCEL | MB_ICONINFORMATION | MB_SETFOREGROUND) };
+        lock.wait();
+        if pick != IDRETRY {
+            // 창을 이미 끝냈으면 넘길 곳이 없으니 이 버전으로 연다
+            if unsafe { IsWindow(Some(existing)) }.as_bool() {
+                return TakeOver::Forward;
+            }
+            process.wait_exit(10_000);
+            return TakeOver::Gone;
+        }
+        // 다시 시도: 아직 떠 있으면 곧바로 다시 요청하고, 끝냈으면 위에서 Gone
     }
 }
 
@@ -354,14 +613,33 @@ fn main() -> Result<()> {
     }
     let background = std::env::args().skip(1).any(|a| a.eq_ignore_ascii_case(tray::ARG));
     let open_path = path_arg();
-    if background {
+    let mut lock = StartupLock::acquire();
+    // 이어받는 동안 다른 Sakadu가 떴을 수 있어, 창이 하나도 없을 때까지 다시 살핀다
+    while let Some(existing) = running_window() {
         // 로그인할 때 시작했는데 이미 떠 있으면 그대로 둔다
-        if unsafe { FindWindowW(w!("SakaduWindow"), windows::core::PCWSTR::null()) }.is_ok_and(|h| !h.is_invalid()) {
+        if background {
             return Ok(());
         }
-    } else if forward_to_running(&open_path) {
-        return Ok(());
+        match take_over(existing, &mut lock) {
+            TakeOver::Gone => continue,
+            how => {
+                if how == TakeOver::SameBuild {
+                    let sync = defaultfm::sync_install_copy();
+                    diag::log(|| format!("install copy sync (same build running) -> {sync:?}"));
+                    if let Err(e) = sync {
+                        lock.release();
+                        warn_sync_failed(None, &e);
+                    }
+                }
+                forward_to_running(existing, &open_path);
+                return Ok(());
+            }
+        }
     }
+    // 로그인할 때·폴더를 열 때 실행되는 설치 사본을 지금 실행한 버전으로 맞춘다.
+    // 로그인할 때는 그 사본이 실행되고, 디버그 빌드는 콘솔 창이 붙어 있어 사본으로 쓰지 않는다
+    let sync = if background || cfg!(debug_assertions) { Ok(false) } else { defaultfm::sync_install_copy() };
+    diag::log(|| format!("install copy sync -> {sync:?}"));
     unsafe {
         // 매니페스트로 이미 설정돼 있으면 실패하지만 무해하다
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -438,6 +716,11 @@ fn main() -> Result<()> {
             with_app(|a| a.set_tray(true));
         }
         run_deferred(hwnd);
+        // 창이 준비됐으니 기다리던 실행은 이 창에 경로를 넘긴다
+        drop(lock);
+        if let Err(e) = sync {
+            warn_sync_failed(Some(hwnd), &e);
+        }
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -457,6 +740,23 @@ mod tests {
 
     fn r(l: i32, t: i32, w: i32, h: i32) -> RECT {
         RECT { left: l, top: t, right: l + w, bottom: t + h }
+    }
+
+    /// 같은 사용자의 다른 프로세스도 권한 상승 여부를 읽을 수 있어야 이어받는다 (못 읽으면 경로만 넘긴다)
+    #[test]
+    #[ignore]
+    fn reads_elevation_of_other_process() {
+        use std::os::windows::io::AsRawHandle;
+        let mine = elevated(unsafe { windows::Win32::System::Threading::GetCurrentProcess() });
+        assert!(mine.is_some());
+        let mut child = std::process::Command::new("ping").args(["-n", "3", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let theirs = elevated(HANDLE(child.as_raw_handle()));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(theirs, mine);
+        // 창으로 연 프로세스 핸들(PROCESS_QUERY_LIMITED_INFORMATION)로도 읽힌다
+        let limited = unsafe { windows::Win32::System::Threading::OpenProcess(windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION, false, std::process::id()) }.map(Process).unwrap();
+        assert_eq!(elevated(limited.0), mine);
     }
 
     #[test]
