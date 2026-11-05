@@ -80,23 +80,95 @@ pub fn install_path() -> PathBuf {
     base.join("Programs").join("Sakadu").join("sakadu.exe")
 }
 
-/// 지금 실행 중인 파일을 설치 위치로 복사한다. 그 위치의 파일이 실행 중이면 이름을 비켜 두고 복사
+/// 두 경로가 같은 파일인지 (대소문자·짧은 이름 차이는 무시). 어느 쪽이든 없으면 false
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => crate::util::eq_path(&a.to_string_lossy(), &b.to_string_lossy()),
+        _ => false,
+    }
+}
+
+/// 두 실행 파일이 같은 빌드인지: 같은 파일이거나 내용이 같다. 어느 쪽이든 읽지 못하면 false
+pub fn same_build(a: &Path, b: &Path) -> bool {
+    if same_path(a, b) {
+        return true;
+    }
+    let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
+    if len(a).is_none() || len(a) != len(b) {
+        return false;
+    }
+    matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// 이 프로세스가 설치 위치의 사본인지 (로그인할 때·폴더를 열 때 실행된 것)
+pub fn is_install_copy(me: &Path) -> bool {
+    same_path(me, &install_path())
+}
+
+/// 설치 위치의 사본을 쓰는 설정(트레이 대기, 기본 파일 관리자)이 하나라도 켜져 있는지
+pub fn install_copy_in_use() -> bool {
+    crate::tray::is_enabled(crate::tray::RUN_KEY) || is_registered(CLASSES)
+}
+
+/// 설치 위치의 사본을 지금 실행한 버전으로 맞춘다. 사본을 쓰는 설정이 꺼져 있거나 이미 같으면 그대로 두고 false
+pub fn sync_install_copy() -> Result<bool, String> {
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    if !install_copy_in_use() || same_build(&me, &install_path()) {
+        return Ok(false);
+    }
+    copy_self().map(|_| true)
+}
+
+/// 지금 실행 중인 파일을 설치 위치로 복사한다. 이미 같은 빌드면 그대로 둔다.
+/// 옆에 다 복사한 뒤 바꿔 넣어서, 도중에 실패해도 등록된 파일이 반쯤 쓰인 채로 남지 않는다
 pub fn copy_self() -> Result<PathBuf, String> {
     let target = install_path();
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    if me == target {
+    if same_build(&me, &target) {
         return Ok(target);
     }
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    if std::fs::copy(&me, &target).is_err() {
-        let old = target.with_extension("old.exe");
-        let _ = std::fs::remove_file(&old);
-        std::fs::rename(&target, &old).map_err(|e| format!("{}: {e}", target.display()))?;
-        std::fs::copy(&me, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+    let new = target.with_extension("new.exe");
+    if let Err(e) = std::fs::copy(&me, &new) {
+        let _ = std::fs::remove_file(&new);
+        return Err(format!("{}: {e}", new.display()));
     }
-    Ok(target)
+    // 백신 검사나 방금 끝난 이전 프로세스 때문에 잠깐 잠겨 있을 수 있어 몇 번 다시 해 본다
+    let mut tries = 0;
+    loop {
+        match replace_file(&new, &target) {
+            Ok(()) => {
+                // 지난번에 비켜 둔 파일. 아직 실행 중이면 지워지지 않고 다음에 다시 지운다
+                let _ = std::fs::remove_file(target.with_extension("old.exe"));
+                return Ok(target);
+            }
+            Err(_) if tries < 10 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&new);
+                return Err(format!("{}: {e}", target.display()));
+            }
+        }
+    }
+}
+
+/// new를 target 자리에 넣는다. 실행 중인 파일은 덮어쓰거나 지울 수 없지만 이름은 바꿀 수 있으므로,
+/// 그때는 target을 sakadu.old.exe로 비켜 두고 넣는다
+fn replace_file(new: &Path, target: &Path) -> std::io::Result<()> {
+    let Err(e) = std::fs::rename(new, target) else { return Ok(()) };
+    if !target.exists() {
+        return Err(e);
+    }
+    let old = target.with_extension("old.exe");
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(target, &old)?;
+    std::fs::rename(new, target).inspect_err(|_| {
+        let _ = std::fs::rename(&old, target);
+    })
 }
 
 pub fn is_registered(classes: &str) -> bool {
@@ -327,6 +399,66 @@ mod tests {
         assert_eq!(get(&cmd, "").as_deref(), Some("\"C:\\Other\\fm.exe\""));
         delete_tree("Software\\SakaduTest2");
         delete_value(STATE, &format!("WinEKeyCreated:{root}"));
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sakadu-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn same_build_compares_contents() {
+        let d = temp_dir("same-build");
+        let (a, b, c) = (d.join("a.exe"), d.join("b.exe"), d.join("c.exe"));
+        std::fs::write(&a, b"build 1").unwrap();
+        std::fs::write(&b, b"build 1").unwrap();
+        std::fs::write(&c, b"build 2").unwrap();
+        assert!(same_build(&a, &b), "same contents elsewhere");
+        assert!(!same_build(&a, &c), "same size, different contents");
+        assert!(same_build(&a, &d.join(".").join("A.EXE")), "same file spelled differently");
+        assert!(!same_build(&a, &d.join("missing.exe")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn replace_file_swaps_in_new_build() {
+        let d = temp_dir("replace");
+        let (new, target) = (d.join("sakadu.new.exe"), d.join("sakadu.exe"));
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&new, b"new").unwrap();
+        replace_file(&new, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!new.exists());
+        // 처음 넣을 때는 자리가 비어 있다
+        std::fs::remove_file(&target).unwrap();
+        std::fs::write(&new, b"first").unwrap();
+        replace_file(&new, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 설치 사본이 실행 중이어도 바꿔 넣는다 (실행 중인 exe는 덮어쓰거나 지울 수 없다)
+    #[test]
+    #[ignore]
+    fn replace_file_while_target_runs() {
+        let d = temp_dir("running");
+        let (new, target) = (d.join("sakadu.new.exe"), d.join("sakadu.exe"));
+        // 실행 중인 사본 흉내: 시스템의 ping을 복사해 몇 초 돌린다
+        let ping = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32").join("PING.EXE");
+        std::fs::copy(&ping, &target).unwrap();
+        let mut child = std::process::Command::new(&target).args(["-n", "5", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(std::fs::OpenOptions::new().write(true).open(&target).is_err(), "running exe can't be overwritten");
+        std::fs::write(&new, b"new build").unwrap();
+        let r = replace_file(&new, &target);
+        let _ = child.kill();
+        let _ = child.wait();
+        r.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new build");
+        assert!(target.with_extension("old.exe").exists(), "running file moved aside");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

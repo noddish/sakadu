@@ -66,6 +66,11 @@ pub const ID_SEARCH: i32 = 103;
 pub const HOTKEY_SEARCH: i32 = 1;
 /// 다른 Sakadu 프로세스가 WM_COPYDATA로 넘기는 "이 경로를 열어 달라" 요청
 pub const COPYDATA_OPEN: usize = 0x5150_0001;
+/// 다른 버전의 Sakadu가 이어받으려고 보내는 "끝내 달라" 요청. 0.5.1까지는 모르는 요청이라 0을 돌려준다
+pub const COPYDATA_QUIT: usize = 0x5150_0002;
+/// COPYDATA_QUIT 응답: 끝내는 중 / 작업 중이라 거절
+pub const QUIT_OK: isize = 1;
+pub const QUIT_BUSY: isize = 2;
 const ID_OPEN_TAB: u32 = shell::MENU_CUSTOM;
 const ID_ADD_FAV: u32 = shell::MENU_CUSTOM + 1;
 const TIMER_REFRESH: usize = 10;
