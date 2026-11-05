@@ -12,9 +12,8 @@ use windows::core::{PCWSTR, PWSTR, w};
 
 pub type Color = D2D1_COLOR_F;
 
-/// 둥글기: 칸, 탭, 파일 줄·메뉴 줄. 크게 둥글리지 않는다
+/// 둥글기: 팝업, 파일 줄·메뉴 줄. 크게 둥글리지 않는다 (칸 카드는 app.rs RADIUS)
 pub const R_PANE: f32 = 6.0;
-pub const R_TAB: f32 = 4.0;
 pub const R_ROW: f32 = 4.0;
 /// 키보드 포커스 테두리 두께
 pub const FOCUS_W: f32 = 1.25;
@@ -52,13 +51,9 @@ pub struct Theme {
     pub thumb: Color,
     /// 모든 칸의 경계. 활성 여부와 상관없이 같은 색·두께라 칸을 옮겨도 화면이 흔들리지 않는다
     pub pane_border: Color,
-    /// 활성 칸의 지금 탭 바탕(강조 색)과 글자. 같은 색 테두리가 그 칸 본문을 두르고 탭과 이어진다.
-    /// 지금 작업 중인 칸을 이것으로 알아본다
-    pub tab_on: Color,
-    pub tab_on_text: Color,
-    /// 지금 탭이 아닌 탭의 글자와, 그 탭에 마우스를 올렸을 때 바탕
-    pub tab_text: Color,
-    pub tab_hover: Color,
+    /// 활성 칸의 지금 탭 칩 글자: 옅은 강조 색(accent_soft) 바탕 위에서 또렷한 강조 색.
+    /// 지금 작업 중인 칸을 이 칩과 카드 그림자로 알아본다
+    pub chip_text: Color,
     /// 키보드 포커스 테두리
     pub focus: Color,
 }
@@ -83,10 +78,7 @@ impl Theme {
         accent_soft: hex(0xE1EAFC),
         thumb: hex(0xC4C8CF),
         pane_border: hex(0xD5D8DD),
-        tab_on: hex(0x2F6FEB),
-        tab_on_text: hex(0xFFFFFF),
-        tab_text: hex(0x4A4E56),
-        tab_hover: hex(0xE7E9EC),
+        chip_text: hex(0x2F6FEB),
         focus: hex(0x6A6F78),
     };
 
@@ -110,10 +102,7 @@ impl Theme {
         accent_soft: hex(0x1F3354),
         thumb: hex(0x4B4E56),
         pane_border: hex(0x34363C),
-        tab_on: hex(0x5B9BFF),
-        tab_on_text: hex(0x121316),
-        tab_text: hex(0xB4B8C0),
-        tab_hover: hex(0x24262B),
+        chip_text: hex(0x5B9BFF),
         focus: hex(0xA3A8B2),
     };
 
@@ -140,10 +129,7 @@ impl Theme {
             accent_soft: mix(window, highlight, 0.3),
             thumb: text,
             pane_border: text,
-            tab_on: highlight,
-            tab_on_text: highlight_text,
-            tab_text: text,
-            tab_hover: soft,
+            chip_text: text,
             focus: hot,
         }
     }
@@ -185,8 +171,8 @@ impl Theme {
                 t.sel = mix(t.pane, c, if dark { 0.35 } else { 0.2 });
             }
         }
-        // 활성 칸의 지금 탭과 그 칸 테두리도 강조 색을 따른다 (글자는 흰색·검은색 중 더 잘 읽히는 쪽)
-        (t.tab_on, t.tab_on_text) = tab_on_colors(t.accent);
+        // 활성 칸의 지금 탭 칩 글자도 강조 색을 따르되, 옅은 강조 색 바탕 위에서 또렷하게
+        t.chip_text = chip_text(t.accent, t.accent_soft, t.text);
         t
     }
 }
@@ -203,28 +189,20 @@ pub fn apca(text: Color, bg: Color) -> f32 {
     if s.abs() < 0.1 { 0.0 } else { (s.abs() - 0.027) * 100.0 }
 }
 
-/// 바탕 c 위에서 더 잘 읽히는 글자색: 흰색과 거의 검정 중 체감 대비가 큰 쪽
-pub fn readable_on(c: Color) -> Color {
-    let (white, dark) = (hex(0xFFFFFF), hex(0x121316));
-    if apca(white, c) >= apca(dark, c) { white } else { dark }
-}
+/// 탭 칩 글자(13px 굵게)에 필요한 체감 대비
+const CHIP_LC: f32 = 60.0;
 
-/// 탭 글자(13px 굵게)에 필요한 체감 대비
-const TAB_LC: f32 = 60.0;
-
-/// 활성 탭의 (바탕, 글자). 바탕은 강조 색이고, 글자가 충분히 또렷하지 않으면 바탕을 글자에서 멀어지는 쪽으로
-/// 조금씩 옮긴다 (흰 글자면 어둡게, 검은 글자면 밝게)
-pub fn tab_on_colors(accent: Color) -> (Color, Color) {
-    let fg = readable_on(accent);
-    let away = if fg.r > 0.5 { hex(0x000000) } else { hex(0xFFFFFF) };
-    let mut bg = accent;
-    for _ in 0..8 {
-        if apca(fg, bg) >= TAB_LC {
+/// 활성 칸의 지금 탭 칩 글자: 옅은 강조 색(soft) 바탕 위의 강조 색. 충분히 또렷하지 않으면
+/// 본문 글자 색(ink) 쪽으로 조금씩 옮긴다 (밝은 테마는 어둡게, 어두운 테마는 밝게)
+pub fn chip_text(accent: Color, soft: Color, ink: Color) -> Color {
+    let mut fg = accent;
+    for _ in 0..12 {
+        if apca(fg, soft) >= CHIP_LC {
             break;
         }
-        bg = mix(bg, away, 0.06);
+        fg = mix(fg, ink, 0.08);
     }
-    (bg, fg)
+    fg
 }
 
 /// 강조 색: (설정 키, 이름, 밝은 테마 색, 어두운 테마 색). "system"은 Windows 강조 색
@@ -332,26 +310,21 @@ pub fn alpha(c: Color, a: f32) -> Color {
 mod tests {
     use super::*;
 
-    /// 활성 탭 글자: 어떤 강조 색이든 체감 대비(APCA) 60 이상, 바탕은 강조 색에서 크게 벗어나지 않는다
+    /// 지금 탭 칩 글자: 어떤 강조 색이든 옅은 강조 색 바탕 위에서 체감 대비(APCA) 60 이상이고, 강조 색에서 크게 벗어나지 않는다
     #[test]
-    fn tab_text_stays_readable_on_every_accent() {
-        let white = hex(0xFFFFFF);
-        // 밝은 테마의 강조 색은 모두 흰 글자 (청록·주황 같은 중간 밝기 색에 검은 글자가 오지 않게)
-        for a in &ACCENTS[1..] {
-            assert_eq!(tab_on_colors(hex(a.2)).1, white, "밝은 테마 {}", a.0);
-        }
-        // 어두운 테마의 밝은 주황은 검은 글자가 더 또렷하다
-        assert_ne!(tab_on_colors(hex(0xFFA552)).1, white);
-        for a in &ACCENTS[1..] {
-            for c in [hex(a.2), hex(a.3)] {
-                let (bg, fg) = tab_on_colors(c);
-                assert!(apca(fg, bg) >= TAB_LC, "{} {:?} -> {:?} Lc {}", a.0, c, bg, apca(fg, bg));
-                assert!((bg.r - c.r).abs() < 0.25 && (bg.g - c.g).abs() < 0.25 && (bg.b - c.b).abs() < 0.25, "{} too far", a.0);
+    fn chip_text_stays_readable_on_every_accent() {
+        for dark in [false, true] {
+            let base = if dark { Theme::DARK } else { Theme::LIGHT };
+            for a in &ACCENTS[1..] {
+                let c = hex(if dark { a.3 } else { a.2 });
+                let soft = mix(base.pane, c, if dark { 0.22 } else { 0.12 });
+                let fg = chip_text(c, soft, base.text);
+                assert!(apca(fg, soft) >= CHIP_LC, "{} dark={dark} {:?} Lc {}", a.0, fg, apca(fg, soft));
+                assert!((fg.r - c.r).abs() < 0.5 && (fg.g - c.g).abs() < 0.5 && (fg.b - c.b).abs() < 0.5, "{} too far", a.0);
             }
         }
-        // 기본 파랑은 그대로 쓴다
-        assert_eq!(tab_on_colors(hex(0x2F6FEB)).0, hex(0x2F6FEB));
         // APCA 기준값: 흰 바탕 검은 글자는 100 안팎, 같은 색끼리는 0
+        let white = hex(0xFFFFFF);
         assert!(apca(hex(0x000000), white) > 100.0);
         assert_eq!(apca(white, white), 0.0);
     }
