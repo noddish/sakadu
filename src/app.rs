@@ -498,41 +498,49 @@ fn sort_chips(gfx: &Gfx, header: R, current: SortKey) -> Vec<(SortKey, &'static 
         .collect()
 }
 
-/// 탭 칩 자리. 다 들어가면 칩마다 이름 길이(natural)대로, 아니면 같은 폭으로 줄이고, 그래도 넘치면
-/// 지금 탭(active)이 보이는 만큼만 보이고 나머지는 폭 0으로 양 끝에 둔다(그리기·누르기에서 빠짐). 새 탭(+)은 늘 보이는 칩 바로 뒤
+/// 줄어든 탭 칩의 가장 좁은 폭
+const CHIP_MIN: f32 = 64.0;
+
+/// 탭 칩 자리. 다 들어가면 칩마다 이름 길이(natural)대로 둔다. 넘치면 지금 탭(active)은 제 폭을 지키고
+/// 나머지가 남는 폭을 고르게 나눈다(짧은 이름은 늘리지 않는다). 그래도 넘치면 지금 탭이 보이는 만큼만 보이고
+/// 나머지는 폭 0으로 양 끝에 둔다(그리기·누르기에서 빠짐). 새 탭(+)은 늘 보이는 칩 바로 뒤
 fn tab_rects(strip: R, natural: &[f32], active: usize) -> Vec<R> {
+    const GAP_X: f32 = 2.0;
     let n = natural.len();
     let avail = strip.w() - 32.0;
-    let total = natural.iter().sum::<f32>() + 2.0 * n.saturating_sub(1) as f32;
-    if total <= avail {
+    let total = natural.iter().sum::<f32>() + GAP_X * n.saturating_sub(1) as f32;
+    let place = |widths: &mut dyn Iterator<Item = (usize, f32)>, first: usize, shown: usize| -> Vec<R> {
+        let mut out = vec![R::new(strip.l, strip.t, strip.l, strip.b); n];
         let mut x = strip.l;
-        return natural
-            .iter()
-            .map(|w| {
-                let r = R::new(x, strip.t, x + w, strip.b);
-                x = r.r + 2.0;
-                r
-            })
-            .collect();
-    }
-    let w = ((avail + 2.0) / n.max(1) as f32 - 2.0).clamp(72.0, 180.0);
-    // 나눗셈 오차로 하나 덜 들어간다고 보지 않게 조금 여유를 둔다
-    let fits = ((avail + 2.0) / (w + 2.0) + 0.001).floor().max(1.0) as usize;
-    let first = if n > fits { (active + 1).saturating_sub(fits).min(n - fits) } else { 0 };
-    let start = strip.l;
-    let end = start + fits.min(n) as f32 * (w + 2.0) - 2.0;
-    (0..n)
-        .map(|i| {
-            if i < first {
-                R::new(start, strip.t, start, strip.b)
-            } else if i >= first + fits {
-                R::new(end, strip.t, end, strip.b)
-            } else {
-                let l = start + (i - first) as f32 * (w + 2.0);
-                R::new(l, strip.t, l + w, strip.b)
+        for (i, w) in widths {
+            out[i] = R::new(x, strip.t, x + w, strip.b);
+            x += w + GAP_X;
+        }
+        // 가려진 칩: 앞쪽은 첫 칩 왼쪽 끝, 뒤쪽은 마지막 칩 오른쪽 끝에 폭 0으로
+        let end = (x - GAP_X).max(strip.l);
+        for (i, r) in out.iter_mut().enumerate() {
+            if i >= first + shown {
+                *r = R::new(end, strip.t, end, strip.b);
             }
-        })
-        .collect()
+        }
+        out
+    };
+    if n == 0 {
+        return Vec::new();
+    }
+    if total <= avail {
+        return place(&mut natural.iter().copied().enumerate(), 0, n);
+    }
+    let active = active.min(n - 1);
+    // 지금 탭은 제 폭 (다른 칩 하나 놓을 자리는 남기고)
+    let cur_w = natural[active].min((avail - CHIP_MIN - GAP_X).max(CHIP_MIN)).min(avail.max(0.0));
+    let rest = avail - cur_w - GAP_X;
+    // 나머지 칩을 가장 좁게 줄였을 때 몇 개 들어가나 (나눗셈 오차로 하나 덜 들어간다고 보지 않게 조금 여유를 둔다)
+    let others = (((rest + GAP_X) / (CHIP_MIN + GAP_X) + 0.001).floor().max(0.0) as usize).min(n - 1);
+    let shown = others + 1;
+    let first = (active + 1).saturating_sub(shown).min(n - shown);
+    let w_other = if others > 0 { ((rest + GAP_X) / others as f32 - GAP_X).min(180.0) } else { 0.0 };
+    place(&mut (first..first + shown).map(|i| (i, if i == active { cur_w } else { natural[i].min(w_other) })), first, shown)
 }
 
 /// 탭 줄의 x에 놓았을 때 들어갈 자리. 보이는 탭만 보고 정한다:
@@ -1979,7 +1987,9 @@ impl App {
         let popup = self.pal_open || self.view_menu.is_some() || self.settings.is_some();
         let filter = match self.pane_rect(self.active) {
             Some(r) if !popup && !self.panes[self.active].tab().filter.is_empty() => {
-                Some(center(self.filter_parts(self.active, filter_chip(&geom(r))).0, 0.0, 0.0))
+                // 입력 상자 글자는 위쪽에 붙어 그려지므로 칩 안 다른 글자(개수)와 줄이 맞게 2px 내린다
+                let e = center(self.filter_parts(self.active, filter_chip(&geom(r))).0, 0.0, 0.0);
+                Some(R::new(e.l, e.t + 2.0, e.r, e.b + 2.0))
             }
             _ => Some(R::new(-4000.0, -4000.0, -3800.0, -3980.0)),
         };
@@ -3554,6 +3564,8 @@ impl App {
         let hover = self.hover;
         let drop_hover = self.drop_hover;
         let edit_mode = self.edit_mode;
+        // 키보드가 사이드바 즐겨찾기에 있으면 칸의 포커스 테두리는 그리지 않는다 (포커스 표시는 한 곳에만)
+        let keyboard_here = active && !self.fav_focus;
         let thumb_drag = matches!(self.drag, Drag::Thumb { pane, .. } if pane == p);
         // 끌고 있는 탭: (그 탭이 있던 칸, 탭), 놓을 곳 (칸, 위치)
         let (dragged_tab, tab_drop) = match self.drag {
@@ -3584,11 +3596,7 @@ impl App {
 
         // 카드: 지금 칸은 아래로 옅게 번지는 그림자로 떠 보이고, 다른 칸은 평평하다 (고대비는 테두리로)
         if active && multi && !t.high_contrast {
-            let k = if t.dark { 3.0 } else { 1.0 };
-            let ink = |a: f32| Color { r: 0.06, g: 0.09, b: 0.16, a: (a * k).min(0.6) };
-            gfx.fill_round(R::new(r.l + 10.0, r.t + 14.0, r.r - 10.0, r.b + 10.0), RADIUS + 6.0, ink(0.035));
-            gfx.fill_round(R::new(r.l + 4.0, r.t + 8.0, r.r - 4.0, r.b + 6.0), RADIUS + 3.0, ink(0.05));
-            gfx.fill_round(R::new(r.l - 0.5, r.t + 1.0, r.r + 0.5, r.b + 2.0), RADIUS + 0.5, ink(0.06));
+            soft_shadow(gfx, r, RADIUS, 12.0, 0.10, t.dark);
         }
         gfx.fill_round(r, RADIUS, t.pane);
 
@@ -3775,7 +3783,7 @@ impl App {
             let e = &tab.entries[tab.view[vi] as usize];
             let it = grid.item(vi, tab.scroll);
             // 선택(바탕)과 키보드 포커스(테두리)는 따로 보인다. 포커스는 활성 칸에만, 선택한 하나와 겹치면 바탕만으로
-            let focused = active && vi == tab.cursor && (!e.selected || many_selected);
+            let focused = keyboard_here && vi == tab.cursor && (!e.selected || many_selected);
             let fg = if e.selected && active { t.sel_text } else { t.text };
             if grid.cell == CellKind::Icon {
                 // 작은 아이콘·목록: 칸 하나에 작은 아이콘과 이름
@@ -3943,6 +3951,22 @@ impl App {
         };
         gfx.stroke_round(r.inset(w / 2.0, w / 2.0), RADIUS, color, w);
     }
+}
+
+/// 아래로 부드럽게 번지는 그림자. 흐림 효과 대신 조금씩 내려가며 커지는 아주 옅은 둥근 사각형을 겹쳐,
+/// 카드 가장자리에서 멀어질수록 옅어지게 한다. depth: 아래로 번지는 길이(DIP), strength: 가장자리 바로 밑의 진하기
+fn soft_shadow(g: &Gfx, r: R, radius: f32, depth: f32, strength: f32, dark: bool) {
+    const LAYERS: usize = 8;
+    let (base, k) = if dark { ((0.0, 0.0, 0.0), 2.5) } else { ((0.06, 0.09, 0.16), 1.0) };
+    let ink = Color { r: base.0, g: base.1, b: base.2, a: (strength * k).min(0.7) / LAYERS as f32 };
+    for i in 1..=LAYERS {
+        let f = i as f32 / LAYERS as f32;
+        let spread = depth * (f * 0.5 - 0.25);
+        let dy = depth * f * 0.6;
+        g.fill_round(R::new(r.l - spread, r.t + dy - spread, r.r + spread, r.b + dy + spread), radius + spread.max(0.0), ink);
+    }
+    // 가장자리에 붙은 얇은 그림자 (카드가 바닥에 닿은 곳)
+    g.fill_round(R::new(r.l - 0.5, r.t + 0.5, r.r + 0.5, r.b + 1.5), radius + 0.5, Color { a: if dark { 0.25 } else { 0.05 }, ..ink });
 }
 
 fn draw_layout_icon(g: &Gfx, r: R, layout: Layout, c: Color) {
@@ -4303,6 +4327,15 @@ mod tests {
         let trs = tab_rects(strip, &[60.0, 90.0], 0);
         assert!(trs.windows(2).all(|w| w[0].r < w[1].l));
         assert_eq!((trs[0].w(), trs[1].w()), (60.0, 90.0));
+        // 넘치면 지금 탭은 제 폭을 지키고 (이름이 잘리지 않게), 나머지가 줄어든다
+        let natural = [150.0, 150.0, 150.0, 150.0, 150.0, 150.0];
+        let trs = tab_rects(strip, &natural, 3);
+        assert_eq!(trs[3].w(), 150.0, "{trs:?}");
+        assert!(trs.iter().enumerate().all(|(i, r)| i == 3 || r.w() == 0.0 || (r.w() >= CHIP_MIN && r.w() < 150.0)), "{trs:?}");
+        assert!(trs.iter().filter(|r| r.w() > 0.0).all(|r| r.r <= strip.r - 32.0 + 0.5), "{trs:?}");
+        // 짧은 이름의 칩은 늘리지 않는다
+        let trs = tab_rects(strip, &[150.0, 70.0, 150.0, 150.0], 0);
+        assert!(trs[1].w() <= 70.0);
         // 필터 칩은 칩 줄 안, 칩 자리와 겹치지 않는다
         let chip = filter_chip(&g);
         assert!(chip.r <= g.head.r && chip_strip(&g, chip.w()).r <= chip.l);

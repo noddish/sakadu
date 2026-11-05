@@ -783,13 +783,9 @@ impl App {
 
         // 뒤를 살짝 어둡게 해 검색에 집중하게 한다 (누르면 닫힌다)
         gfx.fill(R::new(0.0, 0.0, win_w, win_h), Color { r: 0.06, g: 0.07, b: 0.09, a: if t.dark { 0.35 } else { 0.12 } });
-        // 떠 있는 판: 아래로 번지는 그림자 몇 겹
+        // 떠 있는 판: 아래로 번지는 그림자
         if !t.high_contrast {
-            let k = if t.dark { 3.0 } else { 1.0 };
-            let ink = |a: f32| Color { r: 0.06, g: 0.09, b: 0.16, a: (a * k).min(0.6) };
-            gfx.fill_round(R::new(r.l + 6.0, r.t + 14.0, r.r - 6.0, r.b + 22.0), 18.0, ink(0.05));
-            gfx.fill_round(R::new(r.l + 2.0, r.t + 8.0, r.r - 2.0, r.b + 12.0), 15.0, ink(0.07));
-            gfx.fill_round(R::new(r.l - 1.0, r.t + 1.0, r.r + 1.0, r.b + 3.0), 13.0, ink(0.06));
+            super::soft_shadow(gfx, r, 12.0, 24.0, 0.18, t.dark);
         }
         gfx.fill_round(r, 12.0, t.pane);
         // 테두리는 다른 팝업과 같은 중립색. 포커스는 입력 줄의 커서가 보여 준다

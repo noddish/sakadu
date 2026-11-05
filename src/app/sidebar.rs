@@ -497,6 +497,10 @@ impl App {
         let row_bg = |g: &Gfx, r: R, current: bool, hovered: bool| {
             if current {
                 g.fill_round(r, 6.0, well(&t));
+                // 고대비에서는 들어간 면이 창 바탕과 같은 색이라 테두리로 지금 위치를 보인다
+                if t.high_contrast {
+                    g.stroke_round(r.inset(0.5, 0.5), 6.0, t.border, 1.0);
+                }
             }
             if hovered {
                 g.fill_round(r, 6.0, hover_fill(&t));
@@ -565,7 +569,8 @@ impl App {
                             }
                         }
                     }
-                    if sel_row == Some(row) {
+                    // 키보드 포커스 테두리 (이름을 바꾸는 중이면 입력 상자 테두리만)
+                    if sel_row == Some(row) && editing != Some(row) {
                         g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), 6.0, t.focus, FOCUS_W);
                     }
                     if editing == Some(row) {
