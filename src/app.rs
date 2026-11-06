@@ -1170,6 +1170,11 @@ impl App {
     /// 어디서든 검색(전역 단축키)을 등록한다. 설정에서 정한 키가 없으면 비어 있는 첫 후보를 쓴다.
     /// 정한 키를 다른 프로그램이 쓰고 있으면 false
     pub(super) fn register_global_hotkey(&mut self) -> bool {
+        // 시험용으로 따로 띄운 창은 사용자가 쓰는 Sakadu의 단축키를 가져가지 않는다
+        if crate::isolated() {
+            self.hotkey = None;
+            return false;
+        }
         unsafe {
             let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_SEARCH);
             let mods = |c: crate::keys::Combo| {

@@ -216,6 +216,7 @@ cargo test
 - 셸·서비스와 실제로 붙는 테스트와 성능 측정은 `#[ignore]`로 빠져 있어요: `cargo test --release -- --ignored --nocapture`
 - 테마 강제: `SAKADU_THEME=dark` 또는 `light`
 - 릴리스 빌드를 직접 실행하면, 트레이 대기나 기본 파일 관리자가 켜져 있을 때 `%LOCALAPPDATA%\Programs\Sakadu`의 사본을 그 빌드로 바꾸고 떠 있는 다른 빌드를 이어받아요(디버그 빌드는 하지 않아요). 시험 창을 띄울 때는 `APPDATA`와 함께 `LOCALAPPDATA`도 다른 폴더로 돌려 두세요.
+- 시험 창은 `SAKADU_ISOLATED=1`을 붙여 띄우면, 쓰고 있는 Sakadu를 켜 둔 채로 따로 떠요. 창 종류 이름을 따로 쓰고, 한 창 실행·이어받기·설치 사본 갱신·트레이 대기·전역 단축키를 쓰지 않아요.
 - 아이콘은 `assets/*.ico`예요. `build.rs`가 리소스 컴파일러 없이 실행 파일에 넣어요.
 - 릴리스: `Cargo.toml`의 `version`을 올리고 `v0.2.0` 같은 태그를 푸시하면 GitHub Actions가 빌드해서 **초안** 릴리스를 만들어요. 확인한 뒤 게시해요.
 
