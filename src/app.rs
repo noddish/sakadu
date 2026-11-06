@@ -36,6 +36,7 @@ mod view_menu;
 mod caption;
 mod sidebar;
 mod start;
+mod workspace_ui;
 use fav_ui::G_STAR;
 use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
 use sidebar::{BAR_W, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_CLOSE};
@@ -198,6 +199,8 @@ enum Hit {
     PreviewOpen,
     /// 미리 보기의 고정 칩 (누르면 핀과 같다)
     PreviewChip,
+    /// 작업 줄 왼쪽의 작업 공간 단추 (메뉴)
+    Workspace,
 }
 
 impl Hit {
@@ -241,6 +244,8 @@ enum EditMode {
     Rename(usize),
     /// 즐겨찾기 표시 이름 바꾸기
     FavRename(crate::favorites::Row),
+    /// 작업 줄의 작업 공간 이름
+    WorkspaceRename,
 }
 
 struct RenameCtx {
@@ -310,6 +315,8 @@ pub enum Deferred {
     MoreMenu { pt: POINT },
     /// 새 탭 시작 화면 항목의 메뉴. 위치는 메뉴를 열 때 정해 둔다
     StartMenu { pane: usize, item: start::StartItem, loc: Location, pt: POINT },
+    /// 작업 공간 메뉴 (저장한 작업 공간·새로 저장·이름 바꾸기·지우기)
+    WorkspaceMenu { pt: POINT },
 }
 
 /// 끌어 놓을 곳 (drop_dir_at)
@@ -451,6 +458,8 @@ pub struct App {
     recent: Vec<String>,
     /// 시작 화면에서 키보드를 쓰기 시작했는지 (초점 테두리를 보일지)
     start_keys: bool,
+    /// 이름 붙여 저장해 둔 화면들과 지금 작업 공간
+    workspaces: crate::workspaces::Workspaces,
     /// 단추 말풍선이 떠 있는지
     tip_shown: bool,
     /// 설정 창 (열려 있으면 창 전체를 덮는다)
@@ -1124,6 +1133,7 @@ impl App {
             new_tab_home: sess.as_ref().map_or_else(|| session::NEW_TAB_START.to_string(), |s| s.new_tab.clone()),
             recent: sess.as_ref().map(|s| s.recent.clone()).unwrap_or_default(),
             start_keys: false,
+            workspaces: crate::workspaces::load(),
             tip_shown: false,
             settings: None,
             folders: crate::folders::Folders::start(),
@@ -1138,6 +1148,12 @@ impl App {
         app.apply_edit_font();
         app.apply_window_theme();
         app.refresh_places();
+        // 지난번 검색어·범위와 미리 보기에 고정해 둔 파일
+        if let Some(s) = &sess {
+            app.set_search_text(&s.query);
+            app.pal_here = s.scope_here;
+            app.preview_restore_pin(s.pin.as_deref());
+        }
         Ok(app)
     }
 
@@ -1163,8 +1179,11 @@ impl App {
         self.set_filter_edit_text(&filter);
         self.layout_edits();
         self.update_title();
-        // 지난번에 검색 패널을 열어 둔 채 끝냈으면 서비스 상태부터 확인한다
+        // 지난번에 검색 패널을 열어 둔 채 끝냈으면 서비스 상태부터 확인하고, 남은 검색어로 다시 찾는다
         self.pal_check_status();
+        if self.pal_shown() && !edit_text(self.search_edit).trim().is_empty() {
+            self.pal_run_query();
+        }
     }
 
     /// 어디서든 검색(전역 단축키)을 등록한다. 설정에서 정한 키가 없으면 비어 있는 첫 후보를 쓴다.
@@ -1237,7 +1256,7 @@ impl App {
         }
         match self.edit_mode {
             EditMode::Address(_) => self.addr_edit,
-            EditMode::Rename(_) | EditMode::FavRename(_) => self.rename_edit,
+            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename => self.rename_edit,
             EditMode::None if self.pal_focus && self.pal_shown() => self.search_edit,
             // 즐겨찾기에 키보드가 있으면 메인 창이 키를 받는다 (필터 상자에 커서가 깜박이지 않게)
             EditMode::None if self.fav_focus => self.hwnd,
@@ -1285,12 +1304,12 @@ impl App {
 
     /// 칸 나누기 버튼 5개를 한 덩어리로 담는 판. 작업 줄에서 칸과 같은 왼쪽 선
     fn layout_pill(&self) -> R {
-        let l = self.panes_left();
+        let l = self.workspace_button().r + 8.0;
         R::new(l, 7.0, l + 6.0 + 5.0 * 32.0, 37.0)
     }
 
     fn layout_buttons(&self) -> [R; 5] {
-        let l0 = self.panes_left() + 3.0;
+        let l0 = self.layout_pill().l + 3.0;
         std::array::from_fn(|i| {
             let l = l0 + i as f32 * 32.0;
             R::new(l, 10.0, l + 32.0, 34.0)
@@ -1457,6 +1476,9 @@ impl App {
             return Hit::SideResize;
         }
         if y < WORKBAR_H {
+            if self.workspace_button().contains(x, y) {
+                return Hit::Workspace;
+            }
             if let Some(i) = self.layout_buttons().iter().position(|r| r.contains(x, y)) {
                 return Hit::Layout(i);
             }
@@ -1935,7 +1957,7 @@ impl App {
         match self.edit_mode {
             EditMode::None => {}
             // 즐겨찾기 이름은 칸과 상관없으니 확정하고, 칸에 붙은 입력(파일 이름·경로)은 취소한다
-            EditMode::FavRename(_) => self.commit_rename(),
+            EditMode::FavRename(_) | EditMode::WorkspaceRename => self.commit_rename(),
             _ => self.cancel_edit(),
         }
         self.active = p;
@@ -2192,6 +2214,7 @@ impl App {
         let ren = match self.edit_mode {
             EditMode::Rename(p) => self.rename_rect(p).map(|r| center(r, 4.0, 4.0)),
             EditMode::FavRename(row) => self.fav_rename_rect(row).map(|r| center(r, 4.0, 4.0)),
+            EditMode::WorkspaceRename => Some(center(self.workspace_rename_rect(), 0.0, 0.0)),
             _ => None,
         };
         place(self.rename_edit, ren);
@@ -2303,6 +2326,10 @@ impl App {
             self.commit_fav_rename(row);
             return;
         }
+        if self.edit_mode == EditMode::WorkspaceRename {
+            self.commit_workspace_rename();
+            return;
+        }
         let Some(ctx) = self.rename.take() else { return };
         let new_name = edit_text(self.rename_edit).trim().to_string();
         self.close_edit();
@@ -2363,7 +2390,7 @@ impl App {
     /// 목록을 클릭하면 이름 바꾸기는 확정, 주소 입력은 취소 (탐색기와 같음)
     fn end_edits_for_click(&mut self) {
         match self.edit_mode {
-            EditMode::Rename(_) | EditMode::FavRename(_) => self.commit_rename(),
+            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename => self.commit_rename(),
             EditMode::Address(_) => self.cancel_edit(),
             EditMode::None => {}
         }
@@ -2647,39 +2674,16 @@ impl App {
         self.invalidate();
     }
 
-    fn save_session(&self) {
-        let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-        unsafe {
-            let _ = GetWindowPlacement(self.hwnd, &mut wp);
-        }
-        let r = wp.rcNormalPosition;
-        let s = session::Session {
-            window: Some([r.left, r.top, r.right - r.left, r.bottom - r.top]),
-            maximized: wp.showCmd == SW_SHOWMAXIMIZED.0 as u32,
-            layout: self.layout.index() as u8,
-            split: self.split,
-            active: self.active,
-            show_hidden: self.show_hidden,
-            preview: self.preview.is_some(),
-            new_tab: self.new_tab_home.clone(),
-            recent: self.recent.clone(),
-            side: self.side_pinned.map_or("none", Panel::key).to_string(),
-            side_w: self.side_w,
-            look: self.look.clone(),
-            panes: self
-                .panes
-                .iter()
-                .map(|p| session::PaneState {
-                    tabs: p.tabs.iter().map(|t| t.loc.to_session()).collect(),
-                    active: p.active,
-                    cols: p.cols,
-                    sort_key: p.sort.key.to_u8(),
-                    sort_desc: p.sort.desc,
-                    view: p.view.code(),
-                })
-                .collect(),
-        };
+    /// 세션을 저장한다. 작업 공간이 있으면 지금 작업 공간에도 지금 화면을 적어 둔다
+    fn save_session(&mut self) {
+        let s = self.screen_state();
         let _ = session::save(&s);
+        if let Some(w) = self.workspaces.current.and_then(|c| self.workspaces.list.get_mut(c)) {
+            w.state = s;
+            if let Err(e) = crate::workspaces::save(&self.workspaces) {
+                crate::diag::log(|| format!("workspaces: save failed: {e}"));
+            }
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -3181,7 +3185,7 @@ impl App {
             && matches!(
                 hit,
                 Hit::Bar(_) | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalRow(_)
-                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen
+                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen | Hit::Workspace
             )
         {
             return;
@@ -3234,6 +3238,11 @@ impl App {
             Hit::PreviewButton => self.toggle_preview(),
             Hit::PreviewPin | Hit::PreviewChip => self.toggle_preview_pin(),
             Hit::PreviewOpen => self.preview_open(),
+            Hit::Workspace => {
+                let r = self.workspace_button();
+                let pt = self.to_screen(r.l, r.b + 2.0);
+                self.pending.push(Deferred::WorkspaceMenu { pt });
+            }
             Hit::SettingsButton => self.toggle_settings(settings_ui::Page::General),
             Hit::Bar(panel) => self.bar_click(panel),
             Hit::SidePin => self.side_toggle_pin(),
@@ -3773,7 +3782,7 @@ impl App {
     /// 입력 상자가 포커스를 잃으면: 이름 바꾸기는 확정, 주소 입력은 취소
     pub fn on_edit_blur(&mut self, id: i32) {
         match (id, self.edit_mode) {
-            (ID_RENAME, EditMode::Rename(_) | EditMode::FavRename(_)) => self.commit_rename(),
+            (ID_RENAME, EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename) => self.commit_rename(),
             (ID_ADDR, EditMode::Address(_)) => self.cancel_edit(),
             _ => {}
         }
@@ -3855,6 +3864,7 @@ impl App {
 
     /// 칸 영역 위 작업 줄: 칸 나누기, 숨김 항목, 미리 보기. 창 단추는 paint_caption
     fn paint_workbar(&self) {
+        self.paint_workspace_button();
         let t = self.theme;
         let g = &self.gfx;
         let hover_bg = t.sel_inactive;
@@ -3920,6 +3930,7 @@ impl App {
             Hit::PalClose => (self.pal_close_rect(), "검색 닫기".to_string()),
             Hit::Start(p, i) => return self.start_tip(p, i),
             Hit::PreviewPin | Hit::PreviewOpen => return self.preview_tip(),
+            Hit::Workspace => (self.workspace_button(), "작업 공간 · 지금 화면을 저장하고 바꾸기".to_string()),
             _ => return None,
         })
     }
@@ -4453,6 +4464,7 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         Deferred::PalMenu { pt } => palette::show_pal_menu(hwnd, pt),
         Deferred::MoreMenu { pt } => with_menu(|| sidebar::show_more_menu(hwnd, pt)),
         Deferred::StartMenu { pane, item, loc, pt } => with_menu(|| start::show_start_menu(hwnd, pane, item, loc, pt)),
+        Deferred::WorkspaceMenu { pt } => with_menu(|| workspace_ui::show_workspace_menu(hwnd, pt)),
     }
 }
 

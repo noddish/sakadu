@@ -400,16 +400,42 @@ impl App {
             // 검색을 닫으면 전에 고정해 둔 패널로 돌아간다
             self.side_before_search = self.side_pinned.filter(|p| *p != Panel::Search);
             self.show_side(Panel::Search, true);
-            self.pal_results.clear();
-            self.pal_gate = PalGate::default();
-            self.pal_picked.clear();
-            self.pal_sel = 0;
-            self.pal_anchor = 0;
-            self.pal_scroll = 0.0;
-            self.pal_status = PalStatus::Idle;
+            self.pal_reset();
             self.pal_check_status();
         }
         self.pal_focus_input();
+    }
+
+    fn pal_reset(&mut self) {
+        self.pal_results.clear();
+        self.pal_gate = PalGate::default();
+        self.pal_picked.clear();
+        self.pal_sel = 0;
+        self.pal_anchor = 0;
+        self.pal_scroll = 0.0;
+        self.pal_status = PalStatus::Idle;
+    }
+
+    /// 검색 상자 글자를 바꾼다 (세션·작업 공간을 되살릴 때). 앱을 다루는 동안 생긴 글자 바뀜 알림은 받지 못하니 찾기는 부르는 쪽이 한다
+    pub(super) fn set_search_text(&self, q: &str) {
+        if edit_text(self.search_edit) != q {
+            unsafe {
+                let _ = SetWindowTextW(self.search_edit, &HSTRING::from(q));
+            }
+        }
+    }
+
+    /// 작업 공간을 되살릴 때: 검색 패널을 고정해 열고 이 검색어·범위로 찾는다 (키보드는 옮기지 않는다)
+    pub(super) fn restore_search(&mut self, query: &str, here: bool) {
+        self.set_search_text(query);
+        self.pal_here = here;
+        if !self.pal_shown() {
+            self.side_before_search = None;
+            self.show_side(Panel::Search, true);
+            self.pal_reset();
+            self.pal_check_status();
+        }
+        self.pal_run_query();
     }
 
     /// 키보드를 검색 상자로. 지난 검색어는 통째로 선택한다: 새로 치면 바뀌고, 이어 쓰려면 End. 결과가 없으면 다시 찾아 채운다

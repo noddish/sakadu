@@ -160,6 +160,7 @@ When turned on in Settings → General, closing the window doesn't quit Sakadu. 
 - Hover over a button on the work bar (split, `…`, hidden items, preview) or on the icon bar at the left for a moment to see its name and shortcut. Help, settings and about are under `…` at the right of the work bar.
 - Each pane shows its tabs as chips along the top, with the item count and the selection's count and size on the right. Typing turns that spot into a **filter chip**; × or Esc clears it.
 - The **icon bar** on the left holds places, favorites, search and settings. Rest the mouse on an icon and its panel opens over the panes; it closes when the mouse leaves or you pick a location. Click the icon, or the pin in the panel, to keep it open: it then pushes the panes aside and its right edge can be dragged to change the width. Click the icon again to close it and give the space back to the files.
+- **Workspaces**: the button at the left of the work bar (`작업 공간 ▾`) saves the current screen under a name and switches between saved screens. A workspace keeps the split, panes and tabs, the pinned panel, the preview and its pinned file, and the search query and scope. Switching saves the current workspace as it is at that moment, and Sakadu reopens on the last screen. Rename and delete are in the same menu.
 - The **바로가기** (places) panel shows This PC, drives (with a free-space bar) and added search folders. Drop files on a drive or folder row to copy them there (Shift moves).
 - **Preview pane** (Alt+P) shows photos large and the start of text and code files (UTF-8, UTF-16 and CP949 detected). PDF and Office files use the preview handlers registered in Windows, run out of process so a crashing handler can't take the app down. Photos also show their width × height.
 - The **pin** in the preview header (or the `선택 따라가기` chip) **pins** the file (`파일 고정`): it stays in the preview while you select other files, and follows the file when it is renamed or moved to another folder on the same NTFS drive, even from Explorer. If it is deleted or moved where it can't be found (another drive, a network share), the pin is released and the preview follows the selection again. The button next to the pin opens the file in its default app.
@@ -231,6 +232,7 @@ cargo test
 | `app/sidebar.rs` · `app/fav_ui.rs` | Icon bar and panels on the left (places, favorites; peek, pin, resize) · favorites actions |
 | `app/palette.rs` · `app/preview.rs` | Ctrl+F search panel · preview pane |
 | `app/start.rs` | New tab start page (favorite folder cards, recent locations, drives) |
+| `app/workspace_ui.rs` · `workspaces.rs` | Workspace button, menu and switching · file format |
 | `pane.rs` | Tab state (history, sort, filter, selection) |
 | `listing.rs` | Folder listing, This PC, display formatting |
 | `shell.rs` | Shell menus, file operations, clipboard, drag, change notifications, icons |

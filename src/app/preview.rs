@@ -439,6 +439,41 @@ impl App {
         self.invalidate();
     }
 
+    /// 고정해 둔 파일의 경로 (세션·작업 공간에 저장한다)
+    pub(super) fn preview_pin_path(&self) -> Option<String> {
+        let pv = self.preview.as_ref()?;
+        pv.pin.as_ref()?;
+        pv.target.as_ref().map(|t| t.path.clone())
+    }
+
+    /// 세션·작업 공간에 저장해 둔 고정 파일을 되살린다 (None이면 고정을 풀고 다시 선택을 따라간다).
+    /// 크기·종류는 모르니 뒤에서 확인한 결과가 오면 채우고 그때 읽기 시작한다 (없어졌으면 고정을 푼다)
+    pub(super) fn preview_restore_pin(&mut self, path: Option<&str>) {
+        let Some(pv) = self.preview.as_mut() else { return };
+        let Some(path) = path else {
+            pv.pin = None;
+            self.invalidate();
+            return;
+        };
+        let name = util::file_name(path).to_string();
+        let ext = ext_of(&name);
+        let (type_name, icon) = self.types.entry(ext.clone()).or_insert_with(|| shell::type_info(&ext, false)).clone();
+        pv.target = Some(Target { path: path.to_string(), name, kind: Kind::File, size: 0, modified: 0, type_name, icon });
+        pv.pin = Some(Pin { id: None, round: next_seq(), busy: false, again: false });
+        pv.seq = next_seq();
+        pv.content = Content::Waiting;
+        pv.scroll = 0.0;
+        pv.layout = None;
+        pv.dims = None;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_PREVIEW);
+        }
+        // 이전 대상의 처리기를 내린다
+        self.pending.push(Deferred::PreviewSync);
+        self.preview_pin_check();
+        self.invalidate();
+    }
+
     /// 고정한 파일이 그대로 있는지 뒤에서 확인한다 (파일 작업 뒤, 폴더가 바뀐 알림 뒤, 창으로 돌아올 때)
     pub(super) fn preview_pin_check(&mut self) {
         let hwnd = self.hwnd;
@@ -470,7 +505,15 @@ impl App {
         pin.id = f.id.or(pin.id);
         let Some(t) = pv.target.as_mut() else { return };
         let moved = t.path != f.path;
-        let changed = t.kind == Kind::File && (t.size != f.size || t.modified != f.modified);
+        // 되살린 고정(종류를 몰라 파일로 둔 것)이 폴더였다
+        let became_dir = f.dir && t.kind == Kind::File;
+        if became_dir {
+            t.kind = Kind::Dir;
+            let (type_name, icon) = self.types.entry("\\dir".to_string()).or_insert_with(|| shell::type_info("", true)).clone();
+            t.type_name = type_name;
+            t.icon = icon;
+        }
+        let changed = became_dir || (t.kind == Kind::File && (t.size != f.size || t.modified != f.modified));
         if moved || changed {
             if moved {
                 let name = util::file_name(&f.path).to_string();

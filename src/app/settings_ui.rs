@@ -337,6 +337,7 @@ impl App {
                                 tip("새 탭", format!("{} · 즐겨찾기 폴더·최근 위치·드라이브에서 고르기 · 글자를 치고 Enter로 바로", k(Action::NewTab))),
                                 tip("칸 이동", format!("Tab · Shift+Tab, 칸 나누기는 {}", layout_keys(&self.keys))),
                                 tip("되돌리기", format!("{} · 이름 바꾸기·이동·복사·휴지통 삭제를 마지막 것부터", k(Action::Undo))),
+                                tip("작업 공간", "작업 줄 왼쪽 단추 · 지금 화면(칸·탭·패널·미리 보기·검색어)을 이름 붙여 저장하고 바꿔요".into()),
                                 tip("미리 보기 고정", format!("{}로 연 미리 보기의 핀 · 다른 파일을 골라도 그 파일을 계속 보고, 같은 드라이브 안에서 이름이 바뀌거나 옮겨져도 따라가요", k(Action::Preview))),
                             ],
                         },
@@ -1049,7 +1050,7 @@ fn open_url(hwnd: HWND, target: &str) {
 }
 
 /// 항목들을 체크 표시와 함께 띄우고 고른 번호(1부터, 없으면 0)
-fn pick_menu(hwnd: HWND, pt: POINT, items: &[(String, bool)]) -> usize {
+pub(super) fn pick_menu(hwnd: HWND, pt: POINT, items: &[(String, bool)]) -> usize {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return 0 };
         for (i, (label, checked)) in items.iter().enumerate() {

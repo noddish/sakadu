@@ -30,6 +30,11 @@ pub struct Session {
     pub side: String,
     /// 왼쪽 패널 너비 (DIP)
     pub side_w: f32,
+    /// 미리 보기에 고정해 둔 파일
+    pub pin: Option<String>,
+    /// 검색 패널의 검색어와 범위 (true: 현재 폴더)
+    pub query: String,
+    pub scope_here: bool,
     pub look: Look,
     pub panes: Vec<PaneState>,
 }
@@ -55,7 +60,7 @@ impl Default for Look {
     }
 }
 
-const HEADER: &str = "sakadu-session 1";
+pub const HEADER: &str = "sakadu-session 1";
 pub const NEW_TAB_SAME: &str = "::same";
 /// 새 탭 기본값: 시작 화면
 pub const NEW_TAB_START: &str = "::start";
@@ -97,6 +102,17 @@ pub fn serialize(s: &Session) -> String {
     // 0.5.x까지의 "newtab"은 내 PC가 기본이라 사용자가 고른 값인지 알 수 없어, 새 이름으로 쓴다
     out.push_str(&format!("newtab2={}\n", s.new_tab));
     out.push_str(&format!("side={}\nsidew={}\n", s.side, s.side_w));
+    if let Some(p) = &s.pin {
+        out.push_str(&format!("pin={p}\n"));
+    }
+    // 검색 상자는 한 줄이지만, 붙여넣은 줄바꿈이 남아도 줄 형식이 깨지지 않게 공백으로
+    let query: String = s.query.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+    if !query.trim().is_empty() {
+        out.push_str(&format!("query={query}\n"));
+    }
+    if s.scope_here {
+        out.push_str("scope=here\n");
+    }
     out.push_str(&format!("theme={}\naccent={}\nfont={}\nzoom={}\ntext={}\n", s.look.theme, s.look.accent, s.look.font, s.look.zoom, s.look.text));
     for r in &s.recent {
         out.push_str(&format!("recent={r}\n"));
@@ -134,6 +150,9 @@ pub fn parse(text: &str) -> Option<Session> {
         // 0.5.x까지는 즐겨찾기 사이드바가 늘 보였으니, 그 세션은 즐겨찾기 패널을 고정한 채로 연다
         side: "favorites".to_string(),
         side_w: SIDE_W_DEFAULT,
+        pin: None,
+        query: String::new(),
+        scope_here: false,
         look: Look::default(),
         panes: Vec::new(),
     };
@@ -164,6 +183,9 @@ pub fn parse(text: &str) -> Option<Session> {
             "recent" if !value.is_empty() => s.recent.push(value.to_string()),
             "side" => s.side = value.to_string(),
             "sidew" => s.side_w = value.parse::<f32>().ok().filter(|w| w.is_finite()).unwrap_or(SIDE_W_DEFAULT).clamp(SIDE_W_RANGE.0, SIDE_W_RANGE.1),
+            "pin" if !value.is_empty() => s.pin = Some(value.to_string()),
+            "query" => s.query = value.to_string(),
+            "scope" => s.scope_here = value == "here",
             "theme" => s.look.theme = value.to_string(),
             "accent" => s.look.accent = value.to_string(),
             "font" => s.look.font = value.to_string(),
@@ -222,6 +244,9 @@ mod tests {
             recent: vec!["C:\\a=b".into(), "\\\\server\\공유".into()],
             side: "places".into(),
             side_w: 260.0,
+            pin: Some("D:\\업무\\견적서=최종.pdf".into()),
+            query: "견적 | 계약서".into(),
+            scope_here: true,
             look: Look { theme: "dark".into(), accent: "green".into(), font: "맑은 고딕".into(), zoom: 125, text: "soft".into() },
             panes: vec![
                 PaneState {

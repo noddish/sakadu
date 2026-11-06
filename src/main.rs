@@ -21,6 +21,7 @@ mod thumbs;
 mod tray;
 mod undo;
 mod util;
+mod workspaces;
 
 use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::*;
