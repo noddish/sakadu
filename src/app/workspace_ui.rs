@@ -6,8 +6,8 @@
 use super::*;
 use crate::workspaces::{self, Workspace};
 
-/// 작업 공간 단추의 가장 좁은 폭. 창이 좁을 때 고정 패널 너비도 이만큼은 남긴다 (sidebar::side_w_max)
-pub(super) const WS_MIN_W: f32 = 96.0;
+/// 작업 공간 단추의 가장 좁은 폭
+const WS_MIN_W: f32 = 96.0;
 
 impl App {
     /// 시작할 때: 세션이 다른 작업 공간(또는 작업 공간 없는 예전 빌드)의 화면이면 지금 작업 공간의 화면으로 연다.
@@ -21,7 +21,8 @@ impl App {
         }
     }
 
-    /// 작업 줄 맨 왼쪽(칸 영역이 시작하는 곳)의 작업 공간 단추. 칸 나누기 판은 그 오른쪽에 놓인다
+    /// 작업 줄 맨 왼쪽(아이콘 막대 바로 오른쪽)의 작업 공간 단추. 칸 나누기 판은 그 오른쪽에 놓인다.
+    /// 패널을 고정해도 밀리지 않고 패널 위쪽 자리를 쓴다 (패널을 여닫을 때 작업 줄 단추가 움직이지 않게)
     pub(super) fn workspace_button(&self) -> R {
         // 이름을 고치는 동안은 넉넉하게 (긴 이름의 앞부분이 입력 상자 밖으로 밀리지 않게)
         let want = if self.edit_mode == EditMode::WorkspaceRename {
@@ -29,7 +30,7 @@ impl App {
         } else {
             (self.gfx.measure(&self.workspace_label(), Font::Strong) + 40.0).clamp(WS_MIN_W, 220.0)
         };
-        let l = self.panes_left();
+        let l = BAR_W + MARGIN;
         // 칸 나누기 판(166)과 오른쪽 `…` 단추 사이에 들어갈 만큼만 (좁은 창에서 겹치지 않게. 긴 이름은 말줄임)
         let room = self.more_button().l - 8.0 - 166.0 - 8.0 - l;
         let w = want.min(room).max(WS_MIN_W);

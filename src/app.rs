@@ -76,6 +76,8 @@ pub const QUIT_BUSY: isize = 2;
 const ID_OPEN_TAB: u32 = shell::MENU_CUSTOM;
 const ID_ADD_FAV: u32 = shell::MENU_CUSTOM + 1;
 const TIMER_REFRESH: usize = 10;
+/// 짧은 날짜(방금·오늘·어제)를 시간이 흐르는 대로 다시 그린다
+const TIMER_DATES: usize = 49;
 /// 작업 줄·사이드바 단추 말풍선을 띄우기까지
 const TIMER_TIP: usize = 42;
 /// 칸 아래 알림(flash)을 지우기까지
@@ -466,6 +468,8 @@ pub struct App {
     ws_restore: bool,
     /// 패널이 펼쳐지기 시작한 때 (움직이는 중일 때만)
     side_anim: Option<std::time::Instant>,
+    /// 패널 머리의 작은 단추를 마지막으로 그렸는지. 그려지지 않은 단추는 누르지 않는다 (터치로 탭하면 보이기 전에 눌리므로)
+    side_minis_shown: bool,
     /// 단추 말풍선이 떠 있는지
     tip_shown: bool,
     /// 설정 창 (열려 있으면 창 전체를 덮는다)
@@ -1142,6 +1146,7 @@ impl App {
             workspaces: crate::workspaces::load(),
             folded: Fold::ALL.map(|f| sess.as_ref().is_some_and(|s| s.folded.iter().any(|k| k == f.key()))),
             side_anim: None,
+            side_minis_shown: false,
             ws_restore: false,
             tip_shown: false,
             settings: None,
@@ -1170,6 +1175,9 @@ impl App {
     /// 메인 창을 표시한 뒤에 할 초기화: 자동 완성, 드롭 대상, 첫 목록 불러오기, 변경 알림
     pub fn init(&mut self) {
         self.restore_workspace_if_needed();
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_DATES, 60_000, None);
+        }
         unsafe {
             let _ = SHAutoComplete(self.addr_edit, SHACF_FILESYS_DIRS | SHACF_AUTOSUGGEST_FORCE_ON | SHACF_AUTOAPPEND_FORCE_OFF);
             let target: IDropTarget = crate::droptarget::DropTarget::new(self.hwnd).into();
@@ -2963,6 +2971,10 @@ impl App {
                         self.on_side_close_timer();
                     } else if id == TIMER_SIDE_ANIM {
                         self.on_side_anim_timer();
+                    } else if id == TIMER_DATES {
+                        if self.look.dates != "full" && IsWindowVisible(hwnd).as_bool() {
+                            self.invalidate();
+                        }
                     } else if (TIMER_REFRESH..TIMER_REFRESH + 4).contains(&id) {
                         let _ = KillTimer(Some(hwnd), id);
                         let p = id - TIMER_REFRESH;
@@ -2997,6 +3009,8 @@ impl App {
                     }
                     return None;
                 }
+                // 시계를 바꾸면 짧은 날짜(오늘·어제)를 다시 그린다
+                WM_TIMECHANGE => self.invalidate(),
                 // Windows를 끄거나 로그아웃할 때: 트레이에 숨어 있어도 지금 화면을 저장한다
                 WM_QUERYENDSESSION => {
                     self.save_session();

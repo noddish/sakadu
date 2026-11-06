@@ -271,17 +271,19 @@ fn day_number(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// 목록의 짧은 날짜: 1분 안이면 "방금", 오늘·어제는 "오늘 10:24"·"어제 18:40", 올해는 "11월 3일", 그 전은 "2025-03-04".
-/// secs는 now - t (초). 시계가 어긋나 앞날이면 날짜 그대로
+/// secs는 now - t (초). 시계가 조금 빠른 곳(NAS·다른 PC)에서 막 저장한 파일은 몇 분 앞설 수 있어 5분까지는 "방금",
+/// 같은 날이면 "오늘", 그보다 먼 앞날은 날짜와 시각 그대로 (오래된 파일처럼 보이지 않게)
 pub fn relative_label(t: LocalTime, now: LocalTime, secs: i64) -> String {
-    if (0..60).contains(&secs) {
+    if (-300..60).contains(&secs) {
         return "방금".to_string();
     }
     let days = day_number(now.year, now.month, now.day) - day_number(t.year, t.month, t.day);
     match days {
-        0 if secs >= 0 => format!("오늘 {:02}:{:02}", t.hour, t.minute),
+        0 => format!("오늘 {:02}:{:02}", t.hour, t.minute),
         1 => format!("어제 {:02}:{:02}", t.hour, t.minute),
         d if d > 1 && t.year == now.year => format!("{}월 {}일", t.month, t.day),
-        _ => format!("{:04}-{:02}-{:02}", t.year, t.month, t.day),
+        d if d > 1 => format!("{:04}-{:02}-{:02}", t.year, t.month, t.day),
+        _ => format!("{:04}-{:02}-{:02} {:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute),
     }
 }
 
@@ -327,8 +329,11 @@ mod tests {
         assert_eq!(relative_label(at(2025, 12, 31, 23, 50), at(2026, 1, 1, 0, 10), 1200), "어제 23:50");
         // 3월 1일 전날은 윤년이면 2월 29일
         assert_eq!(relative_label(at(2028, 2, 29, 8, 0), at(2028, 3, 1, 8, 0), 86400), "어제 08:00");
-        // 시계가 어긋나 조금 앞선 시각은 날짜 그대로
-        assert_eq!(relative_label(at(2026, 11, 7, 9, 0), now, -3600 * 18), "2026-11-07");
+        // 시계가 조금 빠른 곳에서 막 저장한 파일: 몇 분 앞서도 "방금", 같은 날이면 "오늘"
+        assert_eq!(relative_label(at(2026, 11, 6, 14, 32), now, -120), "방금");
+        assert_eq!(relative_label(at(2026, 11, 6, 16, 0), now, -5400), "오늘 16:00");
+        // 그보다 먼 앞날은 날짜와 시각 그대로
+        assert_eq!(relative_label(at(2026, 11, 7, 9, 0), now, -3600 * 18), "2026-11-07 09:00");
     }
 
     #[test]

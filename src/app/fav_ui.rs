@@ -422,6 +422,8 @@ impl App {
         // 입력 상자는 즐겨찾기 패널이 고정돼 있어야 자리가 있다 (떠 있는 패널은 마우스가 떠나면 닫힌다)
         if self.side_panel() != Some(Panel::Favorites) || self.side_floating() {
             self.show_side(Panel::Favorites, true);
+            // 입력 상자는 곧바로 제자리에 놓이니 패널은 펼치지 않고 바로 연다
+            self.side_anim = None;
         }
         self.fav_select(row);
         self.edit_mode = EditMode::FavRename(row);

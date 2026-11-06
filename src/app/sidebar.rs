@@ -207,8 +207,7 @@ impl App {
 
     /// 창이 좁을 때 패널이 차지할 수 있는 가장 넓은 너비: 칸 나누기 판(166)과 작업 줄 오른쪽 단추·창 단추(약 260)가 겹치지 않게
     pub(super) fn side_w_max(&self) -> f32 {
-        // 작업 공간 단추(가장 좁을 때)와 칸 나누기 판, 오른쪽 단추·창 단추 자리를 남긴다
-        (self.w - BAR_W - MARGIN - (workspace_ui::WS_MIN_W + 8.0) - 166.0 - 270.0).clamp(session::SIDE_W_RANGE.0, session::SIDE_W_RANGE.1)
+        (self.w - BAR_W - MARGIN - 166.0 - 270.0).clamp(session::SIDE_W_RANGE.0, session::SIDE_W_RANGE.1)
     }
 
     /// 지금 창에서 실제로 보이는 패널 너비 (저장한 너비는 그대로 두고, 창이 좁으면 줄여 보인다)
@@ -495,10 +494,12 @@ impl App {
 
     /// 패널이 바뀌거나 자리가 바뀐 뒤: 스크롤·입력 상자·칸 스크롤·마우스 아래 것을 다시 맞춘다
     fn side_changed(&mut self, before: Option<Panel>, pinned_before: Option<Panel>) {
+        // 패널 자리가 비어 있다가 열릴 때만 펼친다: 고정 패널 위로 떠서 열리거나 고정 패널로 돌아올 때 그 패널이 깜빡이지 않게.
+        // 검색 패널은 입력 상자(자식 창)가 함께 움직이지 못해 바로 연다 (펼치는 도중에 바뀌어도 그만둔다)
         match self.side_panel() {
-            Some(p) if Some(p) != before && p != Panel::Search => self.start_side_anim(),
+            Some(p) if before.is_none() && p != Panel::Search => self.start_side_anim(),
+            Some(Panel::Search) | None => self.side_anim = None,
             Some(_) => {}
-            None => self.side_anim = None,
         }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_BAR_HOVER);
@@ -641,15 +642,20 @@ impl App {
         if self.side_pin_rect().is_some_and(|r| r.contains(x, y)) {
             return Hit::SidePin;
         }
-        for (i, s) in self.side_minis().iter().enumerate() {
-            if self.side_mini_rect(i).is_some_and(|r| r.contains(x, y)) {
-                return Hit::Side(*s);
+        if self.side_minis_shown {
+            for (i, s) in self.side_minis().iter().enumerate() {
+                if self.side_mini_rect(i).is_some_and(|r| r.contains(x, y)) {
+                    return Hit::Side(*s);
+                }
             }
         }
         if self.side_list().contains(x, y) {
             let (slots, _) = self.side_slots();
             // 겹친 자리(구역 머리 줄 위의 + 단추)는 나중에 놓인 것이 위에 있다
             for (r, Slot::Item(side)) in slots.into_iter().rev() {
+                if side == Side::FolderAdd && !self.side_minis_shown {
+                    continue;
+                }
                 if self.side_at(r).contains(x, y) {
                     return Hit::Side(side);
                 }
@@ -843,7 +849,7 @@ impl App {
     /// 디스크를 읽지 않는 정보만 쓰고, 그림은 썸네일 작업(뒤)에서 만든다
     pub(super) fn paint_fav_card(&mut self, missing: &mut Vec<crate::thumbs::Request>) {
         let Hit::Side(s @ Side::Fav(Row::Item { group, index })) = self.hover else { return };
-        if !self.tip_shown || self.menu_open || !matches!(self.drag, Drag::None) {
+        if !self.tip_shown || self.menu_open || !matches!(self.drag, Drag::None) || self.edit_mode != EditMode::None {
             return;
         }
         let Some(f) = self.favs.item(group, index).cloned() else { return };
@@ -855,7 +861,10 @@ impl App {
         let ext = if f.is_dir { String::new() } else { util::file_name(&f.path).rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default() };
         let key = if f.is_dir { "\\dir".to_string() } else { ext.clone() };
         let (kind, icon) = self.types.entry(key).or_insert_with(|| shell::type_info(&ext, f.is_dir)).clone();
-        let image = !f.is_dir && preview::is_image_ext(&ext);
+        // 공유 폴더·네트워크 드라이브의 사진은 그림을 건너뛴다 (꺼져 있거나 잠든 NAS면 썸네일 작업이 오래 붙잡힌다)
+        let root = &f.path[..util::root_len(&f.path)];
+        let remote = f.path.starts_with("\\\\") || unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(&HSTRING::from(root)) } == 4;
+        let image = !f.is_dir && !remote && preview::is_image_ext(&ext);
         let t = self.theme;
         let w = 300.0;
         let h = if image { 78.0 + 150.0 } else { 78.0 };
@@ -948,6 +957,7 @@ impl App {
     }
 
     pub(super) fn paint_sidebar(&mut self) {
+        self.side_minis_shown = false;
         match (self.side_open_progress(), self.side_panel_rect()) {
             (Some(f), Some(pr)) => {
                 // 그림자까지 들어가게 조금 넉넉히
@@ -1003,6 +1013,7 @@ impl App {
         let pin = self.side_pin_rect();
         // 머리의 작은 단추는 마우스가 패널 위에 있거나 키보드가 즐겨찾기에 있을 때만
         let hot = self.side_hot();
+        self.side_minis_shown = hot;
         let minis: Vec<(Side, R)> = if hot { self.side_minis().iter().enumerate().filter_map(|(i, s)| self.side_mini_rect(i).map(|r| (*s, r))).collect() } else { Vec::new() };
         let folded = self.folded;
         let App { gfx: g, favs, places, .. } = self;
