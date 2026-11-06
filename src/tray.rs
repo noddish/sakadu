@@ -27,6 +27,16 @@ pub fn is_enabled(run_key: &str) -> bool {
     get(run_key, RUN_VALUE).is_some()
 }
 
+/// 시작할 때 트레이 대기를 켤지: 시작 프로그램 등록(RUN_KEY)을 따른다.
+/// SAKADU_TRAY=0|1이 있으면 그것을 따른다 (시험용: 레지스트리를 건드리지 않고 창을 닫을 때 숨기기·끝내기 두 길을 시험한다)
+pub fn wait_at_start() -> bool {
+    match std::env::var("SAKADU_TRAY").ok().as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => is_enabled(RUN_KEY),
+    }
+}
+
 /// run_key는 보통 RUN_KEY. 테스트에서는 다른 경로를 넘겨 실제 시작 프로그램을 건드리지 않는다
 pub fn enable(run_key: &str, exe: &Path) -> Result<(), String> {
     set(run_key, RUN_VALUE, &format!("\"{}\" {ARG}", exe.display()))
