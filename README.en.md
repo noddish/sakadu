@@ -56,7 +56,7 @@ Dark mode follows your Windows setting.
 | Tab / Shift+Tab | Next / previous pane |
 | Ctrl+T / Ctrl+W | New tab / close tab |
 | Alt+P | Preview pane |
-| Ctrl+B / Ctrl+D | Go to the favorites in the sidebar / add to favorites |
+| Ctrl+B / Ctrl+D | Open the favorites panel and go to it / add to favorites |
 | Ctrl+Z | Undo the last file operation |
 
 <details>
@@ -83,7 +83,7 @@ Dark mode follows your Windows setting.
 | Ctrl+H | Show hidden items |
 | Ctrl+F | Whole-disk search |
 | Ctrl+Z | Undo the last file operation |
-| Ctrl+B | Move the keyboard to the sidebar favorites (↑↓, Enter, F2, Del, Ctrl+↑↓, ←→ collapse/expand groups, type to jump, Esc back to the pane) |
+| Ctrl+B | Open the favorites panel (pinned) and move the keyboard to it (↑↓, Enter, F2, Del, Ctrl+↑↓, ←→ collapse/expand groups, type to jump, Esc back to the pane) |
 | Ctrl+D | Add to favorites (the selected folder or file, or the current folder) |
 | Alt+Enter | Properties |
 | Menu key, Shift+F10 | Context menu |
@@ -114,7 +114,7 @@ Dark mode follows your Windows setting.
 The search service only reads this PC's own (NTFS) disks. Shared folders (`\\server\share`), NAS and USB drives are searched once you add them.
 
 - Open the folder in any pane and search with Ctrl+F. If nothing turns up, click **이 폴더도 검색하기** (search this folder too) in the search window.
-- The sidebar's **검색에 넣은 폴더** (added folders) section lists them. When the current pane shows a folder outside the search, the **+** in that section adds it; right-click a folder to remove it.
+- The **검색에 넣은 폴더** (added folders) section of the 바로가기 (places) panel on the left lists them. When the current pane shows a folder outside the search, the **+** in that section adds it; right-click a folder to remove it.
 - Settings → **검색** (Search) → **검색에 넣은 폴더** also lists them, lets you remove one, and adds folders you have open.
 - The app walks the folder once with your own account and keeps the names in memory. Nothing is written to disk, so it walks the folder again each time the app starts.
 - Changes come in through folder change notifications. In case a server doesn't send them, the folder is walked again every few hours, and opening it in Sakadu also brings it up to date.
@@ -156,11 +156,12 @@ When turned on in Settings → General, closing the window doesn't quit Sakadu. 
 - The **view button** at the right end of the path row picks extra large, large, medium or small icons, list, or details. Shortcuts match Explorer (Ctrl+Shift+1–6), and each pane remembers its own. Icon views show thumbnails for photos and PDFs.
 - **New tabs** (Ctrl+T, +) open at This PC. Change it in Settings → General → **새 탭을 열 위치** (new tab location): the same folder as the current tab, or a folder of your choice.
 - The **star** at the right end of the path adds the current folder to favorites in one click (it turns yellow). Click again to remove it. The button next to it makes a **new folder**.
-- Hover over a button on the work bar above the panes (split, hidden items, preview) or in the sidebar for a moment to see its name and shortcut.
+- Hover over a button on the work bar (split, `…`, hidden items, preview) or on the icon bar at the left for a moment to see its name and shortcut. Help, settings and about are under `…` at the right of the work bar.
 - Each pane shows its tabs as chips along the top, with the item count and the selection's count and size on the right. Typing turns that spot into a **filter chip**; × or Esc clears it.
-- The sidebar always shows favorites, drives (with a free-space bar) and added search folders. Drop files on a drive or folder row to copy them there (Shift moves).
+- The **icon bar** on the left holds places, favorites, search and settings. Rest the mouse on an icon and its panel opens over the panes; it closes when the mouse leaves or you pick a location. Click the icon, or the pin in the panel, to keep it open: it then pushes the panes aside and its right edge can be dragged to change the width. Click the icon again to close it and give the space back to the files.
+- The **바로가기** (places) panel shows This PC, drives (with a free-space bar) and added search folders. Drop files on a drive or folder row to copy them there (Shift moves).
 - **Preview pane** (Alt+P) shows photos large and the start of text and code files (UTF-8, UTF-16 and CP949 detected). PDF and Office files use the preview handlers registered in Windows, run out of process so a crashing handler can't take the app down.
-- **Favorites** live in the sidebar. They can be folders or files (add with the star, Ctrl+D, or by dragging from a file list), with their own display names like "01. Daily work", independent of the real name (F2). Drag to reorder. Click a **group** to fold or unfold it in place; drag an item onto a group, or right-click → **그룹으로 이동** (move to group). Clicking a file opens it, and Ctrl+click (Ctrl+Enter from the keyboard) opens its folder in a new tab. Ctrl+B moves the keyboard to the favorites.
+- **Favorites** can be folders or files (add with the star, Ctrl+D, or by dragging from a file list onto the panel or the star icon in the bar), with their own display names like "01. Daily work", independent of the real name (F2). Drag to reorder. Click a **group** to fold or unfold it in place; drag an item onto a group, or right-click → **그룹으로 이동** (move to group). Clicking a file opens it, and Ctrl+click (Ctrl+Enter from the keyboard) opens its folder in a new tab. Ctrl+B moves the keyboard to the favorites.
 - **Undo** (Ctrl+Z) reverses renames, moves, copies, Recycle Bin deletes, new folders, pastes and drag and drop, newest first. Permanent deletes and actions from the context menu can't be undone.
 
 </details>
@@ -224,7 +225,7 @@ cargo test
 | `app.rs` | Layout, input, drawing, pane and tab behavior |
 | `app/settings_ui.rs` | Settings window (general, appearance, search, shortcuts, help, about) |
 | `keys.rs` | Remappable shortcuts (key map, saving) |
-| `app/sidebar.rs` · `app/fav_ui.rs` | Sidebar (search box, favorites, drives, search folders, settings, help) · favorites actions |
+| `app/sidebar.rs` · `app/fav_ui.rs` | Icon bar and panels on the left (places, favorites; peek, pin, resize) · favorites actions |
 | `app/palette.rs` · `app/preview.rs` | Ctrl+F search · preview pane |
 | `pane.rs` | Tab state (history, sort, filter, selection) |
 | `listing.rs` | Folder listing, This PC, display formatting |
