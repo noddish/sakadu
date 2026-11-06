@@ -62,7 +62,7 @@ pub const ID_FILTER: i32 = 100;
 pub const ID_RENAME: i32 = 101;
 pub const ID_ADDR: i32 = 102;
 pub const ID_SEARCH: i32 = 103;
-/// 전역 단축키 (Ctrl+Alt+Space): 어디서든 검색 팔레트
+/// 전역 단축키 (Ctrl+Alt+Space): 어디서든 검색 패널
 pub const HOTKEY_SEARCH: i32 = 1;
 /// 다른 Sakadu 프로세스가 WM_COPYDATA로 넘기는 "이 경로를 열어 달라" 요청
 pub const COPYDATA_OPEN: usize = 0x5150_0001;
@@ -174,7 +174,7 @@ enum Hit {
     SideResize,
     /// 작업 줄 오른쪽 `…` (도움말·설정·정보 메뉴)
     More,
-    /// 검색 창의 "이 폴더도 검색하기" 버튼
+    /// 검색 패널의 "이 폴더도 검색하기" 버튼
     PalAddFolder,
     SearchButton,
     PalRow(usize),
@@ -382,8 +382,6 @@ pub struct App {
     places_again: bool,
     /// (폴더, 디스크 검색 밖인가): 드라이브 종류는 폴더가 바뀔 때만 묻는다
     outside_cache: RefCell<(String, bool)>,
-    /// 오른쪽 버튼으로 검색 창을 닫았다: 그 버튼을 떼는 것은 무시한다
-    swallow_rbutton_up: bool,
     /// 앞 누름이 팝업을 열거나 닫았다: 이어지는 두 번 클릭 누름은 무시한다
     swallow_dbl: bool,
     /// 필터 상자를 마지막으로 둔 자리 (픽셀 x, y, 너비, 높이)
@@ -441,7 +439,7 @@ pub struct App {
     settings: Option<settings_ui::Settings>,
     /// Ctrl+F 검색에 넣은 폴더(공유폴더 등 디스크 인덱스 밖)
     folders: crate::folders::Folders,
-    /// 검색 창을 열 때 보이는 칸에 열려 있던, 아직 검색에 넣지 않은 공유폴더·USB 폴더 (결과가 없으면 넣기 버튼)
+    /// 검색 패널을 열 때 보이는 칸에 열려 있던, 아직 검색에 넣지 않은 공유폴더·USB 폴더 (결과가 없으면 넣기 버튼)
     pal_outside: Option<String>,
 }
 
@@ -1067,7 +1065,6 @@ impl App {
             places_busy: false,
             places_again: false,
             outside_cache: RefCell::new((String::new(), false)),
-            swallow_rbutton_up: false,
             swallow_dbl: false,
             filter_placed: Cell::new((0, 0, 0, 0)),
             fav_flash: None,
@@ -2104,7 +2101,15 @@ impl App {
         let edit_h = 20.0;
         let center = |b: R, lp: f32, rp: f32| R::new(b.l + lp, b.t + (b.h() - edit_h) / 2.0, b.r - rp, b.t + (b.h() + edit_h) / 2.0);
         self.place_filter_edit(true);
-        place(self.search_edit, self.pal_visible().then(|| center(self.pal_input_rect(), 4.0, 4.0)));
+        // 다른 패널이 잠깐 가리는 동안 검색 상자는 숨기지 않고 화면 밖에 둔다 (숨기면 키보드 포커스가 메인 창으로 가 버린다)
+        let search_at = if self.pal_visible() {
+            Some(center(self.pal_input_rect(), 4.0, 4.0))
+        } else if self.pal_shown() {
+            Some(R::new(-4000.0, -4000.0, -3800.0, -3980.0))
+        } else {
+            None
+        };
+        place(self.search_edit, search_at);
         let addr = match self.edit_mode {
             EditMode::Address(p) => self.pane_rect(p).map(|r| center(geom(r).crumb, 8.0, 8.0)),
             _ => None,
@@ -2544,7 +2549,6 @@ impl App {
                 rename: self.rename_edit,
                 preview_host: self.preview_host,
                 filter: self.filter_edit,
-                search: self.search_edit,
             }
         };
         if let Some(old) = EDIT_COLORS.replace(Some(colors)) {
@@ -2658,6 +2662,7 @@ impl App {
             self.clamp_scroll(p);
         }
         self.side_clamp_scroll();
+        self.pal_clamp_scroll();
         self.layout_edits();
         self.invalidate();
     }
@@ -2802,7 +2807,7 @@ impl App {
                 WM_SETFOCUS => self.focus(),
                 WM_ACTIVATE => {
                     // 다른 창으로 전환하면 보기 메뉴를 닫는다 (WA_INACTIVE).
-                    // 검색 창은 다른 앱에서 무언가 복사해 오는 동안에도 적어 둔 검색어가 그대로 있도록 열어 둔다
+                    // 검색 패널은 다른 앱에서 무언가 복사해 오는 동안에도 적어 둔 검색어가 그대로 있도록 열어 둔다
                     self.window_active = loword(wp.0) != 0;
                     self.invalidate();
                     if loword(wp.0) == 0 {
@@ -2833,7 +2838,8 @@ impl App {
                     let id = wp.0;
                     if id == TIMER_SEARCH_READY {
                         self.pal_ready_timer();
-                    } else if id == TIMER_SEARCH {
+                    } else if id == TIMER_SEARCH || id == palette::TIMER_SEARCH_AGAIN {
+                        let _ = KillTimer(Some(hwnd), id);
                         self.pal_run_query();
                     } else if id == TIMER_PREVIEW {
                         self.start_preview();
@@ -3048,12 +3054,13 @@ impl App {
         for p in 0..self.layout.count() {
             self.clamp_scroll(p);
         }
+        self.pal_clamp_scroll();
         self.layout_edits();
         self.invalidate();
     }
 
     fn on_lbutton_down(&mut self, x: f32, y: f32, dbl: bool) {
-        // 앞 누름이 검색 창·보기 메뉴·설정을 열거나 닫았으면, 두 번 클릭의 두 번째 누름은 그 아래 다른 것을 누르지 않게 버린다
+        // 앞 누름이 검색 패널·보기 메뉴·설정을 열거나 닫았으면, 두 번 클릭의 두 번째 누름은 그 아래 다른 것을 누르지 않게 버린다
         if dbl && std::mem::take(&mut self.swallow_dbl) {
             return;
         }
@@ -3076,7 +3083,7 @@ impl App {
             return;
         }
         // 막대 아이콘·핀·`…`·검색 패널 단추도 두 번째 누름은 무시한다 (첫 누름이 연 것을 바로 닫지 않게)
-        if dbl && matches!(hit, Hit::Bar(_) | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder) {
+        if dbl && matches!(hit, Hit::Bar(_) | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalRow(_)) {
             return;
         }
         // 떠 있는 패널 밖을 누르면 패널은 닫고, 누른 것은 그대로 처리한다
@@ -3087,7 +3094,7 @@ impl App {
         let shift = key_down(VK_SHIFT);
         // 검색 패널 밖을 누르면 키보드는 검색 상자에서 칸으로 (패널과 결과는 그대로)
         if self.pal_focus && !matches!(hit, Hit::PalRow(_) | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalClose | Hit::SidePanel | Hit::SearchButton) {
-            self.pal_focus = false;
+            self.pal_blur();
         }
         // 보기 메뉴가 열려 있으면 메뉴 밖 클릭은 메뉴를 닫기만 한다 (보기 버튼은 아래에서 닫기·다른 칸 메뉴 열기)
         if self.view_menu.is_some() && !matches!(hit, Hit::View(_)) {
@@ -3256,9 +3263,12 @@ impl App {
         if self.settings.is_some() {
             return;
         }
-        // 즐겨찾기 줄 밖을 누르면 키보드는 칸으로 (그 뒤 Delete가 즐겨찾기를 지우지 않게)
+        // 즐겨찾기 줄 밖을 누르면 키보드는 칸으로 (그 뒤 Delete가 즐겨찾기를 지우지 않게). 검색 상자도 마찬가지
         if self.fav_focus && !matches!(hit, Hit::Side(Side::Fav(_))) {
             self.fav_blur();
+        }
+        if self.pal_focus && !matches!(hit, Hit::PalRow(_) | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalClose | Hit::SidePanel) {
+            self.pal_blur();
         }
         if let Hit::PalRow(i) = hit {
             self.pal_right_press(i);
@@ -3307,7 +3317,7 @@ impl App {
     }
 
     fn on_rbutton_up(&mut self, x: f32, y: f32) -> bool {
-        if self.settings.is_some() || std::mem::take(&mut self.swallow_rbutton_up) {
+        if self.settings.is_some() {
             return true;
         }
         if let Hit::PalRow(_) = self.hit(x, y) {
@@ -3687,7 +3697,7 @@ impl App {
     }
 
     /// 알림: 칸 아래쪽 가운데 어두운 알약 (몇 초 뒤 사라진다).
-    /// 검색 창·보기 메뉴보다 위에 그려, 그 위에서 한 일(검색 결과 복사 등)의 결과도 보이게 한다
+    /// 검색 패널·보기 메뉴보다 위에 그려, 그 위에서 한 일(검색 결과 복사 등)의 결과도 보이게 한다
     fn paint_toasts(&self) {
         let t = self.theme;
         let g = &self.gfx;
@@ -4427,8 +4437,6 @@ struct EditColors {
     rename: HWND,
     preview_host: HWND,
     filter: HWND,
-    /// 검색 창 입력 상자 (판과 같은 바탕, 상자 없이)
-    search: HWND,
 }
 
 thread_local! {
@@ -4442,7 +4450,7 @@ pub fn edit_ctl_color(wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     let c = EDIT_COLORS.get()?;
     let hdc = HDC(wp.0 as *mut c_void);
     let target = HWND(lp.0 as *mut c_void);
-    let (bg, brush) = if target == c.rename || target == c.preview_host || target == c.search {
+    let (bg, brush) = if target == c.rename || target == c.preview_host {
         (c.pane, c.pane_brush)
     } else if target == c.filter {
         (c.chip, c.chip_brush)

@@ -404,7 +404,7 @@ impl App {
 
     /// 패널을 연다. pin이면 고정(칸을 밀어냄), 아니면 떠서(마우스가 떠나거나 위치를 고르면 닫힘)
     pub(super) fn show_side(&mut self, p: Panel, pin: bool) {
-        let before = self.side_panel();
+        let (before, pinned_before) = (self.side_panel(), self.side_pinned);
         if pin {
             self.side_pinned = Some(p);
             self.side_peek = None;
@@ -413,23 +413,23 @@ impl App {
         } else {
             self.side_peek = Some(p);
         }
-        self.side_changed(before);
+        self.side_changed(before, pinned_before);
     }
 
     /// 고정한 것까지 모두 닫는다
     pub(super) fn close_side(&mut self) {
-        let before = self.side_panel();
+        let (before, pinned_before) = (self.side_panel(), self.side_pinned);
         self.side_pinned = None;
         self.side_peek = None;
-        self.side_changed(before);
+        self.side_changed(before, pinned_before);
     }
 
     /// 떠 있는 패널만 닫는다 (고정한 패널은 그대로)
     pub(super) fn close_peek(&mut self) {
         if self.side_peek.is_some() {
-            let before = self.side_panel();
+            let (before, pinned_before) = (self.side_panel(), self.side_pinned);
             self.side_peek = None;
-            self.side_changed(before);
+            self.side_changed(before, pinned_before);
         }
     }
 
@@ -450,15 +450,15 @@ impl App {
         if self.side_floating() {
             self.show_side(p, true);
         } else {
-            let before = Some(p);
+            let (before, pinned_before) = (Some(p), self.side_pinned);
             self.side_pinned = None;
             self.side_peek = Some(p);
-            self.side_changed(before);
+            self.side_changed(before, pinned_before);
         }
     }
 
     /// 패널이 바뀌거나 자리가 바뀐 뒤: 스크롤·입력 상자·칸 스크롤·마우스 아래 것을 다시 맞춘다
-    fn side_changed(&mut self, before: Option<Panel>) {
+    fn side_changed(&mut self, before: Option<Panel>, pinned_before: Option<Panel>) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_BAR_HOVER);
             let _ = KillTimer(Some(self.hwnd), TIMER_SIDE_CLOSE);
@@ -478,12 +478,16 @@ impl App {
             }
             self.fav_blur();
         }
-        // 검색 패널이 닫혔거나 다른 패널로 바뀌었다 (다른 패널이 잠깐 떠 있는 것은 아님)
-        if before == Some(Panel::Search) && self.side_pinned != Some(Panel::Search) {
+        // 검색 패널이 닫혔거나 다른 패널로 바뀌었다 (다른 패널이 잠깐 떠 있는 것은 아님: 고정 기준으로 본다)
+        if pinned_before == Some(Panel::Search) && self.side_pinned != Some(Panel::Search) {
             self.pal_hidden();
         }
         self.side_clamp_scroll();
         self.after_resize_drag();
+        // 가렸던 패널이 닫혀 검색 패널이 다시 보이면 키보드도 검색 상자로 돌아온다
+        if self.pal_visible() && self.pal_focus {
+            self.focus();
+        }
         self.refresh_hover();
         self.update_tip();
     }

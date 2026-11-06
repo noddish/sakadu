@@ -63,7 +63,7 @@ Sakadu가 켜져 있으면 다른 앱을 쓰다가도 단축키 한 번으로 �
 | 키 | 하는 일 |
 |---|---|
 | 글자 입력 | 현재 칸 필터 (Esc로 해제) |
-| Enter / Ctrl+Enter / Shift+Enter | 열기 / 지금 칸에서 위치 열기 / 새 탭에서 열기 |
+| Enter / Ctrl+Enter | 열기 / 폴더를 새 탭에서 열기 |
 | Backspace, Alt+↑ | 상위 폴더 |
 | Alt+← / Alt+→, 마우스 뒤로·앞으로 버튼 | 뒤로 / 앞으로 |
 | Tab / Shift+Tab | 칸 이동 |

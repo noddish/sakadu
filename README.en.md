@@ -65,7 +65,7 @@ Dark mode follows your Windows setting.
 | Key | What it does |
 |---|---|
 | Typing | Filter the current pane (Esc clears) |
-| Enter / Ctrl+Enter / Shift+Enter | Open / open the location in this pane / open in a new tab |
+| Enter / Ctrl+Enter | Open / open folder in a new tab |
 | Backspace, Alt+↑ | Parent folder |
 | Alt+← / Alt+→, mouse back/forward buttons | Back / forward |
 | Tab / Shift+Tab | Switch pane |

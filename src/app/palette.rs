@@ -25,6 +25,10 @@ pub(super) const G_SEARCH: u16 = 0xE721;
 pub(super) const TIMER_SEARCH: usize = 20;
 /// 검색 서비스가 준비 중일 때 준비됐는지 다시 묻는 간격
 pub(super) const TIMER_SEARCH_READY: usize = 21;
+/// 폴더가 바뀌거나 파일 작업이 끝난 뒤 같은 검색어로 다시 찾기 (입력 디바운스와 따로)
+pub(super) const TIMER_SEARCH_AGAIN: usize = 22;
+/// "현재 폴더" 범위로 찾을 때 서비스에 더 넉넉히 묻는다 (폴더 밖 결과를 걸러낸 뒤 남는 것이 있도록)
+const SCOPE_LIMIT: usize = PAL_LIMIT * 10;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum PalStatus {
@@ -104,31 +108,27 @@ impl PalGate {
     }
 }
 
-/// scope가 있으면 그 폴더 아래만 찾는다 (결과의 검색어는 입력한 그대로 돌려준다)
+/// scope가 있으면 그 폴더 아래만 남긴다. 폴더 경로는 띄어쓰기가 들어갈 수 있어 검색어에 섞지 않고,
+/// 서비스에 넉넉히 물은 뒤 여기서 거른다 (결과의 검색어는 입력한 그대로 돌려준다)
 fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>, scope: Option<String>, folders: crate::folders::Folders) {
     let owner = shell::SendHwnd(hwnd);
     std::thread::spawn(move || {
         let reply = match &query {
-            Some(q) => SearchReply::Results(search_all(&scoped_query(q, scope.as_deref()), &folders).map(|mut r| {
-                if let Some(dir) = &scope {
-                    // 경로 낱말은 띄어쓰기로 쪼개져 느슨하게 맞으니 폴더 아래인지 다시 가린다
-                    r.hits.retain(|(_, p)| under(p, dir));
-                    r.total = r.hits.len();
-                }
-                r
-            })),
+            Some(q) => {
+                let limit = if scope.is_some() { SCOPE_LIMIT } else { PAL_LIMIT };
+                SearchReply::Results(search_all(q, &folders, limit).map(|mut r| {
+                    if let Some(dir) = &scope {
+                        r.hits.retain(|(_, p)| under(p, dir));
+                        r.total = r.hits.len();
+                        r.hits.truncate(PAL_LIMIT);
+                    }
+                    r
+                }))
+            }
             None => SearchReply::Status(service::status()),
         };
         post(owner.get(), WM_APP_SEARCH, Box::new(SearchDone { seq, query, reply }));
     });
-}
-
-/// "현재 폴더" 범위: 조각마다 폴더 경로를 경로 낱말로 붙여 인덱스가 그 아래만 보게 한다
-pub(super) fn scoped_query(q: &str, dir: Option<&str>) -> String {
-    match dir {
-        Some(d) => query_pieces(q).iter().map(|p| format!("{p} {}\\", d.trim_end_matches('\\'))).collect::<Vec<_>>().join(" | "),
-        None => q.to_string(),
-    }
 }
 
 /// path가 dir 안에 있는가 (대소문자 무시)
@@ -169,10 +169,10 @@ pub(super) fn unique_pieces(q: &str) -> Vec<&str> {
 }
 
 /// 한 조각을 디스크 인덱스(검색 서비스 결과 local)와 검색에 넣은 폴더에서 찾는다
-fn search_piece(q: &str, local: Result<SearchResponse, SearchError>, folders: &crate::folders::Folders) -> Result<Found, SearchError> {
+fn search_piece(q: &str, local: Result<SearchResponse, SearchError>, folders: &crate::folders::Folders, limit: usize) -> Result<Found, SearchError> {
     let started = std::time::Instant::now();
     let query = crate::index::Query::parse(q);
-    let (extra, extra_total) = folders.search(&query, PAL_LIMIT);
+    let (extra, extra_total) = folders.search(&query, limit);
     // 서비스가 없거나 실패해도 폴더 쪽 결과는 보여 준다
     let r = match local {
         Ok(r) => r,
@@ -196,16 +196,16 @@ fn search_piece(q: &str, local: Result<SearchResponse, SearchError>, folders: &c
 
 /// 조각마다 찾아 합친다. 여러 조각에 걸린 항목은 가장 높은 점수로 한 번만 남는다.
 /// 전체 개수는 조각별 개수의 합이라 겹치는 항목이 있으면 실제보다 조금 클 수 있다
-fn search_all(q: &str, folders: &crate::folders::Folders) -> Result<SearchResponse, SearchError> {
+fn search_all(q: &str, folders: &crate::folders::Folders, limit: usize) -> Result<SearchResponse, SearchError> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut all: Vec<(i32, bool, String)> = Vec::new();
     let (mut total, mut micros, mut error) = (0, 0, None);
     let (mut ready, mut failed) = (true, String::new());
     let pieces = unique_pieces(q);
     // 서비스에는 조각들을 묶어 한 번에 묻는다 (줄마다 파이프를 오가지 않게)
-    let locals = service::query_many(&pieces, PAL_LIMIT);
+    let locals = service::query_many(&pieces, limit);
     for (piece, local) in pieces.into_iter().zip(locals) {
-        match search_piece(piece, local, folders) {
+        match search_piece(piece, local, folders, limit) {
             Ok(Found { hits, total: t, micros: m, ready: r, failed: f }) => {
                 total += t;
                 micros += m;
@@ -232,7 +232,7 @@ fn search_all(q: &str, folders: &crate::folders::Folders) -> Result<SearchRespon
         return Err(e);
     }
     all.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.len().cmp(&b.2.len())));
-    all.truncate(PAL_LIMIT);
+    all.truncate(limit);
     Ok(SearchResponse { total, micros, hits: all.into_iter().map(|(_, d, p)| (d, p)).collect(), ready, failed })
 }
 
@@ -307,9 +307,9 @@ impl App {
         self.side_panel() == Some(Panel::Search)
     }
 
-    /// 검색 패널 자리. 보이지 않으면 빈 사각형
+    /// 검색 패널 자리 (다른 패널이 잠깐 가려도 같은 자리). 열려 있지 않으면 빈 사각형
     pub(super) fn pal_rect(&self) -> R {
-        if self.pal_visible() { self.side_panel_rect().unwrap_or(R::new(0.0, 0.0, 0.0, 0.0)) } else { R::new(0.0, 0.0, 0.0, 0.0) }
+        if self.pal_shown() { self.side_panel_rect().unwrap_or(R::new(0.0, 0.0, 0.0, 0.0)) } else { R::new(0.0, 0.0, 0.0, 0.0) }
     }
 
     pub(super) fn pal_list(&self) -> R {
@@ -344,7 +344,7 @@ impl App {
     fn pal_install_button(&self) -> R {
         let list = self.pal_list();
         let cx = (list.l + list.r) / 2.0;
-        R::new(cx - 80.0, list.t + 96.0, cx + 80.0, list.t + 128.0)
+        R::new(cx - 80.0, list.t + 150.0, cx + 80.0, list.t + 182.0)
     }
 
     /// 찾은 게 없고 보이는 칸에 검색 범위 밖 폴더가 열려 있으면 "이 폴더도 검색하기" 버튼을 보인다
@@ -407,7 +407,6 @@ impl App {
             self.pal_anchor = 0;
             self.pal_scroll = 0.0;
             self.pal_status = PalStatus::Idle;
-            self.pal_outside = self.visible_dirs().into_iter().find(|d| self.folders.covering(d).is_none() && crate::folders::outside_disk_index(d));
             self.pal_check_status();
         }
         self.pal_focus_input();
@@ -464,16 +463,18 @@ impl App {
         self.focus();
     }
 
-    /// Esc·Tab: 키보드를 칸으로 돌려준다 (패널과 결과는 그대로)
-    fn pal_blur(&mut self) {
+    /// Esc·Tab, 패널 밖 클릭: 키보드를 칸으로 돌려준다 (패널과 결과는 그대로)
+    pub(super) fn pal_blur(&mut self) {
         self.pal_focus = false;
         self.focus();
         self.invalidate();
     }
 
-    /// 서비스가 있는지·인덱스가 준비됐는지 확인한다 (패널을 열 때, 다시 켰는데 열려 있었을 때)
+    /// 서비스가 있는지·인덱스가 준비됐는지 확인하고, 보이는 칸 중 검색 범위 밖 폴더를 적어 둔다
+    /// (패널을 열 때, 다시 켰는데 열려 있었을 때)
     pub(super) fn pal_check_status(&mut self) {
         if self.pal_shown() {
+            self.pal_outside = self.visible_dirs().into_iter().find(|d| self.folders.covering(d).is_none() && crate::folders::outside_disk_index(d));
             self.pal_seq += 1;
             spawn_search(self.hwnd, self.pal_seq, None, None, self.folders.clone());
         }
@@ -482,8 +483,14 @@ impl App {
     /// 폴더가 바뀌거나 파일 작업이 끝났다: 같은 검색어로 잠시 뒤 다시 찾는다 (고른 줄은 경로로 이어 간다)
     pub(super) fn pal_requery(&mut self) {
         if self.pal_shown() && !edit_text(self.search_edit).trim().is_empty() {
-            unsafe { SetTimer(Some(self.hwnd), TIMER_SEARCH, 700, None) };
+            unsafe { SetTimer(Some(self.hwnd), TIMER_SEARCH_AGAIN, 700, None) };
         }
+    }
+
+    /// 창이나 패널 크기가 바뀌었다: 스크롤이 목록 끝을 넘지 않게
+    pub(super) fn pal_clamp_scroll(&mut self) {
+        let max = (self.pal_results.len() as f32 * PAL_ROW_H - self.pal_list().h()).max(0.0);
+        self.pal_scroll = self.pal_scroll.clamp(0.0, max);
     }
 
     /// 입력이 바뀌면 잠깐 모았다가 검색 (빠르게 칠 때 질의를 줄인다).
@@ -867,8 +874,8 @@ impl App {
             Hit::PalRow(i) => self.pal_activate(i, OpenMode::Open),
             Hit::PalInstall => self.pal_install(),
             Hit::PalAddFolder => self.pal_add_folder(),
-            // 범위를 바꾸면 같은 검색어로 다시 찾는다
-            Hit::PalScope(here) if here != self.pal_here => {
+            // 범위를 바꾸면 같은 검색어로 다시 찾는다 (칸에 폴더가 없으면 현재 폴더는 고를 수 없다)
+            Hit::PalScope(here) if here != self.pal_here && (!here || self.panes[self.active].tab().loc.dir().is_some()) => {
                 self.pal_here = here;
                 self.pal_run_query();
             }
@@ -920,10 +927,10 @@ impl App {
         gfx.stroke_round(input.inset(0.75, 0.75), 8.0, if focus { t.accent } else { t.border }, if focus { 1.5 } else { 1.0 });
         gfx.glyph(G_SEARCH, R::new(input.l + 8.0, input.t, input.l + 28.0, input.b), true, if focus { t.accent } else { t.dim });
 
-        // 범위 칩: PC 전체 · 현재 폴더 (칸에 폴더가 없으면 흐리게)
+        // 범위 칩: PC 전체 · 현재 폴더 (칸에 폴더가 없으면 현재 폴더는 흐리게, 전체로 찾는다)
         for (h, cr) in scopes {
-            let on = h == here;
             let enabled = !h || here_ok;
+            let on = if here_ok { h == here } else { !h };
             if on {
                 gfx.fill_round(cr, 12.0, t.accent_soft);
             } else if hover == Hit::PalScope(h) && enabled {
@@ -957,7 +964,7 @@ impl App {
                 query.trim(),
                 add_folder.as_deref().unwrap_or_default()
             )),
-            PalStatus::Done { .. } if pal_results.is_empty() && here => Some(format!("지금 폴더 아래에 ‘{}’와(과) 일치하는 항목이 없습니다", query.trim())),
+            PalStatus::Done { .. } if pal_results.is_empty() && here && here_ok => Some(format!("지금 폴더 아래에 ‘{}’와(과) 일치하는 항목이 없습니다", query.trim())),
             PalStatus::Done { .. } if pal_results.is_empty() => Some(format!("‘{}’와(과) 일치하는 항목이 없습니다", query.trim())),
             PalStatus::Idle | PalStatus::Ready(_) if query.trim().is_empty() => Some(format!(
                 "파일·폴더 이름을 입력하세요\n띄어 쓰면 모두 포함 · | 는 또는 · 끝에 \\ 는 경로{}",
@@ -966,7 +973,7 @@ impl App {
             _ => None,
         };
         if let Some(m) = message {
-            gfx.text(&m, R::new(list.l + 10.0, list.t + 14.0, list.r - 10.0, list.t + 110.0), Font::Hint, t.faint);
+            gfx.text(&m, R::new(list.l + 10.0, list.t + 14.0, list.r - 10.0, list.t + 142.0), Font::Hint, t.faint);
         }
         let button = match (&status, &add_folder) {
             (PalStatus::NotInstalled, _) => Some(("검색 서비스 설치", Hit::PalInstall)),
@@ -1132,10 +1139,9 @@ mod tests {
     }
 
     #[test]
-    fn scoped_query_appends_the_folder_to_every_piece() {
-        assert_eq!(scoped_query("견적 | 보고", Some("C:\\업무\\")), "견적 C:\\업무\\ | 보고 C:\\업무\\");
-        assert_eq!(scoped_query("견적", None), "견적");
+    fn scope_keeps_only_paths_under_the_folder() {
         assert!(under("C:\\업무\\견적.xlsx", "c:\\업무"));
+        assert!(under("C:\\OneDrive - Personal\\a b\\x.txt", "C:\\OneDrive - Personal\\a b"));
         assert!(under("C:\\업무\\2026\\견적.xlsx", "C:\\업무\\"));
         assert!(!under("C:\\업무2\\견적.xlsx", "C:\\업무"));
         assert!(!under("C:\\업무", "C:\\업무"));
