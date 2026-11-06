@@ -4,9 +4,9 @@
 
 A Windows file manager that keeps several folders open side by side and finds any file on your disk as you type its name.
 
-![Sakadu with the sidebar, two panes, thumbnails and the preview pane](docs/screenshot-main.png)
+![Sakadu with the icon bar and favorites panel, a workspace, two panes, thumbnails and the preview pane](docs/screenshot-main.png)
 
-**[Download the latest release](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · a single 1.1 MB exe, no installer · free and open source
+**[Download the latest release](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · a single 1.2 MB exe, no installer · free and open source
 
 > The interface is Korean only for now.
 
@@ -14,11 +14,12 @@ A Windows file manager that keeps several folders open side by side and finds an
 
 **Search without waiting.** Press Ctrl+F, type part of a name, and results from the whole disk show up right away.
 On a PC with about 1.8 million files and folders, a search takes 10–20 ms.
+Search stays open in the **search panel** on the left, so you keep working in the panes with the results beside you (Ctrl+Enter opens the location in the current pane).
 While Sakadu is running, a global hotkey brings up search from any app. Turn on **트레이에서 대기** (stay in tray) and that works even after you close the window.
 Add a shared folder or USB drive and it's searched too.
 Paste a list of file names to find them all at once, then open or copy the ones you pick in one go.
 
-![Results from the whole disk as you type](docs/screenshot-search.png)
+![Results kept in the search panel and a photo pinned in the preview](docs/screenshot-search.png)
 
 **Stop juggling windows.** Split the window into 2, 3 or 4 panes, each with its own tabs. Drag a tab to move it to another pane.
 Moving files from Downloads into a project folder happens on one screen.
@@ -26,13 +27,15 @@ Moving files from Downloads into a project folder happens on one screen.
 **Works like Explorer.** Right-click menus, the copy progress dialog and drag and drop behave exactly as they do in Explorer.
 Moved something by mistake? Ctrl+Z.
 
-**Look before you open.** Thumbnail view and a preview pane show photos, PDFs and text files right next to the list.
+**Look before you open.** Thumbnail view and a preview pane show photos, PDFs and text files right next to the list. **Pin** a reference file in the preview and it stays there while you select other files.
+
+**Pick up where you left off.** Keep panes and tabs, the search query and the pinned preview file as **workspaces** and switch between them. A new tab opens on your favorite folders and recent locations.
 
 **Light.** No runtime or web view. It's Rust drawing with Direct2D. Unzip and run the exe.
 
 Dark mode follows your Windows setting.
 
-![Dark mode with four panes](docs/screenshot-dark.png)
+![Dark mode with four panes and the new tab start page](docs/screenshot-dark.png)
 
 ## Getting started
 
@@ -40,7 +43,7 @@ Dark mode follows your Windows setting.
 2. Run `sakadu.exe`.
 
 - If Windows shows "Windows protected your PC" on first launch, click **More info → Run anyway**. The exe isn't code-signed yet.
-- Whole-disk search needs a small background service. Press **검색 서비스 설치** (install search service) in the Ctrl+F window once and approve the admin prompt.
+- Whole-disk search needs a small background service. Press **검색 서비스 설치** (install search service) in the search panel (Ctrl+F) once and approve the admin prompt.
 - To open folders in Sakadu by default, open Settings (gear) → **일반** (General) and turn on **기본 파일 관리자로 사용** (use as default file manager).
 - To keep the search hotkey working after you close the window, turn on **트레이에서 대기** (stay in tray) in the same place. Sakadu then also starts at sign-in, without a window.
 - Theme, accent color, font and size live in Settings → **화면** (Appearance); shortcuts in Settings → **단축키** (Shortcuts). Press F1 for usage tips.
