@@ -144,6 +144,7 @@ impl App {
 
     pub(super) fn open_settings(&mut self, page: Page) {
         self.close_palette();
+        self.close_peek();
         self.fav_blur();
         if self.edit_mode != EditMode::None {
             self.cancel_edit();

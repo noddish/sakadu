@@ -429,7 +429,9 @@ impl App {
 
     /// 막대 아이콘을 눌렀다: 고정한 패널이면 닫고, 아니면(안 보이거나 떠 있으면) 고정해서 연다
     pub(super) fn bar_click(&mut self, p: Panel) {
-        if self.side_pinned == Some(p) {
+        if self.side_floating() && self.side_pinned == Some(p) {
+            self.close_peek();
+        } else if self.side_pinned == Some(p) {
             self.close_side();
         } else {
             self.show_side(p, true);
@@ -458,7 +460,10 @@ impl App {
         self.bar_arm = None;
         self.peek_leaving = false;
         if self.side_panel() != before {
-            self.side_scroll = 0.0;
+            if let Some(b) = before {
+                self.side_scroll_memo[b as usize] = self.side_scroll;
+            }
+            self.side_scroll = self.side_panel().map_or(0.0, |p| self.side_scroll_memo[p as usize]);
         }
         if self.side_panel() != Some(Panel::Favorites) {
             // 즐겨찾기 줄이 사라지면 그 줄의 이름 입력은 확정하고 키보드는 칸으로
@@ -476,7 +481,7 @@ impl App {
     /// 마우스가 움직였다 (끌기 중이 아닐 때): 아이콘에 머무르면 패널을 띄우고, 떠 있는 패널 밖으로 나가면 닫을 준비
     pub(super) fn side_track(&mut self, x: f32, y: f32) {
         let over = match self.hover {
-            Hit::Bar(p) if self.side_panel() != Some(p) => Some(p),
+            Hit::Bar(p) if self.side_panel() != Some(p) && !self.pal_open && self.settings.is_none() => Some(p),
             _ => None,
         };
         if over != self.bar_arm {
@@ -526,7 +531,7 @@ impl App {
             let _ = KillTimer(Some(self.hwnd), TIMER_BAR_HOVER);
         }
         let Some(p) = self.bar_arm.take() else { return };
-        if self.hover == Hit::Bar(p) && self.side_panel() != Some(p) && matches!(self.drag, Drag::None) && !self.pal_open && self.settings.is_none() {
+        if self.hover == Hit::Bar(p) && self.side_panel() != Some(p) && matches!(self.drag, Drag::None) && !self.pal_open && self.settings.is_none() && self.edit_mode == EditMode::None {
             self.show_side(p, false);
         }
     }
@@ -536,8 +541,8 @@ impl App {
             let _ = KillTimer(Some(self.hwnd), TIMER_SIDE_CLOSE);
         }
         self.peek_leaving = false;
-        // 끌거나 이름을 바꾸는 중, 키보드가 즐겨찾기에 있을 때는 닫지 않는다
-        if !self.side_floating() || !matches!(self.drag, Drag::None) || matches!(self.edit_mode, EditMode::FavRename(_)) || self.fav_focus {
+        // 끌거나 이름을 바꾸는 중, 키보드가 즐겨찾기에 있을 때, 패널의 메뉴가 떠 있을 때는 닫지 않는다
+        if !self.side_floating() || !matches!(self.drag, Drag::None) || matches!(self.edit_mode, EditMode::FavRename(_)) || self.fav_focus || self.menu_open {
             return;
         }
         // 그 사이 돌아왔으면 그대로 둔다

@@ -355,8 +355,10 @@ pub struct App {
     fav_focus: bool,
     /// 사이드바 즐겨찾기에서 고른 줄 (favs.rows() 번호)
     fav_sel: usize,
-    /// 왼쪽 패널 가운데 목록의 스크롤
+    /// 보이는 패널 가운데 목록의 스크롤
     side_scroll: f32,
+    /// 패널마다 기억해 둔 스크롤 (Panel 순서). 다른 패널이 떴다 닫혀도 자리를 잃지 않게
+    side_scroll_memo: [f32; 2],
     /// 고정한 패널 (칸을 밀어낸다). 세션에 저장
     side_pinned: Option<Panel>,
     /// 아이콘에 머물러 칸 위에 떠 있는 패널 (마우스가 떠나거나 위치를 고르면 닫힌다)
@@ -367,6 +369,8 @@ pub struct App {
     bar_arm: Option<Panel>,
     /// 떠 있는 패널 밖으로 나가 닫기(TIMER_SIDE_CLOSE)를 기다리는 중
     peek_leaving: bool,
+    /// 패널·작업 줄에서 연 팝업 메뉴가 떠 있는 동안 (그 위로 간 마우스를 패널 밖으로 보지 않게)
+    menu_open: bool,
     /// 파일을 끌어 사이드바에 놓으려는 자리 (즐겨찾기 쪽이면 Side::FavEmpty)
     side_drop: Option<Side>,
     /// 사이드바의 내 PC·드라이브 (뒤에서 읽어 온다)
@@ -1043,11 +1047,13 @@ impl App {
             fav_focus: false,
             fav_sel: 0,
             side_scroll: 0.0,
+            side_scroll_memo: [0.0; 2],
             side_pinned,
             side_peek: None,
             side_w,
             bar_arm: None,
             peek_leaving: false,
+            menu_open: false,
             side_drop: None,
             places: sidebar::Places::default(),
             places_busy: false,
@@ -2109,6 +2115,10 @@ impl App {
         match self.pane_rect(self.active) {
             Some(r) if !popup && !self.panes[self.active].tab().filter.is_empty() => {
                 let b = self.filter_parts(self.active, filter_chip(&geom(r))).0;
+                // 떠 있는 패널이 그 자리를 덮으면 입력 상자(자식 창은 늘 그림 위에 보인다)도 숨긴다
+                if self.side_floating() && self.side_panel_rect().is_some_and(|p| p.l < b.r && p.r > b.l && p.t < b.b && p.b > b.t) {
+                    return R::new(-4000.0, -4000.0, -3800.0, -3980.0);
+                }
                 // 입력 상자 글자는 위쪽에 붙어 그려지므로 칩 안 다른 글자(개수)와 줄이 맞게 2px 내린다
                 let t = b.t + (b.h() - 20.0) / 2.0 + 2.0;
                 R::new(b.l, t, b.r, t + 20.0)
@@ -3765,6 +3775,7 @@ impl App {
             ),
             Hit::PreviewButton => (self.preview_button(), named(Action::Preview, "미리 보기 창")),
             Hit::SettingsButton => (self.settings_button(), named(Action::Settings, "설정")),
+            Hit::Bar(p) if self.side_panel() == Some(p) => return None,
             Hit::Bar(Panel::Favorites) => (self.bar_rect(Panel::Favorites), named(Action::Favorites, "즐겨찾기")),
             Hit::Bar(p) => (self.bar_rect(p), p.title().to_string()),
             Hit::SidePin => (self.side_pin_rect()?, (if self.side_floating() { "고정해 두기" } else { "고정 풀기" }).to_string()),
@@ -4275,14 +4286,21 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         },
         Deferred::Menu { pane, paths, dir, pt } => show_menu(hwnd, MenuRequest { pane, paths, dir, pt }),
         Deferred::PrepareMenu { paths, dir } => prepare_menu(hwnd, paths, dir),
-        Deferred::FavMenu { row, pt } => fav_ui::show_fav_menu(hwnd, row, pt),
-        Deferred::FavSortMenu { pt } => fav_ui::show_fav_sort_menu(hwnd, pt),
-        Deferred::SideMenu { side, pt } => sidebar::show_side_menu(hwnd, side, pt),
+        Deferred::FavMenu { row, pt } => with_menu(|| fav_ui::show_fav_menu(hwnd, row, pt)),
+        Deferred::FavSortMenu { pt } => with_menu(|| fav_ui::show_fav_sort_menu(hwnd, pt)),
+        Deferred::SideMenu { side, pt } => with_menu(|| sidebar::show_side_menu(hwnd, side, pt)),
         Deferred::PreviewSync => preview::sync_handler(),
         Deferred::Settings { ctl, index, pt } => settings_ui::run_deferred(hwnd, ctl, index, pt),
         Deferred::PalMenu { pt } => palette::show_pal_menu(hwnd, pt),
-        Deferred::MoreMenu { pt } => sidebar::show_more_menu(hwnd, pt),
+        Deferred::MoreMenu { pt } => with_menu(|| sidebar::show_more_menu(hwnd, pt)),
     }
+}
+
+/// 팝업 메뉴를 띄우는 동안 표시해 둔다: 메뉴 위로 간 마우스 때문에 떠 있는 패널이 닫히지 않게
+fn with_menu(f: impl FnOnce()) {
+    with_app(|a| a.menu_open = true);
+    f();
+    with_app(|a| a.menu_open = false);
 }
 
 fn remove_search_folder(hwnd: HWND, folders: &crate::folders::Folders, root: &str) {

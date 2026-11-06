@@ -332,6 +332,7 @@ impl App {
     }
 
     pub(super) fn open_palette(&mut self) {
+        self.close_peek();
         self.fav_blur();
         if self.edit_mode != EditMode::None {
             self.cancel_edit();

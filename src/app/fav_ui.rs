@@ -383,7 +383,7 @@ impl App {
             }
             None => {
                 self.favs.push(None, Favorite { name: favorites::default_name(&dir), path: dir, is_dir: true });
-                "즐겨찾기에 넣었습니다 · 왼쪽 목록에서 이름·순서·그룹을 정리할 수 있어요"
+                "즐겨찾기에 넣었습니다 · 즐겨찾기 패널에서 이름·순서·그룹을 정리할 수 있어요"
             }
         };
         // 저장하지 못했으면 별 표시도 원래대로 두고 오류만 보인다 (성공 문구로 덮지 않게)
@@ -419,6 +419,10 @@ impl App {
             self.cancel_edit();
         }
         self.close_palette();
+        // 입력 상자는 즐겨찾기 패널이 고정돼 있어야 자리가 있다 (떠 있는 패널은 마우스가 떠나면 닫힌다)
+        if self.side_panel() != Some(Panel::Favorites) || self.side_floating() {
+            self.show_side(Panel::Favorites, true);
+        }
         self.fav_select(row);
         self.edit_mode = EditMode::FavRename(row);
         unsafe {

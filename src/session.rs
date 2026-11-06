@@ -149,7 +149,7 @@ pub fn parse(text: &str) -> Option<Session> {
             "preview" => s.preview = value == "1",
             "newtab" => s.new_tab = value.to_string(),
             "side" => s.side = value.to_string(),
-            "sidew" => s.side_w = value.parse::<f32>().unwrap_or(SIDE_W_DEFAULT).clamp(SIDE_W_RANGE.0, SIDE_W_RANGE.1),
+            "sidew" => s.side_w = value.parse::<f32>().ok().filter(|w| w.is_finite()).unwrap_or(SIDE_W_DEFAULT).clamp(SIDE_W_RANGE.0, SIDE_W_RANGE.1),
             "theme" => s.look.theme = value.to_string(),
             "accent" => s.look.accent = value.to_string(),
             "font" => s.look.font = value.to_string(),
@@ -236,6 +236,7 @@ mod tests {
         let s = parse("sakadu-session 1\nside=none\nsidew=9999").unwrap();
         assert_eq!(s.side, "none");
         assert_eq!(s.side_w, SIDE_W_RANGE.1, "an out-of-range width is clamped");
+        assert_eq!(parse("sakadu-session 1\nsidew=NaN").unwrap().side_w, SIDE_W_DEFAULT, "a non-number falls back to the default");
     }
 
     #[test]
