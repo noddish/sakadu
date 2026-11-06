@@ -209,6 +209,7 @@ impl App {
         match s.page {
             Page::General => {
                 let new_tab = match self.new_tab_home.as_str() {
+                    session::NEW_TAB_START => "시작 화면".to_string(),
                     "::computer" | "" => "내 PC".to_string(),
                     session::NEW_TAB_SAME => "지금 탭과 같은 폴더".to_string(),
                     p => util::file_name(p).to_string(),
@@ -333,6 +334,7 @@ impl App {
                                 tip("걸러 보기", "목록에서 글자를 치면 지금 폴더에서 바로 걸러요 · Esc로 풀기".into()),
                                 tip("여러 개 고르기", "빈 곳이나 날짜 칸에서 끌면 네모 상자로 · Ctrl을 누르면 더하기".into()),
                                 tip("탭 옮기기", "탭을 끌어 순서를 바꾸거나 다른 칸으로 · Ctrl+Tab 다음 탭".into()),
+                                tip("새 탭", format!("{} · 즐겨찾기 폴더·최근 위치·드라이브에서 고르기 · 글자를 치고 Enter로 바로", k(Action::NewTab))),
                                 tip("칸 이동", format!("Tab · Shift+Tab, 칸 나누기는 {}", layout_keys(&self.keys))),
                                 tip("되돌리기", format!("{} · 이름 바꾸기·이동·복사·휴지통 삭제를 마지막 것부터", k(Action::Undo))),
                             ],
@@ -1061,8 +1063,12 @@ fn pick_menu(hwnd: HWND, pt: POINT, items: &[(String, bool)]) -> usize {
 
 fn new_tab_menu(hwnd: HWND, pt: POINT) {
     let Some((home, dir)) = with_app(|a| (a.new_tab_home.clone(), a.panes[a.active].tab().loc.dir().map(str::to_string))) else { return };
-    let custom = Some(home.as_str()).filter(|h| *h != "::computer" && *h != session::NEW_TAB_SAME && !h.is_empty()).map(str::to_string);
-    let mut items = vec![("내 PC".to_string(), custom.is_none() && home != session::NEW_TAB_SAME), ("지금 탭과 같은 폴더".to_string(), home == session::NEW_TAB_SAME)];
+    let custom = Some(home.as_str()).filter(|h| ![session::NEW_TAB_START, "::computer", session::NEW_TAB_SAME, ""].contains(h)).map(str::to_string);
+    let mut items = vec![
+        ("시작 화면".to_string(), home == session::NEW_TAB_START),
+        ("내 PC".to_string(), home == "::computer" || home.is_empty()),
+        ("지금 탭과 같은 폴더".to_string(), home == session::NEW_TAB_SAME),
+    ];
     if let Some(c) = &custom {
         items.push((c.clone(), true));
     }
@@ -1073,8 +1079,9 @@ fn new_tab_menu(hwnd: HWND, pt: POINT) {
     let cmd = pick_menu(hwnd, pt, &items);
     // 정해 둔 폴더 줄은 이미 고른 것이라 바꿀 것이 없다
     let home = match cmd {
-        1 => "::computer".to_string(),
-        2 => session::NEW_TAB_SAME.to_string(),
+        1 => session::NEW_TAB_START.to_string(),
+        2 => "::computer".to_string(),
+        3 => session::NEW_TAB_SAME.to_string(),
         n if n == items.len() && dir.is_some() => dir.unwrap_or_default(),
         _ => return,
     };

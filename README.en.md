@@ -155,7 +155,7 @@ When turned on in Settings → General, closing the window doesn't quit Sakadu. 
 <summary>Thumbnails, preview, favorites, undo</summary>
 
 - The **view button** at the right end of the path row picks extra large, large, medium or small icons, list, or details. Shortcuts match Explorer (Ctrl+Shift+1–6), and each pane remembers its own. Icon views show thumbnails for photos and PDFs.
-- **New tabs** (Ctrl+T, +) open at This PC. Change it in Settings → General → **새 탭을 열 위치** (new tab location): the same folder as the current tab, or a folder of your choice.
+- **New tabs** (Ctrl+T, +) open on a **start page** ("어디로 이동할까요?", where to?): favorite folders as cards, recently visited folders as rows, then This PC and the drives. A click opens it in that tab (Ctrl+click or middle click opens a new tab); type to filter by name and press Enter to go. Arrow keys move between them, and right-click or Delete removes a recent folder from the list. Change it in Settings → General → **새 탭을 열 위치** (new tab location): This PC, the same folder as the current tab, or a folder of your choice.
 - The **star** at the right end of the path adds the current folder to favorites in one click (it turns yellow). Click again to remove it. The button next to it makes a **new folder**.
 - Hover over a button on the work bar (split, `…`, hidden items, preview) or on the icon bar at the left for a moment to see its name and shortcut. Help, settings and about are under `…` at the right of the work bar.
 - Each pane shows its tabs as chips along the top, with the item count and the selection's count and size on the right. Typing turns that spot into a **filter chip**; × or Esc clears it.
@@ -228,6 +228,7 @@ cargo test
 | `keys.rs` | Remappable shortcuts (key map, saving) |
 | `app/sidebar.rs` · `app/fav_ui.rs` | Icon bar and panels on the left (places, favorites; peek, pin, resize) · favorites actions |
 | `app/palette.rs` · `app/preview.rs` | Ctrl+F search panel · preview pane |
+| `app/start.rs` | New tab start page (favorite folder cards, recent locations, drives) |
 | `pane.rs` | Tab state (history, sort, filter, selection) |
 | `listing.rs` | Folder listing, This PC, display formatting |
 | `shell.rs` | Shell menus, file operations, clipboard, drag, change notifications, icons |

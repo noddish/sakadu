@@ -35,6 +35,7 @@ mod settings_ui;
 mod view_menu;
 mod caption;
 mod sidebar;
+mod start;
 use fav_ui::G_STAR;
 use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
 use sidebar::{BAR_W, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_CLOSE};
@@ -189,6 +190,8 @@ enum Hit {
     Set(settings_ui::SetHit),
     /// 경로 오른쪽 끝의 즐겨찾기 별
     Star(usize),
+    /// 새 탭 시작 화면의 카드·줄 (칸, 항목)
+    Start(usize, usize),
 }
 
 impl Hit {
@@ -196,7 +199,8 @@ impl Hit {
         use Hit::*;
         match self {
             Tab(p, _) | TabClose(p, _) | TabAdd(p) | TabStrip(p) | Back(p) | Fwd(p) | Up(p) | Crumb(p, _) | CrumbEmpty(p) | Star(p) | View(p)
-            | Header(p, _) | HeaderResize(p, _) | Row(p, _) | ListEmpty(p) | Thumb(p) | Track(p) | FilterClear(p) | NewFolder(p) | Pane(p) => Some(p),
+            | Header(p, _) | HeaderResize(p, _) | Row(p, _) | ListEmpty(p) | Thumb(p) | Track(p) | FilterClear(p) | NewFolder(p) | Pane(p)
+            | Start(p, _) => Some(p),
             _ => Option::None,
         }
     }
@@ -298,6 +302,8 @@ pub enum Deferred {
     PalMenu { pt: POINT },
     /// 작업 줄 `…` 메뉴 (도움말·설정·정보)
     MoreMenu { pt: POINT },
+    /// 새 탭 시작 화면 항목의 메뉴. 위치는 메뉴를 열 때 정해 둔다
+    StartMenu { pane: usize, item: start::StartItem, loc: Location, pt: POINT },
 }
 
 /// 끌어 놓을 곳 (drop_dir_at)
@@ -312,6 +318,8 @@ pub struct Listed {
     tab: u64,
     generation: u64,
     result: Result<Vec<Entry>, String>,
+    /// 열지 못한 폴더가 지워졌거나 옮겨진 것 (그 위 폴더는 있다). 네트워크가 끊겼거나 USB를 뽑아 잠깐 못 연 것과 가른다
+    gone: bool,
 }
 
 pub struct IconsReady {
@@ -433,6 +441,10 @@ pub struct App {
     marquee_base: Vec<bool>,
     /// 새 탭을 열 위치 (세션 형식, session::NEW_TAB_SAME이면 지금 탭과 같은 폴더)
     new_tab_home: String,
+    /// 시작 화면의 최근 위치 (최근 것이 앞, 세션에 저장)
+    recent: Vec<String>,
+    /// 시작 화면에서 키보드를 쓰기 시작했는지 (초점 테두리를 보일지)
+    start_keys: bool,
     /// 단추 말풍선이 떠 있는지
     tip_shown: bool,
     /// 설정 창 (열려 있으면 창 전체를 덮는다)
@@ -776,7 +788,11 @@ struct Crumb {
 
 /// 경로 표시줄 조각. 공간이 모자라면 앞쪽을 "…"로 접는다
 fn crumbs(gfx: &Gfx, area: R, loc: &Location) -> Vec<Crumb> {
-    let mut items = vec![("내 PC".to_string(), Location::Computer)];
+    // 시작 화면은 "새 탭" 한 조각
+    let mut items = match loc {
+        Location::Start => vec![(loc.title(), Location::Start)],
+        _ => vec![("내 PC".to_string(), Location::Computer)],
+    };
     if let Location::Dir(path) = loc {
         for (label, full) in util::segments(path) {
             items.push((label, Location::Dir(full)));
@@ -813,6 +829,7 @@ fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
     let Location::Dir(cur) = current else { return None };
     match ancestor {
         Location::Computer => Some(util::segments(cur).first()?.1.clone()),
+        Location::Start => None,
         Location::Dir(a) => {
             if cur.len() <= a.len() || !util::eq_path(&cur[..a.len()], a) {
                 return None;
@@ -901,6 +918,8 @@ fn spawn_listing(hwnd: HWND, tab: u64, generation: u64, loc: Location) {
         let _com = shell::ComInit::sta();
         let result = match &loc {
             Location::Computer => Ok(list_computer()),
+            // 시작 화면은 읽을 것이 없다 (즐겨찾기·최근 위치·드라이브는 앱이 이미 들고 있다)
+            Location::Start => Ok(Vec::new()),
             Location::Dir(d) => list_dir(d),
         };
         let special: Vec<(u32, String)> = match (&result, &loc) {
@@ -912,7 +931,11 @@ fn spawn_listing(hwnd: HWND, tab: u64, generation: u64, loc: Location) {
                 .collect(),
             _ => Vec::new(),
         };
-        post(owner.get(), WM_APP_LISTED, Box::new(Listed { tab, generation, result }));
+        let gone = match (&result, &loc) {
+            (Err(_), Location::Dir(d)) => !shell::exists(d) && util::parent(d).is_some_and(|p| shell::is_dir(&p)),
+            _ => false,
+        };
+        post(owner.get(), WM_APP_LISTED, Box::new(Listed { tab, generation, result, gone }));
         if !special.is_empty() {
             let icons = special.into_iter().map(|(i, p)| (i, shell::icon_for_path(&p))).collect();
             post(owner.get(), WM_APP_ICONS, Box::new(IconsReady { tab, generation, icons }));
@@ -1092,7 +1115,9 @@ impl App {
             tray: None,
             stale: [false; 4],
             marquee_base: Vec::new(),
-            new_tab_home: sess.as_ref().map_or_else(|| "::computer".to_string(), |s| s.new_tab.clone()),
+            new_tab_home: sess.as_ref().map_or_else(|| session::NEW_TAB_START.to_string(), |s| s.new_tab.clone()),
+            recent: sess.as_ref().map(|s| s.recent.clone()).unwrap_or_default(),
+            start_keys: false,
             tip_shown: false,
             settings: None,
             folders: crate::folders::Folders::start(),
@@ -1326,6 +1351,9 @@ impl App {
     /// 칸 p의 칩 줄 오른쪽 글자: 불러오는 중이거나, 항목 수와 고른 개수·크기
     fn head_count_text(&self, p: usize) -> String {
         let tab = self.panes[p].tab();
+        if tab.loc == Location::Start {
+            return String::new();
+        }
         match &tab.state {
             LoadState::Loading => "불러오는 중…".to_string(),
             LoadState::Error(_) => "열 수 없음".to_string(),
@@ -1379,6 +1407,9 @@ impl App {
 
     /// 필터 칩 안의 개수: 고른 게 있으면 "고른/전체개"
     fn filter_count_text(&self, p: usize) -> String {
+        if let Some(n) = self.start_count(p) {
+            return format!("{n}개");
+        }
         let tab = self.panes[p].tab();
         match tab.selection_stats().0 {
             0 => format!("{}개", tab.view.len()),
@@ -1478,10 +1509,12 @@ impl App {
             if g.up.contains(x, y) {
                 return Hit::Up(p);
             }
-            if g.view.contains(x, y) {
+            // 시작 화면에는 보기·새 폴더 단추가 없다
+            let start = tab.loc == Location::Start;
+            if !start && g.view.contains(x, y) {
                 return Hit::View(p);
             }
-            if g.new_folder.contains(x, y) {
+            if !start && g.new_folder.contains(x, y) {
                 return Hit::NewFolder(p);
             }
             if tab.loc.dir().is_some() && g.star.contains(x, y) {
@@ -1493,6 +1526,9 @@ impl App {
                     Some(i) => Hit::Crumb(p, i),
                     None => Hit::CrumbEmpty(p),
                 };
+            }
+            if start {
+                return self.start_hit(p, x, y);
             }
             if g.header.contains(x, y) {
                 if pane.view != ViewMode::Details {
@@ -1583,6 +1619,12 @@ impl App {
                 None
             }
         };
+        // 지워졌거나 옮겨진 폴더는 시작 화면의 최근 위치에서 뺀다 (잠깐 못 연 것은 그대로)
+        if l.gone {
+            if let Some(d) = self.panes[p].tabs[t].loc.dir().map(str::to_string) {
+                self.forget_recent(&d);
+            }
+        }
         if self.panes[p].active == t {
             self.clamp_scroll(p);
             if p == self.active {
@@ -1675,6 +1717,9 @@ impl App {
     }
 
     fn after_location_change(&mut self, p: usize) {
+        let loc = self.panes[p].tab().loc.clone();
+        self.note_recent(&loc);
+        self.start_keys = false;
         if p == self.active {
             self.set_filter_edit_text("");
             self.layout_edits();
@@ -1758,6 +1803,10 @@ impl App {
 
     pub fn new_tab(&mut self, p: usize, loc: Option<Location>, activate: bool) {
         let loc = loc.unwrap_or_else(|| self.new_tab_location(p));
+        // 뒤에 여는 탭(가운데 클릭)은 넣지 않는다: 그대로 보이는 시작 화면의 줄이 마우스 아래에서 밀리지 않게
+        if activate {
+            self.note_recent(&loc);
+        }
         let id = self.next_tab_id();
         let pane = &mut self.panes[p];
         let idx = pane.active + 1;
@@ -1851,6 +1900,7 @@ impl App {
         if matches!(self.edit_mode, EditMode::Rename(e) | EditMode::Address(e) if e == p) {
             self.cancel_edit();
         }
+        self.start_keys = false;
         let t = self.panes[p].active;
         let fresh = self.panes[p].tab().generation == 0;
         self.load_at(p, t, !fresh);
@@ -1875,6 +1925,7 @@ impl App {
             _ => self.cancel_edit(),
         }
         self.active = p;
+        self.start_keys = false;
         let f = self.panes[p].tab().filter.clone();
         self.set_filter_edit_text(&f);
         self.layout_edits();
@@ -1984,6 +2035,11 @@ impl App {
     }
 
     fn clamp_scroll(&mut self, p: usize) {
+        if let Some(max) = self.start_max_scroll(p) {
+            let tab = self.panes[p].tab_mut();
+            tab.scroll = tab.scroll.clamp(0.0, max);
+            return;
+        }
         let Some((list, grid)) = self.grid(p) else { return };
         let tab = self.panes[p].tab_mut();
         let max = (grid.content(tab.view.len()) - grid.page(list)).max(0.0);
@@ -1991,6 +2047,10 @@ impl App {
     }
 
     fn ensure_visible(&mut self, p: usize) {
+        if self.panes[p].tab().loc == Location::Start {
+            self.clamp_scroll(p);
+            return;
+        }
         let Some((list, grid)) = self.grid(p) else { return };
         let tab = self.panes[p].tab_mut();
         // 스크롤 0 기준 위치 (스크롤 방향으로)
@@ -2182,6 +2242,11 @@ impl App {
             tab.select_only(0);
         }
         tab.scroll = 0.0;
+        // 시작 화면도 글자를 치면 첫 일치 항목에 초점을 두어 Enter로 바로 연다
+        if tab.loc == Location::Start {
+            tab.cursor = 0;
+            self.start_keys = !tab.filter.is_empty();
+        }
         self.ensure_visible(p);
         // 필터 칩이 생기거나 없어지고, 개수 글자 폭이 바뀌니 입력 상자 자리를 다시 잡는다
         self.layout_edits();
@@ -2581,6 +2646,7 @@ impl App {
             show_hidden: self.show_hidden,
             preview: self.preview.is_some(),
             new_tab: self.new_tab_home.clone(),
+            recent: self.recent.clone(),
             side: self.side_pinned.map_or("none", Panel::key).to_string(),
             side_w: self.side_w,
             look: self.look.clone(),
@@ -3066,13 +3132,22 @@ impl App {
         }
         let popups = |a: &App| (a.pal_shown(), a.view_menu.is_some(), a.settings.is_some());
         let before = popups(self);
+        // 시작 화면 카드를 눌러 옮겨 갔으면 두 번째 누름이 새 목록의 항목을 열지 않게 버린다
+        let start = matches!(self.hit(x, y), Hit::Start(..));
         self.press(x, y, dbl);
-        self.swallow_dbl = popups(self) != before;
+        self.swallow_dbl = popups(self) != before || (start && !dbl);
     }
 
     fn press(&mut self, x: f32, y: f32, dbl: bool) {
         let hit = self.hit(x, y);
+        // 시작 화면 항목은 누른 순간의 위치를 연다 (아래의 이름 확정 등으로 목록이 바뀌어도)
+        let start_target = match hit {
+            Hit::Start(p, i) => self.start_target(p, i),
+            _ => None,
+        };
         self.tip_shown = false;
+        // 마우스를 쓰면 시작 화면의 키보드 초점 테두리는 감춘다
+        self.start_keys = false;
         if let Hit::Set(h) = hit {
             self.settings_click(h, x, y);
             return;
@@ -3232,6 +3307,12 @@ impl App {
                 capture(self, Drag::MarqueeArm { pane: p, x, y, additive: ctrl });
             }
             Hit::FilterClear(_) => self.clear_filter(),
+            // 한 번 누르면 연다 (Ctrl이면 새 탭에서)
+            Hit::Start(p, _) if !dbl => {
+                if let Some(loc) = start_target {
+                    self.start_go(p, loc, ctrl, true);
+                }
+            }
             _ => {}
         }
         self.invalidate();
@@ -3312,6 +3393,10 @@ impl App {
             _ => return None,
         };
         let tab = self.panes[p].tab();
+        // 시작 화면에는 셸 메뉴를 띄울 폴더가 없다 (항목 메뉴는 따로)
+        if tab.loc == Location::Start {
+            return None;
+        }
         let paths = if items { tab.selected_paths() } else { Vec::new() };
         Some((p, paths, tab.loc.dir().map(String::from)))
     }
@@ -3333,6 +3418,10 @@ impl App {
             self.side_context_menu(s, x, y);
             return true;
         }
+        if let Hit::Start(p, i) = self.hit(x, y) {
+            self.start_context_menu(p, i, x, y);
+            return true;
+        }
         let Some((pane, paths, dir)) = self.menu_target(x, y) else { return false };
         let pt = self.to_screen(x, y);
         self.pending.push(Deferred::Menu { pane, paths, dir, pt });
@@ -3343,6 +3432,10 @@ impl App {
         if self.settings.is_some() {
             return;
         }
+        let start_target = match self.hit(x, y) {
+            Hit::Start(p, i) => self.start_target(p, i).map(|loc| (p, loc)),
+            _ => None,
+        };
         if self.fav_focus && !matches!(self.hit(x, y), Hit::Side(Side::Fav(_))) {
             self.fav_blur();
         }
@@ -3357,6 +3450,11 @@ impl App {
         match self.hit(x, y) {
             Hit::Side(s @ (Side::Fav(crate::favorites::Row::Item { .. }) | Side::Computer | Side::Drive(_) | Side::Folder(_))) => self.side_open(s, true),
             Hit::Tab(p, t) | Hit::TabClose(p, t) => self.close_tab(p, t),
+            Hit::Start(..) => {
+                if let Some((p, loc)) = start_target {
+                    self.start_go(p, loc, true, false);
+                }
+            }
             Hit::Row(p, vi) => {
                 let tab = self.panes[p].tab();
                 if let Some(path) = tab.entry_at(vi).filter(|e| e.is_dir()).and_then(|e| tab.path_of(e)) {
@@ -3404,6 +3502,7 @@ impl App {
         let p = hit.pane().unwrap_or(self.active);
         // 아이콘 보기는 한 번에 한 줄, 목록 보기는 한 열(가로), 나머지는 세 줄
         let step = match self.grid(p) {
+            _ if self.panes[p].tab().loc == Location::Start => 3.0 * ROW_H,
             Some((_, g)) if g.horiz => g.cell_w,
             Some((_, g)) if matches!(g.cell, CellKind::Tile(_)) => g.cell_h,
             _ => 3.0 * ROW_H,
@@ -3542,6 +3641,10 @@ impl App {
         if let Some(a) = self.keys.find(crate::keys::Combo::now(vk.0)) {
             self.run_action(a);
             self.invalidate();
+            return true;
+        }
+        // 시작 화면: 화살표는 카드·줄 사이를 옮기고, Enter는 고른 곳을 연다
+        if self.panes[self.active].tab().loc == Location::Start && self.start_key(self.active, vk) {
             return true;
         }
         let ctrl = key_down(VK_CONTROL);
@@ -3788,6 +3891,7 @@ impl App {
             Hit::SidePin => (self.side_pin_rect()?, (if self.side_floating() { "고정해 두기" } else { "고정 풀기" }).to_string()),
             Hit::More => (self.more_button(), "도움말·설정".to_string()),
             Hit::PalClose => (self.pal_close_rect(), "검색 닫기".to_string()),
+            Hit::Start(p, i) => return self.start_tip(p, i),
             _ => return None,
         })
     }
@@ -3859,7 +3963,11 @@ impl App {
         let fcount_text = self.filter_count_text(p);
         // 팝업이 열려 있으면 입력 상자(자식 창)는 화면 밖에 있으니 필터 글자를 직접 그린다
         let edit_in_chip = active && !(self.view_menu.is_some() || self.settings.is_some());
-        let App { gfx, panes, types, thumb_failed, .. } = self;
+        // 시작 화면이면 머리글·목록 대신 그릴 카드와 줄
+        let start = self.start_view(p);
+        let folder_icon = if start.is_some() { self.type_icon("", true) } else { -1 };
+        let start_focus = (keyboard_here && self.start_keys).then(|| self.panes[p].tab().cursor);
+        let App { gfx, panes, types, thumb_failed, places, .. } = self;
         let pane = &panes[p];
         let tab = pane.tab();
 
@@ -3948,15 +4056,18 @@ impl App {
         // 이동 화살표는 가운데 크기(12px), 새 폴더·별·보기는 도구 아이콘 크기(16px)
         nav_btn(gfx, g.back, G_BACK, Font::GlyphMid, !tab.back.is_empty(), hover == Hit::Back(p));
         nav_btn(gfx, g.fwd, G_FWD, Font::GlyphMid, !tab.fwd.is_empty(), hover == Hit::Fwd(p));
-        nav_btn(gfx, g.up, G_UP, Font::GlyphMid, tab.loc != Location::Computer, hover == Hit::Up(p));
-        nav_btn(gfx, g.new_folder, G_NEW_FOLDER, Font::Glyph, tab.loc.dir().is_some(), hover == Hit::NewFolder(p));
-        // 보기 방식: 지금 보기 그림과 아래 화살표 (누르면 보기 메뉴)
-        if hover == Hit::View(p) || view_menu_open {
-            gfx.fill_round(g.view, 6.0, t.hover);
+        nav_btn(gfx, g.up, G_UP, Font::GlyphMid, matches!(tab.loc, Location::Dir(_)), hover == Hit::Up(p));
+        // 시작 화면에는 새 폴더·보기 단추가 없다
+        if start.is_none() {
+            nav_btn(gfx, g.new_folder, G_NEW_FOLDER, Font::Glyph, tab.loc.dir().is_some(), hover == Hit::NewFolder(p));
+            // 보기 방식: 지금 보기 그림과 아래 화살표 (누르면 보기 메뉴)
+            if hover == Hit::View(p) || view_menu_open {
+                gfx.fill_round(g.view, 6.0, t.hover);
+            }
+            let view_glyph = if matches!(pane.view, ViewMode::Huge | ViewMode::Large | ViewMode::Medium) { G_GRID } else { G_LIST };
+            gfx.glyph(view_glyph, R::new(g.view.l + 2.0, g.view.t, g.view.l + 26.0, g.view.b), false, t.text);
+            gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - 16.0, g.view.t + 1.0, g.view.r - 4.0, g.view.b + 1.0), true, t.faint);
         }
-        let view_glyph = if matches!(pane.view, ViewMode::Huge | ViewMode::Large | ViewMode::Medium) { G_GRID } else { G_LIST };
-        gfx.glyph(view_glyph, R::new(g.view.l + 2.0, g.view.t, g.view.l + 26.0, g.view.b), false, t.text);
-        gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - 16.0, g.view.t + 1.0, g.view.r - 4.0, g.view.b + 1.0), true, t.faint);
 
         // 경로: 상자 없이 글자만. 경로 위에 올리면 옅은 바탕(빈 곳을 누르면 경로 입력), 조각에 올리면 그 조각이 한 단계 진하게
         if edit_mode == EditMode::Address(p) {
@@ -3994,6 +4105,28 @@ impl App {
                 }
             }
             gfx.unclip();
+        }
+
+        // 테두리: 모든 칸이 같은 옅은 선. 끌어 놓을 대상(파일, 다른 칸에서 끌어 온 탭)일 때만 강조 색으로.
+        // 고대비에서는 모든 칸을 2px로 두고 활성 칸만 포커스 색으로 바꿔 두께는 그대로 둔다
+        let tab_target = tab_drop.is_some_and(|(q, _)| q == p) && dragged_tab.is_some_and(|(from, _)| from != p);
+        let dropping = tab_target || matches!(drop_hover, Some((dp, None)) if dp == p);
+        let border_w = if t.high_contrast || dropping { 2.0 } else { 1.0 };
+        let border_c = match () {
+            _ if dropping => t.accent,
+            _ if t.high_contrast && active && multi => t.focus,
+            _ => t.pane_border,
+        };
+
+        // 시작 화면: 머리글·목록 자리에 카드와 줄
+        if let Some(sv) = &start {
+            let hovered = match hover {
+                Hit::Start(hp, i) if hp == p => Some(i),
+                _ => None,
+            };
+            sv.paint(gfx, &t, places, folder_icon, hovered, start_focus);
+            gfx.stroke_round(r.inset(border_w / 2.0, border_w / 2.0), RADIUS, border_c, border_w);
+            return;
         }
 
         // 열 머리글
@@ -4193,17 +4326,7 @@ impl App {
             gfx.unclip();
         }
 
-        // 테두리: 모든 칸이 같은 옅은 선. 끌어 놓을 대상(파일, 다른 칸에서 끌어 온 탭)일 때만 강조 색으로.
-        // 고대비에서는 모든 칸을 2px로 두고 활성 칸만 포커스 색으로 바꿔 두께는 그대로 둔다
-        let tab_target = tab_drop.is_some_and(|(q, _)| q == p) && dragged_tab.is_some_and(|(from, _)| from != p);
-        let dropping = tab_target || matches!(drop_hover, Some((dp, None)) if dp == p);
-        let w = if t.high_contrast || dropping { 2.0 } else { 1.0 };
-        let color = match () {
-            _ if dropping => t.accent,
-            _ if t.high_contrast && active && multi => t.focus,
-            _ => t.pane_border,
-        };
-        gfx.stroke_round(r.inset(w / 2.0, w / 2.0), RADIUS, color, w);
+        gfx.stroke_round(r.inset(border_w / 2.0, border_w / 2.0), RADIUS, border_c, border_w);
     }
 }
 
@@ -4301,6 +4424,7 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         Deferred::Settings { ctl, index, pt } => settings_ui::run_deferred(hwnd, ctl, index, pt),
         Deferred::PalMenu { pt } => palette::show_pal_menu(hwnd, pt),
         Deferred::MoreMenu { pt } => with_menu(|| sidebar::show_more_menu(hwnd, pt)),
+        Deferred::StartMenu { pane, item, loc, pt } => with_menu(|| start::show_start_menu(hwnd, pane, item, loc, pt)),
     }
 }
 

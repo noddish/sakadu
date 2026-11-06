@@ -103,18 +103,18 @@ enum Slot {
 
 /// 드라이브 한 개
 pub(super) struct Drive {
-    name: String,
-    path: String,
-    icon: i32,
-    free: u64,
-    total: u64,
+    pub(super) name: String,
+    pub(super) path: String,
+    pub(super) icon: i32,
+    pub(super) free: u64,
+    pub(super) total: u64,
 }
 
 /// 뒤에서 읽어 오는 "내 PC"·드라이브 목록
 pub struct Places {
     /// 시스템 이미지 목록의 "내 PC" 아이콘. 읽기 전이나 없으면 -1 (글리프로 대신)
-    computer_icon: i32,
-    drives: Vec<Drive>,
+    pub(super) computer_icon: i32,
+    pub(super) drives: Vec<Drive>,
 }
 
 impl Default for Places {
@@ -768,9 +768,9 @@ impl App {
         if std::mem::take(&mut self.places_again) {
             self.refresh_places();
         }
-        // 드라이브 수가 바뀌면 아래 줄들이 밀린다: 이름 바꾸기 상자와 마우스 아래 줄을 다시 맞춘다
+        // 드라이브 수가 바뀌면 아래 줄들이 밀린다: 이름 바꾸기 상자와 마우스 아래 줄을 다시 맞춘다 (시작 화면의 드라이브 카드도)
         self.side_clamp_scroll();
-        self.refresh_hover();
+        self.start_changed();
         if matches!(self.edit_mode, EditMode::FavRename(_)) {
             self.layout_edits();
         }
@@ -780,7 +780,7 @@ impl App {
     // ---------- 그리기 ----------
 
     /// 확장자·폴더별 아이콘 (형식 캐시)
-    fn type_icon(&mut self, ext: &str, dir: bool) -> i32 {
+    pub(super) fn type_icon(&mut self, ext: &str, dir: bool) -> i32 {
         let key = if dir { "\\dir".to_string() } else { ext.to_string() };
         self.types.entry(key).or_insert_with(|| shell::type_info(ext, dir)).1
     }
