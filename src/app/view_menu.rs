@@ -1,5 +1,5 @@
 //! 보기 방식 메뉴: 경로 줄 오른쪽 보기 버튼을 누르면 버튼 아래에 뜨는 메뉴.
-//! Windows 기본 메뉴 대신 검색 팔레트와 같은 결(그림자·둥근 모서리·테마 색)로 직접 그린다
+//! Windows 기본 메뉴 대신 떠 있는 패널과 같은 결(그림자·둥근 모서리·테마 색)로 직접 그린다
 
 use super::*;
 
@@ -51,7 +51,8 @@ impl App {
             return;
         }
         self.fav_blur();
-        self.close_palette();
+        // 검색 패널은 두고 키보드만 칸으로 (보기를 바꾸고 결과로 돌아갈 수 있게)
+        self.pal_blur();
         self.end_edits_for_click();
         self.active = p;
         let sel = ViewMode::ALL.iter().position(|v| *v == self.panes[p].view).unwrap_or(0);

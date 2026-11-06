@@ -15,6 +15,7 @@ const ZOOMS: [u32; 5] = [90, 100, 110, 125, 150];
 const THEMES: [(&str, &str); 3] = [("system", "시스템"), ("light", "밝게"), ("dark", "어둡게")];
 /// 글자 표시 (gfx::TextLook의 키)
 const TEXT_LOOKS: [(&str, &str); 3] = [("soft", "부드럽게"), ("sharp", "선명하게 (컬러)"), ("gray", "선명하게 (회색)")];
+const DATE_STYLES: [(&str, &str); 2] = [("relative", "오늘·어제"), ("full", "날짜와 시각")];
 const G_GEAR: u16 = 0xE713;
 const G_COLOR: u16 = 0xE790;
 const G_KEYBOARD: u16 = 0xE765;
@@ -54,6 +55,7 @@ pub enum Ctl {
     Font,
     Zoom,
     Text,
+    Dates,
     Service,
     Global,
     Key(Action),
@@ -144,6 +146,7 @@ impl App {
 
     pub(super) fn open_settings(&mut self, page: Page) {
         self.close_palette();
+        self.close_peek();
         self.fav_blur();
         if self.edit_mode != EditMode::None {
             self.cancel_edit();
@@ -208,6 +211,7 @@ impl App {
         match s.page {
             Page::General => {
                 let new_tab = match self.new_tab_home.as_str() {
+                    session::NEW_TAB_START => "시작 화면".to_string(),
                     "::computer" | "" => "내 PC".to_string(),
                     session::NEW_TAB_SAME => "지금 탭과 같은 폴더".to_string(),
                     p => util::file_name(p).to_string(),
@@ -244,6 +248,7 @@ impl App {
                 let zoom = ZOOMS.iter().position(|z| *z == self.look.zoom).unwrap_or(1);
                 let font = if self.look.font.is_empty() { "기본 (Segoe UI)".to_string() } else { self.look.font.clone() };
                 let text = TEXT_LOOKS.iter().position(|t| t.0 == self.look.text).unwrap_or(2);
+                let dates = DATE_STYLES.iter().position(|d| d.0 == self.look.dates).unwrap_or(0);
                 (
                     "화면",
                     vec![Card {
@@ -254,6 +259,7 @@ impl App {
                             row("글꼴", "목록·메뉴·검색 창에 쓰는 글꼴", Widget::Drop(font, Ctl::Font)),
                             row("글자 표시", "흐리면 선명하게, 색 번짐이 거슬리면 회색", Widget::Seg(TEXT_LOOKS.iter().map(|t| t.1.to_string()).collect(), text, Ctl::Text)),
                             row("크기", "화면 전체를 크게 또는 작게", Widget::Seg(ZOOMS.iter().map(|z| format!("{z}%")).collect(), zoom, Ctl::Zoom)),
+                            row("날짜", "목록의 수정한 날짜를 짧게(오늘 10:24·11월 3일) 또는 그대로", Widget::Seg(DATE_STYLES.iter().map(|d| d.1.to_string()).collect(), dates, Ctl::Dates)),
                         ],
                     }],
                 )
@@ -322,7 +328,8 @@ impl App {
                                 tip("또는", "사이에 |를 넣으면 그중 하나라도 · 견적 | 계약서 ·여러 줄을 붙여넣으면 한 번에".into()),
                                 tip("경로로 찾기", "끝에 \\를 붙이면 경로에서 찾아요 · 업무\\".into()),
                                 tip("여러 개 다루기", "Ctrl·Shift+클릭으로 고르고 Enter 모두 열기 · Ctrl+C 파일 복사".into()),
-                                tip("위치 열기", "Ctrl+Enter · 새 탭에서 그 폴더를 열고 파일을 골라 둬요".into()),
+                                tip("위치 열기", "Ctrl+Enter · 지금 칸에서 그 폴더를 열고 파일을 골라 둬요 · Shift+Enter는 새 탭".into()),
+                                tip("패널", "결과는 두고 칸에서 일해요 · Esc는 키보드만 칸으로 · 현재 폴더 칩은 지금 칸 아래만".into()),
                             ],
                         },
                         Card {
@@ -331,8 +338,11 @@ impl App {
                                 tip("걸러 보기", "목록에서 글자를 치면 지금 폴더에서 바로 걸러요 · Esc로 풀기".into()),
                                 tip("여러 개 고르기", "빈 곳이나 날짜 칸에서 끌면 네모 상자로 · Ctrl을 누르면 더하기".into()),
                                 tip("탭 옮기기", "탭을 끌어 순서를 바꾸거나 다른 칸으로 · Ctrl+Tab 다음 탭".into()),
+                                tip("새 탭", format!("{} · 즐겨찾기 폴더·최근 위치·드라이브에서 고르기 · 글자를 치고 Enter로 바로", k(Action::NewTab))),
                                 tip("칸 이동", format!("Tab · Shift+Tab, 칸 나누기는 {}", layout_keys(&self.keys))),
                                 tip("되돌리기", format!("{} · 이름 바꾸기·이동·복사·휴지통 삭제를 마지막 것부터", k(Action::Undo))),
+                                tip("작업 공간", "작업 줄 왼쪽 단추 · 지금 화면(칸·탭·패널·미리 보기·검색어)을 이름 붙여 저장하고 바꿔요".into()),
+                                tip("미리 보기 고정", format!("{}로 연 미리 보기의 핀 · 다른 파일을 골라도 그 파일을 계속 보고, 같은 드라이브 안에서 이름이 바뀌거나 옮겨져도 따라가요", k(Action::Preview))),
                             ],
                         },
                         Card {
@@ -551,6 +561,10 @@ impl App {
             Ctl::Text => {
                 self.look.text = TEXT_LOOKS[i.min(TEXT_LOOKS.len() - 1)].0.to_string();
                 self.apply_look(LookPart::Text);
+            }
+            Ctl::Dates => {
+                self.look.dates = DATE_STYLES[i.min(DATE_STYLES.len() - 1)].0.to_string();
+                self.save_session();
             }
             Ctl::Tray => {
                 let on = self.settings.as_ref().is_some_and(|s| s.tray);
@@ -807,7 +821,7 @@ impl App {
                     } else if hot(*hit) {
                         g.fill_round(*r, 7.0, t.hover);
                     }
-                    // 아이콘은 글자와 어울리는 보통 크기(14px). 작은 크기는 글자 옆에서 흐릿하게 보인다
+                    // 아이콘은 글자와 어울리는 도구 아이콘 크기(16px). 작은 크기는 글자 옆에서 흐릿하게 보인다
                     let fg = if *on { t.accent } else { t.dim };
                     if compact {
                         g.glyph(*glyph, *r, false, fg);
@@ -900,12 +914,13 @@ impl App {
             (VK_UP, Some(i)) => (i > 0 && !in_side(i - 1)).then(|| i - 1).or(Some(i)),
             (VK_DOWN, Some(i)) => Some((i + 1).min(stops.len() - 1)),
             // 묶음 안에서는 옆 칸으로, 내용에서 ←는 분류로, 분류에서 →는 내용으로
-            (VK_LEFT | VK_RIGHT, Some(i)) if matches!(stops[i].0, SetHit::Ctl(Ctl::Theme | Ctl::Accent | Ctl::Zoom | Ctl::Text, _)) => {
+            (VK_LEFT | VK_RIGHT, Some(i)) if matches!(stops[i].0, SetHit::Ctl(Ctl::Theme | Ctl::Accent | Ctl::Zoom | Ctl::Text | Ctl::Dates, _)) => {
                 let SetHit::Ctl(ctl, k) = stops[i].0 else { return true };
                 let n = match ctl {
                     Ctl::Theme => THEMES.len(),
                     Ctl::Accent => ACCENTS.len(),
                     Ctl::Text => TEXT_LOOKS.len(),
+                    Ctl::Dates => DATE_STYLES.len(),
                     _ => ZOOMS.len(),
                 };
                 let k = if vk == VK_LEFT { k.checked_sub(1) } else { (k + 1 < n).then_some(k + 1) };
@@ -1044,7 +1059,7 @@ fn open_url(hwnd: HWND, target: &str) {
 }
 
 /// 항목들을 체크 표시와 함께 띄우고 고른 번호(1부터, 없으면 0)
-fn pick_menu(hwnd: HWND, pt: POINT, items: &[(String, bool)]) -> usize {
+pub(super) fn pick_menu(hwnd: HWND, pt: POINT, items: &[(String, bool)]) -> usize {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return 0 };
         for (i, (label, checked)) in items.iter().enumerate() {
@@ -1059,8 +1074,12 @@ fn pick_menu(hwnd: HWND, pt: POINT, items: &[(String, bool)]) -> usize {
 
 fn new_tab_menu(hwnd: HWND, pt: POINT) {
     let Some((home, dir)) = with_app(|a| (a.new_tab_home.clone(), a.panes[a.active].tab().loc.dir().map(str::to_string))) else { return };
-    let custom = Some(home.as_str()).filter(|h| *h != "::computer" && *h != session::NEW_TAB_SAME && !h.is_empty()).map(str::to_string);
-    let mut items = vec![("내 PC".to_string(), custom.is_none() && home != session::NEW_TAB_SAME), ("지금 탭과 같은 폴더".to_string(), home == session::NEW_TAB_SAME)];
+    let custom = Some(home.as_str()).filter(|h| ![session::NEW_TAB_START, "::computer", session::NEW_TAB_SAME, ""].contains(h)).map(str::to_string);
+    let mut items = vec![
+        ("시작 화면".to_string(), home == session::NEW_TAB_START),
+        ("내 PC".to_string(), home == "::computer" || home.is_empty()),
+        ("지금 탭과 같은 폴더".to_string(), home == session::NEW_TAB_SAME),
+    ];
     if let Some(c) = &custom {
         items.push((c.clone(), true));
     }
@@ -1071,8 +1090,9 @@ fn new_tab_menu(hwnd: HWND, pt: POINT) {
     let cmd = pick_menu(hwnd, pt, &items);
     // 정해 둔 폴더 줄은 이미 고른 것이라 바꿀 것이 없다
     let home = match cmd {
-        1 => "::computer".to_string(),
-        2 => session::NEW_TAB_SAME.to_string(),
+        1 => session::NEW_TAB_START.to_string(),
+        2 => "::computer".to_string(),
+        3 => session::NEW_TAB_SAME.to_string(),
         n if n == items.len() && dir.is_some() => dir.unwrap_or_default(),
         _ => return,
     };

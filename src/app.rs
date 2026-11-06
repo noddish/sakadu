@@ -35,12 +35,14 @@ mod settings_ui;
 mod view_menu;
 mod caption;
 mod sidebar;
+mod start;
+mod workspace_ui;
 use fav_ui::G_STAR;
 use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
-use sidebar::{SIDEBAR_W, Side};
+use sidebar::{BAR_W, Fold, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_ANIM, TIMER_SIDE_CLOSE};
 use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
-pub use preview::{TextReady, unload_handler};
+pub use preview::{PreviewMsg, unload_handler};
 
 /// 칸 영역 위 작업 줄 (칸 나누기·숨김·미리 보기·창 단추). 빈 곳은 창을 끄는 제목 줄 역할도 한다
 const WORKBAR_H: f32 = 44.0;
@@ -62,7 +64,7 @@ pub const ID_FILTER: i32 = 100;
 pub const ID_RENAME: i32 = 101;
 pub const ID_ADDR: i32 = 102;
 pub const ID_SEARCH: i32 = 103;
-/// 전역 단축키 (Ctrl+Alt+Space): 어디서든 검색 팔레트
+/// 전역 단축키 (Ctrl+Alt+Space): 어디서든 검색 패널
 pub const HOTKEY_SEARCH: i32 = 1;
 /// 다른 Sakadu 프로세스가 WM_COPYDATA로 넘기는 "이 경로를 열어 달라" 요청
 pub const COPYDATA_OPEN: usize = 0x5150_0001;
@@ -74,6 +76,8 @@ pub const QUIT_BUSY: isize = 2;
 const ID_OPEN_TAB: u32 = shell::MENU_CUSTOM;
 const ID_ADD_FAV: u32 = shell::MENU_CUSTOM + 1;
 const TIMER_REFRESH: usize = 10;
+/// 짧은 날짜(방금·오늘·어제)를 시간이 흐르는 대로 다시 그린다
+const TIMER_DATES: usize = 49;
 /// 작업 줄·사이드바 단추 말풍선을 띄우기까지
 const TIMER_TIP: usize = 42;
 /// 칸 아래 알림(flash)을 지우기까지
@@ -99,6 +103,7 @@ const G_LIST: u16 = 0xE8FD;
 const G_GRID: u16 = 0xF0E2;
 const G_CHEVRON_DOWN: u16 = 0xE70D;
 const G_SETTINGS: u16 = 0xE713;
+const G_MORE: u16 = 0xE712;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layout {
@@ -161,22 +166,43 @@ enum Hit {
     /// 칩 줄 필터 칩의 × (필터 지우기)
     FilterClear(usize),
     Pane(usize),
-    /// 사이드바 가운데 목록 (즐겨찾기·드라이브·검색 폴더)
+    /// 왼쪽 패널 안의 줄·단추 (즐겨찾기·드라이브·검색 폴더)
     Side(Side),
-    /// 검색 창의 "이 폴더도 검색하기" 버튼
+    /// 아이콘 막대의 패널 아이콘
+    Bar(Panel),
+    /// 패널 머리의 핀 (고정·풀기)
+    SidePin,
+    /// 패널 안의 빈 곳 (떠 있는 패널 아래 칸을 누르지 않게)
+    SidePanel,
+    /// 고정한 패널의 오른쪽 가장자리 (너비 조절)
+    SideResize,
+    /// 작업 줄 오른쪽 `…` (도움말·설정·정보 메뉴)
+    More,
+    /// 검색 패널의 "이 폴더도 검색하기" 버튼
     PalAddFolder,
     SearchButton,
     PalRow(usize),
     PalInstall,
-    PalPanel,
+    /// 검색 패널 머리의 닫기
+    PalClose,
+    /// 검색 범위 칩 (false: PC 전체, true: 현재 폴더)
+    PalScope(bool),
     PreviewButton,
     SettingsButton,
-    /// 사이드바 아래쪽 도움말
-    HelpButton,
     /// 설정 창 안
     Set(settings_ui::SetHit),
     /// 경로 오른쪽 끝의 즐겨찾기 별
     Star(usize),
+    /// 새 탭 시작 화면의 카드·줄 (칸, 항목)
+    Start(usize, usize),
+    /// 미리 보기 머리의 핀 (파일 고정·풀기)
+    PreviewPin,
+    /// 미리 보기 머리의 열기 (기본 앱으로)
+    PreviewOpen,
+    /// 미리 보기의 고정 칩 (누르면 핀과 같다)
+    PreviewChip,
+    /// 작업 줄 왼쪽의 작업 공간 단추 (메뉴)
+    Workspace,
 }
 
 impl Hit {
@@ -184,7 +210,8 @@ impl Hit {
         use Hit::*;
         match self {
             Tab(p, _) | TabClose(p, _) | TabAdd(p) | TabStrip(p) | Back(p) | Fwd(p) | Up(p) | Crumb(p, _) | CrumbEmpty(p) | Star(p) | View(p)
-            | Header(p, _) | HeaderResize(p, _) | Row(p, _) | ListEmpty(p) | Thumb(p) | Track(p) | FilterClear(p) | NewFolder(p) | Pane(p) => Some(p),
+            | Header(p, _) | HeaderResize(p, _) | Row(p, _) | ListEmpty(p) | Thumb(p) | Track(p) | FilterClear(p) | NewFolder(p) | Pane(p)
+            | Start(p, _) => Some(p),
             _ => Option::None,
         }
     }
@@ -200,6 +227,8 @@ enum Drag {
     /// 사이드바 즐겨찾기 줄을 눌렀다. 조금 움직이면 FavMove
     FavPress { row: crate::favorites::Row, y: f32 },
     FavMove { from: crate::favorites::Row, y: f32 },
+    /// 고정한 패널의 오른쪽 가장자리를 끌어 너비를 바꾸는 중
+    SideW { start_x: f32, start_w: f32 },
     /// 탭을 눌렀다. 조금 움직이면 TabMove
     TabPress { pane: usize, tab: usize, x: f32, y: f32 },
     /// 탭을 끄는 중. (x, y)는 지금 포인터 위치
@@ -217,6 +246,8 @@ enum EditMode {
     Rename(usize),
     /// 즐겨찾기 표시 이름 바꾸기
     FavRename(crate::favorites::Row),
+    /// 작업 줄의 작업 공간 이름
+    WorkspaceRename,
 }
 
 struct RenameCtx {
@@ -282,6 +313,12 @@ pub enum Deferred {
     Settings { ctl: settings_ui::Ctl, index: usize, pt: POINT },
     /// 검색 결과 오른쪽 버튼 메뉴
     PalMenu { pt: POINT },
+    /// 작업 줄 `…` 메뉴 (도움말·설정·정보)
+    MoreMenu { pt: POINT },
+    /// 새 탭 시작 화면 항목의 메뉴. 위치는 메뉴를 열 때 정해 둔다
+    StartMenu { pane: usize, item: start::StartItem, loc: Location, pt: POINT },
+    /// 작업 공간 메뉴 (저장한 작업 공간·새로 저장·이름 바꾸기·지우기)
+    WorkspaceMenu { pt: POINT },
 }
 
 /// 끌어 놓을 곳 (drop_dir_at)
@@ -296,6 +333,8 @@ pub struct Listed {
     tab: u64,
     generation: u64,
     result: Result<Vec<Entry>, String>,
+    /// 열지 못한 폴더가 지워졌거나 옮겨진 것 (그 위 폴더는 있다). 네트워크가 끊겼거나 USB를 뽑아 잠깐 못 연 것과 가른다
+    gone: bool,
 }
 
 pub struct IconsReady {
@@ -342,8 +381,22 @@ pub struct App {
     fav_focus: bool,
     /// 사이드바 즐겨찾기에서 고른 줄 (favs.rows() 번호)
     fav_sel: usize,
-    /// 사이드바 가운데 목록의 스크롤
+    /// 보이는 패널 가운데 목록의 스크롤
     side_scroll: f32,
+    /// 패널마다 기억해 둔 스크롤 (Panel 순서). 다른 패널이 떴다 닫혀도 자리를 잃지 않게
+    side_scroll_memo: [f32; Panel::ALL.len()],
+    /// 고정한 패널 (칸을 밀어낸다). 세션에 저장
+    side_pinned: Option<Panel>,
+    /// 아이콘에 머물러 칸 위에 떠 있는 패널 (마우스가 떠나거나 위치를 고르면 닫힌다)
+    side_peek: Option<Panel>,
+    /// 패널 너비 (DIP)
+    side_w: f32,
+    /// 머무르면 패널을 띄울 아이콘 (TIMER_BAR_HOVER를 기다리는 중)
+    bar_arm: Option<Panel>,
+    /// 떠 있는 패널 밖으로 나가 닫기(TIMER_SIDE_CLOSE)를 기다리는 중
+    peek_leaving: bool,
+    /// 패널·작업 줄에서 연 팝업 메뉴가 떠 있는 동안 (그 위로 간 마우스를 패널 밖으로 보지 않게)
+    menu_open: bool,
     /// 파일을 끌어 사이드바에 놓으려는 자리 (즐겨찾기 쪽이면 Side::FavEmpty)
     side_drop: Option<Side>,
     /// 사이드바의 내 PC·드라이브 (뒤에서 읽어 온다)
@@ -352,8 +405,6 @@ pub struct App {
     places_again: bool,
     /// (폴더, 디스크 검색 밖인가): 드라이브 종류는 폴더가 바뀔 때만 묻는다
     outside_cache: RefCell<(String, bool)>,
-    /// 오른쪽 버튼으로 검색 창을 닫았다: 그 버튼을 떼는 것은 무시한다
-    swallow_rbutton_up: bool,
     /// 앞 누름이 팝업을 열거나 닫았다: 이어지는 두 번 클릭 누름은 무시한다
     swallow_dbl: bool,
     /// 필터 상자를 마지막으로 둔 자리 (픽셀 x, y, 너비, 높이)
@@ -361,7 +412,12 @@ pub struct App {
     /// 잠깐 강조할 즐겨찾기 줄 (이미 있는 것을 다시 넣으려 할 때. 키보드는 옮기지 않는다)
     fav_flash: Option<crate::favorites::Row>,
     search_edit: HWND,
-    pal_open: bool,
+    /// 키보드가 검색 상자에 있는가 (검색 패널이 보일 때)
+    pal_focus: bool,
+    /// 검색 범위: 지금 칸의 폴더 아래만
+    pal_here: bool,
+    /// 검색 패널을 열기 전에 고정해 두었던 패널 (검색을 닫으면 돌아간다)
+    side_before_search: Option<Panel>,
     pal_results: Vec<(bool, String)>,
     pal_sel: usize,
     /// 검색 결과 중 골라 둔 것 (Ctrl·Shift+클릭, Shift+↑↓). 결과와 같은 순서
@@ -400,13 +456,27 @@ pub struct App {
     marquee_base: Vec<bool>,
     /// 새 탭을 열 위치 (세션 형식, session::NEW_TAB_SAME이면 지금 탭과 같은 폴더)
     new_tab_home: String,
+    /// 시작 화면의 최근 위치 (최근 것이 앞, 세션에 저장)
+    recent: Vec<String>,
+    /// 시작 화면에서 키보드를 쓰기 시작했는지 (초점 테두리를 보일지)
+    start_keys: bool,
+    /// 이름 붙여 저장해 둔 화면들과 지금 작업 공간
+    workspaces: crate::workspaces::Workspaces,
+    /// 바로가기 패널에서 접어 둔 구역 (Fold 순서)
+    folded: [bool; 2],
+    /// 시작할 때 세션 대신 지금 작업 공간의 화면으로 열지 (세션이 다른 작업 공간·예전 빌드의 것이면)
+    ws_restore: bool,
+    /// 패널이 펼쳐지기 시작한 때 (움직이는 중일 때만)
+    side_anim: Option<std::time::Instant>,
+    /// 패널 머리의 작은 단추를 마지막으로 그렸는지. 그려지지 않은 단추는 누르지 않는다 (터치로 탭하면 보이기 전에 눌리므로)
+    side_minis_shown: bool,
     /// 단추 말풍선이 떠 있는지
     tip_shown: bool,
     /// 설정 창 (열려 있으면 창 전체를 덮는다)
     settings: Option<settings_ui::Settings>,
     /// Ctrl+F 검색에 넣은 폴더(공유폴더 등 디스크 인덱스 밖)
     folders: crate::folders::Folders,
-    /// 검색 창을 열 때 보이는 칸에 열려 있던, 아직 검색에 넣지 않은 공유폴더·USB 폴더 (결과가 없으면 넣기 버튼)
+    /// 검색 패널을 열 때 보이는 칸에 열려 있던, 아직 검색에 넣지 않은 공유폴더·USB 폴더 (결과가 없으면 넣기 버튼)
     pal_outside: Option<String>,
 }
 
@@ -743,7 +813,11 @@ struct Crumb {
 
 /// 경로 표시줄 조각. 공간이 모자라면 앞쪽을 "…"로 접는다
 fn crumbs(gfx: &Gfx, area: R, loc: &Location) -> Vec<Crumb> {
-    let mut items = vec![("내 PC".to_string(), Location::Computer)];
+    // 시작 화면은 "새 탭" 한 조각
+    let mut items = match loc {
+        Location::Start => vec![(loc.title(), Location::Start)],
+        _ => vec![("내 PC".to_string(), Location::Computer)],
+    };
     if let Location::Dir(path) = loc {
         for (label, full) in util::segments(path) {
             items.push((label, Location::Dir(full)));
@@ -780,6 +854,7 @@ fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
     let Location::Dir(cur) = current else { return None };
     match ancestor {
         Location::Computer => Some(util::segments(cur).first()?.1.clone()),
+        Location::Start => None,
         Location::Dir(a) => {
             if cur.len() <= a.len() || !util::eq_path(&cur[..a.len()], a) {
                 return None;
@@ -789,18 +864,6 @@ fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
     }
 }
 
-/// 칸 나누기 버튼 5개를 한 덩어리로 담는 판. 작업 줄 왼쪽 끝, 칸과 같은 왼쪽 선
-fn layout_pill() -> R {
-    let l = SIDEBAR_W + MARGIN;
-    R::new(l, 7.0, l + 6.0 + 5.0 * 32.0, 37.0)
-}
-
-fn layout_buttons() -> [R; 5] {
-    std::array::from_fn(|i| {
-        let l = SIDEBAR_W + MARGIN + 3.0 + i as f32 * 32.0;
-        R::new(l, 10.0, l + 32.0, 34.0)
-    })
-}
 
 fn type_info(types: &mut HashMap<String, (String, i32)>, e: &Entry) -> (String, i32) {
     let key = if e.is_dir() { "\\dir".to_string() } else { e.ext_lower() };
@@ -880,6 +943,8 @@ fn spawn_listing(hwnd: HWND, tab: u64, generation: u64, loc: Location) {
         let _com = shell::ComInit::sta();
         let result = match &loc {
             Location::Computer => Ok(list_computer()),
+            // 시작 화면은 읽을 것이 없다 (즐겨찾기·최근 위치·드라이브는 앱이 이미 들고 있다)
+            Location::Start => Ok(Vec::new()),
             Location::Dir(d) => list_dir(d),
         };
         let special: Vec<(u32, String)> = match (&result, &loc) {
@@ -891,7 +956,11 @@ fn spawn_listing(hwnd: HWND, tab: u64, generation: u64, loc: Location) {
                 .collect(),
             _ => Vec::new(),
         };
-        post(owner.get(), WM_APP_LISTED, Box::new(Listed { tab, generation, result }));
+        let gone = match (&result, &loc) {
+            (Err(_), Location::Dir(d)) => !shell::exists(d) && util::parent(d).is_some_and(|p| shell::is_dir(&p)),
+            _ => false,
+        };
+        post(owner.get(), WM_APP_LISTED, Box::new(Listed { tab, generation, result, gone }));
         if !special.is_empty() {
             let icons = special.into_iter().map(|(i, p)| (i, shell::icon_for_path(&p))).collect();
             post(owner.get(), WM_APP_ICONS, Box::new(IconsReady { tab, generation, icons }));
@@ -971,6 +1040,11 @@ impl App {
             panes.push(Pane { tabs, active, sort, cols, view });
         }
         let layout = sess.as_ref().map(|s| Layout::ALL[(s.layout as usize).min(4)]).unwrap_or(Layout::TwoV);
+        // 처음 쓰면(세션 없음) 드라이브가 보이는 바로가기 패널을 고정해 둔다. 예전 세션은 session::parse가 즐겨찾기로 둔다
+        let (side_pinned, side_w) = match &sess {
+            Some(s) => (Panel::from_key(&s.side), s.side_w),
+            None => (Some(Panel::Places), session::SIDE_W_DEFAULT),
+        };
         let mut rc = RECT::default();
         unsafe {
             let _ = GetClientRect(hwnd, &mut rc);
@@ -1027,17 +1101,25 @@ impl App {
             fav_focus: false,
             fav_sel: 0,
             side_scroll: 0.0,
+            side_scroll_memo: [0.0; Panel::ALL.len()],
+            side_pinned,
+            side_peek: None,
+            side_w,
+            bar_arm: None,
+            peek_leaving: false,
+            menu_open: false,
             side_drop: None,
             places: sidebar::Places::default(),
             places_busy: false,
             places_again: false,
             outside_cache: RefCell::new((String::new(), false)),
-            swallow_rbutton_up: false,
             swallow_dbl: false,
             filter_placed: Cell::new((0, 0, 0, 0)),
             fav_flash: None,
             search_edit,
-            pal_open: false,
+            pal_focus: false,
+            pal_here: false,
+            side_before_search: None,
             pal_results: Vec::new(),
             pal_sel: 0,
             pal_picked: Vec::new(),
@@ -1058,7 +1140,14 @@ impl App {
             tray: None,
             stale: [false; 4],
             marquee_base: Vec::new(),
-            new_tab_home: sess.as_ref().map_or_else(|| "::computer".to_string(), |s| s.new_tab.clone()),
+            new_tab_home: sess.as_ref().map_or_else(|| session::NEW_TAB_START.to_string(), |s| s.new_tab.clone()),
+            recent: sess.as_ref().map(|s| s.recent.clone()).unwrap_or_default(),
+            start_keys: false,
+            workspaces: crate::workspaces::load(),
+            folded: Fold::ALL.map(|f| sess.as_ref().is_some_and(|s| s.folded.iter().any(|k| k == f.key()))),
+            side_anim: None,
+            side_minis_shown: false,
+            ws_restore: false,
             tip_shown: false,
             settings: None,
             folders: crate::folders::Folders::start(),
@@ -1073,11 +1162,22 @@ impl App {
         app.apply_edit_font();
         app.apply_window_theme();
         app.refresh_places();
+        // 지난번 검색어·범위와 미리 보기에 고정해 둔 파일
+        if let Some(s) = &sess {
+            app.set_search_text(&s.query);
+            app.pal_here = s.scope_here;
+            app.preview_restore_pin(s.pin.as_deref(), s.pin_id);
+        }
+        app.ws_restore = app.workspaces.current.is_some() && sess.as_ref().and_then(|s| s.ws.as_deref()) != app.workspaces.current_name();
         Ok(app)
     }
 
     /// 메인 창을 표시한 뒤에 할 초기화: 자동 완성, 드롭 대상, 첫 목록 불러오기, 변경 알림
     pub fn init(&mut self) {
+        self.restore_workspace_if_needed();
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_DATES, 60_000, None);
+        }
         unsafe {
             let _ = SHAutoComplete(self.addr_edit, SHACF_FILESYS_DIRS | SHACF_AUTOSUGGEST_FORCE_ON | SHACF_AUTOAPPEND_FORCE_OFF);
             let target: IDropTarget = crate::droptarget::DropTarget::new(self.hwnd).into();
@@ -1098,11 +1198,21 @@ impl App {
         self.set_filter_edit_text(&filter);
         self.layout_edits();
         self.update_title();
+        // 지난번에 검색 패널을 열어 둔 채 끝냈으면 서비스 상태부터 확인하고, 남은 검색어로 다시 찾는다
+        self.pal_check_status();
+        if self.pal_shown() && !edit_text(self.search_edit).trim().is_empty() {
+            self.pal_run_query();
+        }
     }
 
     /// 어디서든 검색(전역 단축키)을 등록한다. 설정에서 정한 키가 없으면 비어 있는 첫 후보를 쓴다.
     /// 정한 키를 다른 프로그램이 쓰고 있으면 false
     pub(super) fn register_global_hotkey(&mut self) -> bool {
+        // 시험용으로 따로 띄운 창은 사용자가 쓰는 Sakadu의 단축키를 가져가지 않는다
+        if crate::isolated() {
+            self.hotkey = None;
+            return false;
+        }
         unsafe {
             let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_SEARCH);
             let mods = |c: crate::keys::Combo| {
@@ -1165,8 +1275,8 @@ impl App {
         }
         match self.edit_mode {
             EditMode::Address(_) => self.addr_edit,
-            EditMode::Rename(_) | EditMode::FavRename(_) => self.rename_edit,
-            EditMode::None if self.pal_open => self.search_edit,
+            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename => self.rename_edit,
+            EditMode::None if self.pal_focus && self.pal_shown() => self.search_edit,
             // 즐겨찾기에 키보드가 있으면 메인 창이 키를 받는다 (필터 상자에 커서가 깜박이지 않게)
             EditMode::None if self.fav_focus => self.hwnd,
             EditMode::None => self.filter_edit,
@@ -1204,14 +1314,28 @@ impl App {
 
     // ---------- 레이아웃 ----------
 
-    /// 칸이 놓이는 곳: 사이드바 오른쪽, 작업 줄 아래 (미리 보기가 열려 있으면 그만큼 비운다)
+    /// 칸이 놓이는 곳: 아이콘 막대(고정한 패널이 있으면 그 패널) 오른쪽, 작업 줄 아래 (미리 보기가 열려 있으면 그만큼 비운다)
     fn area(&self) -> R {
-        let l = SIDEBAR_W + MARGIN;
+        let l = self.panes_left();
         let right = self.w - MARGIN - if self.preview.is_some() { self.preview_w() + GAP } else { 0.0 };
         R::new(l, WORKBAR_H, right.max(l + 100.0), (self.h - MARGIN).max(WORKBAR_H + 100.0))
     }
 
-    /// 작업 줄 오른쪽: 창 단추 바로 앞에 미리 보기, 그 앞에 숨김 항목
+    /// 칸 나누기 버튼 5개를 한 덩어리로 담는 판. 작업 줄에서 칸과 같은 왼쪽 선
+    fn layout_pill(&self) -> R {
+        let l = self.workspace_button().r + 8.0;
+        R::new(l, 7.0, l + 6.0 + 5.0 * 32.0, 37.0)
+    }
+
+    fn layout_buttons(&self) -> [R; 5] {
+        let l0 = self.layout_pill().l + 3.0;
+        std::array::from_fn(|i| {
+            let l = l0 + i as f32 * 32.0;
+            R::new(l, 10.0, l + 32.0, 34.0)
+        })
+    }
+
+    /// 작업 줄 오른쪽: 창 단추 바로 앞에 미리 보기, 그 앞에 숨김 항목, 그 앞에 `…`
     fn preview_button(&self) -> R {
         let r = self.caption_left() - 8.0;
         R::new(r - 32.0, 7.0, r, 37.0)
@@ -1220,6 +1344,11 @@ impl App {
     fn hidden_button(&self) -> R {
         let p = self.preview_button();
         R::new(p.l - 36.0, 7.0, p.l - 4.0, 37.0)
+    }
+
+    fn more_button(&self) -> R {
+        let h = self.hidden_button();
+        R::new(h.l - 36.0, 7.0, h.l - 4.0, 37.0)
     }
 
     fn split_points(&self) -> (f32, f32) {
@@ -1271,6 +1400,9 @@ impl App {
     /// 칸 p의 칩 줄 오른쪽 글자: 불러오는 중이거나, 항목 수와 고른 개수·크기
     fn head_count_text(&self, p: usize) -> String {
         let tab = self.panes[p].tab();
+        if tab.loc == Location::Start {
+            return String::new();
+        }
         match &tab.state {
             LoadState::Loading => "불러오는 중…".to_string(),
             LoadState::Error(_) => "열 수 없음".to_string(),
@@ -1324,6 +1456,9 @@ impl App {
 
     /// 필터 칩 안의 개수: 고른 게 있으면 "고른/전체개"
     fn filter_count_text(&self, p: usize) -> String {
+        if let Some(n) = self.start_count(p) {
+            return format!("{n}개");
+        }
         let tab = self.panes[p].tab();
         match tab.selection_stats().0 {
             0 => format!("{}개", tab.view.len()),
@@ -1346,22 +1481,24 @@ impl App {
         if self.settings.is_some() {
             return Hit::Set(self.settings_hit(x, y));
         }
-        if self.pal_open {
-            if let Some(h) = self.pal_hit(x, y) {
-                return h;
-            }
-        }
-        if self.search_button().contains(x, y) {
-            return Hit::SearchButton;
+        if x < BAR_W {
+            return self.bar_hit(x, y);
         }
         if let Some(h) = self.view_menu_hit(x, y) {
             return h;
         }
-        if x < SIDEBAR_W {
+        // 패널은 칸보다 위에 있다 (떠 있을 때 그 아래 칸을 누르지 않게)
+        if self.side_panel_rect().is_some_and(|r| r.contains(x, y)) {
             return self.sidebar_hit(x, y);
         }
+        if self.side_resize_rect().is_some_and(|r| r.contains(x, y)) {
+            return Hit::SideResize;
+        }
         if y < WORKBAR_H {
-            if let Some(i) = layout_buttons().iter().position(|r| r.contains(x, y)) {
+            if self.workspace_button().contains(x, y) {
+                return Hit::Workspace;
+            }
+            if let Some(i) = self.layout_buttons().iter().position(|r| r.contains(x, y)) {
                 return Hit::Layout(i);
             }
             if self.hidden_button().contains(x, y) {
@@ -1370,7 +1507,13 @@ impl App {
             if self.preview_button().contains(x, y) {
                 return Hit::PreviewButton;
             }
+            if self.more_button().contains(x, y) {
+                return Hit::More;
+            }
             return Hit::None;
+        }
+        if let Some(h) = self.preview_hit(x, y) {
+            return h;
         }
         let (sx, sy) = self.splitters();
         if sx.is_some_and(|r| r.contains(x, y)) {
@@ -1421,10 +1564,12 @@ impl App {
             if g.up.contains(x, y) {
                 return Hit::Up(p);
             }
-            if g.view.contains(x, y) {
+            // 시작 화면에는 보기·새 폴더 단추가 없다
+            let start = tab.loc == Location::Start;
+            if !start && g.view.contains(x, y) {
                 return Hit::View(p);
             }
-            if g.new_folder.contains(x, y) {
+            if !start && g.new_folder.contains(x, y) {
                 return Hit::NewFolder(p);
             }
             if tab.loc.dir().is_some() && g.star.contains(x, y) {
@@ -1436,6 +1581,9 @@ impl App {
                     Some(i) => Hit::Crumb(p, i),
                     None => Hit::CrumbEmpty(p),
                 };
+            }
+            if start {
+                return self.start_hit(p, x, y);
             }
             if g.header.contains(x, y) {
                 if pane.view != ViewMode::Details {
@@ -1526,6 +1674,12 @@ impl App {
                 None
             }
         };
+        // 지워졌거나 옮겨진 폴더는 시작 화면의 최근 위치에서 뺀다 (잠깐 못 연 것은 그대로)
+        if l.gone {
+            if let Some(d) = self.panes[p].tabs[t].loc.dir().map(str::to_string) {
+                self.forget_recent(&d);
+            }
+        }
         if self.panes[p].active == t {
             self.clamp_scroll(p);
             if p == self.active {
@@ -1598,7 +1752,6 @@ impl App {
         let Some(raw) = path else { return };
         // 설정 화면 뒤에 새 탭이 가려지지 않게 닫는다
         self.close_settings();
-        self.close_palette();
         self.fav_blur();
         let p = self.active;
         let path = util::normalize(&raw);
@@ -1619,9 +1772,16 @@ impl App {
     }
 
     fn after_location_change(&mut self, p: usize) {
+        let loc = self.panes[p].tab().loc.clone();
+        self.note_recent(&loc);
+        self.start_keys = false;
         if p == self.active {
             self.set_filter_edit_text("");
             self.layout_edits();
+            // "현재 폴더" 범위로 찾는 중이면 바뀐 폴더로 다시 찾는다
+            if self.pal_here {
+                self.pal_requery();
+            }
         }
         self.sync_watches();
         self.update_title();
@@ -1698,6 +1858,10 @@ impl App {
 
     pub fn new_tab(&mut self, p: usize, loc: Option<Location>, activate: bool) {
         let loc = loc.unwrap_or_else(|| self.new_tab_location(p));
+        // 뒤에 여는 탭(가운데 클릭)은 넣지 않는다: 그대로 보이는 시작 화면의 줄이 마우스 아래에서 밀리지 않게
+        if activate {
+            self.note_recent(&loc);
+        }
         let id = self.next_tab_id();
         let pane = &mut self.panes[p];
         let idx = pane.active + 1;
@@ -1791,6 +1955,7 @@ impl App {
         if matches!(self.edit_mode, EditMode::Rename(e) | EditMode::Address(e) if e == p) {
             self.cancel_edit();
         }
+        self.start_keys = false;
         let t = self.panes[p].active;
         let fresh = self.panes[p].tab().generation == 0;
         self.load_at(p, t, !fresh);
@@ -1811,10 +1976,11 @@ impl App {
         match self.edit_mode {
             EditMode::None => {}
             // 즐겨찾기 이름은 칸과 상관없으니 확정하고, 칸에 붙은 입력(파일 이름·경로)은 취소한다
-            EditMode::FavRename(_) => self.commit_rename(),
+            EditMode::FavRename(_) | EditMode::WorkspaceRename => self.commit_rename(),
             _ => self.cancel_edit(),
         }
         self.active = p;
+        self.start_keys = false;
         let f = self.panes[p].tab().filter.clone();
         self.set_filter_edit_text(&f);
         self.layout_edits();
@@ -1924,6 +2090,11 @@ impl App {
     }
 
     fn clamp_scroll(&mut self, p: usize) {
+        if let Some(max) = self.start_max_scroll(p) {
+            let tab = self.panes[p].tab_mut();
+            tab.scroll = tab.scroll.clamp(0.0, max);
+            return;
+        }
         let Some((list, grid)) = self.grid(p) else { return };
         let tab = self.panes[p].tab_mut();
         let max = (grid.content(tab.view.len()) - grid.page(list)).max(0.0);
@@ -1931,6 +2102,10 @@ impl App {
     }
 
     fn ensure_visible(&mut self, p: usize) {
+        if self.panes[p].tab().loc == Location::Start {
+            self.clamp_scroll(p);
+            return;
+        }
         let Some((list, grid)) = self.grid(p) else { return };
         let tab = self.panes[p].tab_mut();
         // 스크롤 0 기준 위치 (스크롤 방향으로)
@@ -2041,7 +2216,15 @@ impl App {
         let edit_h = 20.0;
         let center = |b: R, lp: f32, rp: f32| R::new(b.l + lp, b.t + (b.h() - edit_h) / 2.0, b.r - rp, b.t + (b.h() + edit_h) / 2.0);
         self.place_filter_edit(true);
-        place(self.search_edit, self.pal_open.then(|| center(self.pal_input_rect(), 4.0, 4.0)));
+        // 다른 패널이 잠깐 가리는 동안 검색 상자는 숨기지 않고 화면 밖에 둔다 (숨기면 키보드 포커스가 메인 창으로 가 버린다)
+        let search_at = if self.pal_visible() {
+            Some(center(self.pal_input_rect(), 4.0, 4.0))
+        } else if self.pal_shown() {
+            Some(R::new(-4000.0, -4000.0, -3800.0, -3980.0))
+        } else {
+            None
+        };
+        place(self.search_edit, search_at);
         let addr = match self.edit_mode {
             EditMode::Address(p) => self.pane_rect(p).map(|r| center(geom(r).crumb, 8.0, 8.0)),
             _ => None,
@@ -2050,6 +2233,7 @@ impl App {
         let ren = match self.edit_mode {
             EditMode::Rename(p) => self.rename_rect(p).map(|r| center(r, 4.0, 4.0)),
             EditMode::FavRename(row) => self.fav_rename_rect(row).map(|r| center(r, 4.0, 4.0)),
+            EditMode::WorkspaceRename => Some(center(self.workspace_rename_rect(), 0.0, 0.0)),
             _ => None,
         };
         place(self.rename_edit, ren);
@@ -2058,10 +2242,14 @@ impl App {
     /// 필터 상자 자리 (DIP). 활성 칸의 필터 칩 안에 둔다. 필터가 비어 있거나 팝업이 열려 있으면 화면 밖에 두되
     /// 포커스는 그대로 둬, 목록에서 바로 글자를 치면 걸러진다 (첫 글자가 들어오면 칩이 생겨 그 안으로 옮긴다)
     fn filter_edit_rect(&self) -> R {
-        let popup = self.pal_open || self.view_menu.is_some() || self.settings.is_some();
+        let popup = self.view_menu.is_some() || self.settings.is_some();
         match self.pane_rect(self.active) {
             Some(r) if !popup && !self.panes[self.active].tab().filter.is_empty() => {
                 let b = self.filter_parts(self.active, filter_chip(&geom(r))).0;
+                // 떠 있는 패널이 그 자리를 덮으면 입력 상자(자식 창은 늘 그림 위에 보인다)도 숨긴다
+                if self.side_floating() && self.side_panel_rect().is_some_and(|p| p.l < b.r && p.r > b.l && p.t < b.b && p.b > b.t) {
+                    return R::new(-4000.0, -4000.0, -3800.0, -3980.0);
+                }
                 // 입력 상자 글자는 위쪽에 붙어 그려지므로 칩 안 다른 글자(개수)와 줄이 맞게 2px 내린다
                 let t = b.t + (b.h() - 20.0) / 2.0 + 2.0;
                 R::new(b.l, t, b.r, t + 20.0)
@@ -2110,6 +2298,11 @@ impl App {
             tab.select_only(0);
         }
         tab.scroll = 0.0;
+        // 시작 화면도 글자를 치면 첫 일치 항목에 초점을 두어 Enter로 바로 연다
+        if tab.loc == Location::Start {
+            tab.cursor = 0;
+            self.start_keys = !tab.filter.is_empty();
+        }
         self.ensure_visible(p);
         // 필터 칩이 생기거나 없어지고, 개수 글자 폭이 바뀌니 입력 상자 자리를 다시 잡는다
         self.layout_edits();
@@ -2150,6 +2343,10 @@ impl App {
     fn commit_rename(&mut self) {
         if let EditMode::FavRename(row) = self.edit_mode {
             self.commit_fav_rename(row);
+            return;
+        }
+        if self.edit_mode == EditMode::WorkspaceRename {
+            self.commit_workspace_rename();
             return;
         }
         let Some(ctx) = self.rename.take() else { return };
@@ -2212,7 +2409,7 @@ impl App {
     /// 목록을 클릭하면 이름 바꾸기는 확정, 주소 입력은 취소 (탐색기와 같음)
     fn end_edits_for_click(&mut self) {
         match self.edit_mode {
-            EditMode::Rename(_) | EditMode::FavRename(_) => self.commit_rename(),
+            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename => self.commit_rename(),
             EditMode::Address(_) => self.cancel_edit(),
             EditMode::None => {}
         }
@@ -2381,6 +2578,8 @@ impl App {
         }
         // 복사·이동·삭제로 남은 용량이 바뀌었다
         self.refresh_places();
+        // 고정한 미리 보기 파일의 이름이 바뀌었거나 옮겨졌거나 지워졌을 수 있다
+        self.preview_pin_check();
     }
 
     /// 되돌리기가 일부만 됐으면 알리고, 실패한 항목은 기록으로 되돌려 놓아 다시 시도할 수 있게 한다
@@ -2477,7 +2676,6 @@ impl App {
                 rename: self.rename_edit,
                 preview_host: self.preview_host,
                 filter: self.filter_edit,
-                search: self.search_edit,
             }
         };
         if let Some(old) = EDIT_COLORS.replace(Some(colors)) {
@@ -2495,36 +2693,16 @@ impl App {
         self.invalidate();
     }
 
-    fn save_session(&self) {
-        let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-        unsafe {
-            let _ = GetWindowPlacement(self.hwnd, &mut wp);
-        }
-        let r = wp.rcNormalPosition;
-        let s = session::Session {
-            window: Some([r.left, r.top, r.right - r.left, r.bottom - r.top]),
-            maximized: wp.showCmd == SW_SHOWMAXIMIZED.0 as u32,
-            layout: self.layout.index() as u8,
-            split: self.split,
-            active: self.active,
-            show_hidden: self.show_hidden,
-            preview: self.preview.is_some(),
-            new_tab: self.new_tab_home.clone(),
-            look: self.look.clone(),
-            panes: self
-                .panes
-                .iter()
-                .map(|p| session::PaneState {
-                    tabs: p.tabs.iter().map(|t| t.loc.to_session()).collect(),
-                    active: p.active,
-                    cols: p.cols,
-                    sort_key: p.sort.key.to_u8(),
-                    sort_desc: p.sort.desc,
-                    view: p.view.code(),
-                })
-                .collect(),
-        };
+    /// 세션을 저장한다. 작업 공간이 있으면 지금 작업 공간에도 지금 화면을 적어 둔다
+    fn save_session(&mut self) {
+        let s = self.screen_state();
         let _ = session::save(&s);
+        if let Some(w) = self.workspaces.current.and_then(|c| self.workspaces.list.get_mut(c)) {
+            w.state = s;
+            if let Err(e) = crate::workspaces::save(&self.workspaces) {
+                crate::diag::log(|| format!("workspaces: save failed: {e}"));
+            }
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -2589,6 +2767,7 @@ impl App {
             self.clamp_scroll(p);
         }
         self.side_clamp_scroll();
+        self.pal_clamp_scroll();
         self.layout_edits();
         self.invalidate();
     }
@@ -2603,14 +2782,16 @@ impl App {
             let _ = ScreenToClient(self.hwnd, &mut cp);
         }
         let (x, y) = (cp.x as f32 / self.scale(), cp.y as f32 / self.scale());
-        // 검색 창이 그 자리를 덮고 있으면 아래 줄(사이드바·칸)에 놓지 않는다 (누르기와 같은 순서)
-        if self.pal_open && self.pal_rect().contains(x, y) {
-            if self.drop_hover.take().is_some() | self.side_drop.take().is_some() {
+        // 막대의 별 위에 놓으면 즐겨찾기에 넣는다 (패널이 닫혀 있어도)
+        if x < BAR_W && self.settings.is_none() {
+            let side = matches!(self.bar_hit(x, y), Hit::Bar(Panel::Favorites)).then_some(Side::FavEmpty);
+            if self.drop_hover.take().is_some() || side != self.side_drop {
+                self.side_drop = side;
                 self.invalidate();
             }
-            return DropAt::None;
+            return if side.is_some() { DropAt::Favorites } else { DropAt::None };
         }
-        if x < SIDEBAR_W && self.settings.is_none() {
+        if self.settings.is_none() && self.side_panel_rect().is_some_and(|r| r.contains(x, y)) {
             let (side, dir) = self.side_drop_at(x, y).map_or((None, None), |(s, d)| (Some(s), d));
             let side = side.filter(|s| *s == Side::FavEmpty || dir.is_some());
             if self.drop_hover.take().is_some() || side != self.side_drop {
@@ -2674,6 +2855,7 @@ impl App {
                 }
                 WM_MOUSELEAVE => {
                     self.tracking = false;
+                    self.side_mouse_left();
                     if self.hover != Hit::None {
                         self.hover = Hit::None;
                         self.update_tip();
@@ -2730,16 +2912,19 @@ impl App {
                 WM_SETFOCUS => self.focus(),
                 WM_ACTIVATE => {
                     // 다른 창으로 전환하면 보기 메뉴를 닫는다 (WA_INACTIVE).
-                    // 검색 창은 다른 앱에서 무언가 복사해 오는 동안에도 적어 둔 검색어가 그대로 있도록 열어 둔다
+                    // 검색 패널은 다른 앱에서 무언가 복사해 오는 동안에도 적어 둔 검색어가 그대로 있도록 열어 둔다
                     self.window_active = loword(wp.0) != 0;
                     self.invalidate();
                     if loword(wp.0) == 0 {
                         self.close_view_menu();
+                        self.close_peek();
                     } else {
                         // 관리자 승인(검색 서비스 설치) 등을 마치고 돌아오면 설정 창의 상태를 다시 읽는다.
                         // 다른 곳에서 파일을 옮겼을 수 있으니 드라이브 남은 용량도 다시 읽는다
                         self.refresh_settings();
                         self.refresh_places();
+                        // 다른 앱에서 고정한 파일의 이름을 바꾸거나 옮겼을 수 있다
+                        self.preview_pin_check();
                         // 비활성인 동안 남겨 둔 알림은 이제부터 잠시 뒤 지운다
                         if self.panes.iter().any(|pn| pn.tabs.iter().any(|t| t.message.is_some())) {
                             SetTimer(Some(hwnd), TIMER_FLASH, FLASH_MS, None);
@@ -2760,7 +2945,8 @@ impl App {
                     let id = wp.0;
                     if id == TIMER_SEARCH_READY {
                         self.pal_ready_timer();
-                    } else if id == TIMER_SEARCH {
+                    } else if id == TIMER_SEARCH || id == palette::TIMER_SEARCH_AGAIN {
+                        let _ = KillTimer(Some(hwnd), id);
                         self.pal_run_query();
                     } else if id == TIMER_PREVIEW {
                         self.start_preview();
@@ -2779,6 +2965,16 @@ impl App {
                         let _ = KillTimer(Some(hwnd), id);
                         self.tip_shown = true;
                         self.invalidate();
+                    } else if id == TIMER_BAR_HOVER {
+                        self.on_bar_hover_timer();
+                    } else if id == TIMER_SIDE_CLOSE {
+                        self.on_side_close_timer();
+                    } else if id == TIMER_SIDE_ANIM {
+                        self.on_side_anim_timer();
+                    } else if id == TIMER_DATES {
+                        if self.look.dates != "full" && IsWindowVisible(hwnd).as_bool() {
+                            self.invalidate();
+                        }
                     } else if (TIMER_REFRESH..TIMER_REFRESH + 4).contains(&id) {
                         let _ = KillTimer(Some(hwnd), id);
                         let p = id - TIMER_REFRESH;
@@ -2786,6 +2982,9 @@ impl App {
                             // 트레이에 숨어 있는 동안에는 읽지 않고, 다시 보일 때 읽는다
                             if IsWindowVisible(hwnd).as_bool() {
                                 self.load(p, true);
+                                // 파일 작업·이름 바꾸기로 바뀐 것을 검색 결과와 고정한 미리 보기에도 반영한다
+                                self.pal_requery();
+                                self.preview_pin_check();
                             } else {
                                 self.stale[p] = true;
                             }
@@ -2810,6 +3009,13 @@ impl App {
                     }
                     return None;
                 }
+                // 시계를 바꾸면 짧은 날짜(오늘·어제)를 다시 그린다
+                WM_TIMECHANGE => self.invalidate(),
+                // Windows를 끄거나 로그아웃할 때: 트레이에 숨어 있어도 지금 화면을 저장한다
+                WM_QUERYENDSESSION => {
+                    self.save_session();
+                    return Some(LRESULT(1));
+                }
                 WM_CLOSE => {
                     self.save_session();
                     self.pending.push(if self.tray.is_some() { Deferred::HideToTray } else { Deferred::Close });
@@ -2832,7 +3038,7 @@ impl App {
                 WM_APP_SEARCH => self.on_search_done(*Box::from_raw(lp.0 as *mut SearchDone)),
                 crate::WM_APP_FILEOP => self.on_file_op(*Box::from_raw(lp.0 as *mut shell::OpReport)),
                 crate::WM_APP_THUMB => self.on_thumb(*Box::from_raw(lp.0 as *mut crate::thumbs::Image)),
-                crate::WM_APP_PREVIEW => self.on_preview_text(*Box::from_raw(lp.0 as *mut TextReady)),
+                crate::WM_APP_PREVIEW => self.on_preview_msg(*Box::from_raw(lp.0 as *mut PreviewMsg)),
                 m if (WM_APP_NOTIFY..WM_APP_NOTIFY + 4).contains(&m) => {
                     shell::ack_notify(wp, lp);
                     // 연속된 변경(복사 중 등)을 한 번의 새로 고침으로 묶는다
@@ -2886,6 +3092,12 @@ impl App {
                 }
             }
             Drag::FavPress { .. } | Drag::FavMove { .. } => self.fav_drag_move(y),
+            Drag::SideW { start_x, start_w } => {
+                let lo = session::SIDE_W_RANGE.0;
+                self.side_w = (start_w + x - start_x).clamp(lo, self.side_w_max());
+                self.side_clamp_scroll();
+                self.after_resize_drag();
+            }
             Drag::TabPress { pane, tab, x: x0, y: y0 } => {
                 if (x - x0).abs() > 6.0 || (y - y0).abs() > 6.0 {
                     self.drag = Drag::TabMove { pane, tab, x, y };
@@ -2919,6 +3131,7 @@ impl App {
                     self.update_tip();
                     self.invalidate();
                 }
+                self.side_track(x, y);
                 if !self.tracking {
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -2962,24 +3175,34 @@ impl App {
         for p in 0..self.layout.count() {
             self.clamp_scroll(p);
         }
+        self.pal_clamp_scroll();
         self.layout_edits();
         self.invalidate();
     }
 
     fn on_lbutton_down(&mut self, x: f32, y: f32, dbl: bool) {
-        // 앞 누름이 검색 창·보기 메뉴·설정을 열거나 닫았으면, 두 번 클릭의 두 번째 누름은 그 아래 다른 것을 누르지 않게 버린다
+        // 앞 누름이 검색 패널·보기 메뉴·설정을 열거나 닫았으면, 두 번 클릭의 두 번째 누름은 그 아래 다른 것을 누르지 않게 버린다
         if dbl && std::mem::take(&mut self.swallow_dbl) {
             return;
         }
-        let popups = |a: &App| (a.pal_open, a.view_menu.is_some(), a.settings.is_some());
+        let popups = |a: &App| (a.pal_shown(), a.view_menu.is_some(), a.settings.is_some());
         let before = popups(self);
+        // 시작 화면 카드를 눌러 옮겨 갔으면 두 번째 누름이 새 목록의 항목을 열지 않게 버린다
+        let start = matches!(self.hit(x, y), Hit::Start(..));
         self.press(x, y, dbl);
-        self.swallow_dbl = popups(self) != before;
+        self.swallow_dbl = popups(self) != before || (start && !dbl);
     }
 
     fn press(&mut self, x: f32, y: f32, dbl: bool) {
         let hit = self.hit(x, y);
+        // 시작 화면 항목은 누른 순간의 위치를 연다 (아래의 이름 확정 등으로 목록이 바뀌어도)
+        let start_target = match hit {
+            Hit::Start(p, i) => self.start_target(p, i),
+            _ => None,
+        };
         self.tip_shown = false;
+        // 마우스를 쓰면 시작 화면의 키보드 초점 테두리는 감춘다
+        self.start_keys = false;
         if let Hit::Set(h) = hit {
             self.settings_click(h, x, y);
             return;
@@ -2989,12 +3212,25 @@ impl App {
         if dbl && matches!(hit, Hit::Side(s) if !matches!(s, Side::Fav(_))) {
             return;
         }
+        // 막대 아이콘·핀·`…`·검색 패널 단추도 두 번째 누름은 무시한다 (첫 누름이 연 것을 바로 닫지 않게)
+        if dbl
+            && matches!(
+                hit,
+                Hit::Bar(_) | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalRow(_)
+                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen | Hit::Workspace
+            )
+        {
+            return;
+        }
+        // 떠 있는 패널 밖을 누르면 패널은 닫고, 누른 것은 그대로 처리한다
+        if self.side_floating() && !matches!(hit, Hit::Side(_) | Hit::SidePin | Hit::SidePanel | Hit::Bar(_) | Hit::SearchButton | Hit::SettingsButton) {
+            self.close_peek();
+        }
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
-        if self.pal_open && hit != Hit::SearchButton {
-            self.pal_mouse_down(hit);
-            self.invalidate();
-            return;
+        // 검색 패널 밖을 누르면 키보드는 검색 상자에서 칸으로 (패널과 결과는 그대로)
+        if self.pal_focus && !matches!(hit, Hit::PalRow(_) | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalClose | Hit::SidePanel | Hit::SearchButton) {
+            self.pal_blur();
         }
         // 보기 메뉴가 열려 있으면 메뉴 밖 클릭은 메뉴를 닫기만 한다 (보기 버튼은 아래에서 닫기·다른 칸 메뉴 열기)
         if self.view_menu.is_some() && !matches!(hit, Hit::View(_)) {
@@ -3019,12 +3255,36 @@ impl App {
         match hit {
             Hit::Layout(i) => self.set_layout(Layout::ALL[i]),
             Hit::Side(s) => self.side_mouse_down(s, y, dbl),
-            Hit::SearchButton => self.toggle_palette(),
+            // 막대의 검색 아이콘: 패널이 보이면 닫고, 아니면 연다
+            Hit::SearchButton => {
+                if self.pal_shown() {
+                    self.close_palette();
+                } else {
+                    self.open_palette();
+                }
+            }
+            Hit::PalRow(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalScope(_) => self.pal_mouse_down(hit),
+            Hit::PalClose => self.close_palette(),
             Hit::NewFolder(p) => self.new_folder(p),
             Hit::Hidden => self.toggle_hidden(),
             Hit::PreviewButton => self.toggle_preview(),
+            Hit::PreviewPin | Hit::PreviewChip => self.toggle_preview_pin(),
+            Hit::PreviewOpen => self.preview_open(),
+            Hit::Workspace => {
+                let r = self.workspace_button();
+                let pt = self.to_screen(r.l, r.b + 2.0);
+                self.pending.push(Deferred::WorkspaceMenu { pt });
+            }
             Hit::SettingsButton => self.toggle_settings(settings_ui::Page::General),
-            Hit::HelpButton => self.toggle_settings(settings_ui::Page::Help),
+            Hit::Bar(panel) => self.bar_click(panel),
+            Hit::SidePin => self.side_toggle_pin(),
+            Hit::SidePanel => {}
+            Hit::SideResize => capture(self, Drag::SideW { start_x: x, start_w: self.side_w }),
+            Hit::More => {
+                let r = self.more_button();
+                let pt = self.to_screen(r.l, r.b + 2.0);
+                self.pending.push(Deferred::MoreMenu { pt });
+            }
             Hit::View(p) => self.toggle_view_menu(p),
             Hit::SplitX => capture(self, Drag::SplitX),
             Hit::SplitY => capture(self, Drag::SplitY),
@@ -3115,6 +3375,12 @@ impl App {
                 capture(self, Drag::MarqueeArm { pane: p, x, y, additive: ctrl });
             }
             Hit::FilterClear(_) => self.clear_filter(),
+            // 한 번 누르면 연다 (Ctrl이면 새 탭에서)
+            Hit::Start(p, _) if !dbl => {
+                if let Some(loc) = start_target {
+                    self.start_go(p, loc, ctrl, true);
+                }
+            }
             _ => {}
         }
         self.invalidate();
@@ -3146,21 +3412,18 @@ impl App {
         if self.settings.is_some() {
             return;
         }
-        // 즐겨찾기 줄 밖을 누르면 키보드는 칸으로 (그 뒤 Delete가 즐겨찾기를 지우지 않게)
+        // 즐겨찾기 줄 밖을 누르면 키보드는 칸으로 (그 뒤 Delete가 즐겨찾기를 지우지 않게). 검색 상자도 마찬가지
         if self.fav_focus && !matches!(hit, Hit::Side(Side::Fav(_))) {
             self.fav_blur();
         }
-        if self.pal_open {
-            match hit {
-                Hit::PalRow(i) => self.pal_right_press(i),
-                Hit::PalPanel | Hit::PalInstall | Hit::PalAddFolder => {}
-                _ => {
-                    // 닫기만 한다: 떼는 순간 그 아래 칸의 (이전에 골라 둔) 항목 메뉴가 뜨지 않게
-                    self.close_palette();
-                    self.swallow_rbutton_up = true;
-                }
-            }
-            self.invalidate();
+        if self.pal_focus && !matches!(hit, Hit::PalRow(_) | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalClose | Hit::SidePanel) {
+            self.pal_blur();
+        }
+        if let Hit::PalRow(i) = hit {
+            self.pal_right_press(i);
+            return;
+        }
+        if matches!(hit, Hit::PalInstall | Hit::PalAddFolder | Hit::PalScope(_) | Hit::PalClose) {
             return;
         }
         if let Some(p) = hit.pane() {
@@ -3198,19 +3461,21 @@ impl App {
             _ => return None,
         };
         let tab = self.panes[p].tab();
+        // 시작 화면에는 셸 메뉴를 띄울 폴더가 없다 (항목 메뉴는 따로)
+        if tab.loc == Location::Start {
+            return None;
+        }
         let paths = if items { tab.selected_paths() } else { Vec::new() };
         Some((p, paths, tab.loc.dir().map(String::from)))
     }
 
     fn on_rbutton_up(&mut self, x: f32, y: f32) -> bool {
-        if self.settings.is_some() || std::mem::take(&mut self.swallow_rbutton_up) {
+        if self.settings.is_some() {
             return true;
         }
-        if self.pal_open {
-            if let Hit::PalRow(_) = self.hit(x, y) {
-                let pt = self.to_screen(x, y);
-                self.pending.push(Deferred::PalMenu { pt });
-            }
+        if let Hit::PalRow(_) = self.hit(x, y) {
+            let pt = self.to_screen(x, y);
+            self.pending.push(Deferred::PalMenu { pt });
             return true;
         }
         if self.view_menu.is_some() {
@@ -3219,6 +3484,10 @@ impl App {
         }
         if let Hit::Side(s) = self.hit(x, y) {
             self.side_context_menu(s, x, y);
+            return true;
+        }
+        if let Hit::Start(p, i) = self.hit(x, y) {
+            self.start_context_menu(p, i, x, y);
             return true;
         }
         let Some((pane, paths, dir)) = self.menu_target(x, y) else { return false };
@@ -3231,13 +3500,15 @@ impl App {
         if self.settings.is_some() {
             return;
         }
+        let start_target = match self.hit(x, y) {
+            Hit::Start(p, i) => self.start_target(p, i).map(|loc| (p, loc)),
+            _ => None,
+        };
         if self.fav_focus && !matches!(self.hit(x, y), Hit::Side(Side::Fav(_))) {
             self.fav_blur();
         }
-        if self.pal_open {
-            if let Hit::PalRow(i) = self.hit(x, y) {
-                self.pal_activate(i, palette::OpenMode::NewTab);
-            }
+        if let Hit::PalRow(i) = self.hit(x, y) {
+            self.pal_activate(i, palette::OpenMode::NewTab);
             return;
         }
         if self.view_menu.is_some() {
@@ -3247,6 +3518,11 @@ impl App {
         match self.hit(x, y) {
             Hit::Side(s @ (Side::Fav(crate::favorites::Row::Item { .. }) | Side::Computer | Side::Drive(_) | Side::Folder(_))) => self.side_open(s, true),
             Hit::Tab(p, t) | Hit::TabClose(p, t) => self.close_tab(p, t),
+            Hit::Start(..) => {
+                if let Some((p, loc)) = start_target {
+                    self.start_go(p, loc, true, false);
+                }
+            }
             Hit::Row(p, vi) => {
                 let tab = self.panes[p].tab();
                 if let Some(path) = tab.entry_at(vi).filter(|e| e.is_dir()).and_then(|e| tab.path_of(e)) {
@@ -3268,7 +3544,7 @@ impl App {
             self.settings_wheel(-delta / 120.0 * 3.0 * ROW_H);
             return;
         }
-        if self.pal_open && self.pal_rect().contains(x, y) {
+        if self.pal_visible() && self.pal_list().contains(x, y) {
             self.pal_wheel(-delta / 120.0 * 3.0 * ROW_H);
             return;
         }
@@ -3276,7 +3552,7 @@ impl App {
         if self.view_menu.is_some() {
             return;
         }
-        if x < SIDEBAR_W {
+        if self.side_panel_rect().is_some_and(|r| r.contains(x, y)) {
             self.side_wheel(-delta / 120.0 * 3.0 * ROW_H);
             return;
         }
@@ -3294,6 +3570,7 @@ impl App {
         let p = hit.pane().unwrap_or(self.active);
         // 아이콘 보기는 한 번에 한 줄, 목록 보기는 한 열(가로), 나머지는 세 줄
         let step = match self.grid(p) {
+            _ if self.panes[p].tab().loc == Location::Start => 3.0 * ROW_H,
             Some((_, g)) if g.horiz => g.cell_w,
             Some((_, g)) if matches!(g.cell, CellKind::Tile(_)) => g.cell_h,
             _ => 3.0 * ROW_H,
@@ -3303,7 +3580,7 @@ impl App {
 
     fn on_set_cursor(&self) -> bool {
         let id = match self.drag {
-            Drag::SplitX | Drag::Col { .. } => IDC_SIZEWE,
+            Drag::SplitX | Drag::Col { .. } | Drag::SideW { .. } => IDC_SIZEWE,
             Drag::SplitY => IDC_SIZENS,
             _ => {
                 let mut pt = POINT::default();
@@ -3312,7 +3589,7 @@ impl App {
                     let _ = ScreenToClient(self.hwnd, &mut pt);
                 }
                 match self.hit(pt.x as f32 / self.scale(), pt.y as f32 / self.scale()) {
-                    Hit::SplitX | Hit::HeaderResize(..) => IDC_SIZEWE,
+                    Hit::SplitX | Hit::HeaderResize(..) | Hit::SideResize => IDC_SIZEWE,
                     Hit::SplitY => IDC_SIZENS,
                     Hit::CrumbEmpty(_) => IDC_IBEAM,
                     _ => IDC_ARROW,
@@ -3426,15 +3703,16 @@ impl App {
         if self.view_menu.is_some() {
             return self.view_menu_key(vk);
         }
-        if self.pal_open {
-            return self.pal_key(vk);
-        }
         if self.fav_focus {
             return self.fav_key(vk);
         }
         if let Some(a) = self.keys.find(crate::keys::Combo::now(vk.0)) {
             self.run_action(a);
             self.invalidate();
+            return true;
+        }
+        // 시작 화면: 화살표는 카드·줄 사이를 옮기고, Enter는 고른 곳을 연다
+        if self.panes[self.active].tab().loc == Location::Start && self.start_key(self.active, vk) {
             return true;
         }
         let ctrl = key_down(VK_CONTROL);
@@ -3536,7 +3814,7 @@ impl App {
     /// 입력 상자가 포커스를 잃으면: 이름 바꾸기는 확정, 주소 입력은 취소
     pub fn on_edit_blur(&mut self, id: i32) {
         match (id, self.edit_mode) {
-            (ID_RENAME, EditMode::Rename(_) | EditMode::FavRename(_)) => self.commit_rename(),
+            (ID_RENAME, EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename) => self.commit_rename(),
             (ID_ADDR, EditMode::Address(_)) => self.cancel_edit(),
             _ => {}
         }
@@ -3558,7 +3836,7 @@ impl App {
             self.gfx.end();
             return;
         }
-        self.paint_sidebar();
+        self.paint_bar();
         self.paint_workbar();
         self.paint_caption();
         let mut missing = Vec::new();
@@ -3566,6 +3844,8 @@ impl App {
             self.paint_pane(p, r, &mut missing);
         }
         self.paint_preview(&mut missing);
+        // 패널은 칸 다음에: 떠 있을 때 칸 위에 그려진다
+        self.paint_sidebar();
         let t = self.theme;
         let (sx, sy) = self.splitters();
         let hot_x = matches!(self.drag, Drag::SplitX) || self.hover == Hit::SplitX;
@@ -3581,17 +3861,15 @@ impl App {
         if self.view_menu.is_some() {
             self.paint_view_menu();
         }
-        if self.pal_open {
-            self.paint_palette();
-        }
         self.paint_toasts();
         self.paint_tip();
+        self.paint_fav_card(&mut missing);
         self.gfx.end();
         self.request_thumbs(missing);
     }
 
     /// 알림: 칸 아래쪽 가운데 어두운 알약 (몇 초 뒤 사라진다).
-    /// 검색 창·보기 메뉴보다 위에 그려, 그 위에서 한 일(검색 결과 복사 등)의 결과도 보이게 한다
+    /// 검색 패널·보기 메뉴보다 위에 그려, 그 위에서 한 일(검색 결과 복사 등)의 결과도 보이게 한다
     fn paint_toasts(&self) {
         let t = self.theme;
         let g = &self.gfx;
@@ -3619,12 +3897,13 @@ impl App {
 
     /// 칸 영역 위 작업 줄: 칸 나누기, 숨김 항목, 미리 보기. 창 단추는 paint_caption
     fn paint_workbar(&self) {
+        self.paint_workspace_button();
         let t = self.theme;
         let g = &self.gfx;
         let hover_bg = t.sel_inactive;
         // 칸 나누기: 한 덩어리 판 위에 지금 고른 것만 도드라지게
-        g.fill_round(layout_pill(), 8.0, sidebar::well(&t));
-        for (i, r) in layout_buttons().iter().enumerate() {
+        g.fill_round(self.layout_pill(), 8.0, sidebar::well(&t));
+        for (i, r) in self.layout_buttons().iter().enumerate() {
             let layout = Layout::ALL[i];
             let current = layout == self.layout;
             if current {
@@ -3647,11 +3926,12 @@ impl App {
         };
         icon_button(self.hidden_button(), G_HIDDEN, self.show_hidden, self.hover == Hit::Hidden);
         icon_button(self.preview_button(), G_PREVIEW, self.preview.is_some(), self.hover == Hit::PreviewButton);
+        icon_button(self.more_button(), G_MORE, false, self.hover == Hit::More);
     }
 
     /// 단추에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
     fn tip(&self) -> Option<(R, String)> {
-        if self.pal_open || self.view_menu.is_some() || self.settings.is_some() || !matches!(self.drag, Drag::None) {
+        if self.view_menu.is_some() || self.settings.is_some() || !matches!(self.drag, Drag::None) {
             return None;
         }
         use crate::keys::Action;
@@ -3662,7 +3942,7 @@ impl App {
             None => name.to_string(),
         };
         Some(match self.hover {
-            Hit::Layout(i) => (layout_buttons()[i], named(LAYOUTS[i], crate::keys::name(LAYOUTS[i]))),
+            Hit::Layout(i) => (self.layout_buttons()[i], named(LAYOUTS[i], crate::keys::name(LAYOUTS[i]))),
             Hit::NewFolder(p) => (geom(self.pane_rect(p)?).new_folder, named(Action::NewFolder, "새 폴더")),
             Hit::Hidden => (self.hidden_button(), named(Action::Hidden, if self.show_hidden { "숨김 항목 감추기" } else { "숨김 항목 보기" })),
             Hit::Side(s) => return self.side_tip(s),
@@ -3675,7 +3955,15 @@ impl App {
             ),
             Hit::PreviewButton => (self.preview_button(), named(Action::Preview, "미리 보기 창")),
             Hit::SettingsButton => (self.settings_button(), named(Action::Settings, "설정")),
-            Hit::HelpButton => (self.help_button(), named(Action::Help, "도움말")),
+            Hit::Bar(p) if self.side_panel() == Some(p) => return None,
+            Hit::Bar(Panel::Favorites) => (self.bar_rect(Panel::Favorites), named(Action::Favorites, "즐겨찾기")),
+            Hit::Bar(p) => (self.bar_rect(p), p.title().to_string()),
+            Hit::SidePin => (self.side_pin_rect()?, (if self.side_floating() { "고정해 두기" } else { "고정 풀기" }).to_string()),
+            Hit::More => (self.more_button(), "도움말·설정".to_string()),
+            Hit::PalClose => (self.pal_close_rect(), "검색 닫기".to_string()),
+            Hit::Start(p, i) => return self.start_tip(p, i),
+            Hit::PreviewPin | Hit::PreviewOpen => return self.preview_tip(),
+            Hit::Workspace => (self.workspace_button(), "작업 공간 · 지금 화면을 저장하고 바꾸기".to_string()),
             _ => return None,
         })
     }
@@ -3693,11 +3981,15 @@ impl App {
     }
 
     fn paint_tip(&self) {
+        // 즐겨찾기 항목은 말풍선 대신 정보 카드 (sidebar::paint_fav_card)
+        if matches!(self.hover, Hit::Side(Side::Fav(crate::favorites::Row::Item { .. }))) {
+            return;
+        }
         let Some((b, text)) = self.tip().filter(|_| self.tip_shown) else { return };
         let t = self.theme;
         let w = self.gfx.measure(&text, Font::Normal) + 20.0;
-        // 사이드바 단추는 오른쪽에(아래쪽 단추가 창 밖으로 나가지 않게), 작업 줄 단추는 아래에
-        let r = if b.r <= SIDEBAR_W {
+        // 막대 아이콘은 오른쪽에(아래쪽 설정이 창 밖으로 나가지 않게), 작업 줄 단추는 아래에
+        let r = if b.r <= BAR_W {
             let cy = (b.t + b.b) / 2.0;
             R::new(b.r + 8.0, cy - 13.0, b.r + 8.0 + w, cy + 13.0)
         } else {
@@ -3746,8 +4038,14 @@ impl App {
         let (fedit, fcount, fclear) = self.filter_parts(p, fchip);
         let fcount_text = self.filter_count_text(p);
         // 팝업이 열려 있으면 입력 상자(자식 창)는 화면 밖에 있으니 필터 글자를 직접 그린다
-        let edit_in_chip = active && !(self.pal_open || self.view_menu.is_some() || self.settings.is_some());
-        let App { gfx, panes, types, thumb_failed, .. } = self;
+        let edit_in_chip = active && !(self.view_menu.is_some() || self.settings.is_some());
+        // 시작 화면이면 머리글·목록 대신 그릴 카드와 줄
+        let start = self.start_view(p);
+        let folder_icon = if start.is_some() { self.type_icon("", true) } else { -1 };
+        let start_focus = (keyboard_here && self.start_keys).then(|| self.panes[p].tab().cursor);
+        // 목록의 수정한 날짜를 짧게(오늘·어제) 쓸지와 그 기준 시각
+        let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
+        let App { gfx, panes, types, thumb_failed, places, .. } = self;
         let pane = &panes[p];
         let tab = pane.tab();
 
@@ -3756,6 +4054,10 @@ impl App {
             soft_shadow(gfx, r, RADIUS, 12.0, 0.10, t.dark);
         }
         gfx.fill_round(r, RADIUS, t.pane);
+        // 지금 칸: 위쪽 가장자리 안쪽에 얇은 강조 선 (칸이 여럿일 때 어느 칸에서 일하는지 한눈에)
+        if active && multi {
+            gfx.fill_round(R::new(r.l + RADIUS, r.t + 1.0, r.r - RADIUS, r.t + 3.0), 1.0, if t.high_contrast { t.focus } else { t.accent });
+        }
 
         // 칩 줄: 탭 칩. 지금 탭은 바탕이 있는 칩(지금 칸이면 옅은 강조 색), 나머지는 글자만이고 올리면 옅은 바탕.
         // 오른쪽 자리(필터 칩·개수) 앞까지만 그린다 (좁은 칸에서 겹치면 누르기도 오른쪽 자리가 먼저)
@@ -3827,23 +4129,27 @@ impl App {
         }
 
         // 경로 줄: 탐색 단추
-        let nav_btn = |gfx: &Gfx, rr: R, glyph: u16, enabled: bool, hovered: bool| {
+        let nav_btn = |gfx: &Gfx, rr: R, glyph: u16, font: Font, enabled: bool, hovered: bool| {
             if hovered && enabled {
                 gfx.fill_round(rr, 6.0, t.hover);
             }
-            gfx.glyph(glyph, rr, true, if enabled { t.text } else { t.faint });
+            gfx.glyph_font(glyph, rr, font, if enabled { t.text } else { t.faint });
         };
-        nav_btn(gfx, g.back, G_BACK, !tab.back.is_empty(), hover == Hit::Back(p));
-        nav_btn(gfx, g.fwd, G_FWD, !tab.fwd.is_empty(), hover == Hit::Fwd(p));
-        nav_btn(gfx, g.up, G_UP, tab.loc != Location::Computer, hover == Hit::Up(p));
-        nav_btn(gfx, g.new_folder, G_NEW_FOLDER, tab.loc.dir().is_some(), hover == Hit::NewFolder(p));
-        // 보기 방식: 지금 보기 그림과 아래 화살표 (누르면 보기 메뉴)
-        if hover == Hit::View(p) || view_menu_open {
-            gfx.fill_round(g.view, 6.0, t.hover);
+        // 이동 화살표는 가운데 크기(12px), 새 폴더·별·보기는 도구 아이콘 크기(16px)
+        nav_btn(gfx, g.back, G_BACK, Font::GlyphMid, !tab.back.is_empty(), hover == Hit::Back(p));
+        nav_btn(gfx, g.fwd, G_FWD, Font::GlyphMid, !tab.fwd.is_empty(), hover == Hit::Fwd(p));
+        nav_btn(gfx, g.up, G_UP, Font::GlyphMid, matches!(tab.loc, Location::Dir(_)), hover == Hit::Up(p));
+        // 시작 화면에는 새 폴더·보기 단추가 없다
+        if start.is_none() {
+            nav_btn(gfx, g.new_folder, G_NEW_FOLDER, Font::Glyph, tab.loc.dir().is_some(), hover == Hit::NewFolder(p));
+            // 보기 방식: 지금 보기 그림과 아래 화살표 (누르면 보기 메뉴)
+            if hover == Hit::View(p) || view_menu_open {
+                gfx.fill_round(g.view, 6.0, t.hover);
+            }
+            let view_glyph = if matches!(pane.view, ViewMode::Huge | ViewMode::Large | ViewMode::Medium) { G_GRID } else { G_LIST };
+            gfx.glyph(view_glyph, R::new(g.view.l + 2.0, g.view.t, g.view.l + 26.0, g.view.b), false, t.text);
+            gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - 16.0, g.view.t + 1.0, g.view.r - 4.0, g.view.b + 1.0), true, t.faint);
         }
-        let view_glyph = if matches!(pane.view, ViewMode::Huge | ViewMode::Large | ViewMode::Medium) { G_GRID } else { G_LIST };
-        gfx.glyph(view_glyph, R::new(g.view.l + 2.0, g.view.t, g.view.l + 26.0, g.view.b), true, t.text);
-        gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - 16.0, g.view.t + 1.0, g.view.r - 4.0, g.view.b + 1.0), true, t.faint);
 
         // 경로: 상자 없이 글자만. 경로 위에 올리면 옅은 바탕(빈 곳을 누르면 경로 입력), 조각에 올리면 그 조각이 한 단계 진하게
         if edit_mode == EditMode::Address(p) {
@@ -3862,7 +4168,7 @@ impl App {
                     gfx.fill_round(g.star, 5.0, t.sel_inactive);
                 }
                 let gold = Color { r: 0.95, g: 0.69, b: 0.0, a: 1.0 };
-                gfx.glyph(if on { G_STAR_FILL } else { G_STAR }, g.star, true, if on { gold } else if over_path { t.dim } else { t.faint });
+                gfx.glyph(if on { G_STAR_FILL } else { G_STAR }, g.star, false, if on { gold } else if over_path { t.dim } else { t.faint });
             }
             gfx.clip(g.crumbs);
             for (i, c) in cs.iter().enumerate() {
@@ -3881,6 +4187,28 @@ impl App {
                 }
             }
             gfx.unclip();
+        }
+
+        // 테두리: 모든 칸이 같은 옅은 선. 끌어 놓을 대상(파일, 다른 칸에서 끌어 온 탭)일 때만 강조 색으로.
+        // 고대비에서는 모든 칸을 2px로 두고 활성 칸만 포커스 색으로 바꿔 두께는 그대로 둔다
+        let tab_target = tab_drop.is_some_and(|(q, _)| q == p) && dragged_tab.is_some_and(|(from, _)| from != p);
+        let dropping = tab_target || matches!(drop_hover, Some((dp, None)) if dp == p);
+        let border_w = if t.high_contrast || dropping { 2.0 } else { 1.0 };
+        let border_c = match () {
+            _ if dropping => t.accent,
+            _ if t.high_contrast && active && multi => t.focus,
+            _ => t.pane_border,
+        };
+
+        // 시작 화면: 머리글·목록 자리에 카드와 줄
+        if let Some(sv) = &start {
+            let hovered = match hover {
+                Hit::Start(hp, i) if hp == p => Some(i),
+                _ => None,
+            };
+            sv.paint(gfx, &t, places, folder_icon, hovered, start_focus);
+            gfx.stroke_round(r.inset(border_w / 2.0, border_w / 2.0), RADIUS, border_c, border_w);
+            return;
         }
 
         // 열 머리글
@@ -4032,6 +4360,7 @@ impl App {
             if let Some((l, rr)) = cols.modified {
                 let s = match e.kind {
                     Kind::Drive if e.size > 0 => format!("{} 사용 가능", format_size(e.free)),
+                    Kind::File | Kind::Dir if short_dates => crate::listing::format_time_short(e.modified, now),
                     Kind::File | Kind::Dir => format_time(e.modified),
                     _ => String::new(),
                 };
@@ -4080,17 +4409,7 @@ impl App {
             gfx.unclip();
         }
 
-        // 테두리: 모든 칸이 같은 옅은 선. 끌어 놓을 대상(파일, 다른 칸에서 끌어 온 탭)일 때만 강조 색으로.
-        // 고대비에서는 모든 칸을 2px로 두고 활성 칸만 포커스 색으로 바꿔 두께는 그대로 둔다
-        let tab_target = tab_drop.is_some_and(|(q, _)| q == p) && dragged_tab.is_some_and(|(from, _)| from != p);
-        let dropping = tab_target || matches!(drop_hover, Some((dp, None)) if dp == p);
-        let w = if t.high_contrast || dropping { 2.0 } else { 1.0 };
-        let color = match () {
-            _ if dropping => t.accent,
-            _ if t.high_contrast && active && multi => t.focus,
-            _ => t.pane_border,
-        };
-        gfx.stroke_round(r.inset(w / 2.0, w / 2.0), RADIUS, color, w);
+        gfx.stroke_round(r.inset(border_w / 2.0, border_w / 2.0), RADIUS, border_c, border_w);
     }
 }
 
@@ -4181,13 +4500,23 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         },
         Deferred::Menu { pane, paths, dir, pt } => show_menu(hwnd, MenuRequest { pane, paths, dir, pt }),
         Deferred::PrepareMenu { paths, dir } => prepare_menu(hwnd, paths, dir),
-        Deferred::FavMenu { row, pt } => fav_ui::show_fav_menu(hwnd, row, pt),
-        Deferred::FavSortMenu { pt } => fav_ui::show_fav_sort_menu(hwnd, pt),
-        Deferred::SideMenu { side, pt } => sidebar::show_side_menu(hwnd, side, pt),
+        Deferred::FavMenu { row, pt } => with_menu(|| fav_ui::show_fav_menu(hwnd, row, pt)),
+        Deferred::FavSortMenu { pt } => with_menu(|| fav_ui::show_fav_sort_menu(hwnd, pt)),
+        Deferred::SideMenu { side, pt } => with_menu(|| sidebar::show_side_menu(hwnd, side, pt)),
         Deferred::PreviewSync => preview::sync_handler(),
         Deferred::Settings { ctl, index, pt } => settings_ui::run_deferred(hwnd, ctl, index, pt),
         Deferred::PalMenu { pt } => palette::show_pal_menu(hwnd, pt),
+        Deferred::MoreMenu { pt } => with_menu(|| sidebar::show_more_menu(hwnd, pt)),
+        Deferred::StartMenu { pane, item, loc, pt } => with_menu(|| start::show_start_menu(hwnd, pane, item, loc, pt)),
+        Deferred::WorkspaceMenu { pt } => with_menu(|| workspace_ui::show_workspace_menu(hwnd, pt)),
     }
+}
+
+/// 팝업 메뉴를 띄우는 동안 표시해 둔다: 메뉴 위로 간 마우스 때문에 떠 있는 패널이 닫히지 않게
+fn with_menu(f: impl FnOnce()) {
+    with_app(|a| a.menu_open = true);
+    f();
+    with_app(|a| a.menu_open = false);
 }
 
 fn remove_search_folder(hwnd: HWND, folders: &crate::folders::Folders, root: &str) {
@@ -4316,8 +4645,6 @@ struct EditColors {
     rename: HWND,
     preview_host: HWND,
     filter: HWND,
-    /// 검색 창 입력 상자 (판과 같은 바탕, 상자 없이)
-    search: HWND,
 }
 
 thread_local! {
@@ -4331,7 +4658,7 @@ pub fn edit_ctl_color(wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     let c = EDIT_COLORS.get()?;
     let hdc = HDC(wp.0 as *mut c_void);
     let target = HWND(lp.0 as *mut c_void);
-    let (bg, brush) = if target == c.rename || target == c.preview_host || target == c.search {
+    let (bg, brush) = if target == c.rename || target == c.preview_host {
         (c.pane, c.pane_brush)
     } else if target == c.filter {
         (c.chip, c.chip_brush)
@@ -4394,8 +4721,26 @@ pub unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                     }
                 });
             }
+            // 검색 상자를 직접 누르면 키보드는 검색 쪽으로
+            WM_SETFOCUS if id as i32 == ID_SEARCH => {
+                with_app(|app| {
+                    if !app.pal_focus {
+                        app.pal_focus = true;
+                        app.invalidate();
+                    }
+                });
+            }
             WM_KILLFOCUS => {
                 let r = DefSubclassProc(hwnd, msg, wp, lp);
+                // 검색 상자에서 이 창의 다른 곳으로 키보드가 옮겨 갔다 (wParam이 0이면 다른 앱으로: 돌아오면 검색 상자로)
+                if id as i32 == ID_SEARCH && wp.0 != 0 {
+                    with_app(|app| {
+                        if app.pal_focus {
+                            app.pal_focus = false;
+                            app.invalidate();
+                        }
+                    });
+                }
                 with_app(|app| app.on_edit_blur(id as i32));
                 if let Ok(parent) = GetParent(hwnd) {
                     crate::run_deferred(parent);

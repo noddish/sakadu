@@ -9,6 +9,8 @@ use windows::core::PCWSTR;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Location {
     Computer,
+    /// 새 탭 시작 화면 ("어디로 이동할까요?": 즐겨찾기 폴더·최근 위치·드라이브)
+    Start,
     Dir(String),
 }
 
@@ -16,6 +18,7 @@ impl Location {
     pub fn title(&self) -> String {
         match self {
             Location::Computer => "내 PC".to_string(),
+            Location::Start => "새 탭".to_string(),
             Location::Dir(p) => util::file_name(p).to_string(),
         }
     }
@@ -23,19 +26,24 @@ impl Location {
     pub fn dir(&self) -> Option<&str> {
         match self {
             Location::Dir(p) => Some(p),
-            Location::Computer => None,
+            Location::Computer | Location::Start => None,
         }
     }
 
     pub fn to_session(&self) -> String {
         match self {
             Location::Computer => "::computer".to_string(),
+            Location::Start => "::start".to_string(),
             Location::Dir(p) => p.clone(),
         }
     }
 
     pub fn from_session(s: &str) -> Location {
-        if s.is_empty() || s == "::computer" { Location::Computer } else { Location::Dir(util::normalize(s)) }
+        match s {
+            "" | "::computer" => Location::Computer,
+            "::start" => Location::Start,
+            _ => Location::Dir(util::normalize(s)),
+        }
     }
 }
 
@@ -609,6 +617,16 @@ mod tests {
         assert!(t.nav_forward());
         assert_eq!(t.loc, Location::Dir("C:\\Users".into()));
         assert!(!t.nav_forward());
+    }
+
+    /// 탭 위치는 세션 글자로 저장·복원된다 (시작 화면·내 PC·폴더)
+    #[test]
+    fn locations_round_trip_through_the_session() {
+        for loc in [Location::Start, Location::Computer, Location::Dir("C:\\작업\\a=b".into())] {
+            assert_eq!(Location::from_session(&loc.to_session()), loc);
+        }
+        assert_eq!(Location::from_session(""), Location::Computer);
+        assert_eq!(Location::Start.dir(), None);
     }
 
     /// 세션 파일의 보기 값: 예전 파일(0 자세히, 1 썸네일)은 그대로 읽히고, 모든 보기가 저장·복원된다
