@@ -1,7 +1,8 @@
 //! 작업 공간: 이름을 붙여 저장해 둔 화면 (칸 나누기·칸·탭, 사이드 패널, 미리 보기와 고정한 파일, 검색어).
 //! 세션과 같은 줄 형식(session::serialize·parse)을 그대로 써서 %APPDATA%\Sakadu\workspaces.txt 한 파일에 담는다.
 //! 창 위치·화면 설정·최근 위치처럼 작업 공간과 상관없는 값은 들어 있어도 바꿀 때 쓰지 않는다.
-//! 작업 공간이 하나라도 있으면 늘 그중 하나가 지금 것이고, 화면을 바꾸는 대로 그 작업 공간에 저장된다
+//! 작업 공간이 하나라도 있으면 늘 그중 하나가 지금 것이고, 그 작업 공간은 화면을 따라간다:
+//! 세션을 저장할 때(창을 닫을 때·설정을 바꿀 때·Windows를 끌 때)와 다른 작업 공간으로 바꿀 때 지금 화면으로 저장된다
 
 use crate::pane::Location;
 use crate::session::{self, Session};
@@ -35,7 +36,15 @@ impl Workspaces {
         if !taken(base) {
             return base.to_string();
         }
-        (2..).map(|k| format!("{base} {k}")).find(|n| !taken(n)).unwrap_or_default()
+        // 번호를 붙여도 길이 제한 안에 들게 앞부분을 줄인다 (저장할 때 잘려 같은 이름이 되지 않게)
+        (2..)
+            .map(|k| {
+                let suffix = format!(" {k}");
+                let head: String = base.chars().take(NAME_MAX.saturating_sub(suffix.chars().count())).collect();
+                format!("{}{suffix}", head.trim_end())
+            })
+            .find(|n| !taken(n))
+            .unwrap_or_default()
     }
 }
 
@@ -170,6 +179,12 @@ mod tests {
         assert_eq!(w.unique_name("리뉴얼", None), "리뉴얼 2");
         assert_eq!(w.unique_name("리뉴얼", Some(0)), "리뉴얼", "renaming to its own name is fine");
         assert_eq!(w.unique_name("사진", None), "사진");
+        // 길이 제한(40자)에 걸린 이름도 번호를 붙인 뒤 제한 안에 들고 서로 다르다
+        let long = "가".repeat(40);
+        let w = Workspaces { list: vec![Workspace { name: long.clone(), state: state(0, &["C:\\"], "none", "", None) }], current: Some(0) };
+        let second = w.unique_name(&long, None);
+        assert_eq!(second.chars().count(), 40);
+        assert_ne!(clean_name(&second), long);
     }
 
     #[test]

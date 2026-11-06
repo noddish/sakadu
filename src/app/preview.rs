@@ -444,16 +444,16 @@ impl App {
         self.invalidate();
     }
 
-    /// 고정해 둔 파일의 경로 (세션·작업 공간에 저장한다)
-    pub(super) fn preview_pin_path(&self) -> Option<String> {
+    /// 고정해 둔 파일의 경로와 파일 번호 (세션·작업 공간에 저장한다)
+    pub(super) fn preview_pin(&self) -> Option<(String, Option<(u32, u64)>)> {
         let pv = self.preview.as_ref()?;
-        pv.pin.as_ref()?;
-        pv.target.as_ref().map(|t| t.path.clone())
+        let pin = pv.pin.as_ref()?;
+        pv.target.as_ref().map(|t| (t.path.clone(), pin.id))
     }
 
     /// 세션·작업 공간에 저장해 둔 고정 파일을 되살린다 (None이면 고정을 풀고 다시 선택을 따라간다).
     /// 크기·종류는 모르니 뒤에서 확인한 결과가 오면 채우고 그때 읽기 시작한다 (없어졌으면 고정을 푼다)
-    pub(super) fn preview_restore_pin(&mut self, path: Option<&str>) {
+    pub(super) fn preview_restore_pin(&mut self, path: Option<&str>, id: Option<(u32, u64)>) {
         let Some(pv) = self.preview.as_mut() else { return };
         let Some(path) = path else {
             pv.pin = None;
@@ -461,17 +461,29 @@ impl App {
             return;
         };
         let name = util::file_name(path).to_string();
-        let ext = ext_of(&name);
-        let (type_name, icon) = self.types.entry(ext.clone()).or_insert_with(|| shell::type_info(&ext, false)).clone();
-        pv.target = Some(Target { path: path.to_string(), name, kind: Kind::File, size: 0, modified: 0, type_name, icon });
-        pv.pin = Some(Pin { id: None, round: next_seq(), busy: false, again: false });
+        // 드라이브 뿌리는 이름이 바뀌거나 옮겨지지 않으니 확인 없이 바로 보인다
+        let drive = util::parent(path).is_none();
+        let ext = if drive { String::new() } else { ext_of(&name) };
+        let key = if drive { "\\dir".to_string() } else { ext.clone() };
+        let (type_name, icon) = self.types.entry(key).or_insert_with(|| shell::type_info(&ext, drive)).clone();
+        let (kind, type_name) = if drive {
+            (Kind::Drive, drive_type_label(unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(&HSTRING::from(path)) }).to_string())
+        } else {
+            (Kind::File, type_name)
+        };
+        pv.target = Some(Target { path: path.to_string(), name, kind, size: 0, modified: 0, type_name, icon });
+        pv.pin = Some(Pin { id, round: next_seq(), busy: false, again: false });
         pv.seq = next_seq();
         pv.content = Content::Waiting;
         pv.scroll = 0.0;
         pv.layout = None;
         pv.dims = None;
         unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_PREVIEW);
+            if drive {
+                SetTimer(Some(self.hwnd), TIMER_PREVIEW, 120, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_PREVIEW);
+            }
         }
         // 이전 대상의 처리기를 내린다
         self.pending.push(Deferred::PreviewSync);

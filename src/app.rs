@@ -462,6 +462,8 @@ pub struct App {
     workspaces: crate::workspaces::Workspaces,
     /// 바로가기 패널에서 접어 둔 구역 (Fold 순서)
     folded: [bool; 2],
+    /// 시작할 때 세션 대신 지금 작업 공간의 화면으로 열지 (세션이 다른 작업 공간·예전 빌드의 것이면)
+    ws_restore: bool,
     /// 패널이 펼쳐지기 시작한 때 (움직이는 중일 때만)
     side_anim: Option<std::time::Instant>,
     /// 단추 말풍선이 떠 있는지
@@ -1140,6 +1142,7 @@ impl App {
             workspaces: crate::workspaces::load(),
             folded: Fold::ALL.map(|f| sess.as_ref().is_some_and(|s| s.folded.iter().any(|k| k == f.key()))),
             side_anim: None,
+            ws_restore: false,
             tip_shown: false,
             settings: None,
             folders: crate::folders::Folders::start(),
@@ -1158,13 +1161,15 @@ impl App {
         if let Some(s) = &sess {
             app.set_search_text(&s.query);
             app.pal_here = s.scope_here;
-            app.preview_restore_pin(s.pin.as_deref());
+            app.preview_restore_pin(s.pin.as_deref(), s.pin_id);
         }
+        app.ws_restore = app.workspaces.current.is_some() && sess.as_ref().and_then(|s| s.ws.as_deref()) != app.workspaces.current_name();
         Ok(app)
     }
 
     /// 메인 창을 표시한 뒤에 할 초기화: 자동 완성, 드롭 대상, 첫 목록 불러오기, 변경 알림
     pub fn init(&mut self) {
+        self.restore_workspace_if_needed();
         unsafe {
             let _ = SHAutoComplete(self.addr_edit, SHACF_FILESYS_DIRS | SHACF_AUTOSUGGEST_FORCE_ON | SHACF_AUTOAPPEND_FORCE_OFF);
             let target: IDropTarget = crate::droptarget::DropTarget::new(self.hwnd).into();
@@ -2991,6 +2996,11 @@ impl App {
                         }
                     }
                     return None;
+                }
+                // Windows를 끄거나 로그아웃할 때: 트레이에 숨어 있어도 지금 화면을 저장한다
+                WM_QUERYENDSESSION => {
+                    self.save_session();
+                    return Some(LRESULT(1));
                 }
                 WM_CLOSE => {
                     self.save_session();

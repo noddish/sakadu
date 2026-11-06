@@ -207,7 +207,8 @@ impl App {
 
     /// 창이 좁을 때 패널이 차지할 수 있는 가장 넓은 너비: 칸 나누기 판(166)과 작업 줄 오른쪽 단추·창 단추(약 260)가 겹치지 않게
     pub(super) fn side_w_max(&self) -> f32 {
-        (self.w - BAR_W - MARGIN - 166.0 - 270.0).clamp(session::SIDE_W_RANGE.0, session::SIDE_W_RANGE.1)
+        // 작업 공간 단추(가장 좁을 때)와 칸 나누기 판, 오른쪽 단추·창 단추 자리를 남긴다
+        (self.w - BAR_W - MARGIN - (workspace_ui::WS_MIN_W + 8.0) - 166.0 - 270.0).clamp(session::SIDE_W_RANGE.0, session::SIDE_W_RANGE.1)
     }
 
     /// 지금 창에서 실제로 보이는 패널 너비 (저장한 너비는 그대로 두고, 창이 좁으면 줄여 보인다)

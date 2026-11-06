@@ -30,8 +30,11 @@ pub struct Session {
     pub side: String,
     /// 왼쪽 패널 너비 (DIP)
     pub side_w: f32,
-    /// 미리 보기에 고정해 둔 파일
+    /// 미리 보기에 고정해 둔 파일과 그 파일 번호 (꺼져 있는 동안 이름이 바뀌어도 찾게)
     pub pin: Option<String>,
+    pub pin_id: Option<(u32, u64)>,
+    /// 이 화면이 어느 작업 공간의 것인지 (workspaces.txt와 어긋나면 그 작업 공간을 덮어쓰지 않는다)
+    pub ws: Option<String>,
     /// 검색 패널의 검색어와 범위 (true: 현재 폴더)
     pub query: String,
     pub scope_here: bool,
@@ -109,6 +112,13 @@ pub fn serialize(s: &Session) -> String {
     if let Some(p) = &s.pin {
         out.push_str(&format!("pin={p}\n"));
     }
+    if let Some((vol, idx)) = s.pin_id {
+        out.push_str(&format!("pinid={vol}:{idx}\n"));
+    }
+    // "workspace="는 workspaces.txt의 구분 줄이라 다른 이름을 쓴다
+    if let Some(w) = &s.ws {
+        out.push_str(&format!("ws={w}\n"));
+    }
     // 검색 상자는 한 줄이지만, 붙여넣은 줄바꿈이 남아도 줄 형식이 깨지지 않게 공백으로
     let query: String = s.query.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
     if !query.trim().is_empty() {
@@ -158,6 +168,8 @@ pub fn parse(text: &str) -> Option<Session> {
         side: "favorites".to_string(),
         side_w: SIDE_W_DEFAULT,
         pin: None,
+        pin_id: None,
+        ws: None,
         query: String::new(),
         scope_here: false,
         folded: Vec::new(),
@@ -192,6 +204,8 @@ pub fn parse(text: &str) -> Option<Session> {
             "side" => s.side = value.to_string(),
             "sidew" => s.side_w = value.parse::<f32>().ok().filter(|w| w.is_finite()).unwrap_or(SIDE_W_DEFAULT).clamp(SIDE_W_RANGE.0, SIDE_W_RANGE.1),
             "pin" if !value.is_empty() => s.pin = Some(value.to_string()),
+            "pinid" => s.pin_id = value.split_once(':').and_then(|(v, i)| Some((v.parse().ok()?, i.parse().ok()?))),
+            "ws" if !value.is_empty() => s.ws = Some(value.to_string()),
             "query" => s.query = value.to_string(),
             "scope" => s.scope_here = value == "here",
             "fold" => s.folded = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(String::from).collect(),
@@ -255,6 +269,8 @@ mod tests {
             side: "places".into(),
             side_w: 260.0,
             pin: Some("D:\\업무\\견적서=최종.pdf".into()),
+            pin_id: Some((0x1234_abcd, 42)),
+            ws: Some("월말 정산".into()),
             query: "견적 | 계약서".into(),
             scope_here: true,
             folded: vec!["drives".into()],

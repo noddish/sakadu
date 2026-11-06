@@ -416,7 +416,8 @@ impl App {
         self.pal_status = PalStatus::Idle;
     }
 
-    /// 검색 상자 글자를 바꾼다 (세션·작업 공간을 되살릴 때). 앱을 다루는 동안 생긴 글자 바뀜 알림은 받지 못하니 찾기는 부르는 쪽이 한다
+    /// 검색 상자 글자를 바꾼다 (세션·작업 공간을 되살릴 때). 앱을 다루는 동안 생긴 글자 바뀜 알림은 나중에야 처리되니
+    /// (main.rs가 다시 넣는다) 지금 찾으려면 부르는 쪽이 찾는다
     pub(super) fn set_search_text(&self, q: &str) {
         if edit_text(self.search_edit) != q {
             unsafe {
@@ -433,8 +434,9 @@ impl App {
             self.side_before_search = None;
             self.show_side(Panel::Search, true);
             self.pal_reset();
-            self.pal_check_status();
         }
+        // 칸이 바뀌었으니 이미 열려 있었어도 "이 폴더도 검색하기" 대상을 다시 본다
+        self.pal_check_status();
         self.pal_run_query();
     }
 
