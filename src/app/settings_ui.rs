@@ -337,6 +337,7 @@ impl App {
                                 tip("새 탭", format!("{} · 즐겨찾기 폴더·최근 위치·드라이브에서 고르기 · 글자를 치고 Enter로 바로", k(Action::NewTab))),
                                 tip("칸 이동", format!("Tab · Shift+Tab, 칸 나누기는 {}", layout_keys(&self.keys))),
                                 tip("되돌리기", format!("{} · 이름 바꾸기·이동·복사·휴지통 삭제를 마지막 것부터", k(Action::Undo))),
+                                tip("미리 보기 고정", format!("{}로 연 미리 보기의 핀 · 다른 파일을 골라도 그 파일을 계속 보고, 같은 드라이브 안에서 이름이 바뀌거나 옮겨져도 따라가요", k(Action::Preview))),
                             ],
                         },
                         Card {

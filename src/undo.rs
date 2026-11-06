@@ -48,9 +48,9 @@ pub struct Stamp {
     tree: u64,
 }
 
-/// path의 표식. deep이면 내용까지 본다 (복사본·새 폴더처럼 되돌릴 때 지우는 항목)
-pub fn stamp(path: &str, deep: bool) -> Option<Stamp> {
-    let info = unsafe {
+/// 파일·폴더를 열지 않고(속성만) 볼륨·파일 번호와 크기·시각을 읽는다. 연결(정션 등)은 따라가지 않는다
+fn file_info(path: &str) -> Option<BY_HANDLE_FILE_INFORMATION> {
+    unsafe {
         let h = CreateFileW(
             &HSTRING::from(path),
             FILE_READ_ATTRIBUTES.0,
@@ -65,9 +65,57 @@ pub fn stamp(path: &str, deep: bool) -> Option<Stamp> {
         let r = GetFileInformationByHandle(h, &mut info);
         let _ = CloseHandle(h);
         r.ok()?;
-        info
-    };
-    let id = (info.dwVolumeSerialNumber, (info.nFileIndexHigh as u64) << 32 | info.nFileIndexLow as u64);
+        Some(info)
+    }
+}
+
+fn id_of(info: &BY_HANDLE_FILE_INFORMATION) -> (u32, u64) {
+    (info.dwVolumeSerialNumber, (info.nFileIndexHigh as u64) << 32 | info.nFileIndexLow as u64)
+}
+
+/// (볼륨 번호, 파일 번호). 같은 볼륨 안에서는 이름을 바꾸거나 다른 폴더로 옮겨도 그대로다
+pub fn file_id(path: &str) -> Option<(u32, u64)> {
+    file_info(path).map(|i| id_of(&i))
+}
+
+/// 파일 번호로 그 파일의 지금 경로를 찾는다 (NTFS·ReFS처럼 번호로 열 수 있는 볼륨만). hint는 그 볼륨에 있던 경로.
+/// 지워졌거나 번호로 열 수 없는 볼륨(공유 폴더 등)이면 None
+pub fn path_of_file_id(hint: &str, id: (u32, u64)) -> Option<String> {
+    let root = &hint[..util::root_len(hint)];
+    if root.is_empty() {
+        return None;
+    }
+    unsafe {
+        let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        let volume = CreateFileW(&HSTRING::from(root), FILE_READ_ATTRIBUTES.0, share, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None).ok()?;
+        let desc = FILE_ID_DESCRIPTOR { dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32, Type: FileIdType, Anonymous: FILE_ID_DESCRIPTOR_0 { FileId: id.1 as i64 } };
+        let h = OpenFileById(volume, &desc, FILE_READ_ATTRIBUTES.0, share, None, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let _ = CloseHandle(volume);
+        let h = h.ok()?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        let same_volume = GetFileInformationByHandle(h, &mut info).is_ok() && id_of(&info) == id;
+        let mut buf = vec![0u16; 1024];
+        let mut n = GetFinalPathNameByHandleW(h, &mut buf, FILE_NAME_NORMALIZED) as usize;
+        if n > buf.len() {
+            buf = vec![0u16; n + 1];
+            n = GetFinalPathNameByHandleW(h, &mut buf, FILE_NAME_NORMALIZED) as usize;
+        }
+        let _ = CloseHandle(h);
+        if !same_volume || n == 0 || n > buf.len() {
+            return None;
+        }
+        let full = String::from_utf16_lossy(&buf[..n]);
+        Some(match full.strip_prefix("\\\\?\\UNC\\") {
+            Some(rest) => format!("\\\\{rest}"),
+            None => full.strip_prefix("\\\\?\\").unwrap_or(&full).to_string(),
+        })
+    }
+}
+
+/// path의 표식. deep이면 내용까지 본다 (복사본·새 폴더처럼 되돌릴 때 지우는 항목)
+pub fn stamp(path: &str, deep: bool) -> Option<Stamp> {
+    let info = file_info(path)?;
+    let id = id_of(&info);
     let dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
     let link = info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
     let tree = if !deep {
@@ -341,6 +389,24 @@ mod tests {
 
     fn any_stamp(_: &str, _: bool) -> Option<Stamp> {
         Some(Stamp::default())
+    }
+
+    /// 파일 번호는 이름을 바꾸거나 다른 폴더로 옮겨도 그대로라, 옛 경로를 단서로 새 경로를 찾는다 (임시 폴더가 NTFS인 PC)
+    #[test]
+    fn finds_a_moved_file_by_its_id() {
+        let dir = std::env::temp_dir().join(format!("sakadu-fileid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let a = dir.join("a.txt");
+        std::fs::write(&a, b"x").unwrap();
+        let old = a.to_string_lossy().to_string();
+        let id = file_id(&old).expect("id of a.txt");
+        std::fs::rename(&a, dir.join("sub").join("b.txt")).unwrap();
+        let found = path_of_file_id(&old, id);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let found = found.expect("found by id").to_lowercase();
+        assert!(found.ends_with("\\sub\\b.txt") && !found.starts_with("\\\\?"), "{found}");
+        assert_eq!(path_of_file_id(&old, id), None, "a deleted file is not found");
     }
 
     #[test]

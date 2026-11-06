@@ -41,7 +41,7 @@ use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
 use sidebar::{BAR_W, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_CLOSE};
 use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
-pub use preview::{TextReady, unload_handler};
+pub use preview::{PreviewMsg, unload_handler};
 
 /// 칸 영역 위 작업 줄 (칸 나누기·숨김·미리 보기·창 단추). 빈 곳은 창을 끄는 제목 줄 역할도 한다
 const WORKBAR_H: f32 = 44.0;
@@ -192,6 +192,12 @@ enum Hit {
     Star(usize),
     /// 새 탭 시작 화면의 카드·줄 (칸, 항목)
     Start(usize, usize),
+    /// 미리 보기 머리의 핀 (파일 고정·풀기)
+    PreviewPin,
+    /// 미리 보기 머리의 열기 (기본 앱으로)
+    PreviewOpen,
+    /// 미리 보기의 고정 칩 (누르면 핀과 같다)
+    PreviewChip,
 }
 
 impl Hit {
@@ -1460,6 +1466,9 @@ impl App {
             }
             return Hit::None;
         }
+        if let Some(h) = self.preview_hit(x, y) {
+            return h;
+        }
         let (sx, sy) = self.splitters();
         if sx.is_some_and(|r| r.contains(x, y)) {
             return Hit::SplitX;
@@ -2518,6 +2527,8 @@ impl App {
         }
         // 복사·이동·삭제로 남은 용량이 바뀌었다
         self.refresh_places();
+        // 고정한 미리 보기 파일의 이름이 바뀌었거나 옮겨졌거나 지워졌을 수 있다
+        self.preview_pin_check();
     }
 
     /// 되돌리기가 일부만 됐으면 알리고, 실패한 항목은 기록으로 되돌려 놓아 다시 시도할 수 있게 한다
@@ -2884,6 +2895,8 @@ impl App {
                         // 다른 곳에서 파일을 옮겼을 수 있으니 드라이브 남은 용량도 다시 읽는다
                         self.refresh_settings();
                         self.refresh_places();
+                        // 다른 앱에서 고정한 파일의 이름을 바꾸거나 옮겼을 수 있다
+                        self.preview_pin_check();
                         // 비활성인 동안 남겨 둔 알림은 이제부터 잠시 뒤 지운다
                         if self.panes.iter().any(|pn| pn.tabs.iter().any(|t| t.message.is_some())) {
                             SetTimer(Some(hwnd), TIMER_FLASH, FLASH_MS, None);
@@ -2935,8 +2948,9 @@ impl App {
                             // 트레이에 숨어 있는 동안에는 읽지 않고, 다시 보일 때 읽는다
                             if IsWindowVisible(hwnd).as_bool() {
                                 self.load(p, true);
-                                // 파일 작업·이름 바꾸기로 바뀐 것을 검색 결과에도 반영한다
+                                // 파일 작업·이름 바꾸기로 바뀐 것을 검색 결과와 고정한 미리 보기에도 반영한다
                                 self.pal_requery();
+                                self.preview_pin_check();
                             } else {
                                 self.stale[p] = true;
                             }
@@ -2983,7 +2997,7 @@ impl App {
                 WM_APP_SEARCH => self.on_search_done(*Box::from_raw(lp.0 as *mut SearchDone)),
                 crate::WM_APP_FILEOP => self.on_file_op(*Box::from_raw(lp.0 as *mut shell::OpReport)),
                 crate::WM_APP_THUMB => self.on_thumb(*Box::from_raw(lp.0 as *mut crate::thumbs::Image)),
-                crate::WM_APP_PREVIEW => self.on_preview_text(*Box::from_raw(lp.0 as *mut TextReady)),
+                crate::WM_APP_PREVIEW => self.on_preview_msg(*Box::from_raw(lp.0 as *mut PreviewMsg)),
                 m if (WM_APP_NOTIFY..WM_APP_NOTIFY + 4).contains(&m) => {
                     shell::ack_notify(wp, lp);
                     // 연속된 변경(복사 중 등)을 한 번의 새로 고침으로 묶는다
@@ -3158,7 +3172,13 @@ impl App {
             return;
         }
         // 막대 아이콘·핀·`…`·검색 패널 단추도 두 번째 누름은 무시한다 (첫 누름이 연 것을 바로 닫지 않게)
-        if dbl && matches!(hit, Hit::Bar(_) | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalRow(_)) {
+        if dbl
+            && matches!(
+                hit,
+                Hit::Bar(_) | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalRow(_)
+                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen
+            )
+        {
             return;
         }
         // 떠 있는 패널 밖을 누르면 패널은 닫고, 누른 것은 그대로 처리한다
@@ -3207,6 +3227,8 @@ impl App {
             Hit::NewFolder(p) => self.new_folder(p),
             Hit::Hidden => self.toggle_hidden(),
             Hit::PreviewButton => self.toggle_preview(),
+            Hit::PreviewPin | Hit::PreviewChip => self.toggle_preview_pin(),
+            Hit::PreviewOpen => self.preview_open(),
             Hit::SettingsButton => self.toggle_settings(settings_ui::Page::General),
             Hit::Bar(panel) => self.bar_click(panel),
             Hit::SidePin => self.side_toggle_pin(),
@@ -3892,6 +3914,7 @@ impl App {
             Hit::More => (self.more_button(), "도움말·설정".to_string()),
             Hit::PalClose => (self.pal_close_rect(), "검색 닫기".to_string()),
             Hit::Start(p, i) => return self.start_tip(p, i),
+            Hit::PreviewPin | Hit::PreviewOpen => return self.preview_tip(),
             _ => return None,
         })
     }

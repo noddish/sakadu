@@ -1,13 +1,16 @@
 //! 오른쪽 미리 보기 창 (Alt+P). 활성 패널에서 선택한 항목을 보여 준다.
 //! 사진은 셸 썸네일, 텍스트는 앞부분, 그 밖은 Windows 미리 보기 처리기(PDF·Office 등),
 //! 처리기가 없으면 큰 아이콘과 정보.
+//! 머리의 핀으로 파일을 고정하면 선택을 바꿔도 그 파일을 계속 보여 준다. 고정한 파일은 파일 번호로 기억해,
+//! 이름이 바뀌거나 옮겨지면 새 경로를 따라가고 지워지면 고정을 푼다 (확인은 뒤에서).
 //! 미리 보기 처리기는 다른 프로세스에서 돌고 호출 중에 메시지를 돌리므로 App 빌림 밖(execute)에서만 다룬다.
 
 use super::*;
 use crate::thumbs::Request;
 use crate::WM_APP_PREVIEW;
 use windows::Win32::Graphics::DirectWrite::IDWriteTextLayout;
-use windows::Win32::System::Com::{CLSCTX_LOCAL_SERVER, CLSIDFromString, CoCreateInstance, STGM_READ, STGM_SHARE_DENY_NONE};
+use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, IWICImagingFactory, WICDecodeMetadataCacheOnDemand};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, CLSIDFromString, CoCreateInstance, STGM_READ, STGM_SHARE_DENY_NONE};
 use windows::Win32::UI::Shell::PropertiesSystem::{IInitializeWithFile, IInitializeWithStream};
 use windows::Win32::UI::Shell::{
     ASSOCF_INIT_DEFAULTTOSTAR, ASSOCSTR_SHELLEXTENSION, AssocQueryStringW, IInitializeWithItem, IPreviewHandler, IPreviewHandlerVisuals,
@@ -18,7 +21,13 @@ use windows::core::{GUID, Interface, PWSTR};
 pub(super) const PREVIEW_W: f32 = 340.0;
 pub(super) const TIMER_PREVIEW: usize = 30;
 pub(super) const G_PREVIEW: u16 = 0xE90D;
-const HEAD_H: f32 = 64.0;
+/// 머리: 이름표·단추 줄, 이름 줄, 고정 칩·종류 줄
+const HEAD_H: f32 = 96.0;
+const BAR_H: f32 = 36.0;
+const BTN: f32 = 26.0;
+const G_OPEN: u16 = 0xE8A7;
+const CHIP_PINNED: &str = "파일 고정";
+const CHIP_FOLLOW: &str = "선택 따라가기";
 /// 아래 정보 줄 (수정한 날짜·위치) 높이
 const INFO_H: f32 = 74.0;
 /// 정보 카드의 그림 크기(DIP)
@@ -56,8 +65,23 @@ enum Content {
     Info,
 }
 
+/// 고정해 둔 파일. 선택을 바꿔도 target을 바꾸지 않는다
+struct Pin {
+    /// (볼륨, 파일 번호). 고정한 직후 뒤에서 읽어 채운다. 번호로 다시 열 수 있는 것은 같은 NTFS 드라이브 안뿐이라,
+    /// 다른 드라이브로 옮기거나 공유 폴더·FAT USB에서 이름을 바꾸면 찾지 못하고 고정이 풀린다
+    id: Option<(u32, u64)>,
+    /// 늦게 도착한 이전 확인 결과를 버리기 위한 순번 (고정할 때마다 바뀐다)
+    round: u64,
+    /// 뒤에서 확인하는 중이면 true. 그사이 다시 확인할 일이 생기면 again
+    busy: bool,
+    again: bool,
+}
+
 pub(super) struct Preview {
     target: Option<Target>,
+    pin: Option<Pin>,
+    /// 그림 파일의 가로×세로 (픽셀). 뒤에서 읽어 채운다
+    dims: Option<(u32, u32)>,
     content: Content,
     /// 늦게 도착한 이전 결과를 버리기 위한 순번
     seq: u64,
@@ -69,13 +93,93 @@ pub(super) struct Preview {
 
 impl Preview {
     pub(super) fn new() -> Preview {
-        Preview { target: None, content: Content::Waiting, seq: 0, scroll: 0.0, layout: None, host_rect: None }
+        Preview { target: None, pin: None, dims: None, content: Content::Waiting, seq: next_seq(), scroll: 0.0, layout: None, host_rect: None }
     }
 }
 
-pub struct TextReady {
-    seq: u64,
-    text: Option<String>,
+/// 뒤에서 읽은 미리 보기 결과 (WM_APP_PREVIEW)
+pub enum PreviewMsg {
+    /// 텍스트 파일 앞부분. 이진 파일이면 None
+    Text { seq: u64, text: Option<String> },
+    /// 그림 파일의 가로×세로
+    Dims { seq: u64, dims: (u32, u32) },
+    /// 고정한 파일의 지금 자리. 찾지 못했으면(지워짐·휴지통) None
+    Pin { round: u64, found: Option<Found> },
+}
+
+pub struct Found {
+    path: String,
+    id: Option<(u32, u64)>,
+    size: u64,
+    modified: u64,
+    dir: bool,
+}
+
+/// 뒤에서 읽은 결과가 지금 것인지 가리는 순번. 미리 보기를 닫았다 다시 열어도 되풀이되지 않게 앱 전체에서 하나씩 늘린다
+/// (닫기 전에 시작한 읽기·확인이 늦게 도착해 새 대상에 붙지 않게)
+fn next_seq() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 휴지통이나, 열린 채 지워져 사라지기를 기다리는 곳($Extend\$Deleted). 파일 번호로 찾았더니 여기 있으면 지운 것으로 본다
+fn in_trash(path: &str) -> bool {
+    let p = path.to_lowercase();
+    p.contains("\\$recycle.bin\\") || p.contains("\\$extend\\")
+}
+
+/// 고정한 파일이 지금 어디 있는지 뒤에서 확인한다.
+/// 같은 경로에 파일이 있으면 그 경로를 지킨다: 저장할 때 원본을 백업 이름(notes.txt~ 등)으로 바꾸고 새로 쓰는 프로그램은
+/// 번호가 바뀌지만 사용자에게는 같은 파일이다. 경로가 비었을 때만 번호로 옮겨 간 곳을 찾는다
+fn spawn_pin_check(hwnd: HWND, round: u64, path: String, id: Option<(u32, u64)>) {
+    let owner = shell::SendHwnd(hwnd);
+    std::thread::spawn(move || {
+        use std::os::windows::fs::MetadataExt;
+        let at = match (crate::undo::file_id(&path), id) {
+            (Some(_), _) => Some(path),
+            (None, Some(want)) => crate::undo::path_of_file_id(&path, want).filter(|p| !in_trash(p)),
+            (None, None) => None,
+        };
+        let found = at.and_then(|p| {
+            let md = std::fs::metadata(&p).ok()?;
+            Some(Found { id: crate::undo::file_id(&p), size: md.file_size(), modified: md.last_write_time(), dir: md.is_dir(), path: p })
+        });
+        post(owner.get(), WM_APP_PREVIEW, Box::new(PreviewMsg::Pin { round, found }));
+    });
+}
+
+/// 그림 파일의 가로×세로를 뒤에서 읽는다 (WIC가 머리만 읽는다). 읽지 못하면 보내지 않는다
+fn spawn_dims(hwnd: HWND, seq: u64, path: String) {
+    let owner = shell::SendHwnd(hwnd);
+    std::thread::spawn(move || {
+        let _com = shell::ComInit::sta();
+        let dims = unsafe {
+            CoCreateInstance::<_, IWICImagingFactory>(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok().and_then(|f| {
+                let frame = f.CreateDecoderFromFilename(&HSTRING::from(path.as_str()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).ok()?.GetFrame(0).ok()?;
+                let (mut w, mut h) = (0u32, 0u32);
+                frame.GetSize(&mut w, &mut h).ok()?;
+                (w > 0 && h > 0).then_some((w, h))
+            })
+        };
+        if let Some(dims) = dims {
+            post(owner.get(), WM_APP_PREVIEW, Box::new(PreviewMsg::Dims { seq, dims }));
+        }
+    });
+}
+
+/// 머리 첫 줄의 단추: (고정, 기본 앱으로 열기)
+fn head_buttons(pr: R) -> (R, R) {
+    let open = R::new(pr.r - 12.0 - BTN, pr.t + 6.0, pr.r - 12.0, pr.t + 6.0 + BTN);
+    let pin = R::new(open.l - 4.0 - BTN, open.t, open.l - 4.0, open.b);
+    (pin, open)
+}
+
+/// 고정 칩 (이름 아래 줄 왼쪽)
+fn chip_rect(gfx: &Gfx, pr: R, pinned: bool) -> R {
+    let w = gfx.measure(if pinned { CHIP_PINNED } else { CHIP_FOLLOW }, Font::Small) + 22.0;
+    let t = pr.t + BAR_H + 30.0;
+    R::new(pr.l + 16.0, t, (pr.l + 16.0 + w).min(pr.r - 16.0), t + 24.0)
 }
 
 fn ext_of(name: &str) -> String {
@@ -157,7 +261,7 @@ fn spawn_text(hwnd: HWND, seq: u64, path: String) {
         use std::io::Read;
         let mut buf = Vec::new();
         let text = std::fs::File::open(&path).and_then(|f| f.take(TEXT_READ).read_to_end(&mut buf)).ok().and_then(|_| decode_text(&buf));
-        post(owner.get(), WM_APP_PREVIEW, Box::new(TextReady { seq, text }));
+        post(owner.get(), WM_APP_PREVIEW, Box::new(PreviewMsg::Text { seq, text }));
     });
 }
 
@@ -207,7 +311,8 @@ impl App {
         let App { panes, types, preview, .. } = self;
         let Some(pv) = preview.as_mut() else { return };
         let tab = panes[p].tab();
-        let target = tab.entry_at(tab.cursor).filter(|e| e.selected).and_then(|e| {
+        let pinned = pv.pin.is_some();
+        let target = tab.entry_at(tab.cursor).filter(|e| e.selected && !pinned).and_then(|e| {
             let (type_name, icon) = type_info(types, e);
             Some(Target {
                 path: tab.path_of(e)?,
@@ -219,17 +324,19 @@ impl App {
                 icon: if e.icon >= 0 { e.icon } else { icon },
             })
         });
-        let same = match (&pv.target, &target) {
-            (Some(a), Some(b)) => a.path == b.path && a.modified == b.modified && a.size == b.size,
-            (None, None) => true,
-            _ => false,
-        };
+        let same = pinned
+            || match (&pv.target, &target) {
+                (Some(a), Some(b)) => a.path == b.path && a.modified == b.modified && a.size == b.size,
+                (None, None) => true,
+                _ => false,
+            };
         if !same {
-            pv.seq += 1;
+            pv.seq = next_seq();
             pv.target = target;
             pv.content = Content::Waiting;
             pv.scroll = 0.0;
             pv.layout = None;
+            pv.dims = None;
             unsafe {
                 if pv.target.is_some() {
                     SetTimer(Some(hwnd), TIMER_PREVIEW, 120, None);
@@ -277,6 +384,7 @@ impl App {
         pv.content = if t.kind != Kind::File {
             Content::Info
         } else if IMAGE_EXTS.contains(&ext.as_str()) {
+            spawn_dims(hwnd, pv.seq, t.path.clone());
             Content::Image
         } else if TEXT_EXTS.contains(&ext.as_str()) {
             spawn_text(hwnd, pv.seq, t.path.clone());
@@ -298,17 +406,149 @@ impl App {
         self.invalidate();
     }
 
-    pub(super) fn on_preview_text(&mut self, r: TextReady) {
+    pub(super) fn on_preview_msg(&mut self, m: PreviewMsg) {
         let Some(pv) = self.preview.as_mut() else { return };
-        if pv.seq != r.seq {
+        match m {
+            PreviewMsg::Text { seq, text } if seq == pv.seq => {
+                pv.content = match text {
+                    Some(t) => Content::Text(t),
+                    None => Content::Info,
+                };
+                pv.layout = None;
+            }
+            PreviewMsg::Dims { seq, dims } if seq == pv.seq => pv.dims = Some(dims),
+            PreviewMsg::Pin { round, found } => return self.on_pin_checked(round, found),
+            _ => return,
+        }
+        self.invalidate();
+    }
+
+    // ---------- 고정 ----------
+
+    /// 핀·칩: 지금 보이는 파일을 고정하거나, 고정을 풀고 다시 선택을 따라간다
+    pub(super) fn toggle_preview_pin(&mut self) {
+        let Some(pv) = self.preview.as_mut() else { return };
+        if pv.pin.take().is_none() {
+            if pv.target.is_none() {
+                return;
+            }
+            pv.pin = Some(Pin { id: None, round: next_seq(), busy: false, again: false });
+            // 파일 번호를 읽어 둔다 (이름이 바뀌거나 옮겨져도 찾을 수 있게)
+            self.preview_pin_check();
+        }
+        self.invalidate();
+    }
+
+    /// 고정한 파일이 그대로 있는지 뒤에서 확인한다 (파일 작업 뒤, 폴더가 바뀐 알림 뒤, 창으로 돌아올 때)
+    pub(super) fn preview_pin_check(&mut self) {
+        let hwnd = self.hwnd;
+        let Some(pv) = self.preview.as_mut() else { return };
+        let (Some(pin), Some(t)) = (pv.pin.as_mut(), &pv.target) else { return };
+        if t.kind == Kind::Drive {
             return;
         }
-        pv.content = match r.text {
-            Some(t) => Content::Text(t),
-            None => Content::Info,
+        if pin.busy {
+            pin.again = true;
+            return;
+        }
+        pin.busy = true;
+        spawn_pin_check(hwnd, pin.round, t.path.clone(), pin.id);
+    }
+
+    fn on_pin_checked(&mut self, round: u64, found: Option<Found>) {
+        let Some(pv) = self.preview.as_mut() else { return };
+        let Some(pin) = pv.pin.as_mut().filter(|p| p.round == round) else { return };
+        pin.busy = false;
+        let again = std::mem::take(&mut pin.again);
+        let Some(f) = found else {
+            // 지워졌거나 휴지통으로 갔다: 고정을 풀고 다시 선택을 따라간다
+            pv.pin = None;
+            self.flash(self.active, "고정한 파일을 찾을 수 없어 고정을 풀었습니다");
+            self.invalidate();
+            return;
         };
-        pv.layout = None;
+        pin.id = f.id.or(pin.id);
+        let Some(t) = pv.target.as_mut() else { return };
+        let moved = t.path != f.path;
+        let changed = t.kind == Kind::File && (t.size != f.size || t.modified != f.modified);
+        if moved || changed {
+            if moved {
+                let name = util::file_name(&f.path).to_string();
+                // 확장자가 바뀌었을 때만 종류·아이콘을 다시 정한다
+                if !f.dir && ext_of(&name) != ext_of(&t.name) {
+                    let ext = ext_of(&name);
+                    let (type_name, icon) = self.types.entry(ext.clone()).or_insert_with(|| shell::type_info(&ext, false)).clone();
+                    t.type_name = type_name;
+                    t.icon = icon;
+                }
+                t.name = name;
+            }
+            if t.kind == Kind::File {
+                t.size = f.size;
+                t.modified = f.modified;
+            }
+            t.path = f.path;
+            self.preview_reload();
+        }
+        if again {
+            self.preview_pin_check();
+        }
         self.invalidate();
+    }
+
+    /// 같은 대상을 처음부터 다시 읽는다 (고정한 파일이 옮겨지거나 바뀌었을 때)
+    fn preview_reload(&mut self) {
+        let Some(pv) = self.preview.as_mut() else { return };
+        pv.seq = next_seq();
+        pv.content = Content::Waiting;
+        pv.scroll = 0.0;
+        pv.layout = None;
+        pv.dims = None;
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_PREVIEW, 120, None);
+        }
+        self.pending.push(Deferred::PreviewSync);
+    }
+
+    /// 머리의 열기 단추: 파일은 기본 앱으로, 폴더·드라이브는 지금 칸에서 연다
+    pub(super) fn preview_open(&mut self) {
+        let Some(t) = self.preview.as_ref().and_then(|pv| pv.target.clone()) else { return };
+        let p = self.active;
+        if t.kind == Kind::File {
+            self.pending.push(Deferred::Open { pane: p, paths: vec![t.path.clone()], dir: util::parent(&t.path) });
+        } else {
+            self.navigate(p, Location::Dir(t.path), None);
+        }
+    }
+
+    /// 미리 보기 머리의 단추·칩 (그 밖의 미리 보기 자리는 None: 지금처럼 아무것도 누르지 않는다)
+    pub(super) fn preview_hit(&self, x: f32, y: f32) -> Option<Hit> {
+        let pr = self.preview_rect().filter(|r| r.contains(x, y))?;
+        let pv = self.preview.as_ref()?;
+        let (pin, open) = head_buttons(pr);
+        if pin.contains(x, y) {
+            return Some(Hit::PreviewPin);
+        }
+        if open.contains(x, y) {
+            return Some(Hit::PreviewOpen);
+        }
+        if pv.target.is_some() && chip_rect(&self.gfx, pr, pv.pin.is_some()).contains(x, y) {
+            return Some(Hit::PreviewChip);
+        }
+        None
+    }
+
+    pub(super) fn preview_tip(&self) -> Option<(R, String)> {
+        let pr = self.preview_rect()?;
+        let pv = self.preview.as_ref()?;
+        pv.target.as_ref()?;
+        let (pin, open) = head_buttons(pr);
+        match self.hover {
+            Hit::PreviewPin if pv.pin.is_some() => Some((pin, "고정 풀기 · 다시 선택을 따라가요".to_string())),
+            Hit::PreviewPin => Some((pin, "이 파일을 고정 · 다른 파일을 골라도 계속 보여요".to_string())),
+            Hit::PreviewOpen => Some((open, if pv.target.as_ref().is_some_and(|t| t.kind == Kind::File) { "기본 앱으로 열기" } else { "열기" }.to_string())),
+            _ => None,
+        }
     }
 
     /// 지금 띄워야 할 처리기 (execute 쪽에서 물어본다)
@@ -347,22 +587,54 @@ impl App {
         let (Some(pr), Some(body)) = (self.preview_rect(), self.preview_body()) else { return };
         let t = self.theme;
         let scale = self.scale();
+        let hover = self.hover;
         let App { gfx, preview, thumb_failed, .. } = self;
         let Some(pv) = preview.as_mut() else { return };
         gfx.fill_round(pr, RADIUS, t.pane);
         gfx.stroke_round(pr.inset(0.5, 0.5), RADIUS, t.pane_border, 1.0);
+        // 머리 첫 줄: 이름표, 고정(핀)·열기 단추. 고정했으면 핀이 켜진 모양
+        let pinned = pv.pin.is_some();
+        let (pin_r, open_r) = head_buttons(pr);
+        gfx.text("미리 보기", R::new(pr.l + 16.0, pr.t, pin_r.l - 8.0, pr.t + BAR_H + 2.0), Font::Small, t.faint);
+        let has = pv.target.is_some();
+        let button = |gfx: &Gfx, r: R, glyph: u16, on: bool, hovered: bool| {
+            if on {
+                gfx.fill_round(r, 6.0, t.accent_soft);
+            } else if hovered && has {
+                gfx.fill_round(r, 6.0, t.hover);
+            }
+            gfx.glyph(glyph, r, false, if on { t.accent } else if !has { t.faint } else if hovered { t.text } else { t.dim });
+        };
+        button(gfx, pin_r, if pinned { sidebar::G_UNPIN } else { sidebar::G_PIN }, pinned, hover == Hit::PreviewPin);
+        button(gfx, open_r, G_OPEN, false, hover == Hit::PreviewOpen);
         let Some(target) = &pv.target else {
-            gfx.text("파일을 선택하면\n여기에서 미리 봅니다", R::new(pr.l + 16.0, pr.t + 40.0, pr.r - 16.0, pr.t + 120.0), Font::Hint, t.faint);
+            gfx.text("파일을 선택하면\n여기에서 미리 봅니다", R::new(pr.l + 16.0, pr.t + BAR_H + 8.0, pr.r - 16.0, pr.t + BAR_H + 88.0), Font::Hint, t.faint);
             return;
         };
-        // 머리: 아이콘, 이름, 종류 · 크기
-        gfx.icon(target.icon, R::new(pr.l + 16.0, pr.t + 18.0, pr.l + 32.0, pr.t + 34.0));
-        gfx.text(&target.name, R::new(pr.l + 42.0, pr.t + 12.0, pr.r - 16.0, pr.t + 34.0), Font::Strong, t.text);
-        let sub = match target.kind {
+        // 이름 줄: 아이콘, 이름
+        let nt = pr.t + BAR_H;
+        gfx.icon(target.icon, R::new(pr.l + 16.0, nt + 3.0, pr.l + 32.0, nt + 19.0));
+        gfx.text(&target.name, R::new(pr.l + 42.0, nt, pr.r - 16.0, nt + 22.0), Font::Strong, t.text);
+        // 고정 칩(누르면 고정·풀기)과 종류 · 크기 (그림이면 가로×세로까지)
+        let chip = chip_rect(gfx, pr, pinned);
+        let chip_hot = hover == Hit::PreviewChip;
+        if pinned {
+            gfx.fill_round(chip, 12.0, t.accent_soft);
+        } else {
+            gfx.fill_round(chip, 12.0, if chip_hot { t.sel_inactive } else { t.field });
+        }
+        if t.high_contrast || (pinned && chip_hot) {
+            gfx.stroke_round(chip.inset(0.5, 0.5), 12.0, if pinned { t.accent } else { t.border }, 1.0);
+        }
+        gfx.text(if pinned { CHIP_PINNED } else { CHIP_FOLLOW }, R::new(chip.l + 11.0, chip.t, chip.r - 6.0, chip.b), Font::Small, if pinned { t.chip_text } else { t.dim });
+        let mut sub = match target.kind {
             Kind::File => format!("{} · {}", target.type_name, format_size(target.size)),
             _ => target.type_name.clone(),
         };
-        gfx.text(&sub, R::new(pr.l + 42.0, pr.t + 34.0, pr.r - 16.0, pr.t + 52.0), Font::Small, t.dim);
+        if let Some((w, h)) = pv.dims {
+            sub.push_str(&format!(" · {w} × {h}"));
+        }
+        gfx.text(&sub, R::new(chip.r + 10.0, chip.t, pr.r - 16.0, chip.b), Font::Small, t.dim);
         gfx.fill(R::new(pr.l, pr.t + HEAD_H - 1.0, pr.r, pr.t + HEAD_H), t.border);
 
         // 아래 정보 줄: 수정한 날짜, 위치
@@ -564,6 +836,13 @@ mod tests {
         assert_eq!(ext_of(".gitignore"), "gitignore");
         assert_eq!(ext_of("Makefile"), "");
         assert_eq!(ext_of("a.tar.gz"), "gz");
+    }
+
+    #[test]
+    fn trash_locations_count_as_deleted() {
+        assert!(in_trash("C:\\$Recycle.Bin\\S-1-5-21-1\\$RAB12.png"));
+        assert!(in_trash("D:\\$Extend\\$Deleted\\0001"));
+        assert!(!in_trash("C:\\Users\\a\\recycle.bin\\x.png"));
     }
 
     #[test]
