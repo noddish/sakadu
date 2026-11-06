@@ -39,7 +39,7 @@ mod start;
 mod workspace_ui;
 use fav_ui::G_STAR;
 use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
-use sidebar::{BAR_W, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_CLOSE};
+use sidebar::{BAR_W, Fold, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_ANIM, TIMER_SIDE_CLOSE};
 use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
 pub use preview::{PreviewMsg, unload_handler};
@@ -460,6 +460,10 @@ pub struct App {
     start_keys: bool,
     /// 이름 붙여 저장해 둔 화면들과 지금 작업 공간
     workspaces: crate::workspaces::Workspaces,
+    /// 바로가기 패널에서 접어 둔 구역 (Fold 순서)
+    folded: [bool; 2],
+    /// 패널이 펼쳐지기 시작한 때 (움직이는 중일 때만)
+    side_anim: Option<std::time::Instant>,
     /// 단추 말풍선이 떠 있는지
     tip_shown: bool,
     /// 설정 창 (열려 있으면 창 전체를 덮는다)
@@ -1134,6 +1138,8 @@ impl App {
             recent: sess.as_ref().map(|s| s.recent.clone()).unwrap_or_default(),
             start_keys: false,
             workspaces: crate::workspaces::load(),
+            folded: Fold::ALL.map(|f| sess.as_ref().is_some_and(|s| s.folded.iter().any(|k| k == f.key()))),
+            side_anim: None,
             tip_shown: false,
             settings: None,
             folders: crate::folders::Folders::start(),
@@ -2950,6 +2956,8 @@ impl App {
                         self.on_bar_hover_timer();
                     } else if id == TIMER_SIDE_CLOSE {
                         self.on_side_close_timer();
+                    } else if id == TIMER_SIDE_ANIM {
+                        self.on_side_anim_timer();
                     } else if (TIMER_REFRESH..TIMER_REFRESH + 4).contains(&id) {
                         let _ = KillTimer(Some(hwnd), id);
                         let p = id - TIMER_REFRESH;
@@ -3831,6 +3839,7 @@ impl App {
         }
         self.paint_toasts();
         self.paint_tip();
+        self.paint_fav_card(&mut missing);
         self.gfx.end();
         self.request_thumbs(missing);
     }
@@ -3948,6 +3957,10 @@ impl App {
     }
 
     fn paint_tip(&self) {
+        // 즐겨찾기 항목은 말풍선 대신 정보 카드 (sidebar::paint_fav_card)
+        if matches!(self.hover, Hit::Side(Side::Fav(crate::favorites::Row::Item { .. }))) {
+            return;
+        }
         let Some((b, text)) = self.tip().filter(|_| self.tip_shown) else { return };
         let t = self.theme;
         let w = self.gfx.measure(&text, Font::Normal) + 20.0;
@@ -4006,6 +4019,8 @@ impl App {
         let start = self.start_view(p);
         let folder_icon = if start.is_some() { self.type_icon("", true) } else { -1 };
         let start_focus = (keyboard_here && self.start_keys).then(|| self.panes[p].tab().cursor);
+        // 목록의 수정한 날짜를 짧게(오늘·어제) 쓸지와 그 기준 시각
+        let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
         let App { gfx, panes, types, thumb_failed, places, .. } = self;
         let pane = &panes[p];
         let tab = pane.tab();
@@ -4015,6 +4030,10 @@ impl App {
             soft_shadow(gfx, r, RADIUS, 12.0, 0.10, t.dark);
         }
         gfx.fill_round(r, RADIUS, t.pane);
+        // 지금 칸: 위쪽 가장자리 안쪽에 얇은 강조 선 (칸이 여럿일 때 어느 칸에서 일하는지 한눈에)
+        if active && multi {
+            gfx.fill_round(R::new(r.l + RADIUS, r.t + 1.0, r.r - RADIUS, r.t + 3.0), 1.0, if t.high_contrast { t.focus } else { t.accent });
+        }
 
         // 칩 줄: 탭 칩. 지금 탭은 바탕이 있는 칩(지금 칸이면 옅은 강조 색), 나머지는 글자만이고 올리면 옅은 바탕.
         // 오른쪽 자리(필터 칩·개수) 앞까지만 그린다 (좁은 칸에서 겹치면 누르기도 오른쪽 자리가 먼저)
@@ -4317,6 +4336,7 @@ impl App {
             if let Some((l, rr)) = cols.modified {
                 let s = match e.kind {
                     Kind::Drive if e.size > 0 => format!("{} 사용 가능", format_size(e.free)),
+                    Kind::File | Kind::Dir if short_dates => crate::listing::format_time_short(e.modified, now),
                     Kind::File | Kind::Dir => format_time(e.modified),
                     _ => String::new(),
                 };

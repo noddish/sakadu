@@ -69,6 +69,7 @@ impl App {
             pin: self.preview_pin_path(),
             query: edit_text(self.search_edit),
             scope_here: self.pal_here,
+            folded: Fold::ALL.into_iter().filter(|f| self.folded[*f as usize]).map(|f| f.key().to_string()).collect(),
             look: self.look.clone(),
             panes: self
                 .panes

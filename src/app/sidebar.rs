@@ -29,6 +29,9 @@ const HOVER_OPEN_MS: u32 = 300;
 const PEEK_CLOSE_MS: u32 = 400;
 pub(super) const TIMER_BAR_HOVER: usize = 46;
 pub(super) const TIMER_SIDE_CLOSE: usize = 47;
+/// 패널이 열릴 때 펼쳐지는 움직임 (Windows에서 애니메이션을 끄면 하지 않는다)
+pub(super) const TIMER_SIDE_ANIM: usize = 48;
+const SIDE_ANIM_SECS: f32 = 0.15;
 const G_PLACES: u16 = 0xE8B7;
 pub(super) const G_PIN: u16 = 0xE718;
 pub(super) const G_UNPIN: u16 = 0xE77A;
@@ -78,9 +81,37 @@ impl Panel {
     }
 }
 
+/// 바로가기 패널에서 접을 수 있는 구역
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fold {
+    Drives,
+    Folders,
+}
+
+impl Fold {
+    pub const ALL: [Fold; 2] = [Fold::Drives, Fold::Folders];
+
+    /// 세션에 저장하는 이름
+    pub fn key(self) -> &'static str {
+        match self {
+            Fold::Drives => "drives",
+            Fold::Folders => "folders",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Fold::Drives => "드라이브",
+            Fold::Folders => "검색에 넣은 폴더",
+        }
+    }
+}
+
 /// 패널 안에서 누를 수 있는 것
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Side {
+    /// 바로가기 패널 구역 머리 (누르면 접고 펼친다)
+    Fold(Fold),
     FavNewGroup,
     FavSort,
     FavAdd,
@@ -97,7 +128,6 @@ pub enum Side {
 /// 가운데 목록의 한 자리 (스크롤 전, 목록 맨 위·왼쪽이 0인 좌표)
 #[derive(Clone, Copy)]
 enum Slot {
-    Head(&'static str),
     Item(Side),
 }
 
@@ -267,16 +297,17 @@ impl App {
     fn side_slots(&self) -> (Vec<(R, Slot)>, f32) {
         let mut out: Vec<(R, Slot)> = Vec::new();
         let rr = self.side_w_shown() - 8.0;
-        let head = |out: &mut Vec<(R, Slot)>, y: &mut f32, label: &'static str| -> R {
-            *y += HEAD_GAP;
-            let r = R::new(ROW_L + 10.0, *y, rr - 6.0, *y + HEAD_H);
-            out.push((r, Slot::Head(label)));
-            *y += HEAD_H + 4.0;
-            r
-        };
         let mini = |h: R, i: usize| {
             let r = h.r - i as f32 * (MINI + 2.0);
             R::new(r - MINI, h.t, r, h.b)
+        };
+        // 접을 수 있는 구역 머리: 줄 전체를 누를 수 있다 (오른쪽 끝의 작은 단추가 위에 놓인다)
+        let fold_head = |out: &mut Vec<(R, Slot)>, y: &mut f32, f: Fold| -> R {
+            *y += HEAD_GAP;
+            let r = R::new(ROW_L, *y, rr, *y + HEAD_H);
+            out.push((r, Slot::Item(Side::Fold(f))));
+            *y += HEAD_H + 4.0;
+            R::new(ROW_L + 10.0, r.t, rr - 6.0, r.b)
         };
         let mut y = 4.0;
         match self.side_panel() {
@@ -296,26 +327,30 @@ impl App {
             Some(Panel::Places) => {
                 // 드라이브: 내 PC, 드라이브마다 남은 용량 막대 (첫 머리는 위 여백 없이)
                 y -= HEAD_GAP;
-                head(&mut out, &mut y, "드라이브");
-                out.push((R::new(ROW_L, y, rr, y + SIDE_ROW_H), Slot::Item(Side::Computer)));
-                y += SIDE_ROW_H;
-                for i in 0..self.places.drives.len() {
-                    out.push((R::new(ROW_L, y, rr, y + DRIVE_H), Slot::Item(Side::Drive(i))));
-                    y += DRIVE_H;
+                fold_head(&mut out, &mut y, Fold::Drives);
+                if !self.is_folded(Fold::Drives) {
+                    out.push((R::new(ROW_L, y, rr, y + SIDE_ROW_H), Slot::Item(Side::Computer)));
+                    y += SIDE_ROW_H;
+                    for i in 0..self.places.drives.len() {
+                        out.push((R::new(ROW_L, y, rr, y + DRIVE_H), Slot::Item(Side::Drive(i))));
+                        y += DRIVE_H;
+                    }
                 }
 
                 // 검색에 넣은 폴더: 지금 칸이 검색 밖이면 머리 줄에 +
-                let h = head(&mut out, &mut y, "검색에 넣은 폴더");
+                let h = fold_head(&mut out, &mut y, Fold::Folders);
                 if self.side_outside().is_some() {
                     out.push((mini(h, 0), Slot::Item(Side::FolderAdd)));
                 }
-                let n = self.folders.list().len();
-                for i in 0..n {
-                    out.push((R::new(ROW_L, y, rr, y + SIDE_ROW_H), Slot::Item(Side::Folder(i))));
-                    y += SIDE_ROW_H;
-                }
-                if n == 0 {
-                    y += 40.0;
+                if !self.is_folded(Fold::Folders) {
+                    let n = self.folders.list().len();
+                    for i in 0..n {
+                        out.push((R::new(ROW_L, y, rr, y + SIDE_ROW_H), Slot::Item(Side::Folder(i))));
+                        y += SIDE_ROW_H;
+                    }
+                    if n == 0 {
+                        y += 40.0;
+                    }
                 }
             }
         }
@@ -459,6 +494,11 @@ impl App {
 
     /// 패널이 바뀌거나 자리가 바뀐 뒤: 스크롤·입력 상자·칸 스크롤·마우스 아래 것을 다시 맞춘다
     fn side_changed(&mut self, before: Option<Panel>, pinned_before: Option<Panel>) {
+        match self.side_panel() {
+            Some(p) if Some(p) != before && p != Panel::Search => self.start_side_anim(),
+            Some(_) => {}
+            None => self.side_anim = None,
+        }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_BAR_HOVER);
             let _ = KillTimer(Some(self.hwnd), TIMER_SIDE_CLOSE);
@@ -607,11 +647,10 @@ impl App {
         }
         if self.side_list().contains(x, y) {
             let (slots, _) = self.side_slots();
-            for (r, s) in slots {
-                if let Slot::Item(side) = s {
-                    if self.side_at(r).contains(x, y) {
-                        return Hit::Side(side);
-                    }
+            // 겹친 자리(구역 머리 줄 위의 + 단추)는 나중에 놓인 것이 위에 있다
+            for (r, Slot::Item(side)) in slots.into_iter().rev() {
+                if self.side_at(r).contains(x, y) {
+                    return Hit::Side(side);
                 }
             }
         }
@@ -665,6 +704,7 @@ impl App {
             return;
         }
         match s {
+            Side::Fold(f) => self.toggle_fold(f),
             Side::FavAdd => self.add_favorite(),
             Side::FavNewGroup => {
                 self.add_fav_group();
@@ -750,6 +790,101 @@ impl App {
         (r.b > list.t && r.t < list.b).then_some((r, text))
     }
 
+    // ---------- 구역 접기·마우스를 올릴 때만 보이는 단추·여는 움직임 ----------
+
+    pub(super) fn is_folded(&self, f: Fold) -> bool {
+        self.folded[f as usize]
+    }
+
+    fn toggle_fold(&mut self, f: Fold) {
+        self.folded[f as usize] = !self.folded[f as usize];
+        self.side_clamp_scroll();
+        self.refresh_hover();
+        self.invalidate();
+    }
+
+    /// 패널 머리의 작은 단추(추가·정렬·새 그룹, 검색 폴더 +)를 보일지: 마우스가 패널 위에 있거나 키보드가 즐겨찾기에 있을 때만
+    fn side_hot(&self) -> bool {
+        self.fav_focus || matches!(self.hover, Hit::Side(_) | Hit::SidePin | Hit::SidePanel)
+    }
+
+    /// 패널이 새로 열렸다: 막대 쪽에서 펼쳐지게 한다 (검색 패널은 입력 상자가 함께 움직이지 못해 바로 연다)
+    fn start_side_anim(&mut self) {
+        let mut on = BOOL(1);
+        let read = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut BOOL as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
+        if read.is_ok() && !on.as_bool() {
+            self.side_anim = None;
+            return;
+        }
+        self.side_anim = Some(std::time::Instant::now());
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_SIDE_ANIM, 15, None);
+        }
+    }
+
+    pub(super) fn on_side_anim_timer(&mut self) {
+        if self.side_open_progress().is_none() {
+            self.side_anim = None;
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_SIDE_ANIM);
+            }
+        }
+        self.invalidate();
+    }
+
+    /// 펼쳐지는 중이면 보일 너비의 비율 (빠르게 시작해 천천히 멈춘다). 다 펼쳤으면 None
+    fn side_open_progress(&self) -> Option<f32> {
+        let p = self.side_anim?.elapsed().as_secs_f32() / SIDE_ANIM_SECS;
+        (p < 1.0).then(|| 1.0 - (1.0 - p).powi(3))
+    }
+
+    /// 즐겨찾기 항목에 마우스를 잠시 올려 두면 말풍선 대신 뜨는 정보 카드: 아이콘·이름, 종류, 전체 경로, 사진이면 작은 그림.
+    /// 디스크를 읽지 않는 정보만 쓰고, 그림은 썸네일 작업(뒤)에서 만든다
+    pub(super) fn paint_fav_card(&mut self, missing: &mut Vec<crate::thumbs::Request>) {
+        let Hit::Side(s @ Side::Fav(Row::Item { group, index })) = self.hover else { return };
+        if !self.tip_shown || self.menu_open || !matches!(self.drag, Drag::None) {
+            return;
+        }
+        let Some(f) = self.favs.item(group, index).cloned() else { return };
+        let Some(row) = self.side_item_rect(s) else { return };
+        let list = self.side_list();
+        if row.b <= list.t || row.t >= list.b {
+            return;
+        }
+        let ext = if f.is_dir { String::new() } else { util::file_name(&f.path).rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default() };
+        let key = if f.is_dir { "\\dir".to_string() } else { ext.clone() };
+        let (kind, icon) = self.types.entry(key).or_insert_with(|| shell::type_info(&ext, f.is_dir)).clone();
+        let image = !f.is_dir && preview::is_image_ext(&ext);
+        let t = self.theme;
+        let w = 300.0;
+        let h = if image { 78.0 + 150.0 } else { 78.0 };
+        let l = (row.r + 10.0).min(self.w - MARGIN - w).max(BAR_W);
+        let top = row.t.min(self.h - MARGIN - h).max(WORKBAR_H);
+        let r = R::new(l, top, l + w, top + h);
+        let scale = self.scale();
+        let App { gfx: g, thumb_failed, .. } = self;
+        if !t.high_contrast {
+            super::soft_shadow(g, r, 10.0, 14.0, 0.14, t.dark);
+        }
+        g.fill_round(r, 10.0, t.pane);
+        g.stroke_round(r.inset(0.5, 0.5), 10.0, t.border, 1.0);
+        g.icon(icon, R::new(l + 14.0, top + 14.0, l + 30.0, top + 30.0));
+        g.text(&f.name, R::new(l + 40.0, top + 10.0, r.r - 14.0, top + 32.0), Font::Strong, t.text);
+        g.text(&kind, R::new(l + 40.0, top + 32.0, r.r - 14.0, top + 50.0), Font::Small, t.dim);
+        g.text(&f.path, R::new(l + 14.0, top + 52.0, r.r - 14.0, top + 72.0), Font::Path, t.faint);
+        if image {
+            let ir = R::new(l + 14.0, top + 78.0, r.r - 14.0, r.b - 12.0);
+            let px = ((ir.w() * scale) as u32).clamp(64, 512);
+            let key = thumb_key(&f.path, 0, px);
+            if !g.thumb(&key, ir, 1.0) {
+                g.fill_round(ir, 6.0, t.field);
+                if !thumb_failed.contains(&key) {
+                    missing.push(crate::thumbs::Request { key, path: f.path.clone(), px });
+                }
+            }
+        }
+    }
+
     // ---------- 드라이브 ----------
 
     /// 드라이브 목록을 다시 읽는다 (읽는 중이면 끝난 뒤 한 번 더)
@@ -812,6 +947,19 @@ impl App {
     }
 
     pub(super) fn paint_sidebar(&mut self) {
+        match (self.side_open_progress(), self.side_panel_rect()) {
+            (Some(f), Some(pr)) => {
+                // 그림자까지 들어가게 조금 넉넉히
+                let w = (pr.w() + 24.0) * f;
+                self.gfx.clip(R::new(BAR_W, 0.0, BAR_W + w, self.h));
+                self.paint_side_panel();
+                self.gfx.unclip();
+            }
+            _ => self.paint_side_panel(),
+        }
+    }
+
+    fn paint_side_panel(&mut self) {
         let (Some(panel), Some(pr)) = (self.side_panel(), self.side_panel_rect()) else { return };
         if panel == Panel::Search {
             return self.paint_search_panel();
@@ -852,7 +1000,10 @@ impl App {
         let folders = self.folders.list();
         let add_key = self.keys.get(crate::keys::Action::AddFavorite).map(crate::keys::Combo::label);
         let pin = self.side_pin_rect();
-        let minis: Vec<(Side, R)> = self.side_minis().iter().enumerate().filter_map(|(i, s)| self.side_mini_rect(i).map(|r| (*s, r))).collect();
+        // 머리의 작은 단추는 마우스가 패널 위에 있거나 키보드가 즐겨찾기에 있을 때만
+        let hot = self.side_hot();
+        let minis: Vec<(Side, R)> = if hot { self.side_minis().iter().enumerate().filter_map(|(i, s)| self.side_mini_rect(i).map(|r| (*s, r))).collect() } else { Vec::new() };
+        let folded = self.folded;
         let App { gfx: g, favs, places, .. } = self;
 
         // 패널 바탕: 떠 있으면 그림자 달린 카드, 고정이면 창 바탕 그대로
@@ -908,8 +1059,20 @@ impl App {
                 continue;
             }
             match *slot {
-                Slot::Head(label) => g.text(label, r, Font::Small, t.faint),
-                Slot::Item(s @ Side::FolderAdd) => mini_btn(g, r, G_ADD, false, hover == Hit::Side(s)),
+                Slot::Item(s @ Side::FolderAdd) => {
+                    if hot {
+                        mini_btn(g, r, G_ADD, false, hover == Hit::Side(s));
+                    }
+                }
+                // 구역 머리: 접힘 표시와 이름. 올리면 옅은 바탕
+                Slot::Item(s @ Side::Fold(f)) => {
+                    if hover == Hit::Side(s) {
+                        g.fill_round(r, 6.0, hover_fill(&t));
+                    }
+                    let closed = folded[f as usize];
+                    g.glyph(if closed { G_TWIST_CLOSED } else { G_TWIST_OPEN }, R::new(r.l + 2.0, r.t, r.l + 18.0, r.b), true, t.faint);
+                    g.text(f.label(), R::new(r.l + 20.0, r.t, r.r - 8.0, r.b), Font::Small, t.faint);
+                }
                 // 머리 줄 단추는 위에서 그렸다
                 Slot::Item(Side::FavAdd | Side::FavSort | Side::FavNewGroup) => {}
                 Slot::Item(Side::FavEmpty) => {
@@ -1022,8 +1185,8 @@ impl App {
             }
         }
         // 검색 폴더가 없으면 안내
-        if panel == Panel::Places && folders.is_empty() {
-            if let Some((r, _)) = slots.iter().rev().find(|(_, s)| matches!(s, Slot::Head("검색에 넣은 폴더"))) {
+        if panel == Panel::Places && folders.is_empty() && !folded[Fold::Folders as usize] {
+            if let Some((r, _)) = slots.iter().rev().find(|(_, s)| matches!(s, Slot::Item(Side::Fold(Fold::Folders)))) {
                 let (l, top) = (dx + ROW_L + 10.0, r.b + dy + 4.0);
                 g.text("공유폴더·USB를 열고 +를 누르면", R::new(l, top, dx + rr - 6.0, top + 18.0), Font::Small, t.faint);
                 g.text("함께 찾아요", R::new(l, top + 18.0, dx + rr - 6.0, top + 36.0), Font::Small, t.faint);

@@ -6,6 +6,7 @@ use windows::Win32::Storage::FileSystem::{
     FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
     GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, WIN32_FIND_DATAW,
 };
+use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Videos,
@@ -233,6 +234,68 @@ pub fn format_time(ft: u64) -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}", local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute)
 }
 
+/// 지금 시각 (FILETIME과 같은 100ns 단위)
+pub fn now_filetime() -> u64 {
+    filetime_u64(&unsafe { GetSystemTimeAsFileTime() })
+}
+
+/// 현지 시각의 날짜·시·분
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LocalTime {
+    pub year: i64,
+    pub month: i64,
+    pub day: i64,
+    pub hour: u16,
+    pub minute: u16,
+}
+
+fn local_time(ft: u64) -> Option<LocalTime> {
+    let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
+    let mut utc = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    unsafe {
+        FileTimeToSystemTime(&ft, &mut utc).ok()?;
+        SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()?;
+    }
+    Some(LocalTime { year: local.wYear as i64, month: local.wMonth as i64, day: local.wDay as i64, hour: local.wHour, minute: local.wMinute })
+}
+
+/// 날짜의 일련번호 (1970-01-01이 0). 두 날짜가 며칠 떨어졌는지 셀 때 쓴다
+fn day_number(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// 목록의 짧은 날짜: 1분 안이면 "방금", 오늘·어제는 "오늘 10:24"·"어제 18:40", 올해는 "11월 3일", 그 전은 "2025-03-04".
+/// secs는 now - t (초). 시계가 어긋나 앞날이면 날짜 그대로
+pub fn relative_label(t: LocalTime, now: LocalTime, secs: i64) -> String {
+    if (0..60).contains(&secs) {
+        return "방금".to_string();
+    }
+    let days = day_number(now.year, now.month, now.day) - day_number(t.year, t.month, t.day);
+    match days {
+        0 if secs >= 0 => format!("오늘 {:02}:{:02}", t.hour, t.minute),
+        1 => format!("어제 {:02}:{:02}", t.hour, t.minute),
+        d if d > 1 && t.year == now.year => format!("{}월 {}일", t.month, t.day),
+        _ => format!("{:04}-{:02}-{:02}", t.year, t.month, t.day),
+    }
+}
+
+/// 목록의 수정한 날짜를 짧게 (now는 now_filetime). 읽을 수 없으면 빈 글자
+pub fn format_time_short(ft: u64, now: u64) -> String {
+    if ft == 0 {
+        return String::new();
+    }
+    match (local_time(ft), local_time(now)) {
+        (Some(t), Some(n)) => relative_label(t, n, (now as i64 - ft as i64) / 10_000_000),
+        _ => String::new(),
+    }
+}
+
 pub fn drive_type_label(t: u32) -> &'static str {
     match t {
         2 => "이동식 디스크",
@@ -247,6 +310,26 @@ pub fn drive_type_label(t: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(year: i64, month: i64, day: i64, hour: u16, minute: u16) -> LocalTime {
+        LocalTime { year, month, day, hour, minute }
+    }
+
+    #[test]
+    fn short_dates_read_like_the_concept() {
+        let now = at(2026, 11, 6, 14, 30);
+        assert_eq!(relative_label(at(2026, 11, 6, 14, 29), now, 30), "방금");
+        assert_eq!(relative_label(at(2026, 11, 6, 10, 24), now, 4 * 3600), "오늘 10:24");
+        assert_eq!(relative_label(at(2026, 11, 5, 18, 40), now, 20 * 3600), "어제 18:40");
+        assert_eq!(relative_label(at(2026, 11, 3, 9, 0), now, 3 * 86400), "11월 3일");
+        assert_eq!(relative_label(at(2025, 3, 4, 9, 0), now, 400 * 86400), "2025-03-04");
+        // 해가 바뀐 첫날의 어제는 지난해 12월 31일
+        assert_eq!(relative_label(at(2025, 12, 31, 23, 50), at(2026, 1, 1, 0, 10), 1200), "어제 23:50");
+        // 3월 1일 전날은 윤년이면 2월 29일
+        assert_eq!(relative_label(at(2028, 2, 29, 8, 0), at(2028, 3, 1, 8, 0), 86400), "어제 08:00");
+        // 시계가 어긋나 조금 앞선 시각은 날짜 그대로
+        assert_eq!(relative_label(at(2026, 11, 7, 9, 0), now, -3600 * 18), "2026-11-07");
+    }
 
     #[test]
     fn sizes() {

@@ -35,6 +35,8 @@ pub struct Session {
     /// 검색 패널의 검색어와 범위 (true: 현재 폴더)
     pub query: String,
     pub scope_here: bool,
+    /// 접어 둔 바로가기 패널 구역 ("drives"·"folders")
+    pub folded: Vec<String>,
     pub look: Look,
     pub panes: Vec<PaneState>,
 }
@@ -52,11 +54,13 @@ pub struct Look {
     pub font: String,
     pub zoom: u32,
     pub text: String,
+    /// 목록의 수정한 날짜: "relative"(오늘 10:24·어제·11월 3일) 또는 "full"(2026-11-03 09:12)
+    pub dates: String,
 }
 
 impl Default for Look {
     fn default() -> Look {
-        Look { theme: "system".into(), accent: "blue".into(), font: String::new(), zoom: 100, text: "gray".into() }
+        Look { theme: "system".into(), accent: "blue".into(), font: String::new(), zoom: 100, text: "gray".into(), dates: "relative".into() }
     }
 }
 
@@ -113,7 +117,10 @@ pub fn serialize(s: &Session) -> String {
     if s.scope_here {
         out.push_str("scope=here\n");
     }
-    out.push_str(&format!("theme={}\naccent={}\nfont={}\nzoom={}\ntext={}\n", s.look.theme, s.look.accent, s.look.font, s.look.zoom, s.look.text));
+    if !s.folded.is_empty() {
+        out.push_str(&format!("fold={}\n", s.folded.join(",")));
+    }
+    out.push_str(&format!("theme={}\naccent={}\nfont={}\nzoom={}\ntext={}\ndates={}\n", s.look.theme, s.look.accent, s.look.font, s.look.zoom, s.look.text, s.look.dates));
     for r in &s.recent {
         out.push_str(&format!("recent={r}\n"));
     }
@@ -153,6 +160,7 @@ pub fn parse(text: &str) -> Option<Session> {
         pin: None,
         query: String::new(),
         scope_here: false,
+        folded: Vec::new(),
         look: Look::default(),
         panes: Vec::new(),
     };
@@ -186,11 +194,13 @@ pub fn parse(text: &str) -> Option<Session> {
             "pin" if !value.is_empty() => s.pin = Some(value.to_string()),
             "query" => s.query = value.to_string(),
             "scope" => s.scope_here = value == "here",
+            "fold" => s.folded = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(String::from).collect(),
             "theme" => s.look.theme = value.to_string(),
             "accent" => s.look.accent = value.to_string(),
             "font" => s.look.font = value.to_string(),
             "zoom" => s.look.zoom = value.parse::<u32>().unwrap_or(100).clamp(80, 200),
             "text" => s.look.text = value.to_string(),
+            "dates" => s.look.dates = value.to_string(),
             "pane" => {
                 let mut p = PaneState { tabs: Vec::new(), active: 0, cols: crate::pane::DEFAULT_COLS, sort_key: 0, sort_desc: false, view: 0 };
                 for part in value.split(';') {
@@ -247,7 +257,8 @@ mod tests {
             pin: Some("D:\\업무\\견적서=최종.pdf".into()),
             query: "견적 | 계약서".into(),
             scope_here: true,
-            look: Look { theme: "dark".into(), accent: "green".into(), font: "맑은 고딕".into(), zoom: 125, text: "soft".into() },
+            folded: vec!["drives".into()],
+            look: Look { theme: "dark".into(), accent: "green".into(), font: "맑은 고딕".into(), zoom: 125, text: "soft".into(), dates: "full".into() },
             panes: vec![
                 PaneState {
                     tabs: vec!["C:\\a=b,c".into(), "::computer".into()],

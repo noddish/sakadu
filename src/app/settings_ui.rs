@@ -15,6 +15,7 @@ const ZOOMS: [u32; 5] = [90, 100, 110, 125, 150];
 const THEMES: [(&str, &str); 3] = [("system", "시스템"), ("light", "밝게"), ("dark", "어둡게")];
 /// 글자 표시 (gfx::TextLook의 키)
 const TEXT_LOOKS: [(&str, &str); 3] = [("soft", "부드럽게"), ("sharp", "선명하게 (컬러)"), ("gray", "선명하게 (회색)")];
+const DATE_STYLES: [(&str, &str); 2] = [("relative", "오늘·어제"), ("full", "날짜와 시각")];
 const G_GEAR: u16 = 0xE713;
 const G_COLOR: u16 = 0xE790;
 const G_KEYBOARD: u16 = 0xE765;
@@ -54,6 +55,7 @@ pub enum Ctl {
     Font,
     Zoom,
     Text,
+    Dates,
     Service,
     Global,
     Key(Action),
@@ -246,6 +248,7 @@ impl App {
                 let zoom = ZOOMS.iter().position(|z| *z == self.look.zoom).unwrap_or(1);
                 let font = if self.look.font.is_empty() { "기본 (Segoe UI)".to_string() } else { self.look.font.clone() };
                 let text = TEXT_LOOKS.iter().position(|t| t.0 == self.look.text).unwrap_or(2);
+                let dates = DATE_STYLES.iter().position(|d| d.0 == self.look.dates).unwrap_or(0);
                 (
                     "화면",
                     vec![Card {
@@ -256,6 +259,7 @@ impl App {
                             row("글꼴", "목록·메뉴·검색 창에 쓰는 글꼴", Widget::Drop(font, Ctl::Font)),
                             row("글자 표시", "흐리면 선명하게, 색 번짐이 거슬리면 회색", Widget::Seg(TEXT_LOOKS.iter().map(|t| t.1.to_string()).collect(), text, Ctl::Text)),
                             row("크기", "화면 전체를 크게 또는 작게", Widget::Seg(ZOOMS.iter().map(|z| format!("{z}%")).collect(), zoom, Ctl::Zoom)),
+                            row("날짜", "목록의 수정한 날짜를 짧게(오늘 10:24·11월 3일) 또는 그대로", Widget::Seg(DATE_STYLES.iter().map(|d| d.1.to_string()).collect(), dates, Ctl::Dates)),
                         ],
                     }],
                 )
@@ -557,6 +561,10 @@ impl App {
             Ctl::Text => {
                 self.look.text = TEXT_LOOKS[i.min(TEXT_LOOKS.len() - 1)].0.to_string();
                 self.apply_look(LookPart::Text);
+            }
+            Ctl::Dates => {
+                self.look.dates = DATE_STYLES[i.min(DATE_STYLES.len() - 1)].0.to_string();
+                self.save_session();
             }
             Ctl::Tray => {
                 let on = self.settings.as_ref().is_some_and(|s| s.tray);
@@ -906,12 +914,13 @@ impl App {
             (VK_UP, Some(i)) => (i > 0 && !in_side(i - 1)).then(|| i - 1).or(Some(i)),
             (VK_DOWN, Some(i)) => Some((i + 1).min(stops.len() - 1)),
             // 묶음 안에서는 옆 칸으로, 내용에서 ←는 분류로, 분류에서 →는 내용으로
-            (VK_LEFT | VK_RIGHT, Some(i)) if matches!(stops[i].0, SetHit::Ctl(Ctl::Theme | Ctl::Accent | Ctl::Zoom | Ctl::Text, _)) => {
+            (VK_LEFT | VK_RIGHT, Some(i)) if matches!(stops[i].0, SetHit::Ctl(Ctl::Theme | Ctl::Accent | Ctl::Zoom | Ctl::Text | Ctl::Dates, _)) => {
                 let SetHit::Ctl(ctl, k) = stops[i].0 else { return true };
                 let n = match ctl {
                     Ctl::Theme => THEMES.len(),
                     Ctl::Accent => ACCENTS.len(),
                     Ctl::Text => TEXT_LOOKS.len(),
+                    Ctl::Dates => DATE_STYLES.len(),
                     _ => ZOOMS.len(),
                 };
                 let k = if vk == VK_LEFT { k.checked_sub(1) } else { (k + 1 < n).then_some(k + 1) };

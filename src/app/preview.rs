@@ -182,6 +182,11 @@ fn chip_rect(gfx: &Gfx, pr: R, pinned: bool) -> R {
     R::new(pr.l + 16.0, t, (pr.l + 16.0 + w).min(pr.r - 16.0), t + 24.0)
 }
 
+/// 그림 파일 확장자인지 (즐겨찾기 카드의 작은 그림)
+pub(super) fn is_image_ext(ext: &str) -> bool {
+    IMAGE_EXTS.contains(&ext)
+}
+
 fn ext_of(name: &str) -> String {
     match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() || name.starts_with('.') => ext.to_ascii_lowercase(),
