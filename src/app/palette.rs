@@ -1080,7 +1080,7 @@ mod tests {
     #[ignore]
     fn or_search_against_service() {
         let folders = crate::folders::Folders::default();
-        let count = |q: &str| search_all(q, &folders).map(|r| (r.hits.len(), r.total)).unwrap_or((0, 0));
+        let count = |q: &str| search_all(q, &folders, PAL_LIMIT).map(|r| (r.hits.len(), r.total)).unwrap_or((0, 0));
         let (a, b, both) = (count("main.rs sakadu\\src\\"), count("tray.rs sakadu\\src\\"), count("main.rs sakadu\\src\\ | tray.rs sakadu\\src\\"));
         println!("main.rs {a:?}, tray.rs {b:?}, either {both:?}");
         assert_eq!(both.0, a.0 + b.0);
@@ -1130,7 +1130,7 @@ mod tests {
     #[ignore]
     fn dedup_keeps_results_and_order() {
         let folders = crate::folders::Folders::default();
-        let hits = |q: &str| search_all(q, &folders).map(|r| r.hits).unwrap_or_default();
+        let hits = |q: &str| search_all(q, &folders, PAL_LIMIT).map(|r| r.hits).unwrap_or_default();
         let once = hits("main.rs sakadu\\src\\ | tray.rs sakadu\\src\\ | keys.rs sakadu\\src\\");
         let repeated = hits("main.rs sakadu\\src\\ | tray.rs sakadu\\src\\ | MAIN.RS sakadu\\src\\ | keys.rs sakadu\\src\\ | tray.rs  sakadu\\src\\");
         println!("{} hit(s)", once.len());
