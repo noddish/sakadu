@@ -61,6 +61,8 @@ pub enum Font {
     Title,
     /// 설명·작은 안내
     Small,
+    /// 이동 화살표(뒤로·앞으로·위로)용 아이콘: 도구 아이콘(Glyph, 16px)과 장식(GlyphSmall, 10px) 사이
+    GlyphMid,
 }
 
 /// 썸네일 비트맵 캐시 상한. 96 DIP 썸네일(150%에서 약 80KB)이 이 개수까지
@@ -258,7 +260,7 @@ fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextF
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false)?,
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
-                make(icons, 14.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false)?,
+                make(icons, 16.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false)?,
                 make(icons, 10.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false)?,
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true)?,
                 path,
@@ -266,6 +268,7 @@ fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextF
                 mono,
                 make(ui, 22.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
                 make(ui, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
+                make(icons, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false)?,
             ])
         }
     }
@@ -410,7 +413,13 @@ impl Gfx {
     }
 
     /// 아이콘 글리프는 ClearType 색 번짐이 눈에 띄므로 회색조로, 힌팅이 거의 없는 아이콘 글꼴이라 원래의 부드러운 방식으로 그린다
+    /// 아이콘 글리프. small이면 장식 크기(10px), 아니면 도구 아이콘 크기(16px)
     pub fn glyph(&self, code: u16, r: R, small: bool, c: Color) {
+        self.glyph_font(code, r, if small { Font::GlyphSmall } else { Font::Glyph }, c);
+    }
+
+    /// 크기를 직접 고른 아이콘 글리프 (Glyph·GlyphMid·GlyphSmall)
+    pub fn glyph_font(&self, code: u16, r: R, f: Font, c: Color) {
         let rt = self.rt();
         unsafe {
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
@@ -418,7 +427,7 @@ impl Gfx {
                 rt.SetTextRenderingParams(p);
             }
         }
-        self.draw(&[code], r, if small { Font::GlyphSmall } else { Font::Glyph }, c, DWRITE_MEASURING_MODE_NATURAL);
+        self.draw(&[code], r, f, c, DWRITE_MEASURING_MODE_NATURAL);
         self.apply_text_look();
     }
 

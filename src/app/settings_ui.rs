@@ -807,7 +807,7 @@ impl App {
                     } else if hot(*hit) {
                         g.fill_round(*r, 7.0, t.hover);
                     }
-                    // 아이콘은 글자와 어울리는 보통 크기(14px). 작은 크기는 글자 옆에서 흐릿하게 보인다
+                    // 아이콘은 글자와 어울리는 도구 아이콘 크기(16px). 작은 크기는 글자 옆에서 흐릿하게 보인다
                     let fg = if *on { t.accent } else { t.dim };
                     if compact {
                         g.glyph(*glyph, *r, false, fg);

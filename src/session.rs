@@ -24,9 +24,17 @@ pub struct Session {
     pub preview: bool,
     /// 새 탭(Ctrl+T·+)을 열 위치: NEW_TAB_SAME이면 지금 탭과 같은 폴더, 아니면 탭 경로 형식("::computer" 또는 폴더)
     pub new_tab: String,
+    /// 고정해 둔 왼쪽 패널: "places"(바로가기)·"favorites"(즐겨찾기)·"none"
+    pub side: String,
+    /// 왼쪽 패널 너비 (DIP)
+    pub side_w: f32,
     pub look: Look,
     pub panes: Vec<PaneState>,
 }
+
+/// 왼쪽 패널 너비의 기본값과 범위
+pub const SIDE_W_DEFAULT: f32 = 220.0;
+pub const SIDE_W_RANGE: (f32, f32) = (180.0, 420.0);
 
 /// 화면 설정: 테마("system"·"light"·"dark"), 강조 색(theme::ACCENTS의 키), 글꼴(빈 문자열이면 기본), 크기(%),
 /// 글자 표시("soft"·"sharp"·"gray", gfx::TextLook)
@@ -83,6 +91,7 @@ pub fn serialize(s: &Session) -> String {
     out.push_str(&format!("hidden={}\n", s.show_hidden as u8));
     out.push_str(&format!("preview={}\n", s.preview as u8));
     out.push_str(&format!("newtab={}\n", s.new_tab));
+    out.push_str(&format!("side={}\nsidew={}\n", s.side, s.side_w));
     out.push_str(&format!("theme={}\naccent={}\nfont={}\nzoom={}\ntext={}\n", s.look.theme, s.look.accent, s.look.font, s.look.zoom, s.look.text));
     for p in &s.panes {
         out.push_str(&format!(
@@ -113,6 +122,9 @@ pub fn parse(text: &str) -> Option<Session> {
         show_hidden: false,
         preview: false,
         new_tab: "::computer".to_string(),
+        // 0.5.x까지는 즐겨찾기 사이드바가 늘 보였으니, 그 세션은 즐겨찾기 패널을 고정한 채로 연다
+        side: "favorites".to_string(),
+        side_w: SIDE_W_DEFAULT,
         look: Look::default(),
         panes: Vec::new(),
     };
@@ -136,6 +148,8 @@ pub fn parse(text: &str) -> Option<Session> {
             "hidden" => s.show_hidden = value == "1",
             "preview" => s.preview = value == "1",
             "newtab" => s.new_tab = value.to_string(),
+            "side" => s.side = value.to_string(),
+            "sidew" => s.side_w = value.parse::<f32>().unwrap_or(SIDE_W_DEFAULT).clamp(SIDE_W_RANGE.0, SIDE_W_RANGE.1),
             "theme" => s.look.theme = value.to_string(),
             "accent" => s.look.accent = value.to_string(),
             "font" => s.look.font = value.to_string(),
@@ -188,6 +202,8 @@ mod tests {
             show_hidden: true,
             preview: true,
             new_tab: "D:\\업무".into(),
+            side: "places".into(),
+            side_w: 260.0,
             look: Look { theme: "dark".into(), accent: "green".into(), font: "맑은 고딕".into(), zoom: 125, text: "soft".into() },
             panes: vec![
                 PaneState {
@@ -210,6 +226,16 @@ mod tests {
         assert_eq!(s.panes[0].cols, crate::pane::DEFAULT_COLS);
         assert_eq!(s.panes[1].cols, [140.0, 131.0, 84.0], "a width the user set stays");
         assert_eq!(s.panes[2].cols, crate::pane::DEFAULT_COLS);
+    }
+
+    #[test]
+    fn old_session_keeps_the_favorites_panel_open() {
+        let s = parse("sakadu-session 1\nlayout=2").unwrap();
+        assert_eq!(s.side, "favorites");
+        assert_eq!(s.side_w, SIDE_W_DEFAULT);
+        let s = parse("sakadu-session 1\nside=none\nsidew=9999").unwrap();
+        assert_eq!(s.side, "none");
+        assert_eq!(s.side_w, SIDE_W_RANGE.1, "an out-of-range width is clamped");
     }
 
     #[test]

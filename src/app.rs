@@ -37,7 +37,7 @@ mod caption;
 mod sidebar;
 use fav_ui::G_STAR;
 use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
-use sidebar::{SIDEBAR_W, Side};
+use sidebar::{BAR_W, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_CLOSE};
 use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
 pub use preview::{TextReady, unload_handler};
@@ -99,6 +99,7 @@ const G_LIST: u16 = 0xE8FD;
 const G_GRID: u16 = 0xF0E2;
 const G_CHEVRON_DOWN: u16 = 0xE70D;
 const G_SETTINGS: u16 = 0xE713;
+const G_MORE: u16 = 0xE712;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layout {
@@ -161,8 +162,18 @@ enum Hit {
     /// 칩 줄 필터 칩의 × (필터 지우기)
     FilterClear(usize),
     Pane(usize),
-    /// 사이드바 가운데 목록 (즐겨찾기·드라이브·검색 폴더)
+    /// 왼쪽 패널 안의 줄·단추 (즐겨찾기·드라이브·검색 폴더)
     Side(Side),
+    /// 아이콘 막대의 패널 아이콘
+    Bar(Panel),
+    /// 패널 머리의 핀 (고정·풀기)
+    SidePin,
+    /// 패널 안의 빈 곳 (떠 있는 패널 아래 칸을 누르지 않게)
+    SidePanel,
+    /// 고정한 패널의 오른쪽 가장자리 (너비 조절)
+    SideResize,
+    /// 작업 줄 오른쪽 `…` (도움말·설정·정보 메뉴)
+    More,
     /// 검색 창의 "이 폴더도 검색하기" 버튼
     PalAddFolder,
     SearchButton,
@@ -171,8 +182,6 @@ enum Hit {
     PalPanel,
     PreviewButton,
     SettingsButton,
-    /// 사이드바 아래쪽 도움말
-    HelpButton,
     /// 설정 창 안
     Set(settings_ui::SetHit),
     /// 경로 오른쪽 끝의 즐겨찾기 별
@@ -200,6 +209,8 @@ enum Drag {
     /// 사이드바 즐겨찾기 줄을 눌렀다. 조금 움직이면 FavMove
     FavPress { row: crate::favorites::Row, y: f32 },
     FavMove { from: crate::favorites::Row, y: f32 },
+    /// 고정한 패널의 오른쪽 가장자리를 끌어 너비를 바꾸는 중
+    SideW { start_x: f32, start_w: f32 },
     /// 탭을 눌렀다. 조금 움직이면 TabMove
     TabPress { pane: usize, tab: usize, x: f32, y: f32 },
     /// 탭을 끄는 중. (x, y)는 지금 포인터 위치
@@ -282,6 +293,8 @@ pub enum Deferred {
     Settings { ctl: settings_ui::Ctl, index: usize, pt: POINT },
     /// 검색 결과 오른쪽 버튼 메뉴
     PalMenu { pt: POINT },
+    /// 작업 줄 `…` 메뉴 (도움말·설정·정보)
+    MoreMenu { pt: POINT },
 }
 
 /// 끌어 놓을 곳 (drop_dir_at)
@@ -342,8 +355,18 @@ pub struct App {
     fav_focus: bool,
     /// 사이드바 즐겨찾기에서 고른 줄 (favs.rows() 번호)
     fav_sel: usize,
-    /// 사이드바 가운데 목록의 스크롤
+    /// 왼쪽 패널 가운데 목록의 스크롤
     side_scroll: f32,
+    /// 고정한 패널 (칸을 밀어낸다). 세션에 저장
+    side_pinned: Option<Panel>,
+    /// 아이콘에 머물러 칸 위에 떠 있는 패널 (마우스가 떠나거나 위치를 고르면 닫힌다)
+    side_peek: Option<Panel>,
+    /// 패널 너비 (DIP)
+    side_w: f32,
+    /// 머무르면 패널을 띄울 아이콘 (TIMER_BAR_HOVER를 기다리는 중)
+    bar_arm: Option<Panel>,
+    /// 떠 있는 패널 밖으로 나가 닫기(TIMER_SIDE_CLOSE)를 기다리는 중
+    peek_leaving: bool,
     /// 파일을 끌어 사이드바에 놓으려는 자리 (즐겨찾기 쪽이면 Side::FavEmpty)
     side_drop: Option<Side>,
     /// 사이드바의 내 PC·드라이브 (뒤에서 읽어 온다)
@@ -789,18 +812,6 @@ fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
     }
 }
 
-/// 칸 나누기 버튼 5개를 한 덩어리로 담는 판. 작업 줄 왼쪽 끝, 칸과 같은 왼쪽 선
-fn layout_pill() -> R {
-    let l = SIDEBAR_W + MARGIN;
-    R::new(l, 7.0, l + 6.0 + 5.0 * 32.0, 37.0)
-}
-
-fn layout_buttons() -> [R; 5] {
-    std::array::from_fn(|i| {
-        let l = SIDEBAR_W + MARGIN + 3.0 + i as f32 * 32.0;
-        R::new(l, 10.0, l + 32.0, 34.0)
-    })
-}
 
 fn type_info(types: &mut HashMap<String, (String, i32)>, e: &Entry) -> (String, i32) {
     let key = if e.is_dir() { "\\dir".to_string() } else { e.ext_lower() };
@@ -971,6 +982,11 @@ impl App {
             panes.push(Pane { tabs, active, sort, cols, view });
         }
         let layout = sess.as_ref().map(|s| Layout::ALL[(s.layout as usize).min(4)]).unwrap_or(Layout::TwoV);
+        // 처음 쓰면(세션 없음) 드라이브가 보이는 바로가기 패널을 고정해 둔다. 예전 세션은 session::parse가 즐겨찾기로 둔다
+        let (side_pinned, side_w) = match &sess {
+            Some(s) => (Panel::from_key(&s.side), s.side_w),
+            None => (Some(Panel::Places), session::SIDE_W_DEFAULT),
+        };
         let mut rc = RECT::default();
         unsafe {
             let _ = GetClientRect(hwnd, &mut rc);
@@ -1027,6 +1043,11 @@ impl App {
             fav_focus: false,
             fav_sel: 0,
             side_scroll: 0.0,
+            side_pinned,
+            side_peek: None,
+            side_w,
+            bar_arm: None,
+            peek_leaving: false,
             side_drop: None,
             places: sidebar::Places::default(),
             places_busy: false,
@@ -1204,14 +1225,28 @@ impl App {
 
     // ---------- 레이아웃 ----------
 
-    /// 칸이 놓이는 곳: 사이드바 오른쪽, 작업 줄 아래 (미리 보기가 열려 있으면 그만큼 비운다)
+    /// 칸이 놓이는 곳: 아이콘 막대(고정한 패널이 있으면 그 패널) 오른쪽, 작업 줄 아래 (미리 보기가 열려 있으면 그만큼 비운다)
     fn area(&self) -> R {
-        let l = SIDEBAR_W + MARGIN;
+        let l = self.panes_left();
         let right = self.w - MARGIN - if self.preview.is_some() { self.preview_w() + GAP } else { 0.0 };
         R::new(l, WORKBAR_H, right.max(l + 100.0), (self.h - MARGIN).max(WORKBAR_H + 100.0))
     }
 
-    /// 작업 줄 오른쪽: 창 단추 바로 앞에 미리 보기, 그 앞에 숨김 항목
+    /// 칸 나누기 버튼 5개를 한 덩어리로 담는 판. 작업 줄에서 칸과 같은 왼쪽 선
+    fn layout_pill(&self) -> R {
+        let l = self.panes_left();
+        R::new(l, 7.0, l + 6.0 + 5.0 * 32.0, 37.0)
+    }
+
+    fn layout_buttons(&self) -> [R; 5] {
+        let l0 = self.panes_left() + 3.0;
+        std::array::from_fn(|i| {
+            let l = l0 + i as f32 * 32.0;
+            R::new(l, 10.0, l + 32.0, 34.0)
+        })
+    }
+
+    /// 작업 줄 오른쪽: 창 단추 바로 앞에 미리 보기, 그 앞에 숨김 항목, 그 앞에 `…`
     fn preview_button(&self) -> R {
         let r = self.caption_left() - 8.0;
         R::new(r - 32.0, 7.0, r, 37.0)
@@ -1220,6 +1255,11 @@ impl App {
     fn hidden_button(&self) -> R {
         let p = self.preview_button();
         R::new(p.l - 36.0, 7.0, p.l - 4.0, 37.0)
+    }
+
+    fn more_button(&self) -> R {
+        let h = self.hidden_button();
+        R::new(h.l - 36.0, 7.0, h.l - 4.0, 37.0)
     }
 
     fn split_points(&self) -> (f32, f32) {
@@ -1351,17 +1391,21 @@ impl App {
                 return h;
             }
         }
-        if self.search_button().contains(x, y) {
-            return Hit::SearchButton;
+        if x < BAR_W {
+            return self.bar_hit(x, y);
         }
         if let Some(h) = self.view_menu_hit(x, y) {
             return h;
         }
-        if x < SIDEBAR_W {
+        // 패널은 칸보다 위에 있다 (떠 있을 때 그 아래 칸을 누르지 않게)
+        if self.side_panel_rect().is_some_and(|r| r.contains(x, y)) {
             return self.sidebar_hit(x, y);
         }
+        if self.side_resize_rect().is_some_and(|r| r.contains(x, y)) {
+            return Hit::SideResize;
+        }
         if y < WORKBAR_H {
-            if let Some(i) = layout_buttons().iter().position(|r| r.contains(x, y)) {
+            if let Some(i) = self.layout_buttons().iter().position(|r| r.contains(x, y)) {
                 return Hit::Layout(i);
             }
             if self.hidden_button().contains(x, y) {
@@ -1369,6 +1413,9 @@ impl App {
             }
             if self.preview_button().contains(x, y) {
                 return Hit::PreviewButton;
+            }
+            if self.more_button().contains(x, y) {
+                return Hit::More;
             }
             return Hit::None;
         }
@@ -2510,6 +2557,8 @@ impl App {
             show_hidden: self.show_hidden,
             preview: self.preview.is_some(),
             new_tab: self.new_tab_home.clone(),
+            side: self.side_pinned.map_or("none", Panel::key).to_string(),
+            side_w: self.side_w,
             look: self.look.clone(),
             panes: self
                 .panes
@@ -2610,7 +2659,16 @@ impl App {
             }
             return DropAt::None;
         }
-        if x < SIDEBAR_W && self.settings.is_none() {
+        // 막대의 별 위에 놓으면 즐겨찾기에 넣는다 (패널이 닫혀 있어도)
+        if x < BAR_W && self.settings.is_none() {
+            let side = matches!(self.bar_hit(x, y), Hit::Bar(Panel::Favorites)).then_some(Side::FavEmpty);
+            if self.drop_hover.take().is_some() || side != self.side_drop {
+                self.side_drop = side;
+                self.invalidate();
+            }
+            return if side.is_some() { DropAt::Favorites } else { DropAt::None };
+        }
+        if self.settings.is_none() && self.side_panel_rect().is_some_and(|r| r.contains(x, y)) {
             let (side, dir) = self.side_drop_at(x, y).map_or((None, None), |(s, d)| (Some(s), d));
             let side = side.filter(|s| *s == Side::FavEmpty || dir.is_some());
             if self.drop_hover.take().is_some() || side != self.side_drop {
@@ -2674,6 +2732,7 @@ impl App {
                 }
                 WM_MOUSELEAVE => {
                     self.tracking = false;
+                    self.side_mouse_left();
                     if self.hover != Hit::None {
                         self.hover = Hit::None;
                         self.update_tip();
@@ -2735,6 +2794,7 @@ impl App {
                     self.invalidate();
                     if loword(wp.0) == 0 {
                         self.close_view_menu();
+                        self.close_peek();
                     } else {
                         // 관리자 승인(검색 서비스 설치) 등을 마치고 돌아오면 설정 창의 상태를 다시 읽는다.
                         // 다른 곳에서 파일을 옮겼을 수 있으니 드라이브 남은 용량도 다시 읽는다
@@ -2779,6 +2839,10 @@ impl App {
                         let _ = KillTimer(Some(hwnd), id);
                         self.tip_shown = true;
                         self.invalidate();
+                    } else if id == TIMER_BAR_HOVER {
+                        self.on_bar_hover_timer();
+                    } else if id == TIMER_SIDE_CLOSE {
+                        self.on_side_close_timer();
                     } else if (TIMER_REFRESH..TIMER_REFRESH + 4).contains(&id) {
                         let _ = KillTimer(Some(hwnd), id);
                         let p = id - TIMER_REFRESH;
@@ -2886,6 +2950,12 @@ impl App {
                 }
             }
             Drag::FavPress { .. } | Drag::FavMove { .. } => self.fav_drag_move(y),
+            Drag::SideW { start_x, start_w } => {
+                let lo = session::SIDE_W_RANGE.0;
+                self.side_w = (start_w + x - start_x).clamp(lo, self.side_w_max());
+                self.side_clamp_scroll();
+                self.after_resize_drag();
+            }
             Drag::TabPress { pane, tab, x: x0, y: y0 } => {
                 if (x - x0).abs() > 6.0 || (y - y0).abs() > 6.0 {
                     self.drag = Drag::TabMove { pane, tab, x, y };
@@ -2919,6 +2989,7 @@ impl App {
                     self.update_tip();
                     self.invalidate();
                 }
+                self.side_track(x, y);
                 if !self.tracking {
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -2989,6 +3060,14 @@ impl App {
         if dbl && matches!(hit, Hit::Side(s) if !matches!(s, Side::Fav(_))) {
             return;
         }
+        // 막대 아이콘·핀·`…`도 두 번째 누름은 무시한다 (첫 누름이 연 것을 바로 닫지 않게)
+        if dbl && matches!(hit, Hit::Bar(_) | Hit::SidePin | Hit::More) {
+            return;
+        }
+        // 떠 있는 패널 밖을 누르면 패널은 닫고, 누른 것은 그대로 처리한다
+        if self.side_floating() && !matches!(hit, Hit::Side(_) | Hit::SidePin | Hit::SidePanel | Hit::Bar(_) | Hit::SearchButton | Hit::SettingsButton) {
+            self.close_peek();
+        }
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
         if self.pal_open && hit != Hit::SearchButton {
@@ -3024,7 +3103,15 @@ impl App {
             Hit::Hidden => self.toggle_hidden(),
             Hit::PreviewButton => self.toggle_preview(),
             Hit::SettingsButton => self.toggle_settings(settings_ui::Page::General),
-            Hit::HelpButton => self.toggle_settings(settings_ui::Page::Help),
+            Hit::Bar(panel) => self.bar_click(panel),
+            Hit::SidePin => self.side_toggle_pin(),
+            Hit::SidePanel => {}
+            Hit::SideResize => capture(self, Drag::SideW { start_x: x, start_w: self.side_w }),
+            Hit::More => {
+                let r = self.more_button();
+                let pt = self.to_screen(r.l, r.b + 2.0);
+                self.pending.push(Deferred::MoreMenu { pt });
+            }
             Hit::View(p) => self.toggle_view_menu(p),
             Hit::SplitX => capture(self, Drag::SplitX),
             Hit::SplitY => capture(self, Drag::SplitY),
@@ -3276,7 +3363,7 @@ impl App {
         if self.view_menu.is_some() {
             return;
         }
-        if x < SIDEBAR_W {
+        if self.side_panel_rect().is_some_and(|r| r.contains(x, y)) {
             self.side_wheel(-delta / 120.0 * 3.0 * ROW_H);
             return;
         }
@@ -3303,7 +3390,7 @@ impl App {
 
     fn on_set_cursor(&self) -> bool {
         let id = match self.drag {
-            Drag::SplitX | Drag::Col { .. } => IDC_SIZEWE,
+            Drag::SplitX | Drag::Col { .. } | Drag::SideW { .. } => IDC_SIZEWE,
             Drag::SplitY => IDC_SIZENS,
             _ => {
                 let mut pt = POINT::default();
@@ -3312,7 +3399,7 @@ impl App {
                     let _ = ScreenToClient(self.hwnd, &mut pt);
                 }
                 match self.hit(pt.x as f32 / self.scale(), pt.y as f32 / self.scale()) {
-                    Hit::SplitX | Hit::HeaderResize(..) => IDC_SIZEWE,
+                    Hit::SplitX | Hit::HeaderResize(..) | Hit::SideResize => IDC_SIZEWE,
                     Hit::SplitY => IDC_SIZENS,
                     Hit::CrumbEmpty(_) => IDC_IBEAM,
                     _ => IDC_ARROW,
@@ -3558,7 +3645,7 @@ impl App {
             self.gfx.end();
             return;
         }
-        self.paint_sidebar();
+        self.paint_bar();
         self.paint_workbar();
         self.paint_caption();
         let mut missing = Vec::new();
@@ -3566,6 +3653,8 @@ impl App {
             self.paint_pane(p, r, &mut missing);
         }
         self.paint_preview(&mut missing);
+        // 패널은 칸 다음에: 떠 있을 때 칸 위에 그려진다
+        self.paint_sidebar();
         let t = self.theme;
         let (sx, sy) = self.splitters();
         let hot_x = matches!(self.drag, Drag::SplitX) || self.hover == Hit::SplitX;
@@ -3623,8 +3712,8 @@ impl App {
         let g = &self.gfx;
         let hover_bg = t.sel_inactive;
         // 칸 나누기: 한 덩어리 판 위에 지금 고른 것만 도드라지게
-        g.fill_round(layout_pill(), 8.0, sidebar::well(&t));
-        for (i, r) in layout_buttons().iter().enumerate() {
+        g.fill_round(self.layout_pill(), 8.0, sidebar::well(&t));
+        for (i, r) in self.layout_buttons().iter().enumerate() {
             let layout = Layout::ALL[i];
             let current = layout == self.layout;
             if current {
@@ -3647,6 +3736,7 @@ impl App {
         };
         icon_button(self.hidden_button(), G_HIDDEN, self.show_hidden, self.hover == Hit::Hidden);
         icon_button(self.preview_button(), G_PREVIEW, self.preview.is_some(), self.hover == Hit::PreviewButton);
+        icon_button(self.more_button(), G_MORE, false, self.hover == Hit::More);
     }
 
     /// 단추에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
@@ -3662,7 +3752,7 @@ impl App {
             None => name.to_string(),
         };
         Some(match self.hover {
-            Hit::Layout(i) => (layout_buttons()[i], named(LAYOUTS[i], crate::keys::name(LAYOUTS[i]))),
+            Hit::Layout(i) => (self.layout_buttons()[i], named(LAYOUTS[i], crate::keys::name(LAYOUTS[i]))),
             Hit::NewFolder(p) => (geom(self.pane_rect(p)?).new_folder, named(Action::NewFolder, "새 폴더")),
             Hit::Hidden => (self.hidden_button(), named(Action::Hidden, if self.show_hidden { "숨김 항목 감추기" } else { "숨김 항목 보기" })),
             Hit::Side(s) => return self.side_tip(s),
@@ -3675,7 +3765,10 @@ impl App {
             ),
             Hit::PreviewButton => (self.preview_button(), named(Action::Preview, "미리 보기 창")),
             Hit::SettingsButton => (self.settings_button(), named(Action::Settings, "설정")),
-            Hit::HelpButton => (self.help_button(), named(Action::Help, "도움말")),
+            Hit::Bar(Panel::Favorites) => (self.bar_rect(Panel::Favorites), named(Action::Favorites, "즐겨찾기")),
+            Hit::Bar(p) => (self.bar_rect(p), p.title().to_string()),
+            Hit::SidePin => (self.side_pin_rect()?, (if self.side_floating() { "고정해 두기" } else { "고정 풀기" }).to_string()),
+            Hit::More => (self.more_button(), "도움말·설정".to_string()),
             _ => return None,
         })
     }
@@ -3696,8 +3789,8 @@ impl App {
         let Some((b, text)) = self.tip().filter(|_| self.tip_shown) else { return };
         let t = self.theme;
         let w = self.gfx.measure(&text, Font::Normal) + 20.0;
-        // 사이드바 단추는 오른쪽에(아래쪽 단추가 창 밖으로 나가지 않게), 작업 줄 단추는 아래에
-        let r = if b.r <= SIDEBAR_W {
+        // 막대 아이콘은 오른쪽에(아래쪽 설정이 창 밖으로 나가지 않게), 작업 줄 단추는 아래에
+        let r = if b.r <= BAR_W {
             let cy = (b.t + b.b) / 2.0;
             R::new(b.r + 8.0, cy - 13.0, b.r + 8.0 + w, cy + 13.0)
         } else {
@@ -3827,22 +3920,23 @@ impl App {
         }
 
         // 경로 줄: 탐색 단추
-        let nav_btn = |gfx: &Gfx, rr: R, glyph: u16, enabled: bool, hovered: bool| {
+        let nav_btn = |gfx: &Gfx, rr: R, glyph: u16, font: Font, enabled: bool, hovered: bool| {
             if hovered && enabled {
                 gfx.fill_round(rr, 6.0, t.hover);
             }
-            gfx.glyph(glyph, rr, true, if enabled { t.text } else { t.faint });
+            gfx.glyph_font(glyph, rr, font, if enabled { t.text } else { t.faint });
         };
-        nav_btn(gfx, g.back, G_BACK, !tab.back.is_empty(), hover == Hit::Back(p));
-        nav_btn(gfx, g.fwd, G_FWD, !tab.fwd.is_empty(), hover == Hit::Fwd(p));
-        nav_btn(gfx, g.up, G_UP, tab.loc != Location::Computer, hover == Hit::Up(p));
-        nav_btn(gfx, g.new_folder, G_NEW_FOLDER, tab.loc.dir().is_some(), hover == Hit::NewFolder(p));
+        // 이동 화살표는 가운데 크기(12px), 새 폴더·별·보기는 도구 아이콘 크기(16px)
+        nav_btn(gfx, g.back, G_BACK, Font::GlyphMid, !tab.back.is_empty(), hover == Hit::Back(p));
+        nav_btn(gfx, g.fwd, G_FWD, Font::GlyphMid, !tab.fwd.is_empty(), hover == Hit::Fwd(p));
+        nav_btn(gfx, g.up, G_UP, Font::GlyphMid, tab.loc != Location::Computer, hover == Hit::Up(p));
+        nav_btn(gfx, g.new_folder, G_NEW_FOLDER, Font::Glyph, tab.loc.dir().is_some(), hover == Hit::NewFolder(p));
         // 보기 방식: 지금 보기 그림과 아래 화살표 (누르면 보기 메뉴)
         if hover == Hit::View(p) || view_menu_open {
             gfx.fill_round(g.view, 6.0, t.hover);
         }
         let view_glyph = if matches!(pane.view, ViewMode::Huge | ViewMode::Large | ViewMode::Medium) { G_GRID } else { G_LIST };
-        gfx.glyph(view_glyph, R::new(g.view.l + 2.0, g.view.t, g.view.l + 26.0, g.view.b), true, t.text);
+        gfx.glyph(view_glyph, R::new(g.view.l + 2.0, g.view.t, g.view.l + 26.0, g.view.b), false, t.text);
         gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - 16.0, g.view.t + 1.0, g.view.r - 4.0, g.view.b + 1.0), true, t.faint);
 
         // 경로: 상자 없이 글자만. 경로 위에 올리면 옅은 바탕(빈 곳을 누르면 경로 입력), 조각에 올리면 그 조각이 한 단계 진하게
@@ -3862,7 +3956,7 @@ impl App {
                     gfx.fill_round(g.star, 5.0, t.sel_inactive);
                 }
                 let gold = Color { r: 0.95, g: 0.69, b: 0.0, a: 1.0 };
-                gfx.glyph(if on { G_STAR_FILL } else { G_STAR }, g.star, true, if on { gold } else if over_path { t.dim } else { t.faint });
+                gfx.glyph(if on { G_STAR_FILL } else { G_STAR }, g.star, false, if on { gold } else if over_path { t.dim } else { t.faint });
             }
             gfx.clip(g.crumbs);
             for (i, c) in cs.iter().enumerate() {
@@ -4187,6 +4281,7 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         Deferred::PreviewSync => preview::sync_handler(),
         Deferred::Settings { ctl, index, pt } => settings_ui::run_deferred(hwnd, ctl, index, pt),
         Deferred::PalMenu { pt } => palette::show_pal_menu(hwnd, pt),
+        Deferred::MoreMenu { pt } => sidebar::show_more_menu(hwnd, pt),
     }
 }
 
