@@ -536,8 +536,9 @@ impl App {
 
     /// 마우스가 움직였다 (끌기 중이 아닐 때): 아이콘에 머무르면 패널을 띄우고, 떠 있는 패널 밖으로 나가면 닫을 준비
     pub(super) fn side_track(&mut self, x: f32, y: f32) {
+        // 머물러 떠서 열기는 패널을 고정하지 않았을 때만: 고정한 패널이 있으면 그 위에 다른 패널이 겹쳐 뜨지 않고, 누를 때만 바꾼다
         let over = match self.hover {
-            Hit::Bar(p) if self.side_panel() != Some(p) && self.settings.is_none() => Some(p),
+            Hit::Bar(p) if self.side_pinned.is_none() && self.side_panel() != Some(p) && self.settings.is_none() => Some(p),
             _ => None,
         };
         if over != self.bar_arm {
@@ -587,7 +588,7 @@ impl App {
             let _ = KillTimer(Some(self.hwnd), TIMER_BAR_HOVER);
         }
         let Some(p) = self.bar_arm.take() else { return };
-        if self.hover == Hit::Bar(p) && self.side_panel() != Some(p) && matches!(self.drag, Drag::None) && self.settings.is_none() && self.edit_mode == EditMode::None {
+        if self.hover == Hit::Bar(p) && self.side_pinned.is_none() && self.side_panel() != Some(p) && matches!(self.drag, Drag::None) && self.settings.is_none() && self.edit_mode == EditMode::None {
             self.show_side(p, false);
         }
     }
@@ -1105,12 +1106,9 @@ impl App {
                             row_bg(g, r, false, hover == Hit::Side(s));
                             let tw = R::new(r.l + 8.0, r.t, r.l + 24.0, r.b);
                             g.glyph(if group.collapsed { G_TWIST_CLOSED } else { G_TWIST_OPEN }, tw, true, t.faint);
-                            let n = group.items.len().to_string();
-                            let nw = g.measure(&n, Font::Small);
                             if editing != Some(row) {
-                                g.text(&group.name, R::new(lx, r.t, r.r - 16.0 - nw, r.b), Font::Normal, fg);
+                                g.text(&group.name, R::new(lx, r.t, r.r - 8.0, r.b), Font::Normal, fg);
                             }
-                            g.text(&n, R::new(r.r - 10.0 - nw, r.t, r.r - 8.0, r.b), Font::Small, t.faint);
                             // 항목을 그룹 머리 줄에 끌어 놓으면 그 그룹으로
                             if let Some((Row::Item { .. }, Row::Group(at), _)) = moving {
                                 if at == gi {
