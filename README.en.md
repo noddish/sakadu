@@ -65,7 +65,7 @@ Dark mode follows your Windows setting.
 | Key | What it does |
 |---|---|
 | Typing | Filter the current pane (Esc clears) |
-| Enter / Ctrl+Enter | Open / open folder in a new tab |
+| Enter / Ctrl+Enter / Shift+Enter | Open / open the location in this pane / open in a new tab |
 | Backspace, Alt+↑ | Parent folder |
 | Alt+← / Alt+→, mouse back/forward buttons | Back / forward |
 | Tab / Shift+Tab | Switch pane |
@@ -101,8 +101,9 @@ Dark mode follows your Windows setting.
 - The index takes about 120 MB of memory for 1.8 million entries.
 - Results only include what the searching Windows account can see: every folder from the drive root down to the file's folder must be listable by that account (what you could browse in Explorer). Hidden files are left out of both the results and the total count. See [docs/search-permissions-check.md](docs/search-permissions-check.md) for a two-account check (Korean).
 - Query syntax: space-separated words must all match. A word ending in `\`, like `work\`, matches the path. `|` means "or" (`quote 2026 | contract`). Pasting several lines joins them with `|`.
-- Results: Enter opens, Ctrl+Enter opens the containing folder in a new tab. Pick several with Ctrl+click, Shift+click or Shift+↑↓, then Enter opens them all and Ctrl+C copies the files. The right-click menu also has copy path and pick all.
-- The search window stays open while you visit other apps. Reopen it after closing and your last query is still there, selected: type to replace it, or press End to keep going.
+- Search opens as a **panel** on the left, so the results stay while you work in the panes. Esc only moves the keyboard back to the pane; close the panel with the search icon on the bar or its ×. Reopen it after closing and your last query is still there, selected: type to replace it, or press End to keep going.
+- Results: Enter opens, Ctrl+Enter opens the containing folder in the current pane with the file selected, Shift+Enter opens in a new tab. Pick several with Ctrl+click, Shift+click or Shift+↑↓, then Enter opens them all and Ctrl+C copies the files. The right-click menu also has copy path and pick all.
+- The **현재 폴더** (current folder) chip limits the search to the folder shown in the active pane. When that folder changes, or files are moved or renamed, the same query runs again so the results stay current.
 - The global hotkey is the first free one of Ctrl+Alt+Space, Win+Shift+F and Ctrl+Alt+F. Hover over the search icon on the left bar to see which one you got.
 - The service exe is copied to `C:\Program Files\Sakadu`. After updating Sakadu, reinstall the service to update it too.
 
@@ -113,7 +114,7 @@ Dark mode follows your Windows setting.
 
 The search service only reads this PC's own (NTFS) disks. Shared folders (`\\server\share`), NAS and USB drives are searched once you add them.
 
-- Open the folder in any pane and search with Ctrl+F. If nothing turns up, click **이 폴더도 검색하기** (search this folder too) in the search window.
+- Open the folder in any pane and search with Ctrl+F. If nothing turns up, click **이 폴더도 검색하기** (search this folder too) in the search panel.
 - The **검색에 넣은 폴더** (added folders) section of the 바로가기 (places) panel on the left lists them. When the current pane shows a folder outside the search, the **+** in that section adds it; right-click a folder to remove it.
 - Settings → **검색** (Search) → **검색에 넣은 폴더** also lists them, lets you remove one, and adds folders you have open.
 - The app walks the folder once with your own account and keeps the names in memory. Nothing is written to disk, so it walks the folder again each time the app starts.
@@ -226,7 +227,7 @@ cargo test
 | `app/settings_ui.rs` | Settings window (general, appearance, search, shortcuts, help, about) |
 | `keys.rs` | Remappable shortcuts (key map, saving) |
 | `app/sidebar.rs` · `app/fav_ui.rs` | Icon bar and panels on the left (places, favorites; peek, pin, resize) · favorites actions |
-| `app/palette.rs` · `app/preview.rs` | Ctrl+F search · preview pane |
+| `app/palette.rs` · `app/preview.rs` | Ctrl+F search panel · preview pane |
 | `pane.rs` | Tab state (history, sort, filter, selection) |
 | `listing.rs` | Folder listing, This PC, display formatting |
 | `shell.rs` | Shell menus, file operations, clipboard, drag, change notifications, icons |

@@ -611,6 +611,8 @@ fn main() -> Result<()> {
     if run_service_command() {
         return Ok(());
     }
+    // panic=abort라 창도 없이 꺼지므로, --log로 켠 로그에 어디서 멈췄는지 남긴다
+    std::panic::set_hook(Box::new(|info| diag::log(|| format!("panic: {info}"))));
     let background = std::env::args().skip(1).any(|a| a.eq_ignore_ascii_case(tray::ARG));
     let open_path = path_arg();
     let mut lock = StartupLock::acquire();

@@ -1,5 +1,6 @@
 //! 창 왼쪽의 아이콘 막대와 그 옆에 여는 패널.
 //! 막대에는 바로가기(내 PC·드라이브·검색에 넣은 폴더)·즐겨찾기·검색·설정 아이콘이 늘 보이고, 패널은 한 번에 하나만 연다.
+//! 검색 패널(palette.rs)은 늘 고정으로만 열린다 (떠 있다가 닫히면 입력 중인 검색이 사라지니까).
 //! 아이콘에 잠깐 머무르면 패널이 칸 위에 떠서 열리고(마우스가 떠나거나 위치를 고르면 닫힘), 아이콘을 누르거나 패널의 핀을 누르면
 //! 고정돼 칸을 밀어내며 오른쪽 가장자리를 끌어 너비를 바꿀 수 있다.
 //! 패널 가운데 목록의 줄 배치는 `side_slots` 한 곳에서 정해 그리기·누르기·끌어 놓기가 같이 쓴다.
@@ -41,16 +42,18 @@ const G_TWIST_CLOSED: u16 = 0xE76C;
 pub enum Panel {
     Places,
     Favorites,
+    Search,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 2] = [Panel::Places, Panel::Favorites];
+    pub const ALL: [Panel; 3] = [Panel::Places, Panel::Favorites, Panel::Search];
 
     /// 세션에 저장하는 이름
     pub fn key(self) -> &'static str {
         match self {
             Panel::Places => "places",
             Panel::Favorites => "favorites",
+            Panel::Search => "search",
         }
     }
 
@@ -62,6 +65,7 @@ impl Panel {
         match self {
             Panel::Places => "바로가기",
             Panel::Favorites => "즐겨찾기",
+            Panel::Search => "검색",
         }
     }
 
@@ -69,6 +73,7 @@ impl Panel {
         match self {
             Panel::Places => G_PLACES,
             Panel::Favorites => fav_ui::G_STAR,
+            Panel::Search => G_SEARCH,
         }
     }
 }
@@ -187,9 +192,9 @@ impl App {
         bar_item(8.0 + i * BAR_PITCH)
     }
 
-    /// 막대의 검색 아이콘 (누르면 검색 창)
+    /// 막대의 검색 아이콘 (누르면 검색 패널)
     pub(super) fn search_button(&self) -> R {
-        bar_item(8.0 + Panel::ALL.len() as f32 * BAR_PITCH)
+        self.bar_rect(Panel::Search)
     }
 
     /// 막대 맨 아래 설정
@@ -275,7 +280,8 @@ impl App {
         };
         let mut y = 4.0;
         match self.side_panel() {
-            None => {}
+            // 검색 패널의 결과 목록은 palette.rs가 따로 둔다
+            None | Some(Panel::Search) => {}
             Some(Panel::Favorites) => {
                 let rows = self.favs.rows();
                 for row in &rows {
@@ -472,6 +478,10 @@ impl App {
             }
             self.fav_blur();
         }
+        // 검색 패널이 닫혔거나 다른 패널로 바뀌었다 (다른 패널이 잠깐 떠 있는 것은 아님)
+        if before == Some(Panel::Search) && self.side_pinned != Some(Panel::Search) {
+            self.pal_hidden();
+        }
         self.side_clamp_scroll();
         self.after_resize_drag();
         self.refresh_hover();
@@ -481,7 +491,7 @@ impl App {
     /// 마우스가 움직였다 (끌기 중이 아닐 때): 아이콘에 머무르면 패널을 띄우고, 떠 있는 패널 밖으로 나가면 닫을 준비
     pub(super) fn side_track(&mut self, x: f32, y: f32) {
         let over = match self.hover {
-            Hit::Bar(p) if self.side_panel() != Some(p) && !self.pal_open && self.settings.is_none() => Some(p),
+            Hit::Bar(p) if self.side_panel() != Some(p) && self.settings.is_none() => Some(p),
             _ => None,
         };
         if over != self.bar_arm {
@@ -531,7 +541,7 @@ impl App {
             let _ = KillTimer(Some(self.hwnd), TIMER_BAR_HOVER);
         }
         let Some(p) = self.bar_arm.take() else { return };
-        if self.hover == Hit::Bar(p) && self.side_panel() != Some(p) && matches!(self.drag, Drag::None) && !self.pal_open && self.settings.is_none() && self.edit_mode == EditMode::None {
+        if self.hover == Hit::Bar(p) && self.side_panel() != Some(p) && matches!(self.drag, Drag::None) && self.settings.is_none() && self.edit_mode == EditMode::None {
             self.show_side(p, false);
         }
     }
@@ -563,13 +573,14 @@ impl App {
 
     /// 막대 (x < BAR_W)에서 누를 수 있는 것
     pub(super) fn bar_hit(&self, x: f32, y: f32) -> Hit {
+        // 검색 아이콘은 머물러도 띄우지 않으니 Bar가 아닌 따로 된 Hit
+        if self.search_button().contains(x, y) {
+            return Hit::SearchButton;
+        }
         for p in Panel::ALL {
             if self.bar_rect(p).contains(x, y) {
                 return Hit::Bar(p);
             }
-        }
-        if self.search_button().contains(x, y) {
-            return Hit::SearchButton;
         }
         if self.settings_button().contains(x, y) {
             return Hit::SettingsButton;
@@ -579,6 +590,9 @@ impl App {
 
     /// 패널 안에서 누를 수 있는 것 (패널 자리 안이라고 확인한 뒤 부른다). 빈 곳은 SidePanel
     pub(super) fn sidebar_hit(&self, x: f32, y: f32) -> Hit {
+        if self.side_panel() == Some(Panel::Search) {
+            return self.pal_hit(x, y);
+        }
         if self.side_pin_rect().is_some_and(|r| r.contains(x, y)) {
             return Hit::SidePin;
         }
@@ -606,6 +620,7 @@ impl App {
             return None;
         }
         match self.side_panel()? {
+            Panel::Search => None,
             Panel::Favorites => Some((Side::FavEmpty, None)),
             Panel::Places => match self.sidebar_hit(x, y) {
                 Hit::Side(s @ Side::Drive(i)) => Some((s, self.places.drives.get(i).map(|d| d.path.clone()))),
@@ -783,17 +798,20 @@ impl App {
             }
             g.glyph(glyph, r, false, if on { t.accent } else if hovered { t.text } else { t.dim });
         };
-        for p in Panel::ALL {
+        for p in [Panel::Places, Panel::Favorites] {
             // 파일을 끌어 별 위에 올리면 즐겨찾기에 넣을 수 있다고 켜 보인다
             let drop = p == Panel::Favorites && self.side_drop == Some(Side::FavEmpty) && self.side_panel() != Some(Panel::Favorites);
             item(self.bar_rect(p), p.glyph(), self.side_panel() == Some(p) || drop, hover == Hit::Bar(p));
         }
-        item(self.search_button(), G_SEARCH, self.pal_open, hover == Hit::SearchButton);
+        item(self.search_button(), G_SEARCH, self.pal_shown(), hover == Hit::SearchButton);
         item(self.settings_button(), G_SETTINGS, false, hover == Hit::SettingsButton);
     }
 
     pub(super) fn paint_sidebar(&mut self) {
         let (Some(panel), Some(pr)) = (self.side_panel(), self.side_panel_rect()) else { return };
+        if panel == Panel::Search {
+            return self.paint_search_panel();
+        }
         let t = self.theme;
         let floating = self.side_floating();
         let list = self.side_list();
