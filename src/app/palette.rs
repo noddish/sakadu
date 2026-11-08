@@ -51,6 +51,8 @@ pub struct SearchDone {
     seq: u64,
     /// 결과를 찾은 검색어 (상태 확인이면 None)
     query: Option<String>,
+    /// 찾은 범위(현재 폴더). PC 전체면 None
+    scope: Option<String>,
     reply: SearchReply,
 }
 
@@ -108,15 +110,16 @@ impl PalGate {
     }
 }
 
-/// scope가 있으면 그 폴더 아래만 남긴다. 폴더 경로는 띄어쓰기가 들어갈 수 있어 검색어에 섞지 않고,
-/// 서비스에 넉넉히 물은 뒤 여기서 거른다 (결과의 검색어는 입력한 그대로 돌려준다)
+/// scope가 있으면 그 폴더 아래만 남긴다. 범위는 검색어 조각마다 경로 조건으로 덧붙여(scoped_query) 서비스와
+/// 넣은 폴더가 순위를 매기고 자르기 전에 거르게 하고, 받은 뒤 정확한 범위로 한 번 더 거른다 (결과의 검색어는 입력한 그대로 돌려준다)
 fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>, scope: Option<String>, folders: crate::folders::Folders) {
     let owner = shell::SendHwnd(hwnd);
     std::thread::spawn(move || {
         let reply = match &query {
             Some(q) => {
                 let limit = if scope.is_some() { SCOPE_LIMIT } else { PAL_LIMIT };
-                SearchReply::Results(search_all(q, &folders, limit).map(|mut r| {
+                let sent = scope.as_deref().map_or_else(|| q.clone(), |d| scoped_query(q, d));
+                SearchReply::Results(search_all(&sent, &folders, limit).map(|mut r| {
                     if let Some(dir) = &scope {
                         r.hits.retain(|(_, p)| under(p, dir));
                         r.total = r.hits.len();
@@ -127,8 +130,26 @@ fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>, scope: Option<Strin
             }
             None => SearchReply::Status(service::status()),
         };
-        post(owner.get(), WM_APP_SEARCH, Box::new(SearchDone { seq, query, reply }));
+        post(owner.get(), WM_APP_SEARCH, Box::new(SearchDone { seq, query, scope, reply }));
     });
+}
+
+/// 현재 폴더 범위를 검색어 조각마다 경로 조건으로 덧붙인다. 서비스와 넣은 폴더는 '\'가 든 낱말을 전체 경로에서 찾으며
+/// 순위를 매기고 자르기 전에 거르므로, 다른 곳의 일치 항목이 많아도 이 폴더 아래 항목을 놓치지 않는다.
+/// 경로를 띄어쓰기로 나눈 조각 가운데 '\'가 든 것만 쓴다('\'가 없으면 이름 조건이 된다). 이 폴더 아래 경로는 이 조각들을
+/// 늘 모두 품으므로 범위 안의 결과를 잃지 않고, 정확한 범위는 받은 뒤 under()로 거른다
+fn scoped_query(q: &str, dir: &str) -> String {
+    let dir = format!("{}\\", dir.trim_end_matches('\\'));
+    let terms = dir.split_whitespace().filter(|w| w.contains('\\')).collect::<Vec<_>>().join(" ");
+    query_pieces(q).iter().map(|p| format!("{p} {terms}")).collect::<Vec<_>>().join(" | ")
+}
+
+/// 보이는 결과가 지금 것인지 가르는 열쇠: 검색어와 범위. 범위를 바꾸면 같은 검색어여도 이전 결과로는 열지 않는다
+fn pal_key(text: &str, scope: Option<&str>) -> String {
+    match scope {
+        Some(d) => format!("{text}\u{1F}{}", d.to_lowercase()),
+        None => text.to_string(),
+    }
 }
 
 /// path가 dir 안에 있는가 (대소문자 무시)
@@ -531,9 +552,29 @@ impl App {
         }
     }
 
-    /// 보이는 결과가 지금 입력한 검색어의 것인지
+    /// 보이는 결과가 지금 입력한 검색어와 범위의 것인지
     fn pal_current(&self) -> bool {
-        self.pal_gate.current(&edit_text(self.search_edit))
+        self.pal_gate.current(&self.pal_key_now())
+    }
+
+    /// "현재 폴더" 범위로 찾을 폴더 (범위가 PC 전체이거나 지금 칸에 폴더가 없으면 None)
+    fn pal_scope(&self) -> Option<String> {
+        if self.pal_here { self.panes[self.active].tab().loc.dir().map(str::to_string) } else { None }
+    }
+
+    /// 지금 입력과 범위의 열쇠 (pal_key)
+    fn pal_key_now(&self) -> String {
+        pal_key(&edit_text(self.search_edit), self.pal_scope().as_deref())
+    }
+
+    /// "현재 폴더" 범위로 찾는 중에 지금 칸의 폴더가 바뀌었으면(이동·탭·칸·칸 나누기) 그 폴더로 바로 다시 찾는다
+    pub(super) fn pal_follow_scope(&mut self) {
+        if !self.pal_here || !self.pal_shown() || edit_text(self.search_edit).trim().is_empty() {
+            return;
+        }
+        if self.pal_gate.asked.as_deref() != Some(self.pal_key_now().as_str()) {
+            self.pal_run_query();
+        }
     }
 
     pub(super) fn pal_run_query(&mut self) {
@@ -542,10 +583,13 @@ impl App {
         }
         let q = edit_text(self.search_edit);
         self.pal_seq += 1;
-        self.pal_gate.asked(&q);
+        // "현재 폴더" 범위: 지금 칸의 폴더 아래만 (내 PC처럼 폴더가 없으면 전체)
+        let scope = self.pal_scope();
+        let key = pal_key(&q, scope.as_deref());
+        self.pal_gate.asked(&key);
         if q.trim().is_empty() {
             self.pal_results.clear();
-            self.pal_gate.arrived(&q, &q, 0);
+            self.pal_gate.arrived(&key, &key, 0);
             // 서비스 상태(미설치·인덱싱 중)는 그대로 보여 준다
             if matches!(self.pal_status, PalStatus::Searching | PalStatus::Done { .. }) {
                 self.pal_status = PalStatus::Idle;
@@ -556,8 +600,6 @@ impl App {
         if self.pal_status != PalStatus::NotInstalled {
             self.pal_status = PalStatus::Searching;
         }
-        // "현재 폴더" 범위: 지금 칸의 폴더 아래만 (내 PC처럼 폴더가 없으면 전체)
-        let scope = if self.pal_here { self.panes[self.active].tab().loc.dir().map(str::to_string) } else { None };
         spawn_search(self.hwnd, self.pal_seq, Some(q), scope, self.folders.clone());
         // 넣은 폴더를 아직 훑는 중이면, 다 훑을 때까지 잠깐마다 다시 찾아 결과를 채운다
         if self.folders.list().iter().any(|(_, s)| *s == crate::folders::State::Scanning) {
@@ -604,7 +646,8 @@ impl App {
                 // 훑는 중 다시 찾아 결과가 늘어날 때도 골라 둔 항목은 경로로 이어 간다
                 let kept: HashSet<String> = self.pal_picked_paths().into_iter().map(|(_, p)| p.to_lowercase()).collect();
                 self.pal_picked = r.hits.iter().map(|(_, p)| kept.contains(&p.to_lowercase())).collect();
-                let enter = self.pal_gate.arrived(done.query.as_deref().unwrap_or_default(), &edit_text(self.search_edit), r.hits.len());
+                let key = pal_key(done.query.as_deref().unwrap_or_default(), done.scope.as_deref());
+                let enter = self.pal_gate.arrived(&key, &self.pal_key_now(), r.hits.len());
                 // 다시 찾은 결과(파일 작업 뒤 등)에 지금 줄이 남아 있으면 그 줄과 스크롤을 지킨다
                 let sel_path = self.pal_results.get(self.pal_sel).map(|(_, p)| p.to_lowercase());
                 self.pal_results = r.hits;
@@ -859,11 +902,11 @@ impl App {
             }
             VK_RETURN => {
                 let mode = if ctrl { OpenMode::Locate } else if shift { OpenMode::NewTab } else { OpenMode::Open };
-                let text = edit_text(self.search_edit);
-                match self.pal_gate.enter(&text, mode) {
+                let key = self.pal_key_now();
+                match self.pal_gate.enter(&key, mode) {
                     Some(mode) => self.pal_open_paths(self.pal_targets(), mode),
-                    // 결과가 아직 이전 검색어의 것: 지금 검색어로 바로 찾고, 결과가 오면 그때 연다
-                    None if self.pal_gate.asked.as_deref() != Some(text.as_str()) => self.pal_run_query(),
+                    // 결과가 아직 이전 검색어(또는 범위)의 것: 지금 것으로 바로 찾고, 결과가 오면 그때 연다
+                    None if self.pal_gate.asked.as_deref() != Some(key.as_str()) => self.pal_run_query(),
                     None => {}
                 }
                 return true;
@@ -945,7 +988,8 @@ impl App {
         // 입력을 바꿨는데 새 결과가 아직이면 이전 결과는 흐리게 (열거나 복사할 수 없음)
         let stale = !self.pal_current() && !self.pal_results.is_empty();
         if crate::diag::enabled() && matches!(status, PalStatus::Done { .. }) {
-            if let Some(d) = self.pal_gate.shown_after_typing(&query) {
+            let key = self.pal_key_now();
+            if let Some(d) = self.pal_gate.shown_after_typing(&key) {
                 let pieces = query_pieces(&query).len();
                 crate::diag::log(|| format!("search: {pieces} piece(s), {} hit(s) shown {:.1}ms after typing", self.pal_results.len(), d.as_secs_f64() * 1000.0));
             }
@@ -1105,6 +1149,22 @@ fn kbd(gfx: &Gfx, t: &Theme, x: f32, cy: f32, label: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 현재 폴더 범위는 검색어 조각마다 경로 조건('\'가 든 낱말)으로 붙는다. 띄어쓰기 뒤 '\'가 없는 조각은 빼고(이름 조건이 되므로)
+    /// 정확한 범위는 받은 뒤 거른다
+    #[test]
+    fn scope_becomes_path_terms() {
+        assert_eq!(scoped_query("보고서", r"C:\업무\월간"), r"보고서 C:\업무\월간\");
+        assert_eq!(scoped_query("보고서", r"C:\업무\월간\"), r"보고서 C:\업무\월간\");
+        assert_eq!(scoped_query("a | b c", r"C:\Sakadu 데모\사진"), r"a C:\Sakadu 데모\사진\ | b c C:\Sakadu 데모\사진\");
+        assert_eq!(scoped_query("x", r"C:\My Big Folder\월간"), r"x C:\My Folder\월간\");
+        assert_eq!(scoped_query("x", r"\\nas\공유\팀"), r"x \\nas\공유\팀\");
+        assert_eq!(scoped_query("x", r"C:\"), r"x C:\");
+        // 범위가 다르면 같은 검색어여도 다른 결과로 본다
+        assert_ne!(pal_key("보고", Some(r"C:\a")), pal_key("보고", None));
+        assert_ne!(pal_key("보고", Some(r"C:\a")), pal_key("보고", Some(r"C:\b")));
+        assert_eq!(pal_key("보고", Some(r"C:\A")), pal_key("보고", Some(r"c:\a")));
+    }
 
     #[test]
     fn pieces_split_on_bar() {

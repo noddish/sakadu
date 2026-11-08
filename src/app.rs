@@ -1968,9 +1968,7 @@ impl App {
             self.set_filter_edit_text("");
             self.layout_edits();
             // "현재 폴더" 범위로 찾는 중이면 바뀐 폴더로 다시 찾는다
-            if self.pal_here {
-                self.pal_requery();
-            }
+            self.pal_follow_scope();
         }
         self.sync_watches();
         self.update_title();
@@ -2184,6 +2182,8 @@ impl App {
         if p == self.active {
             let f = self.panes[p].tab().filter.clone();
             self.set_filter_edit_text(&f);
+            // "현재 폴더" 범위로 찾는 중이면 이 탭의 폴더로 다시 찾는다
+            self.pal_follow_scope();
         }
         self.sync_watches();
         self.update_title();
@@ -2205,6 +2205,8 @@ impl App {
         self.start_keys = false;
         let f = self.panes[p].tab().filter.clone();
         self.set_filter_edit_text(&f);
+        // "현재 폴더" 범위로 찾는 중이면 이 칸의 폴더로 다시 찾는다
+        self.pal_follow_scope();
         self.layout_edits();
         self.update_title();
         self.invalidate();
@@ -2237,6 +2239,8 @@ impl App {
             }
             self.clamp_scroll(p);
         }
+        // 지금 칸이 바뀌었으면(칸을 줄여 지금 칸이 사라짐) "현재 폴더" 범위 검색도 따라간다
+        self.pal_follow_scope();
         self.sync_watches();
         self.layout_edits();
         self.update_title();
