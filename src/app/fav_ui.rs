@@ -1,4 +1,4 @@
-//! 사이드바 즐겨찾기의 동작: 열기·추가·이름 바꾸기·그룹·정렬·메뉴·키보드·끌어서 옮기기.
+//! 즐겨찾기 패널의 동작: 열기·추가·이름 바꾸기·그룹·정렬·메뉴·키보드·끌어서 옮기기.
 //! 줄 배치와 그리기는 sidebar.rs. 그룹은 그 자리에서 접고 펼치고, 표시 이름·순서·그룹은 사용자가 정한다.
 //! Ctrl+B는 키보드를 즐겨찾기 목록으로 옮긴다(다시 누르거나 Esc면 칸으로)
 
@@ -145,12 +145,15 @@ impl App {
         }
     }
 
-    /// 키보드를 사이드바 즐겨찾기로 옮긴다 (고른 줄이 보이게)
+    /// 키보드를 즐겨찾기 패널로 옮긴다 (패널이 안 보이거나 떠 있으면 고정해서 열고, 고른 줄이 보이게)
     fn focus_favorites(&mut self) {
         self.close_palette();
         self.close_view_menu();
         if self.edit_mode != EditMode::None {
             self.cancel_edit();
+        }
+        if self.side_panel() != Some(Panel::Favorites) || self.side_floating() {
+            self.show_side(Panel::Favorites, true);
         }
         self.fav_focus = true;
         self.fav_sel = self.fav_sel.min(self.favs.rows().len().saturating_sub(1));
@@ -258,26 +261,13 @@ impl App {
     fn fav_open_entry(&mut self, group: Option<usize>, index: usize, new_tab: bool) {
         let Some(f) = self.favs.item(group, index).cloned() else { return };
         self.fav_blur();
-        let path = util::normalize(&f.path);
+        // 떠 있는 패널은 위치를 골랐으니 닫는다
+        self.close_peek();
         let p = self.active;
-        if shell::is_dir(&path) {
-            if new_tab {
-                self.new_tab(p, Some(Location::Dir(path)), true);
-            } else {
-                self.navigate(p, Location::Dir(path), None);
-            }
-        } else if shell::exists(&path) {
-            let dir = util::parent(&path);
-            if !new_tab {
-                self.pending.push(Deferred::Open { pane: p, paths: vec![path], dir });
-            } else if let Some(dir) = dir {
-                let name = util::file_name(&path).to_string();
-                self.new_tab(p, Some(Location::Dir(dir)), true);
-                self.panes[p].tab_mut().restore = Some(Restore::select(&name));
-            }
-        } else {
-            self.flash(p, format!("즐겨찾기 항목을 찾을 수 없습니다: {}", f.path));
-        }
+        // 있는지·폴더인지는 뒤에서 확인한다 (꺼진 NAS 즐겨찾기를 눌러도 창이 멈추지 않게)
+        let tab = self.panes[p].tab();
+        let then = ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab };
+        self.probe(p, util::normalize(&f.path), then);
     }
 
     /// Ctrl+D·추가 버튼: 폴더·파일 하나를 선택했으면 그것, 아니면 현재 폴더
@@ -378,7 +368,7 @@ impl App {
             }
             None => {
                 self.favs.push(None, Favorite { name: favorites::default_name(&dir), path: dir, is_dir: true });
-                "즐겨찾기에 넣었습니다 · 왼쪽 목록에서 이름·순서·그룹을 정리할 수 있어요"
+                "즐겨찾기에 넣었습니다 · 즐겨찾기 패널에서 이름·순서·그룹을 정리할 수 있어요"
             }
         };
         // 저장하지 못했으면 별 표시도 원래대로 두고 오류만 보인다 (성공 문구로 덮지 않게)
@@ -414,6 +404,12 @@ impl App {
             self.cancel_edit();
         }
         self.close_palette();
+        // 입력 상자는 즐겨찾기 패널이 고정돼 있어야 자리가 있다 (떠 있는 패널은 마우스가 떠나면 닫힌다)
+        if self.side_panel() != Some(Panel::Favorites) || self.side_floating() {
+            self.show_side(Panel::Favorites, true);
+            // 입력 상자는 곧바로 제자리에 놓이니 패널은 펼치지 않고 바로 연다
+            self.side_anim = None;
+        }
         self.fav_select(row);
         self.edit_mode = EditMode::FavRename(row);
         unsafe {

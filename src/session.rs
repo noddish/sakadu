@@ -22,11 +22,31 @@ pub struct Session {
     pub active: usize,
     pub show_hidden: bool,
     pub preview: bool,
-    /// 새 탭(Ctrl+T·+)을 열 위치: NEW_TAB_SAME이면 지금 탭과 같은 폴더, 아니면 탭 경로 형식("::computer" 또는 폴더)
+    /// 새 탭(Ctrl+T·+)을 열 위치: NEW_TAB_SAME이면 지금 탭과 같은 폴더, 아니면 탭 경로 형식("::start"·"::computer" 또는 폴더)
     pub new_tab: String,
+    /// 시작 화면에 보일 최근 위치 (최근 것이 앞)
+    pub recent: Vec<String>,
+    /// 고정해 둔 왼쪽 패널: "places"(바로가기)·"favorites"(즐겨찾기)·"none"
+    pub side: String,
+    /// 왼쪽 패널 너비 (DIP)
+    pub side_w: f32,
+    /// 미리 보기에 고정해 둔 파일과 그 파일 번호 (꺼져 있는 동안 이름이 바뀌어도 찾게)
+    pub pin: Option<String>,
+    pub pin_id: Option<(u32, u64)>,
+    /// 이 화면이 어느 작업 공간의 것인지 (workspaces.txt와 어긋나면 그 작업 공간을 덮어쓰지 않는다)
+    pub ws: Option<String>,
+    /// 검색 패널의 검색어와 범위 (true: 현재 폴더)
+    pub query: String,
+    pub scope_here: bool,
+    /// 접어 둔 바로가기 패널 구역 ("drives"·"folders")
+    pub folded: Vec<String>,
     pub look: Look,
     pub panes: Vec<PaneState>,
 }
+
+/// 왼쪽 패널 너비의 기본값과 범위
+pub const SIDE_W_DEFAULT: f32 = 220.0;
+pub const SIDE_W_RANGE: (f32, f32) = (180.0, 420.0);
 
 /// 화면 설정: 테마("system"·"light"·"dark"), 강조 색(theme::ACCENTS의 키), 글꼴(빈 문자열이면 기본), 크기(%),
 /// 글자 표시("soft"·"sharp"·"gray", gfx::TextLook)
@@ -37,16 +57,20 @@ pub struct Look {
     pub font: String,
     pub zoom: u32,
     pub text: String,
+    /// 목록의 수정한 날짜: "relative"(오늘 10:24·어제·11월 3일) 또는 "full"(2026-11-03 09:12)
+    pub dates: String,
 }
 
 impl Default for Look {
     fn default() -> Look {
-        Look { theme: "system".into(), accent: "blue".into(), font: String::new(), zoom: 100, text: "gray".into() }
+        Look { theme: "system".into(), accent: "blue".into(), font: String::new(), zoom: 100, text: "gray".into(), dates: "relative".into() }
     }
 }
 
-const HEADER: &str = "sakadu-session 1";
+pub const HEADER: &str = "sakadu-session 1";
 pub const NEW_TAB_SAME: &str = "::same";
+/// 새 탭 기본값: 시작 화면
+pub const NEW_TAB_START: &str = "::start";
 /// 0.4.0까지의 열 너비 기본값 (수정한 날짜, 유형, 크기)
 const OLD_DEFAULT_COLS: [f32; 3] = [140.0, 130.0, 84.0];
 
@@ -82,8 +106,34 @@ pub fn serialize(s: &Session) -> String {
     out.push_str(&format!("active={}\n", s.active));
     out.push_str(&format!("hidden={}\n", s.show_hidden as u8));
     out.push_str(&format!("preview={}\n", s.preview as u8));
-    out.push_str(&format!("newtab={}\n", s.new_tab));
-    out.push_str(&format!("theme={}\naccent={}\nfont={}\nzoom={}\ntext={}\n", s.look.theme, s.look.accent, s.look.font, s.look.zoom, s.look.text));
+    // 0.5.x까지의 "newtab"은 내 PC가 기본이라 사용자가 고른 값인지 알 수 없어, 새 이름으로 쓴다
+    out.push_str(&format!("newtab2={}\n", s.new_tab));
+    out.push_str(&format!("side={}\nsidew={}\n", s.side, s.side_w));
+    if let Some(p) = &s.pin {
+        out.push_str(&format!("pin={p}\n"));
+    }
+    if let Some((vol, idx)) = s.pin_id {
+        out.push_str(&format!("pinid={vol}:{idx}\n"));
+    }
+    // "workspace="는 workspaces.txt의 구분 줄이라 다른 이름을 쓴다
+    if let Some(w) = &s.ws {
+        out.push_str(&format!("ws={w}\n"));
+    }
+    // 검색 상자는 한 줄이지만, 붙여넣은 줄바꿈이 남아도 줄 형식이 깨지지 않게 공백으로
+    let query: String = s.query.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+    if !query.trim().is_empty() {
+        out.push_str(&format!("query={query}\n"));
+    }
+    if s.scope_here {
+        out.push_str("scope=here\n");
+    }
+    if !s.folded.is_empty() {
+        out.push_str(&format!("fold={}\n", s.folded.join(",")));
+    }
+    out.push_str(&format!("theme={}\naccent={}\nfont={}\nzoom={}\ntext={}\ndates={}\n", s.look.theme, s.look.accent, s.look.font, s.look.zoom, s.look.text, s.look.dates));
+    for r in &s.recent {
+        out.push_str(&format!("recent={r}\n"));
+    }
     for p in &s.panes {
         out.push_str(&format!(
             "pane=active:{};cols:{},{},{};sort:{},{};view:{}\n",
@@ -112,10 +162,22 @@ pub fn parse(text: &str) -> Option<Session> {
         active: 0,
         show_hidden: false,
         preview: false,
-        new_tab: "::computer".to_string(),
+        new_tab: NEW_TAB_START.to_string(),
+        recent: Vec::new(),
+        // 0.5.x까지는 즐겨찾기 사이드바가 늘 보였으니, 그 세션은 즐겨찾기 패널을 고정한 채로 연다
+        side: "favorites".to_string(),
+        side_w: SIDE_W_DEFAULT,
+        pin: None,
+        pin_id: None,
+        ws: None,
+        query: String::new(),
+        scope_here: false,
+        folded: Vec::new(),
         look: Look::default(),
         panes: Vec::new(),
     };
+    // 새 형식(newtab2)이 있으면 예전 newtab보다 먼저
+    let mut new_tab2: Option<String> = None;
     for line in lines {
         let Some((key, value)) = line.split_once('=') else { continue };
         match key {
@@ -135,12 +197,24 @@ pub fn parse(text: &str) -> Option<Session> {
             "active" => s.active = value.parse().unwrap_or(0),
             "hidden" => s.show_hidden = value == "1",
             "preview" => s.preview = value == "1",
-            "newtab" => s.new_tab = value.to_string(),
+            // 예전 기본값(내 PC)은 시작 화면으로 옮긴다. 고른 폴더·"지금 탭과 같은 폴더"는 그대로
+            "newtab" => s.new_tab = if value == "::computer" { NEW_TAB_START.to_string() } else { value.to_string() },
+            "newtab2" => new_tab2 = Some(value.to_string()),
+            "recent" if !value.is_empty() => s.recent.push(value.to_string()),
+            "side" => s.side = value.to_string(),
+            "sidew" => s.side_w = value.parse::<f32>().ok().filter(|w| w.is_finite()).unwrap_or(SIDE_W_DEFAULT).clamp(SIDE_W_RANGE.0, SIDE_W_RANGE.1),
+            "pin" if !value.is_empty() => s.pin = Some(value.to_string()),
+            "pinid" => s.pin_id = value.split_once(':').and_then(|(v, i)| Some((v.parse().ok()?, i.parse().ok()?))),
+            "ws" if !value.is_empty() => s.ws = Some(value.to_string()),
+            "query" => s.query = value.to_string(),
+            "scope" => s.scope_here = value == "here",
+            "fold" => s.folded = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(String::from).collect(),
             "theme" => s.look.theme = value.to_string(),
             "accent" => s.look.accent = value.to_string(),
             "font" => s.look.font = value.to_string(),
             "zoom" => s.look.zoom = value.parse::<u32>().unwrap_or(100).clamp(80, 200),
             "text" => s.look.text = value.to_string(),
+            "dates" => s.look.dates = value.to_string(),
             "pane" => {
                 let mut p = PaneState { tabs: Vec::new(), active: 0, cols: crate::pane::DEFAULT_COLS, sort_key: 0, sort_desc: false, view: 0 };
                 for part in value.split(';') {
@@ -170,6 +244,9 @@ pub fn parse(text: &str) -> Option<Session> {
             _ => {}
         }
     }
+    if let Some(v) = new_tab2 {
+        s.new_tab = v;
+    }
     Some(s)
 }
 
@@ -188,7 +265,16 @@ mod tests {
             show_hidden: true,
             preview: true,
             new_tab: "D:\\업무".into(),
-            look: Look { theme: "dark".into(), accent: "green".into(), font: "맑은 고딕".into(), zoom: 125, text: "soft".into() },
+            recent: vec!["C:\\a=b".into(), "\\\\server\\공유".into()],
+            side: "places".into(),
+            side_w: 260.0,
+            pin: Some("D:\\업무\\견적서=최종.pdf".into()),
+            pin_id: Some((0x1234_abcd, 42)),
+            ws: Some("월말 정산".into()),
+            query: "견적 | 계약서".into(),
+            scope_here: true,
+            folded: vec!["drives".into()],
+            look: Look { theme: "dark".into(), accent: "green".into(), font: "맑은 고딕".into(), zoom: 125, text: "soft".into(), dates: "full".into() },
             panes: vec![
                 PaneState {
                     tabs: vec!["C:\\a=b,c".into(), "::computer".into()],
@@ -213,8 +299,25 @@ mod tests {
     }
 
     #[test]
-    fn new_tab_defaults_to_this_pc() {
-        assert_eq!(parse("sakadu-session 1\nlayout=2").unwrap().new_tab, "::computer");
+    fn old_session_keeps_the_favorites_panel_open() {
+        let s = parse("sakadu-session 1\nlayout=2").unwrap();
+        assert_eq!(s.side, "favorites");
+        assert_eq!(s.side_w, SIDE_W_DEFAULT);
+        let s = parse("sakadu-session 1\nside=none\nsidew=9999").unwrap();
+        assert_eq!(s.side, "none");
+        assert_eq!(s.side_w, SIDE_W_RANGE.1, "an out-of-range width is clamped");
+        assert_eq!(parse("sakadu-session 1\nsidew=NaN").unwrap().side_w, SIDE_W_DEFAULT, "a non-number falls back to the default");
+    }
+
+    #[test]
+    fn new_tab_defaults_to_the_start_page() {
+        assert_eq!(parse("sakadu-session 1\nlayout=2").unwrap().new_tab, NEW_TAB_START);
+        // 0.5.x의 기본값(내 PC)은 시작 화면으로, 고른 값은 그대로
+        assert_eq!(parse("sakadu-session 1\nnewtab=::computer").unwrap().new_tab, NEW_TAB_START);
+        assert_eq!(parse("sakadu-session 1\nnewtab=D:\\업무").unwrap().new_tab, "D:\\업무");
+        assert_eq!(parse("sakadu-session 1\nnewtab=::same").unwrap().new_tab, NEW_TAB_SAME);
+        // 새 형식에서 내 PC를 고른 것은 그대로
+        assert_eq!(parse("sakadu-session 1\nnewtab2=::computer\nnewtab=::same").unwrap().new_tab, "::computer");
     }
 
     #[test]

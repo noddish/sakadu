@@ -341,7 +341,7 @@ pub fn default_name(path: &str) -> String {
 }
 
 /// 탐색기와 같은 자연 정렬 ("2.주간" < "10.월간")
-fn natural(a: &str, b: &str) -> Ordering {
+pub(crate) fn natural(a: &str, b: &str) -> Ordering {
     let (wa, wb) = (wide(a), wide(b));
     unsafe { StrCmpLogicalW(PCWSTR(wa.as_ptr()), PCWSTR(wb.as_ptr())) }.cmp(&0)
 }

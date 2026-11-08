@@ -1,7 +1,8 @@
 //! 다른 앱이나 다른 패널에서 끌어온 항목을 받는 OLE 드롭 대상.
 //! 파일 목록(CF_HDROP)은 앱이 직접 IFileOperation으로 복사·이동해 Ctrl+Z로 되돌릴 수 있게 하고,
 //! 그 밖의 데이터나 바로 가기(Alt)·오른쪽 버튼 끌기(메뉴)는 커서 아래 폴더의 셸 드롭 대상에 맡긴다.
-//! 기본 동작은 복사, Shift를 누르면 이동.
+//! 기본 동작은 탐색기와 같다: 같은 드라이브(같은 공유) 안은 이동, 다른 곳으로는 복사.
+//! Shift는 이동, Ctrl은 복사, Ctrl+Shift·Alt는 바로 가기(셸에 맡김).
 
 use crate::app::DropAt;
 use crate::shell::{self, FileOp};
@@ -34,9 +35,18 @@ struct State {
     helper: Option<IDropTargetHelper>,
 }
 
-/// 앱이 직접 처리할지: 파일 목록이고, 바로 가기(Alt)나 오른쪽 버튼 끌기(셸 메뉴)가 아닐 때
+/// 앱이 직접 처리할지: 파일 목록이고, 바로 가기(Alt, Ctrl+Shift)나 오른쪽 버튼 끌기(셸 메뉴)가 아닐 때
 fn handle_ourselves(files: &Option<Vec<String>>, keys: MODIFIERKEYS_FLAGS) -> bool {
-    files.is_some() && keys.0 & (MK_ALT | MK_RBUTTON.0) == 0
+    let link = keys.0 & MK_ALT != 0 || (keys.0 & MK_CONTROL.0 != 0 && keys.0 & MK_SHIFT.0 != 0);
+    files.is_some() && !link && keys.0 & MK_RBUTTON.0 == 0
+}
+
+/// 같은 드라이브나 같은 공유 폴더에 있는가 ("C:", "\\서버\공유"를 대소문자 없이 비교).
+/// 경로 글자만 본다: 끄는 동안 디스크·네트워크에 묻지 않게. 연결 드라이브(Z:)와 그 공유의 UNC 경로는 다른 곳으로 보고 복사한다
+fn same_volume(a: &str, b: &str) -> bool {
+    let ra = a[..util::root_len(a)].trim_end_matches('\\');
+    let rb = b[..util::root_len(b)].trim_end_matches('\\');
+    !ra.is_empty() && ra.eq_ignore_ascii_case(rb)
 }
 
 fn is_inside(folder: &str, path: &str) -> bool {
@@ -55,14 +65,23 @@ fn fav_effect(allowed: DROPEFFECT) -> DROPEFFECT {
     }
 }
 
-/// 직접 처리할 때의 동작. 자기 자신·하위 폴더에 놓기와 같은 폴더로 이동은 막는다
+/// 직접 처리할 때의 동작 (탐색기와 같은 규칙): 수정 키가 없으면 같은 드라이브·공유 안은 이동, 다른 곳으로는 복사.
+/// Shift는 이동, Ctrl은 복사. 자기 자신·하위 폴더에 놓기와 같은 폴더로 이동은 막는다
 fn own_effect(files: &[String], dest: &str, keys: MODIFIERKEYS_FLAGS, allowed: DROPEFFECT) -> DROPEFFECT {
     if files.iter().any(|f| util::eq_path(f, dest) || is_inside(f, dest)) {
         return DROPEFFECT_NONE;
     }
-    let want = if keys.0 & MK_SHIFT.0 != 0 && keys.0 & MK_CONTROL.0 == 0 { DROPEFFECT_MOVE } else { DROPEFFECT_COPY };
+    let (shift, ctrl) = (keys.0 & MK_SHIFT.0 != 0, keys.0 & MK_CONTROL.0 != 0);
+    let want = match (shift, ctrl) {
+        (true, false) => DROPEFFECT_MOVE,
+        (false, true) => DROPEFFECT_COPY,
+        _ if files.iter().all(|f| same_volume(f, dest)) => DROPEFFECT_MOVE,
+        _ => DROPEFFECT_COPY,
+    };
     let same_dir = files.iter().all(|f| util::parent(f).is_some_and(|p| util::eq_path(&p, dest)));
-    if want == DROPEFFECT_MOVE && same_dir {
+    // 같은 폴더에 놓기: 이동은 할 일이 없고, 복사는 Ctrl을 눌렀을 때만 ("- 복사본"을 만든다. 탐색기와 같음).
+    // 살짝 끌었다 제자리에 놓는 실수로 사본이 생기지 않게 한다
+    if same_dir && (want == DROPEFFECT_MOVE || keys.0 & MK_CONTROL.0 == 0) {
         return DROPEFFECT_NONE;
     }
     if allowed.0 & want.0 != 0 {
@@ -111,7 +130,6 @@ impl DropTarget {
                 };
                 return;
             }
-            let keys = shell::copy_by_default(keys);
             if dir != st.dir || st.target.is_none() {
                 if let Some(t) = st.target.take() {
                     let _ = t.DragLeave();
@@ -240,7 +258,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
                     with_app(|app| app.add_favorite_paths(&paths));
                 }
                 (false, _, _, Some(t)) => {
-                    let r = t.Drop(&data, shell::copy_by_default(keys), *pt, effect);
+                    let r = t.Drop(&data, keys, *pt, effect);
                     crate::diag::log(|| format!("drop: shell Drop {r:?} effect={}", (*effect).0));
                 }
                 _ => *effect = DROPEFFECT_NONE,
@@ -257,12 +275,24 @@ mod tests {
 
     const ALL: DROPEFFECT = DROPEFFECT(7);
 
+    /// 탐색기 규칙: 같은 드라이브·공유 안은 이동, 다른 곳은 복사. Shift는 이동, Ctrl은 복사
     #[test]
-    fn copy_by_default_move_with_shift() {
+    fn moves_within_a_volume_and_copies_across() {
+        let none = MODIFIERKEYS_FLAGS(0);
         let f = vec!["C:\\a\\x.txt".to_string()];
-        assert_eq!(own_effect(&f, "D:\\b", MODIFIERKEYS_FLAGS(0), ALL), DROPEFFECT_COPY);
+        assert_eq!(own_effect(&f, "C:\\b", none, ALL), DROPEFFECT_MOVE);
+        assert_eq!(own_effect(&f, "c:\\b", none, ALL), DROPEFFECT_MOVE);
+        assert_eq!(own_effect(&f, "D:\\b", none, ALL), DROPEFFECT_COPY);
+        assert_eq!(own_effect(&f, "\\\\nas\\share\\b", none, ALL), DROPEFFECT_COPY);
         assert_eq!(own_effect(&f, "D:\\b", MK_SHIFT, ALL), DROPEFFECT_MOVE);
-        assert_eq!(own_effect(&f, "D:\\b", MK_CONTROL, ALL), DROPEFFECT_COPY);
+        assert_eq!(own_effect(&f, "C:\\b", MK_CONTROL, ALL), DROPEFFECT_COPY);
+        let n = vec!["\\\\nas\\share\\a\\x.txt".to_string()];
+        assert_eq!(own_effect(&n, "\\\\NAS\\Share\\b", none, ALL), DROPEFFECT_MOVE);
+        assert_eq!(own_effect(&n, "\\\\nas\\other\\b", none, ALL), DROPEFFECT_COPY);
+        assert_eq!(own_effect(&n, "C:\\b", none, ALL), DROPEFFECT_COPY);
+        // 다른 드라이브에서 섞여 온 파일은 복사
+        let mixed = vec!["C:\\a\\x.txt".to_string(), "D:\\y.txt".to_string()];
+        assert_eq!(own_effect(&mixed, "C:\\b", none, ALL), DROPEFFECT_COPY);
     }
 
     #[test]
@@ -270,18 +300,23 @@ mod tests {
         let dir = vec!["C:\\a\\폴더".to_string()];
         assert_eq!(own_effect(&dir, "C:\\a\\폴더", MODIFIERKEYS_FLAGS(0), ALL), DROPEFFECT_NONE);
         assert_eq!(own_effect(&dir, "C:\\a\\폴더\\하위", MODIFIERKEYS_FLAGS(0), ALL), DROPEFFECT_NONE);
-        // 이름이 앞부분만 같은 다른 폴더는 허용
-        assert_eq!(own_effect(&dir, "C:\\a\\폴더2", MODIFIERKEYS_FLAGS(0), ALL), DROPEFFECT_COPY);
+        // 이름이 앞부분만 같은 다른 폴더는 허용 (같은 드라이브라 이동)
+        assert_eq!(own_effect(&dir, "C:\\a\\폴더2", MODIFIERKEYS_FLAGS(0), ALL), DROPEFFECT_MOVE);
         let f = vec!["C:\\a\\x.txt".to_string()];
         assert_eq!(own_effect(&f, "C:\\a", MK_SHIFT, ALL), DROPEFFECT_NONE);
-        // 같은 폴더에 복사는 "- 복사본"을 만든다
-        assert_eq!(own_effect(&f, "C:\\a", MODIFIERKEYS_FLAGS(0), ALL), DROPEFFECT_COPY);
+        // 같은 폴더에 그냥 놓으면 아무 일도 없고, Ctrl을 누르고 놓아야 "- 복사본"을 만든다
+        assert_eq!(own_effect(&f, "C:\\a", MODIFIERKEYS_FLAGS(0), ALL), DROPEFFECT_NONE);
+        assert_eq!(own_effect(&f, "C:\\a", MK_CONTROL, ALL), DROPEFFECT_COPY);
     }
 
     #[test]
     fn respects_allowed_effects_and_modes() {
         let f = vec!["C:\\a\\x.txt".to_string()];
         assert_eq!(own_effect(&f, "D:\\b", MK_SHIFT, DROPEFFECT_COPY), DROPEFFECT_COPY);
+        // 원본이 이동을 허락하지 않으면(읽기 전용 원본 등) 같은 드라이브여도 복사
+        assert_eq!(own_effect(&f, "C:\\b", MODIFIERKEYS_FLAGS(0), DROPEFFECT_COPY), DROPEFFECT_COPY);
+        // Ctrl+Shift는 바로 가기라 셸에 맡긴다
+        assert!(!handle_ourselves(&Some(f.clone()), MODIFIERKEYS_FLAGS(MK_CONTROL.0 | MK_SHIFT.0)));
         assert!(!handle_ourselves(&Some(f.clone()), MODIFIERKEYS_FLAGS(MK_ALT)));
         assert!(!handle_ourselves(&Some(f.clone()), MK_RBUTTON));
         assert!(!handle_ourselves(&None, MODIFIERKEYS_FLAGS(0)));

@@ -1,5 +1,5 @@
 //! 보기 방식 메뉴: 경로 줄 오른쪽 보기 버튼을 누르면 버튼 아래에 뜨는 메뉴.
-//! Windows 기본 메뉴 대신 검색 팔레트와 같은 결(그림자·둥근 모서리·테마 색)로 직접 그린다
+//! Windows 기본 메뉴 대신 떠 있는 패널과 같은 결(그림자·둥근 모서리·테마 색)로 직접 그린다
 
 use super::*;
 
@@ -51,7 +51,8 @@ impl App {
             return;
         }
         self.fav_blur();
-        self.close_palette();
+        // 검색 패널은 두고 키보드만 칸으로 (보기를 바꾸고 결과로 돌아갈 수 있게)
+        self.pal_blur();
         self.end_edits_for_click();
         self.active = p;
         let sel = ViewMode::ALL.iter().position(|v| *v == self.panes[p].view).unwrap_or(0);
@@ -95,6 +96,11 @@ impl App {
 
     /// 메뉴가 열려 있는 동안의 키. 메뉴 조작 밖의 키는 삼킨다
     pub(super) fn view_menu_key(&mut self, vk: VIRTUAL_KEY) -> bool {
+        // Alt+F4는 메뉴를 닫고 창 닫기로 넘긴다
+        if vk == VK_F4 && key_down(VK_MENU) {
+            self.close_view_menu();
+            return false;
+        }
         if self.view_menu_rect().is_none() {
             self.view_menu = None;
             return false;
