@@ -22,8 +22,8 @@ pub(super) const PREVIEW_W: f32 = 340.0;
 pub(super) const TIMER_PREVIEW: usize = 30;
 pub(super) const G_PREVIEW: u16 = 0xE90D;
 /// 머리: 이름표·단추 줄, 이름 줄, 고정 칩·종류 줄
-const HEAD_H: f32 = 96.0;
-const BAR_H: f32 = 36.0;
+const HEAD_H: f32 = 104.0;
+const BAR_H: f32 = 40.0;
 const BTN: f32 = 26.0;
 const G_OPEN: u16 = 0xE8A7;
 const CHIP_PINNED: &str = "파일 고정";
@@ -170,15 +170,15 @@ fn spawn_dims(hwnd: HWND, seq: u64, path: String) {
 
 /// 머리 첫 줄의 단추: (고정, 기본 앱으로 열기)
 fn head_buttons(pr: R) -> (R, R) {
-    let open = R::new(pr.r - 12.0 - BTN, pr.t + 6.0, pr.r - 12.0, pr.t + 6.0 + BTN);
+    let open = R::new(pr.r - 12.0 - BTN, pr.t + 9.0, pr.r - 12.0, pr.t + 9.0 + BTN);
     let pin = R::new(open.l - 4.0 - BTN, open.t, open.l - 4.0, open.b);
     (pin, open)
 }
 
 /// 고정 칩 (이름 아래 줄 왼쪽)
-fn chip_rect(gfx: &Gfx, pr: R, pinned: bool) -> R {
-    let w = gfx.measure(if pinned { CHIP_PINNED } else { CHIP_FOLLOW }, Font::Small) + 22.0;
-    let t = pr.t + BAR_H + 30.0;
+fn chip_rect(gfx: &Gfx, pr: R) -> R {
+    let w = gfx.measure(CHIP_PINNED, Font::Small).max(gfx.measure(CHIP_FOLLOW, Font::Small)) + 22.0;
+    let t = pr.t + BAR_H + 28.0;
     R::new(pr.l + 16.0, t, (pr.l + 16.0 + w).min(pr.r - 16.0), t + 24.0)
 }
 
@@ -592,7 +592,7 @@ impl App {
         if open.contains(x, y) {
             return Some(Hit::PreviewOpen);
         }
-        if pv.target.is_some() && chip_rect(&self.gfx, pr, pv.pin.is_some()).contains(x, y) {
+        if pv.target.is_some() && chip_rect(&self.gfx, pr).contains(x, y) {
             return Some(Hit::PreviewChip);
         }
         None
@@ -655,18 +655,18 @@ impl App {
         // 머리 첫 줄: 이름표, 고정(핀)·열기 단추. 고정했으면 핀이 켜진 모양
         let pinned = pv.pin.is_some();
         let (pin_r, open_r) = head_buttons(pr);
-        gfx.text("미리 보기", R::new(pr.l + 16.0, pr.t, pin_r.l - 8.0, pr.t + BAR_H + 2.0), Font::Small, t.faint);
+        gfx.text("미리 보기", R::new(pr.l + 16.0, pr.t, pin_r.l - 8.0, pr.t + 44.0), Font::Small, t.faint);
         let has = pv.target.is_some();
-        let button = |gfx: &Gfx, r: R, glyph: u16, on: bool, hovered: bool| {
-            if on {
-                gfx.fill_round(r, 6.0, t.accent_soft);
-            } else if hovered && has {
+        let button_bg = |gfx: &Gfx, r: R, hovered: bool| -> Color {
+            if hovered && has {
                 gfx.fill_round(r, 6.0, t.hover);
             }
-            gfx.glyph(glyph, r, false, if on { t.accent } else if !has { t.faint } else if hovered { t.text } else { t.dim });
+            if !has { t.faint } else if hovered { t.text } else { t.dim }
         };
-        button(gfx, pin_r, if pinned { sidebar::G_UNPIN } else { sidebar::G_PIN }, pinned, hover == Hit::PreviewPin);
-        button(gfx, open_r, G_OPEN, false, hover == Hit::PreviewOpen);
+        let c = button_bg(gfx, pin_r, hover == Hit::PreviewPin);
+        sidebar::draw_pin(gfx, pin_r, pinned, c);
+        let c = button_bg(gfx, open_r, hover == Hit::PreviewOpen);
+        gfx.glyph(G_OPEN, open_r, false, c);
         let Some(target) = &pv.target else {
             gfx.text("파일을 선택하면\n여기에서 미리 봅니다", R::new(pr.l + 16.0, pr.t + BAR_H + 8.0, pr.r - 16.0, pr.t + BAR_H + 88.0), Font::Hint, t.faint);
             return;
@@ -676,7 +676,7 @@ impl App {
         gfx.icon(target.icon, R::new(pr.l + 16.0, nt + 3.0, pr.l + 32.0, nt + 19.0));
         gfx.text(&target.name, R::new(pr.l + 42.0, nt, pr.r - 16.0, nt + 22.0), Font::Strong, t.text);
         // 고정 칩(누르면 고정·풀기)과 종류 · 크기 (그림이면 가로×세로까지)
-        let chip = chip_rect(gfx, pr, pinned);
+        let chip = chip_rect(gfx, pr);
         let chip_hot = hover == Hit::PreviewChip;
         if pinned {
             gfx.fill_round(chip, 12.0, t.accent_soft);
@@ -732,7 +732,8 @@ impl App {
             Content::Image => {
                 let px = image_px(body.w().max(body.h()), scale);
                 if !image(gfx, body, px) {
-                    gfx.text("불러오는 중…", body, Font::Hint, t.faint);
+                    let failed = thumb_failed.contains(&thumb_key(&target.path, target.modified, px));
+                    gfx.text(if failed { "미리 볼 수 없습니다" } else { "불러오는 중…" }, body, Font::Hint, t.faint);
                 }
             }
             Content::Text(s) => {

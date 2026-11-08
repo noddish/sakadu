@@ -203,6 +203,8 @@ impl App {
         if self.edit_mode != EditMode::None {
             self.cancel_edit();
         }
+        // 닫은 탭은 그 작업 공간의 것이라 다른 화면에 다시 열지 않는다
+        self.closed_tabs.clear();
         self.close_view_menu();
         self.close_settings();
         self.fav_blur();

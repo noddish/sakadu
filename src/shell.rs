@@ -12,7 +12,6 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows::Win32::System::SystemServices::{MK_CONTROL, MK_RBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
 use windows::Win32::UI::Controls::HIMAGELIST;
@@ -293,9 +292,12 @@ pub fn shortcut_target_dir(path: &str) -> Option<String> {
         let file: IPersistFile = link.cast().ok()?;
         file.Load(&HSTRING::from(path), STGM_READ).ok()?;
         let mut buf = [0u16; 1024];
-        link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
+        let mut fd = windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW::default();
+        link.GetPath(&mut buf, &mut fd, 0).ok()?;
         let target = util::from_wide(&buf);
-        is_dir(&target).then_some(target)
+        // 링크에 저장된 대상 속성을 쓴다 (NAS 대상에 다시 물으면 꺼져 있을 때 창이 멈춘다). 속성이 비어 있는 링크만 직접 확인
+        let dir = if fd.dwFileAttributes != 0 { fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 } else { is_dir(&target) };
+        dir.then_some(target)
     }
 }
 
@@ -658,6 +660,11 @@ fn hdrop_format() -> FORMATETC {
     }
 }
 
+/// 클립보드에 파일 목록이 있는지 (열지 않고 형식만 본다)
+pub fn clipboard_has_files() -> bool {
+    unsafe { windows::Win32::System::DataExchange::IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_ok()
+}
+
 /// 데이터 객체에 들어 있는 파일 경로 목록(CF_HDROP)
 pub fn hdrop_paths(obj: &IDataObject) -> Option<Vec<String>> {
     unsafe {
@@ -673,34 +680,6 @@ pub fn hdrop_paths(obj: &IDataObject) -> Option<Vec<String>> {
         }
         ReleaseStgMedium(&mut med);
         Some(paths)
-    }
-}
-
-/// 끌어서 놓기의 기본 동작을 복사로: 수정 키 없이 놓으면 Ctrl을 더해 셸 드롭 대상에 넘긴다.
-/// Shift(이동)·Ctrl·Alt(바로 가기)를 직접 누르거나 오른쪽 버튼으로 끌면(메뉴) 그대로 둔다
-pub fn copy_by_default(keys: MODIFIERKEYS_FLAGS) -> MODIFIERKEYS_FLAGS {
-    let explicit = MK_SHIFT.0 | MK_CONTROL.0 | MK_ALT | MK_RBUTTON.0;
-    if keys.0 & explicit == 0 { MODIFIERKEYS_FLAGS(keys.0 | MK_CONTROL.0) } else { keys }
-}
-
-/// 데이터 객체에 "선호 동작"을 적는다. 탐색기 같은 다른 드롭 대상도 수정 키가 없으면 이 동작을 쓴다
-pub fn set_preferred_effect(obj: &IDataObject, effect: DROPEFFECT) -> Result<()> {
-    unsafe {
-        let h = GlobalAlloc(GMEM_MOVEABLE, 4)?;
-        let p = GlobalLock(h) as *mut u32;
-        if p.is_null() {
-            let _ = GlobalFree(Some(h));
-            return Err(E_OUTOFMEMORY.into());
-        }
-        *p = effect.0;
-        let _ = GlobalUnlock(h);
-        let mut fmt = hdrop_format();
-        fmt.cfFormat = RegisterClipboardFormatW(w!("Preferred DropEffect")) as u16;
-        let medium = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: h }, pUnkForRelease: std::mem::ManuallyDrop::new(None) };
-        // fRelease=true: 성공하면 메모리는 데이터 객체가 해제한다
-        obj.SetData(&fmt, &medium, true).inspect_err(|_| {
-            let _ = GlobalFree(Some(h));
-        })
     }
 }
 
@@ -832,10 +811,7 @@ pub fn clipboard_text(hwnd: HWND) -> Option<String> {
 
 pub fn drag_out(hwnd: HWND, paths: &[String]) -> Result<()> {
     let obj: IDataObject = ui_object(hwnd, paths).inspect_err(|e| crate::diag::log(|| format!("drag: data object failed: {e}")))?;
-    // 탐색기 등 다른 앱에 놓을 때도 기본은 복사 (Shift를 누르면 이동)
-    if let Err(e) = set_preferred_effect(&obj, DROPEFFECT_COPY) {
-        crate::diag::log(|| format!("drag: preferred effect not set: {e}"));
-    }
+    // 탐색기 등 다른 앱에 놓을 때는 그쪽 규칙대로 (같은 드라이브면 이동, 다른 곳이면 복사)
     crate::diag::log(|| format!("drag: SHDoDragDrop begin, lbutton down={}", key_down(windows::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON)));
     let r = unsafe { SHDoDragDrop(Some(hwnd), &obj, None, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK) };
     crate::diag::log(|| format!("drag: SHDoDragDrop -> {r:?}"));
@@ -873,7 +849,7 @@ pub fn unwatch(id: u32) {
 mod tests {
     use super::*;
     use std::time::Instant;
-    use windows::Win32::System::SystemServices::MK_LBUTTON;
+    use windows::Win32::System::SystemServices::{MK_CONTROL, MK_LBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
 
     /// 여러 폴더의 파일을 담은 CF_HDROP 내용을 셸이 그대로 읽는지 (클립보드는 건드리지 않는다)
     #[test]
@@ -968,24 +944,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// 기본 복사 규칙이 실제 셸 드롭 대상에서 그대로 동작하는지 (파일을 실제로 만들고 옮겨 본다)
+    /// 끌어서 놓기를 셸 드롭 대상(탐색기와 같은 것)에 맡겼을 때의 규칙: 같은 드라이브는 이동, Ctrl은 복사, Shift는 이동.
+    /// 밖으로 끌어낼 때 선호 동작을 적지 않으므로 탐색기에 놓아도 이 규칙대로 된다 (파일을 실제로 만들고 옮겨 본다)
     #[test]
     #[ignore]
-    fn drop_copies_by_default_and_moves_with_shift() {
+    fn shell_drop_follows_explorer_rule() {
         unsafe { OleInitialize(None).unwrap() };
         let none = MODIFIERKEYS_FLAGS(0);
-        // (설명, 데이터 객체에 선호 동작=복사 표시, 끄는 중 키, 놓을 때 키) -> (원본 남음, 대상 도착)
-        let run = |label: &str, prefer_copy: bool, drag_keys: MODIFIERKEYS_FLAGS, drop_keys: MODIFIERKEYS_FLAGS| -> (bool, bool) {
-            let base = std::env::temp_dir().join(format!("qp-copy-{}-{}", std::process::id(), label.len()));
+        // (설명, 끄는 중 키, 놓을 때 키) -> (원본 남음, 대상 도착)
+        let run = |label: &str, drag_keys: MODIFIERKEYS_FLAGS, drop_keys: MODIFIERKEYS_FLAGS| -> (bool, bool) {
+            let base = std::env::temp_dir().join(format!("qp-rule-{}-{}", std::process::id(), label.len()));
             let _ = std::fs::remove_dir_all(&base);
             let (src, dst) = (base.join("src"), base.join("dst"));
             std::fs::create_dir_all(&src).unwrap();
             std::fs::create_dir_all(&dst).unwrap();
             std::fs::write(src.join("a.txt"), b"hello").unwrap();
             let data: IDataObject = ui_object(HWND::default(), &[src.join("a.txt").to_string_lossy().into_owned()]).unwrap();
-            if prefer_copy {
-                set_preferred_effect(&data, DROPEFFECT_COPY).unwrap();
-            }
             let target = folder_drop_target(HWND::default(), dst.to_str().unwrap()).unwrap();
             let allowed = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
             let pt = POINTL::default();
@@ -1011,17 +985,12 @@ mod tests {
             let _ = std::fs::remove_dir_all(&base);
             r
         };
-        let shift = MODIFIERKEYS_FLAGS(MK_LBUTTON.0 | MK_SHIFT.0);
-        let baseline = run("baseline (no change, same drive)", false, MK_LBUTTON, none);
-        let into_app = run("into Sakadu: keys get Ctrl", false, copy_by_default(MK_LBUTTON), copy_by_default(none));
-        let to_explorer = run("to Explorer: preferred effect copy", true, MK_LBUTTON, none);
-        let shift_move = run("into Sakadu with Shift", false, copy_by_default(shift), copy_by_default(MK_SHIFT));
-        let shift_explorer = run("to Explorer with Shift", true, shift, MK_SHIFT);
-        assert_eq!(baseline, (false, true), "same-drive default is move");
-        assert_eq!(into_app, (true, true), "default copy into Sakadu");
-        assert_eq!(to_explorer, (true, true), "default copy to Explorer");
-        assert_eq!(shift_move, (false, true), "Shift moves into Sakadu");
-        assert_eq!(shift_explorer, (false, true), "Shift moves to Explorer");
+        let same_drive = run("same drive, no keys", MK_LBUTTON, none);
+        let ctrl = run("Ctrl copies", MODIFIERKEYS_FLAGS(MK_LBUTTON.0 | MK_CONTROL.0), MK_CONTROL);
+        let shift = run("Shift moves", MODIFIERKEYS_FLAGS(MK_LBUTTON.0 | MK_SHIFT.0), MK_SHIFT);
+        assert_eq!(same_drive, (false, true), "same drive moves");
+        assert_eq!(ctrl, (true, true), "Ctrl copies");
+        assert_eq!(shift, (false, true), "Shift moves");
     }
 
     /// 셸 드롭 대상에 데이터 객체를 넘기면 실제로 복사되는지 (화면 없이 실행)

@@ -68,7 +68,7 @@ impl Theme {
         field: hex(0xF0F2F5),
         text: hex(0x1B1C1F),
         dim: hex(0x5F636B),
-        faint: hex(0x9EA2AA),
+        faint: hex(0x80858E),
         border: hex(0xDCDFE4),
         hover: hex(0xF0F1F3),
         sel: hex(0xD5E4FD),
@@ -190,13 +190,13 @@ pub fn apca(text: Color, bg: Color) -> f32 {
 }
 
 /// 탭 칩 글자(13px 굵게)에 필요한 체감 대비
-const CHIP_LC: f32 = 60.0;
+const CHIP_LC: f32 = 68.0;
 
 /// 활성 칸의 지금 탭 칩 글자: 옅은 강조 색(soft) 바탕 위의 강조 색. 충분히 또렷하지 않으면
 /// 본문 글자 색(ink) 쪽으로 조금씩 옮긴다 (밝은 테마는 어둡게, 어두운 테마는 밝게)
 pub fn chip_text(accent: Color, soft: Color, ink: Color) -> Color {
     let mut fg = accent;
-    for _ in 0..12 {
+    for _ in 0..20 {
         if apca(fg, soft) >= CHIP_LC {
             break;
         }

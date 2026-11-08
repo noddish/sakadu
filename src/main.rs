@@ -45,6 +45,8 @@ pub const WM_APP_PREVIEW: u32 = WM_APP + 6;
 pub const WM_APP_TRAY: u32 = WM_APP + 7;
 /// 사이드바 드라이브 목록 (app::sidebar::Places)
 pub const WM_APP_PLACES: u32 = WM_APP + 8;
+/// 뒤 스레드에서 경로를 확인한 결과 (app::Probed)
+pub const WM_APP_PROBED: u32 = WM_APP + 9;
 /// 패널별 폴더 변경 알림 (WM_APP_NOTIFY + 패널 번호)
 pub const WM_APP_NOTIFY: u32 = WM_APP + 0x10;
 

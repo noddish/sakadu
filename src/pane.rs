@@ -126,6 +126,8 @@ pub struct Tab {
     pub generation: u64,
     pub restore: Option<Restore>,
     pub message: Option<String>,
+    /// 읽기(처음 열기·새로 고침)를 시작한 때. 다 읽으면 None. 오래 걸리면 목록 자리에 기다린다는 글을 보인다
+    pub loading_since: Option<std::time::Instant>,
 }
 
 fn key_of(e: &Entry) -> String {
@@ -152,6 +154,7 @@ impl Tab {
             generation: 0,
             restore: None,
             message: None,
+            loading_since: None,
         }
     }
 

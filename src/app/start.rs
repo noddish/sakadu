@@ -17,6 +17,8 @@ const CARD_GAP: f32 = 10.0;
 const CARD_R: f32 = 8.0;
 const LINE_H: f32 = 32.0;
 const TITLE_H: f32 = 36.0;
+/// 시작 화면 영역이 이보다 낮으면 제목을 그리지 않는다
+const TITLE_MIN_AREA_H: f32 = 360.0;
 const SECTION_H: f32 = 26.0;
 const SECTION_GAP: f32 = 20.0;
 const NOTE_H: f32 = 22.0;
@@ -105,7 +107,18 @@ impl StartView {
     /// 그리기. hovered: 마우스가 올라간 항목, focus: 키보드 초점 테두리를 그릴 항목
     pub(super) fn paint(&self, g: &mut Gfx, t: &Theme, places: &sidebar::Places, folder_icon: i32, hovered: Option<usize>, focus: Option<usize>) {
         g.clip(self.area);
-        g.text("어디로 이동할까요?", self.title, Font::Title, t.text);
+        if self.title.h() > 0.0 {
+            g.text("어디로 이동할까요?", self.title, Font::Title, t.text);
+        }
+        // 최근 위치: 이름 열 폭을 맞춰 경로가 같은 자리에서 시작하게
+        let name_col = self
+            .items
+            .iter()
+            .filter_map(|(it, r)| match it {
+                StartItem::Recent(path) => Some((g.measure(recent_label(path), Font::Normal) + 4.0).min(r.w() * 0.45)),
+                _ => None,
+            })
+            .fold(0.0f32, f32::max);
         for (label, r) in &self.heads {
             g.text(label, *r, Font::Small, t.faint);
         }
@@ -123,25 +136,28 @@ impl StartView {
                 if hot {
                     g.fill_round(r, R_ROW, t.hover);
                 }
-                g.glyph_font(G_RECENT, R::new(r.l + 8.0, r.t, r.l + 24.0, r.b), Font::GlyphMid, t.dim);
+                g.glyph_font(G_RECENT, R::new(r.l + 12.0, r.t, r.l + 28.0, r.b), Font::GlyphMid, t.dim);
                 let name = recent_label(path);
-                let nw = (g.measure(name, Font::Normal) + 4.0).min(r.w() * 0.6);
-                g.text(name, R::new(r.l + 34.0, r.t, r.l + 34.0 + nw, r.b), Font::Normal, t.text);
+                g.text(name, R::new(r.l + 36.0, r.t, r.l + 36.0 + name_col, r.b), Font::Normal, t.text);
                 // 이름 뒤에 어디 있는 폴더인지 흐리게 (길면 가운데를 줄인다)
                 if let Some(parent) = util::parent(path) {
-                    g.text(&parent, R::new(r.l + 34.0 + nw + 10.0, r.t, r.r - 8.0, r.b), Font::Path, t.faint);
+                    g.text(&parent, R::new(r.l + 36.0 + name_col + 16.0, r.t, r.r - 8.0, r.b), Font::Path, t.faint);
                 }
                 R_ROW
             } else {
-                // 카드: 옅은 면과 테두리, 올리면 한 단계 진한 면. 아이콘 위·이름 아래
+                // 카드: 옅은 면과 테두리, 올리면 한 단계 진한 면. 첫 줄 아이콘·이름, 둘째 줄 위치나 남은 용량
                 g.fill_round(r, CARD_R, if hot { t.sel_inactive } else { t.field });
                 g.stroke_round(r.inset(0.5, 0.5), CARD_R, t.border, 1.0);
-                let ic = R::new(r.l + 12.0, r.t + 11.0, r.l + 28.0, r.t + 27.0);
-                let name_r = R::new(r.l + 12.0, r.t + 31.0, r.r - 10.0, r.t + 53.0);
+                let ic = R::new(r.l + 12.0, r.t + 13.0, r.l + 28.0, r.t + 29.0);
+                let name_r = R::new(r.l + 36.0, r.t + 10.0, r.r - 10.0, r.t + 32.0);
+                let sub_r = R::new(r.l + 36.0, r.t + 32.0, r.r - 10.0, r.t + 50.0);
                 match it {
-                    StartItem::Fav { name, .. } => {
+                    StartItem::Fav { name, path } => {
                         g.icon(folder_icon, ic);
                         g.text(name, name_r, Font::Strong, t.text);
+                        if let Some(parent) = util::parent(path) {
+                            g.text(&parent, sub_r, Font::Path, t.faint);
+                        }
                     }
                     StartItem::Computer => {
                         if places.computer_icon >= 0 {
@@ -157,8 +173,7 @@ impl StartView {
                             g.text(&d.name, name_r, Font::Strong, t.text);
                             if d.total > 0 {
                                 let free = format!("{} 남음", format_size(d.free));
-                                let fw = g.measure(&free, Font::Small);
-                                g.text(&free, R::new((r.r - 10.0 - fw).max(ic.r + 6.0), ic.t - 2.0, r.r - 8.0, ic.b + 2.0), Font::Small, t.faint);
+                                g.text(&free, sub_r, Font::Small, t.faint);
                                 // 쓴 만큼 채운 막대. 거의 찼으면(90% 넘게) 빨간색
                                 let used = (1.0 - d.free as f32 / d.total as f32).clamp(0.0, 1.0);
                                 let bar = R::new(r.l + 12.0, r.b - 9.0, r.r - 12.0, r.b - 6.0);
@@ -207,8 +222,10 @@ impl App {
         let x0 = area.l + PAD;
         let top = area.t - scroll;
         let mut y = top + 16.0;
-        let title = R::new(x0, y, x0 + w, y + TITLE_H);
-        y += TITLE_H + 6.0;
+        let title = if area.h() >= TITLE_MIN_AREA_H { R::new(x0, y, x0 + w, y + TITLE_H) } else { R::new(x0, y, x0 + w, y) };
+        if title.h() > 0.0 {
+            y += TITLE_H + 6.0;
+        }
         let cols = (((w + CARD_GAP) / (CARD_MIN_W + CARD_GAP)).floor() as usize).clamp(1, 4);
         let card_w = ((w - CARD_GAP * (cols - 1) as f32) / cols as f32).max(0.0);
         let mut heads = Vec::new();

@@ -20,6 +20,7 @@ pub enum Action {
     AddFavorite,
     NewTab,
     CloseTab,
+    ReopenTab,
     NewFolder,
     Hidden,
     Preview,
@@ -44,12 +45,13 @@ pub enum Action {
 }
 
 /// (동작, 저장 이름, 화면 이름, 기본 키)
-pub const ACTIONS: [(Action, &str, &str, &str); 25] = [
+pub const ACTIONS: [(Action, &str, &str, &str); 26] = [
     (Action::Search, "search", "디스크 검색", "Ctrl+F"),
     (Action::Favorites, "favorites", "즐겨찾기로 이동", "Ctrl+B"),
     (Action::AddFavorite, "add-favorite", "즐겨찾기에 추가", "Ctrl+D"),
     (Action::NewTab, "new-tab", "새 탭", "Ctrl+T"),
     (Action::CloseTab, "close-tab", "탭 닫기", "Ctrl+W"),
+    (Action::ReopenTab, "reopen-tab", "닫은 탭 다시 열기", "Ctrl+Shift+T"),
     (Action::NewFolder, "new-folder", "새 폴더", "Ctrl+Shift+N"),
     (Action::Hidden, "hidden", "숨김 항목 보기", "Ctrl+H"),
     (Action::Preview, "preview", "미리 보기 창", "Alt+P"),
@@ -220,6 +222,7 @@ impl Keymap {
         if lines.next().map(str::trim) != Some(HEADER) {
             return map;
         }
+        let mut explicit = vec![false; ACTIONS.len()];
         for line in lines {
             let Some((key, value)) = line.split_once('=') else { continue };
             let combo = Combo::parse(value.trim());
@@ -227,6 +230,13 @@ impl Keymap {
                 map.global = combo;
             } else if let Some(i) = ACTIONS.iter().position(|a| a.1 == key) {
                 map.keys[i] = combo;
+                explicit[i] = true;
+            }
+        }
+        // 사용자가 정한 키가 새 버전에서 생긴 기본 키와 겹치면 사용자 것을 남긴다
+        for j in 0..ACTIONS.len() {
+            if !explicit[j] && map.keys[j].is_some() && (0..ACTIONS.len()).any(|i| explicit[i] && map.keys[i] == map.keys[j]) {
+                map.keys[j] = None;
             }
         }
         map
@@ -254,6 +264,15 @@ fn file_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 예전 버전에서 사용자가 Ctrl+Shift+T를 다른 동작에 정해 두었으면 새 기본(닫은 탭 다시 열기)보다 사용자 것
+    #[test]
+    fn user_binding_beats_new_default() {
+        let m = Keymap::parse(&format!("{HEADER}\nthumbs=Ctrl+Shift+T\n"));
+        let c = Combo::parse("Ctrl+Shift+T");
+        assert_eq!(m.find(c.unwrap()), Some(Action::Thumbs));
+        assert_eq!(m.get(Action::ReopenTab), None);
+    }
 
     #[test]
     fn combos_round_trip() {

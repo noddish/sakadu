@@ -72,7 +72,8 @@ Dark mode follows your Windows setting.
 | Backspace, Alt+↑ | Parent folder |
 | Alt+← / Alt+→, mouse back/forward buttons | Back / forward |
 | Tab / Shift+Tab | Switch pane |
-| Ctrl+T / Ctrl+W / Ctrl+Tab | New tab / close tab / next tab |
+| Ctrl+T / Ctrl+W (Ctrl+F4) / Ctrl+Tab | New tab / close tab / next tab |
+| Ctrl+Shift+T | Reopen a closed tab (last 20) |
 | Drag a tab | Reorder, or move to another pane |
 | Drag from empty space or the date column | Select with a rectangle (hold Ctrl to add to the selection) |
 | Ctrl+1 – Ctrl+5 | Pane layout |
@@ -80,7 +81,8 @@ Dark mode follows your Windows setting.
 | Alt+P | Preview pane |
 | F2 / F5 | Rename / refresh |
 | F4, Ctrl+L, Alt+D | Edit the path |
-| Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste |
+| Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste (works on files even while the filter has text) |
+| Ctrl+Shift+C | Copy the paths of the selected items as text (the current folder if nothing is selected) |
 | Delete / Shift+Delete | Recycle Bin / delete permanently (asks first) |
 | Ctrl+Shift+N | New folder |
 | Ctrl+H | Show hidden items |
@@ -159,17 +161,20 @@ When turned on in Settings → General, closing the window doesn't quit Sakadu. 
 
 - The **view button** at the right end of the path row picks extra large, large, medium or small icons, list, or details. Shortcuts match Explorer (Ctrl+Shift+1–6), and each pane remembers its own. Icon views show thumbnails for photos and PDFs.
 - **New tabs** (Ctrl+T, +) open on a **start page** ("어디로 이동할까요?", where to?): favorite folders as cards, recently visited folders as rows, then This PC and the drives. A click opens it in that tab (Ctrl+click or middle click opens a new tab); type to filter by name and press Enter to go. Arrow keys move between them, and right-click or Delete removes a recent folder from the list. Change it in Settings → General → **새 탭을 열 위치** (new tab location): This PC, the same folder as the current tab, or a folder of your choice.
-- The **star** at the right end of the path adds the current folder to favorites in one click (it turns yellow). Click again to remove it. The button next to it makes a **new folder**.
+- The **star** button right of the path adds the current folder to favorites in one click (the star fills in). Click again to remove it. The button next to it makes a **new folder**. In a narrow pane the back/forward buttons and then the star make room so the current folder name stays visible (Alt+←→ and Ctrl+D still work). Drop files on a path segment to put them in that folder.
 - Hover over a button on the work bar (split, `…`, hidden items, preview) or on the icon bar at the left for a moment to see its name and shortcut. Help, settings and about are under `…` at the right of the work bar.
 - Each pane shows its tabs as chips along the top, with the item count and the selection's count and size on the right. Typing turns that spot into a **filter chip**; × or Esc clears it. With several panes, a thin accent line marks the top of the current one.
 - Modified dates read short: `방금` (just now), `오늘 10:24` (today), `어제 18:40` (yesterday), `11월 3일` this year, and `2025-03-04` before that. Settings → 화면 → **날짜** switches back to the full date and time.
 - The **icon bar** on the left holds places, favorites, search and settings. When no panel is pinned, resting the mouse on an icon opens its panel over the panes; it closes when the mouse leaves or you pick a location. While a panel is pinned, the other icons switch only when clicked. Click the icon, or the pin in the panel, to keep it open: it then pushes the panes aside and its right edge can be dragged to change the width. Click the icon again to close it and give the space back to the files.
 - **Workspaces**: the button at the left of the work bar (`작업 공간 ▾` at first, then the current workspace's name) starts a new workspace from the current screen and switches between workspaces. A workspace keeps the split, panes and tabs, the pinned panel, the preview and its pinned file, and the search query and scope. The current workspace follows the screen without a separate save (it is saved when you switch, close the window or shut down Windows), and Sakadu reopens on the last screen. Rename and delete are in the same menu.
-- The **바로가기** (places) panel shows This PC, drives (with a free-space bar) and added search folders. Drop files on a drive or folder row to copy them there (Shift moves). Click a section header (drives, search folders) to fold or unfold it; folded sections stay folded.
+- The **바로가기** (places) panel shows This PC, drives (with a free-space bar) and added search folders. Drop files on a drive or folder row to put them there (same rule as drag and drop below). Click a section header (drives, search folders) to fold or unfold it; folded sections stay folded.
 - **Preview pane** (Alt+P) shows photos large and the start of text and code files (UTF-8, UTF-16 and CP949 detected). PDF and Office files use the preview handlers registered in Windows, run out of process so a crashing handler can't take the app down. Photos also show their width × height.
 - The **pin** in the preview header (or the `선택 따라가기` chip) **pins** the file (`파일 고정`): it stays in the preview while you select other files, and follows the file when it is renamed or moved to another folder on the same NTFS drive, even from Explorer. If it is deleted or moved where it can't be found (another drive, a network share), the pin is released and the preview follows the selection again. The button next to the pin opens the file in its default app.
 - **Favorites** can be folders or files (add with the star, Ctrl+D, or by dragging from a file list onto the panel or the star icon in the bar), with their own display names like "01. Daily work", independent of the real name (F2). Drag to reorder. Click a **group** to fold or unfold it in place; drag an item onto a group, or right-click → **그룹으로 이동** (move to group). Clicking a file opens it, and Ctrl+click (Ctrl+Enter from the keyboard) opens its folder in a new tab. Ctrl+B moves the keyboard to the favorites. Rest the mouse on an item to see a card with its name, type and path (and a small picture for photos). The add, sort and new-group buttons in the panel header appear while the mouse is over the panel or the keyboard is in the favorites.
-- **Undo** (Ctrl+Z) reverses renames, moves, copies, Recycle Bin deletes, new folders, pastes and drag and drop, newest first. Permanent deletes and actions from the context menu can't be undone.
+- **Rename** (F2) selects the name without the extension. Characters Windows doesn't allow (\ / : * ? " < > |) can't be typed, and changing the extension asks first. Clicking another pane or the path also confirms the name. Making a new folder while the filter has text clears the filter first.
+- **Undo** (Ctrl+Z) reverses renames, moves, copies, Recycle Bin deletes, new folders, pastes and drag and drop, newest first. Permanent deletes and actions from the context menu can't be undone, and undo waits until a running copy or move finishes.
+- **Drag and drop** works like File Explorer: within the same drive (or the same share) files move, and to another drive, share or USB stick they are copied. Hold Shift to move, Ctrl to copy, and Ctrl+Shift or Alt to create a shortcut; the label next to the cursor shows which one will happen. Dropping files back into the folder they came from does nothing (so a small accidental drag never makes a copy); hold Ctrl to make a copy there.
+- Opening more than 15 files at once asks first. Opening an offline NAS path or favorite never freezes the window; `여는 중…` (opening…) shows while it is checked. When a folder takes longer than 0.3 s to read, `불러오는 중…` (loading…) appears in the list, and F5 retries a folder that couldn't be opened.
 
 </details>
 

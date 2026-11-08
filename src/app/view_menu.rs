@@ -96,6 +96,11 @@ impl App {
 
     /// 메뉴가 열려 있는 동안의 키. 메뉴 조작 밖의 키는 삼킨다
     pub(super) fn view_menu_key(&mut self, vk: VIRTUAL_KEY) -> bool {
+        // Alt+F4는 메뉴를 닫고 창 닫기로 넘긴다
+        if vk == VK_F4 && key_down(VK_MENU) {
+            self.close_view_menu();
+            return false;
+        }
         if self.view_menu_rect().is_none() {
             self.view_menu = None;
             return false;

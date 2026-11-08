@@ -263,26 +263,11 @@ impl App {
         self.fav_blur();
         // 떠 있는 패널은 위치를 골랐으니 닫는다
         self.close_peek();
-        let path = util::normalize(&f.path);
         let p = self.active;
-        if shell::is_dir(&path) {
-            if new_tab {
-                self.new_tab(p, Some(Location::Dir(path)), true);
-            } else {
-                self.navigate(p, Location::Dir(path), None);
-            }
-        } else if shell::exists(&path) {
-            let dir = util::parent(&path);
-            if !new_tab {
-                self.pending.push(Deferred::Open { pane: p, paths: vec![path], dir });
-            } else if let Some(dir) = dir {
-                let name = util::file_name(&path).to_string();
-                self.new_tab(p, Some(Location::Dir(dir)), true);
-                self.panes[p].tab_mut().restore = Some(Restore::select(&name));
-            }
-        } else {
-            self.flash(p, format!("즐겨찾기 항목을 찾을 수 없습니다: {}", f.path));
-        }
+        // 있는지·폴더인지는 뒤에서 확인한다 (꺼진 NAS 즐겨찾기를 눌러도 창이 멈추지 않게)
+        let tab = self.panes[p].tab();
+        let then = ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab };
+        self.probe(p, util::normalize(&f.path), then);
     }
 
     /// Ctrl+D·추가 버튼: 폴더·파일 하나를 선택했으면 그것, 아니면 현재 폴더

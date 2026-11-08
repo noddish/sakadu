@@ -12,9 +12,9 @@ use crate::favorites::Row;
 /// 아이콘 막대 너비 (DIP). 패널이나 칸 영역은 그 오른쪽부터
 pub(super) const BAR_W: f32 = 44.0;
 const BAR_ITEM: f32 = 32.0;
-const BAR_PITCH: f32 = 40.0;
+const BAR_PITCH: f32 = 44.0;
 /// 패널 머리 줄 (제목, 작은 단추, 핀)
-const HEADER_H: f32 = 40.0;
+const HEADER_H: f32 = 44.0;
 pub(super) const SIDE_ROW_H: f32 = 30.0;
 const ROW_L: f32 = 8.0;
 const HEAD_GAP: f32 = 12.0;
@@ -34,7 +34,8 @@ pub(super) const TIMER_SIDE_ANIM: usize = 48;
 const SIDE_ANIM_SECS: f32 = 0.15;
 const G_PLACES: u16 = 0xE8B7;
 pub(super) const G_PIN: u16 = 0xE718;
-pub(super) const G_UNPIN: u16 = 0xE77A;
+/// 채운 핀의 안쪽 (바늘이 없어 G_PIN을 겹쳐 그린다: draw_pin)
+const G_PIN_FILL: u16 = 0xE841;
 const G_SORT: u16 = 0xE8CB;
 const G_NEW_GROUP: u16 = 0xE8F4;
 const G_TWIST_OPEN: u16 = 0xE70D;
@@ -182,6 +183,14 @@ fn hover_fill(t: &Theme) -> Color {
     }
 }
 
+/// 핀 그림. 고정했으면 채운 핀(E841)에 빈 핀(E718)을 겹쳐 바늘까지 그린다 (E841만으로는 바늘 없는 덩어리)
+pub(super) fn draw_pin(g: &Gfx, r: R, pinned: bool, c: Color) {
+    if pinned {
+        g.glyph(G_PIN_FILL, r, false, c);
+    }
+    g.glyph(G_PIN, r, false, c);
+}
+
 fn bar_item(y: f32) -> R {
     let l = (BAR_W - BAR_ITEM) / 2.0;
     R::new(l, y, l + BAR_ITEM, y + BAR_ITEM)
@@ -219,7 +228,7 @@ impl App {
 
     pub(super) fn bar_rect(&self, p: Panel) -> R {
         let i = Panel::ALL.iter().position(|x| *x == p).unwrap_or(0) as f32;
-        bar_item(8.0 + i * BAR_PITCH)
+        bar_item(6.0 + i * BAR_PITCH)
     }
 
     /// 막대의 검색 아이콘 (누르면 검색 패널)
@@ -497,7 +506,8 @@ impl App {
         // 패널 자리가 비어 있다가 열릴 때만 펼친다: 고정 패널 위로 떠서 열리거나 고정 패널로 돌아올 때 그 패널이 깜빡이지 않게.
         // 검색 패널은 입력 상자(자식 창)가 함께 움직이지 못해 바로 연다 (펼치는 도중에 바뀌어도 그만둔다)
         match self.side_panel() {
-            Some(p) if before.is_none() && p != Panel::Search => self.start_side_anim(),
+            // 떠서 열 때만 펼친다. 고정해 열면 칸이 한 번에 자리를 옮기므로 패널만 펼쳐지면 어긋나 보인다
+            Some(p) if before.is_none() && p != Panel::Search && self.side_floating() => self.start_side_anim(),
             Some(Panel::Search) | None => self.side_anim = None,
             Some(_) => {}
         }
@@ -1028,14 +1038,12 @@ impl App {
             g.stroke_round(pr.inset(0.5, 0.5), 10.0, t.border, 1.0);
         }
         // 머리 줄: 제목, (즐겨찾기면 추가·정렬·새 그룹), 핀
-        g.text(panel.title(), R::new(pr.l + 14.0, pr.t, pr.r - 8.0, pr.t + HEADER_H), Font::Strong, t.text);
-        let mini_btn = |g: &Gfx, r: R, glyph: u16, on: bool, hovered: bool| {
-            if on {
-                g.fill_round(r, 6.0, t.accent_soft);
-            } else if hovered {
+        g.text(panel.title(), R::new(pr.l + ROW_L + 10.0, pr.t, pr.r - 8.0, pr.t + HEADER_H), Font::Strong, t.text);
+        let mini_btn = |g: &Gfx, r: R, glyph: u16, hovered: bool| {
+            if hovered {
                 g.fill_round(r, 6.0, hover_fill(&t));
             }
-            g.glyph(glyph, r, false, if on { t.accent } else if hovered { t.text } else { t.dim });
+            g.glyph(glyph, r, false, if hovered { t.text } else { t.dim });
         };
         for (s, r) in &minis {
             let glyph = match s {
@@ -1043,10 +1051,14 @@ impl App {
                 Side::FavNewGroup => G_NEW_GROUP,
                 _ => G_ADD,
             };
-            mini_btn(g, *r, glyph, false, hover == Hit::Side(*s));
+            mini_btn(g, *r, glyph, hover == Hit::Side(*s));
         }
         if let Some(r) = pin {
-            mini_btn(g, r, if floating { G_PIN } else { G_UNPIN }, !floating, hover == Hit::SidePin);
+            let hot = hover == Hit::SidePin;
+            if hot {
+                g.fill_round(r, 6.0, hover_fill(&t));
+            }
+            draw_pin(g, r, !floating, if hot { t.text } else { t.dim });
         }
 
         // 가운데 목록
@@ -1074,7 +1086,7 @@ impl App {
             match *slot {
                 Slot::Item(s @ Side::FolderAdd) => {
                     if hot {
-                        mini_btn(g, r, G_ADD, false, hover == Hit::Side(s));
+                        mini_btn(g, r, G_ADD, hover == Hit::Side(s));
                     }
                 }
                 // 구역 머리: 접힘 표시와 이름. 올리면 옅은 바탕
@@ -1083,8 +1095,10 @@ impl App {
                         g.fill_round(r, 6.0, hover_fill(&t));
                     }
                     let closed = folded[f as usize];
-                    g.glyph(if closed { G_TWIST_CLOSED } else { G_TWIST_OPEN }, R::new(r.l + 2.0, r.t, r.l + 18.0, r.b), true, t.faint);
-                    g.text(f.label(), R::new(r.l + 20.0, r.t, r.r - 8.0, r.b), Font::Small, t.faint);
+                    let lw = g.measure(f.label(), Font::Small);
+                    g.text(f.label(), R::new(r.l + 10.0, r.t, r.r - 8.0, r.b), Font::Small, t.faint);
+                    let cx = r.l + 10.0 + lw + 4.0;
+                    g.glyph(if closed { G_TWIST_CLOSED } else { G_TWIST_OPEN }, R::new(cx, r.t + 1.0, cx + 12.0, r.b + 1.0), true, t.faint);
                 }
                 // 머리 줄 단추는 위에서 그렸다
                 Slot::Item(Side::FavAdd | Side::FavSort | Side::FavNewGroup) => {}

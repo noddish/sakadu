@@ -645,6 +645,10 @@ impl App {
             self.invalidate();
             return true;
         }
+        // Alt+F4는 창 닫기 (처리하지 않고 넘겨야 Windows가 닫는다)
+        if vk == VK_F4 && key_down(VK_MENU) {
+            return false;
+        }
         // 바꿀 수 있는 단축키(설정·도움말)를 먼저 본다: Ctrl+Tab 같은 조합으로 정해 둘 수도 있다
         if let Some(a @ (Action::Settings | Action::Help)) = self.keys.find(Combo::now(vk.0)) {
             self.run_action(a);

@@ -8,14 +8,14 @@ use windows::Win32::UI::Controls::EM_GETSEL;
 use windows::Win32::UI::Shell::ShellExecuteW;
 
 /// 패널 머리(40) 아래 입력 줄
-const S_INPUT_T: f32 = 44.0;
+const S_INPUT_T: f32 = 48.0;
 const S_INPUT_H: f32 = 32.0;
 /// 범위 칩 줄 (PC 전체 · 현재 폴더)
-const S_CHIP_T: f32 = 84.0;
+const S_CHIP_T: f32 = 88.0;
 const S_CHIP_H: f32 = 24.0;
 const S_CHIP_W: f32 = 78.0;
 /// 결과 목록 시작
-const S_LIST_T: f32 = 116.0;
+const S_LIST_T: f32 = 120.0;
 const S_FOOT_H: f32 = 30.0;
 /// 결과 한 줄: 이름, 그 아래 상위 폴더
 const PAL_ROW_H: f32 = 46.0;
@@ -231,7 +231,7 @@ fn search_all(q: &str, folders: &crate::folders::Folders, limit: usize) -> Resul
     if let (true, Some(e)) = (all.is_empty(), error) {
         return Err(e);
     }
-    all.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.len().cmp(&b.2.len())));
+    all.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.len().cmp(&b.2.len())).then_with(|| crate::favorites::natural(&a.2, &b.2)));
     all.truncate(limit);
     Ok(SearchResponse { total, micros, hits: all.into_iter().map(|(_, d, p)| (d, p)).collect(), ready, failed })
 }
@@ -314,31 +314,31 @@ impl App {
 
     pub(super) fn pal_list(&self) -> R {
         let r = self.pal_rect();
-        R::new(r.l + 6.0, r.t + S_LIST_T, r.r - 6.0, (r.b - S_FOOT_H).max(r.t + S_LIST_T))
+        R::new(r.l + 8.0, r.t + S_LIST_T, r.r - 8.0, (r.b - S_FOOT_H).max(r.t + S_LIST_T))
     }
 
     /// 입력 줄의 들어간 상자 (실제 입력은 그 위에 놓인 EDIT)
     fn pal_input_box(&self) -> R {
         let r = self.pal_rect();
-        R::new(r.l + 10.0, r.t + S_INPUT_T, r.r - 10.0, r.t + S_INPUT_T + S_INPUT_H)
+        R::new(r.l + 8.0, r.t + S_INPUT_T, r.r - 8.0, r.t + S_INPUT_T + S_INPUT_H)
     }
 
     pub(super) fn pal_input_rect(&self) -> R {
         let b = self.pal_input_box();
-        R::new(b.l + 30.0, b.t + 6.0, b.r - 8.0, b.b - 6.0)
+        R::new(b.l + 30.0, b.t + 8.0, b.r - 8.0, b.b - 4.0)
     }
 
     /// 범위 칩: PC 전체(false), 현재 폴더(true)
     fn pal_scope_rect(&self, here: bool) -> R {
         let r = self.pal_rect();
-        let x = r.l + 10.0 + if here { S_CHIP_W + 6.0 } else { 0.0 };
+        let x = r.l + 8.0 + if here { S_CHIP_W + 6.0 } else { 0.0 };
         R::new(x, r.t + S_CHIP_T, x + S_CHIP_W, r.t + S_CHIP_T + S_CHIP_H)
     }
 
     /// 머리 오른쪽 닫기 (다른 패널의 핀 자리)
     pub(super) fn pal_close_rect(&self) -> R {
         let r = self.pal_rect();
-        R::new(r.r - 8.0 - 26.0, r.t + 7.0, r.r - 8.0, r.t + 33.0)
+        R::new(r.r - 8.0 - 26.0, r.t + 9.0, r.r - 8.0, r.t + 35.0)
     }
 
     fn pal_install_button(&self) -> R {
@@ -722,6 +722,15 @@ impl App {
         }
         let p = self.active;
         let many = targets.len() > 1;
+        let files = targets.iter().filter(|(d, _)| !*d).count();
+        if mode == OpenMode::Open && files > OPEN_ASK_OVER {
+            let paths: Vec<String> = targets.iter().filter(|(d, _)| !*d).map(|(_, p)| p.clone()).collect();
+            self.pending.push(Deferred::ConfirmOpen { pane: p, paths });
+            for (_, path) in targets.into_iter().filter(|(d, _)| *d) {
+                self.new_tab(p, Some(Location::Dir(path)), true);
+            }
+            return;
+        }
         // (폴더, 고를 이름들)
         let mut groups: Vec<(String, Vec<String>)> = Vec::new();
         for (is_dir, path) in targets {
@@ -944,7 +953,7 @@ impl App {
         let App { gfx, pal_results, pal_picked, types, .. } = self;
 
         // 머리: 제목, 닫기
-        gfx.text("검색", R::new(r.l + 14.0, r.t, close.l - 4.0, r.t + 40.0), Font::Strong, t.text);
+        gfx.text("검색", R::new(r.l + 18.0, r.t, close.l - 4.0, r.t + 44.0), Font::Strong, t.text);
         if hover == Hit::PalClose {
             gfx.fill_round(close, 6.0, t.hover);
         }
@@ -953,7 +962,7 @@ impl App {
         // 입력 줄: 들어간 상자 (실제 입력은 위에 놓인 EDIT). 키보드가 여기 있으면 강조 테두리
         gfx.fill_round(input, 8.0, if t.high_contrast { t.window } else { t.field });
         gfx.stroke_round(input.inset(0.75, 0.75), 8.0, if focus { t.accent } else { t.border }, if focus { 1.5 } else { 1.0 });
-        gfx.glyph(G_SEARCH, R::new(input.l + 8.0, input.t, input.l + 28.0, input.b), true, if focus { t.accent } else { t.dim });
+        gfx.glyph_font(G_SEARCH, R::new(input.l + 8.0, input.t, input.l + 28.0, input.b), Font::GlyphMid, if focus { t.accent } else { t.dim });
 
         // 범위 칩: PC 전체 · 현재 폴더 (칸에 폴더가 없으면 현재 폴더는 흐리게, 전체로 찾는다)
         for (h, cr) in scopes {
@@ -1031,19 +1040,20 @@ impl App {
             if t.high_contrast && (current || picked) {
                 gfx.stroke_round(row.inset(0.75, 0.75), 6.0, if current { t.focus } else { t.border }, 1.5);
             }
+            let text_r = if picked { row.r - 26.0 } else { row.r - 8.0 };
             if picked {
-                gfx.glyph(G_CHECK, R::new(row.l + 2.0, y, row.l + 14.0, y + PAL_ROW_H), true, t.accent);
+                gfx.glyph(G_CHECK, R::new(row.r - 22.0, y, row.r - 8.0, y + PAL_ROW_H), true, t.accent);
             }
             let name = util::file_name(path);
             let ext = if *is_dir { String::new() } else { name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default() };
             let key = if *is_dir { "\\dir".to_string() } else { ext.clone() };
             let icon = types.entry(key).or_insert_with(|| shell::type_info(&ext, *is_dir)).1;
-            gfx.icon(icon, R::new(row.l + 18.0, y + 7.0, row.l + 34.0, y + 23.0));
+            gfx.icon(icon, R::new(row.l + 10.0, y + 7.0, row.l + 26.0, y + 23.0));
             let (font, fg) = if current && !t.high_contrast { (Font::Strong, t.chip_text) } else { (Font::Normal, t.text) };
-            gfx.text(name, R::new(row.l + 42.0, y + 5.0, row.r - 8.0, y + 24.0), font, fg);
+            gfx.text(name, R::new(row.l + 36.0, y + 5.0, text_r, y + 24.0), font, fg);
             // 같은 이름의 파일을 폴더로 구별할 수 있게 경로는 흐린 색이 아닌 보조 글자색으로 (넘치면 가운데를 줄인다)
             let parent = util::parent(path).unwrap_or_default();
-            gfx.text(&parent, R::new(row.l + 42.0, y + 24.0, row.r - 8.0, y + 42.0), Font::Path, t.dim);
+            gfx.text(&parent, R::new(row.l + 36.0, y + 24.0, text_r, y + 42.0), Font::Path, t.dim);
         }
         if stale {
             gfx.fill(list, alpha(t.pane, 0.6));
@@ -1051,7 +1061,7 @@ impl App {
         gfx.unclip();
 
         // 아래: 결과 수 (왼쪽), 키 안내 (오른쪽, 자리가 있을 때)
-        let foot = R::new(r.l + 12.0, r.b - S_FOOT_H, r.r - 12.0, r.b);
+        let foot = R::new(r.l + 18.0, r.b - S_FOOT_H, r.r - 12.0, r.b);
         gfx.fill(R::new(r.l + 8.0, foot.t, r.r - 8.0, foot.t + 1.0), t.border);
         let left = match &status {
             _ if stale => "찾는 중…".to_string(),
@@ -1070,7 +1080,7 @@ impl App {
         let lw = gfx.measure(&left, Font::Small);
         gfx.text(&left, R::new(foot.l, foot.t, foot.l + lw + 2.0, foot.b), Font::Small, if picks > 0 { t.chip_text } else { t.faint });
         // 키 안내: 고른 게 있으면 Enter 모두 열기, 아니면 Ctrl+Enter 위치 열기
-        let (keys, label): (Vec<&str>, &str) = if picks > 0 { (vec!["Enter"], "모두 열기") } else { (vec!["Ctrl", "Enter"], "위치 열기") };
+        let (keys, label): (Vec<&str>, &str) = if picks > 0 { (vec!["Enter"], "모두 열기") } else { (vec!["Ctrl+Enter"], "위치 열기") };
         let need = keys.iter().map(|k| gfx.measure(k, Font::Small) + 14.0).sum::<f32>() + gfx.measure(label, Font::Small) + 6.0;
         if foot.l + lw + 16.0 + need <= foot.r {
             let cy = (foot.t + foot.b) / 2.0;
