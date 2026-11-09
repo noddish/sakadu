@@ -3517,7 +3517,9 @@ impl App {
                 }
                 WM_CLOSE => {
                     self.save_session();
-                    self.pending.push(if self.tray.is_some() { Deferred::HideToTray } else { Deferred::Close });
+                    let to_tray = self.tray.is_some();
+                    crate::diag::log(|| format!("close: {}", if to_tray { "hide to tray" } else { "destroy window" }));
+                    self.pending.push(if to_tray { Deferred::HideToTray } else { Deferred::Close });
                 }
                 // 즐겨찾기에 키보드가 있을 때의 글자: 그 글자로 시작하는 줄로
                 WM_CHAR if self.fav_focus => {
