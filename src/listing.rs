@@ -24,7 +24,7 @@ pub enum Kind {
     Known,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Entry {
     /// 끝에 NUL을 포함해 Win32 API에 바로 넘길 수 있게 저장
     name: Box<[u16]>,
@@ -101,6 +101,95 @@ impl Entry {
     }
 }
 
+/// 네트워크 폴더를 열지 못했을 때 고칠 방법: 이 공유에 로그인(ask)하거나, 끊긴 연결 드라이브를 다시 연결한다
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetFix {
+    pub share: String,
+    /// 로그인 창을 늘 띄운다 (계정·비밀번호 문제)
+    pub ask: bool,
+}
+
+/// "\\서버\공유\a\b" → "\\서버\공유"
+pub fn share_root(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("\\\\")?;
+    let mut parts = rest.splitn(3, '\\');
+    let server = parts.next().filter(|s| !s.is_empty())?;
+    let share = parts.next().filter(|s| !s.is_empty())?;
+    Some(format!("\\\\{server}\\{share}"))
+}
+
+/// 로그인이 필요해서 못 여는 오류 (접근 거부, 잘못된 비밀번호, 인증 안 됨, 다른 계정으로 연결됨, 계정 제한·잠김)
+fn needs_login(code: u32) -> bool {
+    matches!(code, 5 | 86 | 1219 | 1244 | 1326 | 1327 | 1331 | 1385 | 1909)
+}
+
+/// 서버·연결에 닿지 못한 오류 (경로 없음, 네트워크 경로·이름 없음, 연결 끊김)
+fn unreachable(code: u32) -> bool {
+    matches!(code, 3 | 53 | 64 | 67 | 1201 | 1222 | 2250)
+}
+
+thread_local! {
+    /// 이 스레드에서 list_dir이 마지막으로 받은 Win32 오류 번호
+    static LAST_LIST_ERROR: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// 같은 스레드에서 방금 실패한 list_dir의 Win32 오류 번호
+pub fn last_list_error() -> u32 {
+    LAST_LIST_ERROR.get()
+}
+
+/// 네트워크 폴더를 열지 못한 까닭(오류 번호 code)에 맞는 고칠 방법. 연결 드라이브 이름을 물으므로 뒤 스레드에서 부른다
+pub fn net_fix(dir: &str, code: u32) -> Option<NetFix> {
+    if let Some(share) = share_root(dir) {
+        return needs_login(code).then_some(NetFix { share, ask: true });
+    }
+    // 연결 드라이브(Z: 등)는 연결해 둔 원격 경로로
+    let remote = mapped_remote(&dir.chars().take(2).collect::<String>())?;
+    (needs_login(code) || unreachable(code)).then_some(NetFix { share: remote, ask: needs_login(code) })
+}
+
+/// 연결 드라이브의 원격 경로. 끊겨 있어도(ERROR_CONNECTION_UNAVAIL) 기억해 둔 이름을 준다
+fn mapped_remote(drive: &str) -> Option<String> {
+    use windows::Win32::NetworkManagement::WNet::WNetGetConnectionW;
+    let mut buf = [0u16; 512];
+    let mut len = buf.len() as u32;
+    let r = unsafe { WNetGetConnectionW(&HSTRING::from(drive), Some(windows::core::PWSTR(buf.as_mut_ptr())), &mut len) };
+    if r.0 != 0 && r.0 != 1201 {
+        return None;
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
+}
+
+/// Windows의 네트워크 로그인 창으로 공유에 연결한다 (계정·비밀번호는 Windows가 받고 저장한다).
+/// 0이면 연결됨, 1223이면 사용자가 취소. 창이 떠 있는 동안 돌아오지 않으므로 App을 빌리지 않은 채 부른다
+pub fn net_connect(owner: windows::Win32::Foundation::HWND, share: &str, ask: bool) -> u32 {
+    use windows::Win32::NetworkManagement::WNet::{CONNECT_INTERACTIVE, CONNECT_PROMPT, NETRESOURCEW, RESOURCETYPE_DISK, WNetUseConnectionW};
+    let remote: Vec<u16> = share.encode_utf16().chain(Some(0)).collect();
+    let nr = NETRESOURCEW { dwType: RESOURCETYPE_DISK, lpRemoteName: windows::core::PWSTR(remote.as_ptr() as *mut u16), ..Default::default() };
+    let flags = if ask { CONNECT_INTERACTIVE | CONNECT_PROMPT } else { CONNECT_INTERACTIVE };
+    unsafe { WNetUseConnectionW(Some(owner), &nr, windows::core::PCWSTR::null(), windows::core::PCWSTR::null(), flags, None, None, None) }.0
+}
+
+#[cfg(test)]
+mod net_tests {
+    use super::*;
+
+    #[test]
+    fn share_root_keeps_server_and_share() {
+        assert_eq!(share_root("\\\\nas\\자료\\2026\\11월").as_deref(), Some("\\\\nas\\자료"));
+        assert_eq!(share_root("\\\\192.168.0.10\\공유").as_deref(), Some("\\\\192.168.0.10\\공유"));
+        assert_eq!(share_root("\\\\nas"), None);
+        assert_eq!(share_root("C:\\자료"), None);
+    }
+
+    #[test]
+    fn login_and_unreachable_codes_are_apart() {
+        assert!(needs_login(1326) && needs_login(5) && !needs_login(53));
+        assert!(unreachable(53) && unreachable(67) && !unreachable(1326));
+    }
+}
+
 pub fn list_dir(dir: &str) -> Result<Vec<Entry>, String> {
     let pattern = HSTRING::from(util::join(dir, "*"));
     let mut data = WIN32_FIND_DATAW::default();
@@ -117,7 +206,10 @@ pub fn list_dir(dir: &str) -> Result<Vec<Entry>, String> {
         Ok(h) => h,
         // 비어 있는 드라이브 루트는 "."조차 없어서 이 오류가 난다
         Err(e) if e.code() == ERROR_FILE_NOT_FOUND.to_hresult() => return Ok(Vec::new()),
-        Err(e) => return Err(e.message()),
+        Err(e) => {
+            LAST_LIST_ERROR.set(e.code().0 as u32 & 0xFFFF);
+            return Err(e.message());
+        }
     };
     let mut out = Vec::with_capacity(128);
     loop {

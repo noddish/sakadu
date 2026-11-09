@@ -173,6 +173,8 @@ enum Hit {
     FilterClear(usize),
     /// 칸 아래쪽 알림 (누르면 아무 일도 없다: 그 아래 줄을 누르지 않게)
     Toast(usize),
+    /// 열지 못한 네트워크 폴더의 로그인·다시 연결 단추
+    NetFix(usize),
     /// 명령 메뉴의 줄, 메뉴 안 빈 곳, 메뉴 밖(누르면 닫는다)
     CmdRow(usize),
     CmdPanel,
@@ -335,6 +337,8 @@ pub enum Deferred {
     StartMenu { pane: usize, item: start::StartItem, loc: Location, pt: POINT },
     /// 작업 공간 메뉴 (저장한 작업 공간·새로 저장·이름 바꾸기·지우기)
     WorkspaceMenu { pt: POINT },
+    /// 네트워크 공유에 Windows 로그인 창으로 연결한 뒤 그 탭을 다시 읽는다
+    NetFix { tab: u64, share: String, ask: bool },
     /// 확장자를 바꾸는 이름 바꾸기: 묻고 나서 바꾸거나, 친 이름 그대로 상자를 다시 연다
     ConfirmRename { tab: u64, path: String, old: String, new: String },
     /// 파일을 많이 고르고 열 때: 묻고 나서 연다 (작업 폴더는 파일마다 그 폴더)
@@ -355,6 +359,8 @@ pub struct Listed {
     result: Result<Vec<Entry>, String>,
     /// 열지 못한 폴더가 지워졌거나 옮겨진 것 (그 위 폴더는 있다). 네트워크가 끊겼거나 USB를 뽑아 잠깐 못 연 것과 가른다
     gone: bool,
+    /// 네트워크 폴더를 열지 못한 까닭에 맞는 고칠 방법
+    net: Option<crate::listing::NetFix>,
 }
 
 pub struct IconsReady {
@@ -511,6 +517,8 @@ pub struct App {
     /// 되돌리기 단추가 달린 알림: (칸, 알릴 때의 되돌리기 기록 수). 그 뒤로 기록이 바뀌면 단추를 감춘다
     toast_undo: Option<(usize, usize)>,
     wheel: Option<Wheel>,
+    /// 네트워크 폴더(소문자 경로) → 이번 실행에서 마지막으로 읽은 목록. 연결이 끊기면 흐리게 보여 준다
+    net_cache: HashMap<String, Vec<Entry>>,
     /// 페이드가 시작된 때: 말풍선·정보 카드, 알림, 보기 메뉴
     tip_at: Option<std::time::Instant>,
     toast_at: Option<std::time::Instant>,
@@ -1045,6 +1053,12 @@ fn spawn_probe(hwnd: HWND, id: u64, seq: u64, pane: usize, text: String, then: P
     });
 }
 
+/// 공유(\\서버\…)나 연결 드라이브의 경로로 보이는 입력
+fn net_text(text: &str) -> bool {
+    let s = text.trim();
+    s.starts_with("\\\\") || (s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic() && !is_local_path(s))
+}
+
 /// 네트워크 드라이브·공유가 아닌 경로 (감시 등록이 네트워크를 기다리지 않는다)
 fn is_local_path(path: &str) -> bool {
     if path.starts_with("\\\\") {
@@ -1067,6 +1081,8 @@ const TIMER_REDRAW: usize = 52;
 const TIMER_WHEEL: usize = 53;
 /// 페이드가 도는 동안 다시 그린다
 const TIMER_ANIM: usize = 54;
+/// 연결이 끊긴 네트워크 폴더를 10초마다 다시 읽어 본다
+const TIMER_OFFLINE: usize = 55;
 const TIP_FADE_MS: f32 = 140.0;
 const TOAST_FADE_MS: f32 = 200.0;
 const MENU_FADE_MS: f32 = 160.0;
@@ -1164,11 +1180,15 @@ fn spawn_listing(hwnd: HWND, tab: u64, generation: u64, loc: Location) {
                 .collect(),
             _ => Vec::new(),
         };
+        let net = match (&result, &loc) {
+            (Err(_), Location::Dir(d)) if !is_local_path(d) => crate::listing::net_fix(d, crate::listing::last_list_error()),
+            _ => None,
+        };
         let gone = match (&result, &loc) {
             (Err(_), Location::Dir(d)) => !shell::exists(d) && util::parent(d).is_some_and(|p| shell::is_dir(&p)),
             _ => false,
         };
-        post(owner.get(), WM_APP_LISTED, Box::new(Listed { tab, generation, result, gone }));
+        post(owner.get(), WM_APP_LISTED, Box::new(Listed { tab, generation, result, gone, net }));
         if !special.is_empty() {
             let icons = special.into_iter().map(|(i, p)| (i, shell::icon_for_path(&p))).collect();
             post(owner.get(), WM_APP_ICONS, Box::new(IconsReady { tab, generation, icons }));
@@ -1362,6 +1382,7 @@ impl App {
             side_anim: None,
             toast_undo: None,
             wheel: None,
+            net_cache: HashMap::new(),
             tip_at: None,
             toast_at: None,
             view_menu_at: None,
@@ -1637,6 +1658,7 @@ impl App {
         match &tab.state {
             LoadState::Loading => "불러오는 중…".to_string(),
             LoadState::Error(_) => "열 수 없음".to_string(),
+            LoadState::Ready if tab.offline => "연결 끊김 · 마지막으로 본 목록".to_string(),
             LoadState::Ready if tab.loading_since.is_some_and(|s| s.elapsed().as_millis() >= LOADING_SHOW_MS * 2) => "새로 고치는 중…".to_string(),
             LoadState::Ready => {
                 let (sel, bytes) = tab.selection_stats();
@@ -1739,6 +1761,11 @@ impl App {
         }
         if self.side_resize_rect().is_some_and(|r| r.contains(x, y)) {
             return Hit::SideResize;
+        }
+        for (p, _) in self.pane_rects() {
+            if self.net_button(p).is_some_and(|(b, _)| b.contains(x, y)) {
+                return Hit::NetFix(p);
+            }
         }
         if y < WORKBAR_H {
             if self.workspace_button().contains(x, y) {
@@ -1912,24 +1939,52 @@ impl App {
     fn on_listed(&mut self, l: Listed) {
         let Some((p, t)) = self.find_tab(l.tab) else { return };
         let (sort, hidden) = (self.panes[p].sort, self.show_hidden);
+        let is_active = t == self.panes[p].active;
         let tab = &mut self.panes[p].tabs[t];
         if tab.generation != l.generation {
             return;
         }
         let waited = tab.loading_since.take().is_some();
         let ok = l.result.is_ok();
+        let mut went_offline = false;
         let restore = match l.result {
             Ok(entries) => {
                 if let Some(dir) = tab.loc.dir() {
                     self.folders.observe(dir, &entries);
+                    // 네트워크 폴더는 마지막으로 본 목록을 기억해 둔다 (연결이 끊기면 흐리게 보여 준다)
+                    if !is_local_path(dir) && entries.len() <= 20_000 {
+                        if self.net_cache.len() >= 64 {
+                            self.net_cache.clear();
+                        }
+                        self.net_cache.insert(dir.to_lowercase(), entries.clone());
+                    }
                 }
+                tab.offline = false;
+                tab.net_fix = None;
                 tab.set_entries(entries, sort, hidden)
             }
             Err(msg) => {
-                tab.entries.clear();
-                tab.view.clear();
-                tab.state = LoadState::Error(msg);
-                None
+                // 로그인이 필요하면 단추를 보이고, 닿지 못한 것이면 기억한 목록을 흐리게
+                let cached = match (&l.net, tab.loc.dir()) {
+                    (Some(f), _) if f.ask => None,
+                    (_, Some(dir)) if !is_local_path(dir) => self.net_cache.get(&dir.to_lowercase()).cloned(),
+                    _ => None,
+                };
+                tab.net_fix = l.net.clone();
+                match cached {
+                    Some(entries) => {
+                        went_offline = !tab.offline && is_active;
+                        tab.offline = true;
+                        tab.set_entries(entries, sort, hidden)
+                    }
+                    None => {
+                        tab.offline = false;
+                        tab.entries.clear();
+                        tab.view.clear();
+                        tab.state = LoadState::Error(msg);
+                        None
+                    }
+                }
             }
         };
         // 지워졌거나 옮겨진 폴더는 시작 화면의 최근 위치에서 뺀다 (잠깐 못 연 것은 그대로)
@@ -1982,7 +2037,44 @@ impl App {
                 self.refresh_cursor();
             }
         }
+        if self.panes[p].tabs.get(t).is_some_and(|tab| tab.offline) {
+            if went_offline {
+                self.flash(p, "연결이 끊겨 마지막으로 본 목록을 보여 줘요 · 다시 연결되면 저절로 새로 고쳐요");
+            }
+            unsafe { SetTimer(Some(self.hwnd), TIMER_OFFLINE, 10_000, None) };
+        }
         self.invalidate();
+    }
+
+    /// 네트워크 연결(로그인 창)이 끝났다: 되면 그 탭을 다시 읽고, 안 됐으면 까닭을 알린다 (취소는 조용히)
+    pub(super) fn after_net_fix(&mut self, tab: u64, r: u32) {
+        let Some((p, t)) = self.find_tab(tab) else { return };
+        match r {
+            0 => self.load_at(p, t, true),
+            1223 => {}
+            e => {
+                let msg = windows::core::Error::from_hresult(windows::Win32::Foundation::WIN32_ERROR(e).to_hresult()).message();
+                self.flash(p, format!("연결하지 못했어요 · {msg}"));
+            }
+        }
+        self.invalidate();
+    }
+
+    /// 열지 못한 네트워크 폴더의 로그인·다시 연결 단추 (목록 자리 안내 글 아래)
+    fn net_button(&self, p: usize) -> Option<(R, &'static str)> {
+        let tab = self.panes[p].tab();
+        let f = tab.net_fix.as_ref().filter(|_| matches!(tab.state, LoadState::Error(_)))?;
+        let list = geom(self.pane_rect(p)?).list;
+        let label = if f.ask { "로그인" } else { "다시 연결" };
+        let w = self.gfx.measure(label, Font::Normal) + 32.0;
+        Some((R::new(list.l + 24.0, list.t + 120.0, list.l + 24.0 + w, list.t + 152.0), label))
+    }
+
+    fn net_fix_click(&mut self, p: usize) {
+        let tab = self.panes[p].tab();
+        if let Some(f) = tab.net_fix.clone() {
+            self.pending.push(Deferred::NetFix { tab: tab.id, share: f.share, ask: f.ask });
+        }
     }
 
     fn on_icons(&mut self, ic: IconsReady) {
@@ -2861,6 +2953,7 @@ impl App {
                 }
                 match pr.result {
                     Ok((loc, select)) => self.navigate(p, loc, select),
+                    Err(_) if net_text(&pr.shown) => self.navigate(p, Location::Dir(pr.shown.trim().to_string()), None),
                     Err(msg) => self.flash(p, msg),
                 }
             }
@@ -2903,6 +2996,16 @@ impl App {
                         }
                     }
                     Ok(_) => {}
+                    // 꺼졌거나 로그인이 필요한 공유의 즐겨찾기: 그 폴더(파일이면 담은 폴더)를 열어 단추·기억한 목록을 보인다
+                    Err(_) if net_text(&pr.shown) => {
+                        let path = pr.shown.trim().to_string();
+                        let dir = if util::file_name(&path).contains('.') { util::parent(&path).unwrap_or(path.clone()) } else { path.clone() };
+                        if new_tab {
+                            self.new_tab(p, Some(Location::Dir(dir)), true);
+                        } else {
+                            self.navigate(p, Location::Dir(dir), None);
+                        }
+                    }
                     Err(_) => self.flash(p, format!("즐겨찾기 항목을 찾을 수 없어요: {}", pr.shown)),
                 }
             }
@@ -3646,6 +3749,20 @@ impl App {
                         self.start_anim(|a| &mut a.tip_at);
                         self.tip_shown = true;
                         self.invalidate();
+                    } else if id == TIMER_OFFLINE {
+                        let mut any = false;
+                        for p in 0..self.layout.count() {
+                            let tab = self.panes[p].tab();
+                            if tab.offline {
+                                any = true;
+                                if tab.loading_since.is_none() {
+                                    self.load(p, true);
+                                }
+                            }
+                        }
+                        if !any {
+                            let _ = KillTimer(Some(hwnd), id);
+                        }
                     } else if id == TIMER_WHEEL {
                         self.on_wheel_timer();
                     } else if id == TIMER_ANIM {
@@ -4089,6 +4206,7 @@ impl App {
             }
             Hit::FilterClear(_) => self.clear_filter(),
             Hit::ToastUndo(p) => self.toast_undo_click(p),
+            Hit::NetFix(p) => self.net_fix_click(p),
             Hit::Toast(_) => {}
             // 한 번 누르면 연다 (Ctrl이면 새 탭에서)
             Hit::Start(p, _) if !dbl => {
@@ -4347,7 +4465,7 @@ impl App {
                 let hit = self.hit(x, y);
                 let under = self.pane_rects().into_iter().find(|(_, r)| r.contains(x, y)).map(|(q, _)| q);
                 let waiting = !self.probes.is_empty()
-                    || under.is_some_and(|q| self.panes[q].tab().loading_since.is_some_and(|s| s.elapsed().as_millis() >= LOADING_SHOW_MS));
+                    || under.is_some_and(|q| !self.panes[q].tab().offline && self.panes[q].tab().loading_since.is_some_and(|s| s.elapsed().as_millis() >= LOADING_SHOW_MS));
                 match hit {
                     Hit::SplitX | Hit::HeaderResize(..) | Hit::SideResize => IDC_SIZEWE,
                     Hit::SplitY => IDC_SIZENS,
@@ -4894,6 +5012,7 @@ impl App {
         // 목록의 수정한 날짜를 짧게(오늘·어제) 쓸지와 그 기준 시각
         let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
         let motion = sidebar::motion_on();
+        let net_btn = self.net_button(p);
         let App { gfx, panes, types, thumb_failed, places, .. } = self;
         let pane = &panes[p];
         let tab = pane.tab();
@@ -5255,7 +5374,11 @@ impl App {
                 let place = tab.loc.dir().unwrap_or_default();
                 Some(if slow { format!("불러오는 중… 응답을 기다리고 있어요\n{place}\n다른 칸·탭은 그대로 쓸 수 있어요") } else { format!("불러오는 중…\n{place}") })
             }
-            LoadState::Error(msg) => Some(format!("폴더를 열 수 없어요\n{msg}\nF5를 누르면 다시 시도해요")),
+            LoadState::Error(msg) => Some(match &tab.net_fix {
+                Some(f) if f.ask => format!("로그인이 필요해요\n{}\n로그인하면 이 폴더를 열어요", f.share),
+                Some(f) => format!("네트워크 드라이브의 연결이 끊겨 있어요\n{}\n다시 연결하거나 F5로 다시 시도해요", f.share),
+                None => format!("폴더를 열 수 없어요\n{msg}\nF5를 누르면 다시 시도해요"),
+            }),
             LoadState::Ready if tab.entries.is_empty() => Some("빈 폴더예요".to_string()),
             LoadState::Ready if tab.view.is_empty() && !tab.filter.is_empty() => Some(format!("필터 ‘{}’에 맞는 항목이 없어요", tab.filter)),
             LoadState::Ready if tab.view.is_empty() => Some("숨김 항목만 있어요".to_string()),
@@ -5263,6 +5386,17 @@ impl App {
         };
         if let Some(h) = hint {
             gfx.text(&h, R::new(g.list.l + 24.0, g.list.t + 24.0, g.list.r - 24.0, g.list.t + 110.0), Font::Hint, t.faint);
+        }
+        // 로그인·다시 연결: 이 칸의 할 일 하나뿐이라 강조 색 단추
+        if let Some((b, label)) = net_btn {
+            let k = if hover == Hit::NetFix(p) { 0.88 } else { 1.0 };
+            gfx.fill_round(b, R_CTRL, Color { r: t.accent.r * k, g: t.accent.g * k, b: t.accent.b * k, a: 1.0 });
+            let lw = gfx.measure(label, Font::Normal);
+            gfx.text(label, R::new(b.l + (b.w() - lw) / 2.0, b.t, b.r, b.b), Font::Normal, if t.dark { t.window } else { Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } });
+        }
+        // 연결이 끊겨 기억한 목록을 보이는 중이면 흐리게
+        if tab.offline {
+            gfx.fill(g.list, alpha(t.pane, 0.45));
         }
 
         if let Some((_, thumb)) = grid.bar(g.list, tab.view.len(), tab.scroll) {
@@ -5279,7 +5413,7 @@ impl App {
         }
 
         // 늦게 읽히는 폴더: 머리글 아래를 오가는 가는 막대 (0.3초 안에 끝나면 보이지 않는다, 애니메이션을 끄면 글자만)
-        if let Some(ms) = tab.loading_since.map(|s| s.elapsed().as_millis()).filter(|ms| *ms >= LOADING_SHOW_MS && motion) {
+        if let Some(ms) = tab.loading_since.filter(|_| !tab.offline).map(|s| s.elapsed().as_millis()).filter(|ms| *ms >= LOADING_SHOW_MS && motion) {
             let track = R::new(g.list.l + 8.0, g.header.b - 2.0, g.list.r - SCROLL_W - 6.0, g.header.b);
             let seg = track.w() * 0.3;
             let x = track.l - seg + (track.w() + seg) * ((ms % 1400) as f32 / 1400.0);
@@ -5398,6 +5532,10 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         Deferred::MoreMenu { pt } => with_menu(|| sidebar::show_more_menu(hwnd, pt)),
         Deferred::StartMenu { pane, item, loc, pt } => with_menu(|| start::show_start_menu(hwnd, pane, item, loc, pt)),
         Deferred::WorkspaceMenu { pt } => with_menu(|| workspace_ui::show_workspace_menu(hwnd, pt)),
+        Deferred::NetFix { tab, share, ask } => {
+            let r = crate::listing::net_connect(hwnd, &share, ask);
+            with_app(|a| a.after_net_fix(tab, r));
+        }
     }
 }
 
