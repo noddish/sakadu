@@ -14,11 +14,14 @@ use crate::util::wide;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use windows::Win32::Foundation::*;
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows::Win32::Storage::FileSystem::{FlushFileBuffers, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_GENERIC_READ, FILE_SHARE_NONE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
+};
 use windows::Win32::System::Pipes::*;
 use windows::Win32::System::Services::*;
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
@@ -319,9 +322,20 @@ fn push_hits(out: &mut String, hits: &[index::Hit]) {
 // ---------- 파이프 서버 ----------
 
 /// 시스템·관리자는 전체, 로그인한(대화형) 사용자는 읽기/쓰기만 허용
+/// 로그인한 사용자(IU)에게 주는 통로 권한: 읽기 전부 + 데이터·속성·확장 속성 쓰기 (FILE_GENERIC_READ | FILE_WRITE_DATA |
+/// FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES). GENERIC_WRITE를 주면 FILE_APPEND_DATA(= FILE_CREATE_PIPE_INSTANCE)도 따라가,
+/// 같은 PC에 로그인한 다른 사용자가 같은 이름의 가짜 통로를 열어 검색어를 엿보거나 가짜 결과를 줄 수 있다
+const IU_PIPE_ACCESS: u32 = 0x0012_019B;
+/// 앱이 통로를 열 때 청하는 권한 (IU_PIPE_ACCESS 안에서): 읽기, 요청 쓰기, 메시지 모드로 바꾸기(속성 쓰기)
+const CLIENT_PIPE_ACCESS: u32 = FILE_GENERIC_READ.0 | FILE_WRITE_DATA.0 | FILE_WRITE_ATTRIBUTES.0;
+
+fn pipe_sddl() -> String {
+    format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;{IU_PIPE_ACCESS:#x};;;IU)")
+}
+
 fn pipe_security() -> Option<SECURITY_ATTRIBUTES> {
     let mut sd = PSECURITY_DESCRIPTOR::default();
-    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"), 1, &mut sd, None).ok()? };
+    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&HSTRING::from(pipe_sddl()), 1, &mut sd, None).ok()? };
     Some(SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: false.into() })
 }
 
@@ -330,10 +344,12 @@ fn serve(shared: Arc<Shared>) {
     let name = HSTRING::from(PIPE_NAME);
     let mut req = vec![0u8; 64 * 1024];
     while !STOP.load(Ordering::SeqCst) {
+        // 통로는 한 번에 하나만 열고 닫으므로 늘 첫 인스턴스로 만든다. 다른 프로세스가 이 이름을 먼저 잡고 있으면
+        // 만들기가 실패해, 남이 만든 통로에 끼어 답하지 않는다 (앱도 서버가 이 서비스인지 확인한다)
         let pipe = unsafe {
             CreateNamedPipeW(
                 &name,
-                PIPE_ACCESS_DUPLEX,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
                 4 << 20,
@@ -562,26 +578,81 @@ pub struct SearchResponse {
 }
 
 fn query_raw(req: &str) -> Result<String, SearchError> {
-    static BUF_LEN: OnceLock<usize> = OnceLock::new();
-    let len = *BUF_LEN.get_or_init(|| 4 << 20);
-    let mut out = vec![0u8; len];
-    let mut read = 0u32;
-    let ok = unsafe {
-        CallNamedPipeW(
-            &HSTRING::from(PIPE_NAME),
-            Some(req.as_ptr() as *const c_void),
-            req.len() as u32,
-            Some(out.as_mut_ptr() as *mut c_void),
-            out.len() as u32,
-            &mut read,
-            3000,
-        )
-    };
-    if !ok.as_bool() {
-        let e = unsafe { GetLastError() };
-        return Err(if e == ERROR_FILE_NOT_FOUND { SearchError::NotRunning } else { SearchError::Other(windows::core::Error::from(e.to_hresult()).message()) });
+    transact(PIPE_NAME, req.as_bytes(), true)
+}
+
+/// 닫을 때 CloseHandle
+struct PipeHandle(HANDLE);
+impl Drop for PipeHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
     }
-    Ok(String::from_utf8_lossy(&out[..read as usize]).into_owned())
+}
+
+/// 서비스 관리자가 아는 검색 서비스의 프로세스 번호 (돌고 있지 않으면 None)
+fn service_pid() -> Option<u32> {
+    unsafe {
+        let scm = Sc(OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT).ok()?);
+        let svc = Sc(OpenServiceW(scm.0, &HSTRING::from(SERVICE_NAME), SERVICE_QUERY_STATUS).ok()?);
+        let mut st = SERVICE_STATUS_PROCESS::default();
+        let buf = std::slice::from_raw_parts_mut(&mut st as *mut SERVICE_STATUS_PROCESS as *mut u8, size_of::<SERVICE_STATUS_PROCESS>());
+        let mut need = 0u32;
+        QueryServiceStatusEx(svc.0, SC_STATUS_PROCESS_INFO, Some(buf), &mut need).ok()?;
+        (st.dwProcessId != 0).then_some(st.dwProcessId)
+    }
+}
+
+/// 통로로 요청 하나를 보내고 답을 받는다.
+/// 신원 확인만 허락해(SECURITY_IDENTIFICATION) 상대가 이 계정을 흉내 내지 못하게 하고, check_server면 상대가 정말
+/// 검색 서비스(서비스 관리자가 아는 프로세스)인지 확인한 뒤에야 검색어를 보낸다
+fn transact(name: &str, req: &[u8], check_server: bool) -> Result<String, SearchError> {
+    let name = HSTRING::from(name);
+    let open = || unsafe { CreateFileW(&name, CLIENT_PIPE_ACCESS, FILE_SHARE_NONE, None, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, None) };
+    let mut opened = open();
+    if opened.as_ref().err().is_some_and(|e| e.code() == ERROR_PIPE_BUSY.to_hresult()) {
+        unsafe {
+            let _ = WaitNamedPipeW(&name, 3000);
+        }
+        opened = open();
+    }
+    let pipe = match opened {
+        Ok(h) => PipeHandle(h),
+        Err(e) if e.code() == ERROR_FILE_NOT_FOUND.to_hresult() => return Err(SearchError::NotRunning),
+        Err(e) => return Err(SearchError::Other(e.message())),
+    };
+    if check_server {
+        let mut pid = 0u32;
+        let known = unsafe { GetNamedPipeServerProcessId(pipe.0, &mut pid) }.is_ok() && service_pid() == Some(pid);
+        if !known {
+            diag::log(|| format!("pipe: server process {pid} is not the search service"));
+            return Err(SearchError::Other("검색 서비스를 확인하지 못했어요".to_string()));
+        }
+    }
+    let mode = PIPE_READMODE_MESSAGE;
+    unsafe { SetNamedPipeHandleState(pipe.0, Some(&mode), None, None) }.map_err(|e| SearchError::Other(e.message()))?;
+    let mut out = vec![0u8; 4 << 20];
+    let mut read = 0u32;
+    let sent = unsafe { TransactNamedPipe(pipe.0, Some(req.as_ptr() as *const c_void), req.len() as u32, Some(out.as_mut_ptr() as *mut c_void), out.len() as u32, &mut read, None) };
+    let mut total = read as usize;
+    match sent {
+        Ok(()) => {}
+        // 답이 버퍼보다 크면 나머지를 이어 읽는다
+        Err(e) if e.code() == ERROR_MORE_DATA.to_hresult() => loop {
+            out.resize(total + (1 << 20), 0);
+            let mut got = 0u32;
+            let more = unsafe { ReadFile(pipe.0, Some(&mut out[total..]), Some(&mut got), None) };
+            total += got as usize;
+            match more {
+                Ok(()) => break,
+                Err(e) if e.code() == ERROR_MORE_DATA.to_hresult() => continue,
+                Err(e) => return Err(SearchError::Other(e.message())),
+            }
+        },
+        Err(e) => return Err(SearchError::Other(e.message())),
+    }
+    Ok(String::from_utf8_lossy(&out[..total]).into_owned())
 }
 
 pub fn query(q: &str, limit: usize) -> Result<SearchResponse, SearchError> {
@@ -657,6 +728,44 @@ pub fn status() -> Result<(bool, usize), SearchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 로그인한 사용자에게 통로 인스턴스를 만드는 권한(FILE_CREATE_PIPE_INSTANCE = 4)을 주지 않고, 앱이 청하는 권한은 그 안에 있다
+    #[test]
+    fn pipe_dacl_withholds_instance_creation() {
+        assert_eq!(IU_PIPE_ACCESS & 0x4, 0);
+        assert_eq!(CLIENT_PIPE_ACCESS & !IU_PIPE_ACCESS, 0);
+        assert!(pipe_sddl().contains("(A;;0x12019b;;;IU)"));
+    }
+
+    /// 새 권한의 통로로 요청 하나를 주고받고, 같은 이름의 첫 인스턴스는 다시 만들 수 없다
+    #[test]
+    fn pipe_round_trip_with_restricted_dacl() {
+        let name = format!("\\\\.\\pipe\\SakaduTest-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], "");
+        let sa = pipe_security().expect("security descriptor");
+        let h = HSTRING::from(name.as_str());
+        let mode = PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
+        let server = unsafe { CreateNamedPipeW(&h, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, mode, PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, Some(&sa)) };
+        assert!(!server.is_invalid());
+        // 남이 이미 잡은 이름에는 첫 인스턴스를 만들 수 없다 (서비스가 가짜 통로에 끼지 않음)
+        let squat = unsafe { CreateNamedPipeW(&h, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, mode, PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, Some(&sa)) };
+        assert!(squat.is_invalid());
+        let server = PipeHandle(server);
+        let raw = server.0.0 as usize;
+        let t = std::thread::spawn(move || unsafe {
+            let p = HANDLE(raw as *mut c_void);
+            let _ = ConnectNamedPipe(p, None);
+            let mut buf = [0u8; 64];
+            let mut got = 0u32;
+            let _ = ReadFile(p, Some(&mut buf), Some(&mut got), None);
+            let reply = format!("OK\t{}", String::from_utf8_lossy(&buf[..got as usize]));
+            let _ = WriteFile(p, Some(reply.as_bytes()), None, None);
+            let _ = FlushFileBuffers(p);
+        });
+        let resp = transact(&name, b"S", false).expect("transact");
+        t.join().unwrap();
+        assert_eq!(resp, "OK\tS");
+        drop(server);
+    }
 
     #[test]
     fn handles_requests() {

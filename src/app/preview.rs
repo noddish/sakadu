@@ -63,6 +63,8 @@ enum Content {
     Text(String),
     Handler(GUID),
     Info,
+    /// 인터넷에서 받은 파일이라 미리 보기 처리기로 열지 않았다
+    Blocked,
 }
 
 /// 고정해 둔 파일. 선택을 바꿔도 target을 바꾸지 않는다
@@ -105,6 +107,8 @@ pub enum PreviewMsg {
     Text { seq: u64, text: Option<String> },
     /// 그림 파일의 가로×세로
     Dims { seq: u64, dims: (u32, u32) },
+    /// 미리 보기 처리기로 열기 전에 확인한 인터넷 표시 (Mark of the Web)
+    Zone { seq: u64, clsid: GUID, internet: bool },
     /// 고정한 파일의 지금 자리. 찾지 못했으면(지워짐·휴지통) None
     Pin { round: u64, found: Option<Found> },
 }
@@ -272,6 +276,26 @@ fn spawn_text(hwnd: HWND, seq: u64, path: String) {
     });
 }
 
+/// Zone.Identifier 내용이 인터넷(3)·제한된 사이트(4) 영역인지
+fn zone_is_internet(zone_identifier: &str) -> bool {
+    zone_identifier.lines().filter_map(|l| l.trim().trim_matches('\0').strip_prefix("ZoneId=")).any(|z| z.trim().parse::<u32>().is_ok_and(|n| n >= 3))
+}
+
+/// 인터넷에서 받은 파일인지 (Mark of the Web). 탐색기는 2025년 10월 보안 업데이트부터 이런 파일의 미리 보기를 막는다:
+/// 바깥 서버 경로를 숨긴 HTML·문서를 미리 보기만 해도 Windows 로그인 정보(NTLM 해시)가 그 서버로 갈 수 있어서다
+fn from_internet(path: &str) -> bool {
+    std::fs::read(format!("{path}:Zone.Identifier")).is_ok_and(|b| zone_is_internet(&String::from_utf8_lossy(&b)))
+}
+
+/// 미리 보기 처리기로 열기 전에 인터넷 표시를 뒤에서 확인한다 (네트워크 경로라도 창이 멈추지 않게)
+fn spawn_zone(hwnd: HWND, seq: u64, path: String, clsid: GUID) {
+    let owner = shell::SendHwnd(hwnd);
+    std::thread::spawn(move || {
+        let internet = from_internet(&path);
+        post(owner.get(), WM_APP_PREVIEW, Box::new(PreviewMsg::Zone { seq, clsid, internet }));
+    });
+}
+
 /// 그림 요청 크기를 단계로 맞춰, 창 크기를 바꾸는 동안 매번 새로 만들지 않게 한다
 fn image_px(longest_dip: f32, scale: f32) -> u32 {
     (((longest_dip * scale) / 256.0).ceil() as u32 * 256).clamp(256, 1536)
@@ -409,7 +433,8 @@ impl App {
             spawn_text(hwnd, pv.seq, t.path.clone());
             Content::Waiting
         } else if let Some(clsid) = handler_for(&ext) {
-            Content::Handler(clsid)
+            spawn_zone(hwnd, pv.seq, t.path.clone(), clsid);
+            Content::Waiting
         } else if t.size <= SNIFF_MAX {
             spawn_text(hwnd, pv.seq, t.path.clone());
             Content::Waiting
@@ -420,6 +445,7 @@ impl App {
             Content::Image => "image",
             Content::Handler(_) => "handler",
             Content::Info => "info",
+            Content::Blocked => "blocked",
             _ => "text",
         }));
         self.invalidate();
@@ -436,6 +462,10 @@ impl App {
                 pv.layout = None;
             }
             PreviewMsg::Dims { seq, dims } if seq == pv.seq => pv.dims = Some(dims),
+            PreviewMsg::Zone { seq, clsid, internet } if seq == pv.seq => {
+                crate::diag::log(|| format!("preview: mark of the web = {internet}"));
+                pv.content = if internet { Content::Blocked } else { Content::Handler(clsid) };
+            }
             PreviewMsg::Pin { round, found } => return self.on_pin_checked(round, found),
             _ => return,
         }
@@ -783,6 +813,14 @@ impl App {
                     gfx.unclip();
                 }
             }
+            Content::Blocked => {
+                gfx.text(
+                    "인터넷에서 받은 파일이라 미리 보기를 막았어요\n바깥 주소를 숨긴 파일은 미리 보기만으로도 Windows 로그인 정보를 보낼 수 있어요\n믿을 수 있는 파일이면 파일 속성에서 ‘차단 해제’를 누르세요",
+                    body,
+                    Font::Hint,
+                    t.faint,
+                );
+            }
             // 폴더·드라이브·알 수 없는 파일: 큰 그림(없으면 아이콘)만 가운데에
             Content::Info => {
                 let (cx, cy) = ((body.l + body.r) / 2.0, (body.t + body.b) / 2.0);
@@ -909,6 +947,17 @@ unsafe fn open_handler(w: &Wanted) -> windows::core::Result<IPreviewHandler> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 인터넷(3)·제한된 사이트(4)만 막고, 내 컴퓨터(0)·인트라넷(1)·신뢰할 수 있는 사이트(2)는 연다
+    #[test]
+    fn mark_of_the_web_blocks_internet_zones_only() {
+        assert!(zone_is_internet("[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=https://example.com/\r\n"));
+        assert!(zone_is_internet("[ZoneTransfer]\nZoneId=4\n"));
+        assert!(!zone_is_internet("[ZoneTransfer]\r\nZoneId=2\r\n"));
+        assert!(!zone_is_internet("[ZoneTransfer]\r\nZoneId=1\r\n"));
+        assert!(!zone_is_internet(""));
+        assert!(!from_internet("C:\\__sakadu_no_such_file__.pdf"));
+    }
 
     #[test]
     fn decodes_common_encodings() {
