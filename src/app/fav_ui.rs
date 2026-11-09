@@ -266,7 +266,7 @@ impl App {
         let p = self.active;
         // 있는지·폴더인지는 뒤에서 확인한다 (꺼진 NAS 즐겨찾기를 눌러도 창이 멈추지 않게)
         let tab = self.panes[p].tab();
-        let then = ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab };
+        let then = ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab, is_dir: Some(f.is_dir) };
         self.probe(p, util::normalize(&f.path), then);
     }
 

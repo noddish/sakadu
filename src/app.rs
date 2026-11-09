@@ -458,6 +458,8 @@ pub struct App {
     pal_status: PalStatus,
     /// 검색 결과 경로 → (수정한 때, 크기). 읽지 못했으면 None. 보이는 줄만 뒤에서 읽는다
     pal_meta: HashMap<String, Option<(u64, u64)>>,
+    /// 지금 결과가 온 뒤에 읽은 경로 (여기 없는 보이는 줄은 다시 읽는다)
+    pal_meta_fresh: HashSet<String>,
     pal_meta_busy: bool,
     /// 늦게 도착한 이전 검색 결과를 버리기 위한 순번
     pal_seq: u64,
@@ -514,8 +516,10 @@ pub struct App {
     key_repeat: bool,
     /// 패널이 펼쳐지기 시작한 때 (움직이는 중일 때만)
     side_anim: Option<std::time::Instant>,
-    /// 되돌리기 단추가 달린 알림: (칸, 알릴 때의 되돌리기 기록 수). 그 뒤로 기록이 바뀌면 단추를 감춘다
-    toast_undo: Option<(usize, usize)>,
+    /// 되돌리기 단추가 달린 알림: (칸, 알릴 때의 기록 번호). 그 뒤로 기록이 바뀌면 단추를 감춘다
+    toast_undo: Option<(usize, u64)>,
+    /// 되돌리기 기록이 바뀔 때마다(넣기·꺼내기) 하나씩 오른다
+    undo_rev: u64,
     wheel: Option<Wheel>,
     /// 네트워크 폴더(소문자 경로) → 이번 실행에서 마지막으로 읽은 목록. 연결이 끊기면 흐리게 보여 준다
     net_cache: HashMap<String, Vec<Entry>>,
@@ -1029,8 +1033,9 @@ enum ProbeThen {
     Address { tab: u64, from: Location },
     /// 다른 앱에서 넘어온 경로: 새 탭에서 연다 (지금 탭이 이미 그 폴더면 그대로)
     External,
-    /// 즐겨찾기: 폴더는 열고 파일은 연다 (새 탭이면 그 폴더를 열어 파일을 고른다)
-    Favorite { tab: u64, from: Location, new_tab: bool },
+    /// 즐겨찾기: 폴더는 열고 파일은 연다 (새 탭이면 그 폴더를 열어 파일을 고른다).
+    /// is_dir: 즐겨찾기·최근 위치가 아는 종류 (모르면 None, 폴더로 본다). 확인하지 못한 네트워크 경로를 열 때 쓴다
+    Favorite { tab: u64, from: Location, new_tab: bool, is_dir: Option<bool> },
 }
 
 pub struct Probed {
@@ -1359,6 +1364,7 @@ impl App {
             pal_scroll: 0.0,
             pal_status: PalStatus::Idle,
             pal_meta: HashMap::new(),
+            pal_meta_fresh: HashSet::new(),
             pal_meta_busy: false,
             pal_seq: 0,
             pal_gate: PalGate::default(),
@@ -1381,6 +1387,7 @@ impl App {
             folded: Fold::ALL.map(|f| sess.as_ref().is_some_and(|s| s.folded.iter().any(|k| k == f.key()))),
             side_anim: None,
             toast_undo: None,
+            undo_rev: 0,
             wheel: None,
             net_cache: HashMap::new(),
             tip_at: None,
@@ -2974,7 +2981,7 @@ impl App {
                 }
                 Err(_) => self.flash(p, format!("경로를 찾을 수 없어요: {}", pr.shown)),
             },
-            ProbeThen::Favorite { tab, from, new_tab } => {
+            ProbeThen::Favorite { tab, from, new_tab, is_dir } => {
                 if !new_tab && (newer || moved(self, tab, &from)) {
                     return;
                 }
@@ -2999,7 +3006,7 @@ impl App {
                     // 꺼졌거나 로그인이 필요한 공유의 즐겨찾기: 그 폴더(파일이면 담은 폴더)를 열어 단추·기억한 목록을 보인다
                     Err(_) if net_text(&pr.shown) => {
                         let path = pr.shown.trim().to_string();
-                        let dir = if util::file_name(&path).contains('.') { util::parent(&path).unwrap_or(path.clone()) } else { path.clone() };
+                        let dir = if is_dir == Some(false) { util::parent(&path).unwrap_or(path.clone()) } else { path.clone() };
                         if new_tab {
                             self.new_tab(p, Some(Location::Dir(dir)), true);
                         } else {
@@ -3240,6 +3247,7 @@ impl App {
     fn push_undo(&mut self, u: crate::undo::Undo) {
         crate::diag::log(|| format!("undo: recorded ({})", u.describe()));
         self.undo.push(u);
+        self.undo_rev += 1;
         if self.undo.len() > 100 {
             self.undo.remove(0);
         }
@@ -3255,6 +3263,7 @@ impl App {
         }
         match self.undo.pop() {
             Some(u) => {
+                self.undo_rev += 1;
                 self.flash(p, u.describe());
                 shell::spawn_file_op(self.hwnd, FileOp::Undo(u));
             }
@@ -3270,7 +3279,7 @@ impl App {
             if let Some(text) = text {
                 let p = self.active;
                 self.flash(p, text);
-                self.toast_undo = Some((p, self.undo.len()));
+                self.toast_undo = Some((p, self.undo_rev));
                 unsafe { SetTimer(Some(self.hwnd), TIMER_FLASH, UNDO_TOAST_MS, None) };
             }
         }
@@ -3309,7 +3318,7 @@ impl App {
 
     /// 알림의 되돌리기: 알린 뒤로 다른 작업·되돌리기가 없었을 때만 (그 작업이 기록 맨 위에 있다)
     fn toast_undo_click(&mut self, p: usize) {
-        let ours = self.toast_undo.is_some_and(|(tp, n)| tp == p && n == self.undo.len());
+        let ours = self.toast_undo.is_some_and(|(tp, rev)| tp == p && rev == self.undo_rev);
         self.panes[p].tab_mut().message = None;
         self.toast_undo = None;
         if ours {
@@ -3324,7 +3333,7 @@ impl App {
         let m = self.panes[p].tab().message.as_ref()?;
         let g = &self.gfx;
         let list = geom(r).list;
-        let undo = self.toast_undo.is_some_and(|(tp, n)| tp == p && n == self.undo.len());
+        let undo = self.toast_undo.is_some_and(|(tp, rev)| tp == p && rev == self.undo_rev);
         let bw = if undo { g.measure(TOAST_UNDO, Font::Normal) + 24.0 } else { 0.0 };
         let extra = if undo { bw + 8.0 } else { 0.0 };
         let tw = g.measure(m, Font::Normal).min((r.w() - 80.0 - extra).max(40.0));
@@ -4046,7 +4055,7 @@ impl App {
         if dbl
             && matches!(
                 hit,
-                Hit::Bar(_) | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalRow(_)
+                Hit::Bar(_) | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder
                     | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen | Hit::Workspace
             )
         {

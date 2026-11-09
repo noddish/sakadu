@@ -651,6 +651,8 @@ impl App {
                 // 다시 찾은 결과(파일 작업 뒤 등)에 지금 줄이 남아 있으면 그 줄과 스크롤을 지킨다
                 let sel_path = self.pal_results.get(self.pal_sel).map(|(_, p)| p.to_lowercase());
                 self.pal_results = r.hits;
+                // 결과가 새로 오면(다시 찾기·파일 작업 뒤) 보이는 줄의 날짜·크기를 다시 읽는다
+                self.pal_meta_fresh.clear();
                 self.pal_status = PalStatus::Done { total: r.total, micros: r.micros, ready: r.ready, failed: r.failed };
                 self.pal_sel = sel_path.and_then(|s| self.pal_results.iter().position(|(_, p)| p.to_lowercase() == s)).unwrap_or(0);
                 self.pal_anchor = self.pal_sel;
@@ -1010,7 +1012,7 @@ impl App {
         let first = (scroll / PAL_ROW_H).floor().max(0.0) as usize;
         let count = (list.h() / PAL_ROW_H).ceil() as usize + 1;
         if !self.pal_meta_busy {
-            let want: Vec<String> = self.pal_results.iter().skip(first).take(count).map(|(_, p)| p).filter(|p| !self.pal_meta.contains_key(*p)).cloned().collect();
+            let want: Vec<String> = self.pal_results.iter().skip(first).take(count).map(|(_, p)| p).filter(|p| !self.pal_meta_fresh.contains(*p)).cloned().collect();
             if !want.is_empty() {
                 self.pal_meta_busy = true;
                 spawn_pal_meta(self.hwnd, want);
@@ -1212,8 +1214,12 @@ impl App {
         // 오래 쓰면 쌓이니 넉넉히 넘으면 비운다 (보이는 줄은 곧 다시 읽는다)
         if self.pal_meta.len() > 4000 {
             self.pal_meta.clear();
+            self.pal_meta_fresh.clear();
         }
-        self.pal_meta.extend(m.items);
+        for (path, meta) in m.items {
+            self.pal_meta_fresh.insert(path.clone());
+            self.pal_meta.insert(path, meta);
+        }
         self.invalidate();
     }
 

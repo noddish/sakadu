@@ -303,13 +303,13 @@ impl App {
             CmdItem::Recent(path) => {
                 let p = self.active;
                 let tab = self.panes[p].tab();
-                let then = ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab };
+                let then = ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab, is_dir: Some(true) };
                 self.probe(p, path, then);
             }
             CmdItem::GoPath(text) => {
                 let p = self.active;
                 let tab = self.panes[p].tab();
-                let then = if new_tab { ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab } } else { ProbeThen::Address { tab: tab.id, from: tab.loc.clone() } };
+                let then = if new_tab { ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab, is_dir: None } } else { ProbeThen::Address { tab: tab.id, from: tab.loc.clone() } };
                 self.probe(p, text, then);
             }
             CmdItem::Workspace(i, _) => self.switch_workspace(i),
