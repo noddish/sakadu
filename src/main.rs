@@ -21,6 +21,7 @@ mod thumbs;
 mod tray;
 mod undo;
 mod util;
+mod workspaces;
 
 use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::*;
@@ -44,6 +45,8 @@ pub const WM_APP_PREVIEW: u32 = WM_APP + 6;
 pub const WM_APP_TRAY: u32 = WM_APP + 7;
 /// 사이드바 드라이브 목록 (app::sidebar::Places)
 pub const WM_APP_PLACES: u32 = WM_APP + 8;
+/// 뒤 스레드에서 경로를 확인한 결과 (app::Probed)
+pub const WM_APP_PROBED: u32 = WM_APP + 9;
 /// 패널별 폴더 변경 알림 (WM_APP_NOTIFY + 패널 번호)
 pub const WM_APP_NOTIFY: u32 = WM_APP + 0x10;
 
@@ -303,6 +306,14 @@ fn running_window() -> Option<HWND> {
     unsafe { FindWindowW(w!("SakaduWindow"), windows::core::PCWSTR::null()) }.ok().filter(|h| !h.is_invalid())
 }
 
+/// 시험용으로 따로 띄운 Sakadu인지 (SAKADU_ISOLATED 환경 변수가 있으면).
+/// 화면 밖 스크린샷·점검 창이 사용자가 쓰고 있는 Sakadu와 서로 찾지 않게 창 종류 이름을 따로 쓰고,
+/// 한 창 실행(시작 잠금·경로 넘기기·이어받기), 설치 사본 갱신, 트레이 대기, 전역 단축키를 쓰지 않는다
+pub fn isolated() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SAKADU_ISOLATED").is_some())
+}
+
 /// 떠 있는 Sakadu에 경로를 넘긴다.
 /// 그 창이 응답하지 않으면 폴더가 안 열리는 일이 없도록 탐색기로 대신 연다
 fn forward_to_running(existing: HWND, path: &Option<String>) {
@@ -398,6 +409,11 @@ struct StartupLock {
 }
 
 impl StartupLock {
+    /// 아무것도 잠그지 않는다 (시험용으로 따로 띄운 Sakadu)
+    fn none() -> StartupLock {
+        StartupLock { mutex: HANDLE::default(), held: false }
+    }
+
     fn acquire() -> StartupLock {
         use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
         use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
@@ -611,11 +627,15 @@ fn main() -> Result<()> {
     if run_service_command() {
         return Ok(());
     }
+    // panic=abort라 창도 없이 꺼지므로, --log로 켠 로그에 어디서 멈췄는지 남긴다
+    std::panic::set_hook(Box::new(|info| diag::log(|| format!("panic: {info}"))));
     let background = std::env::args().skip(1).any(|a| a.eq_ignore_ascii_case(tray::ARG));
     let open_path = path_arg();
-    let mut lock = StartupLock::acquire();
+    let isolated = isolated();
+    diag::log(|| format!("isolated: {isolated}"));
+    let mut lock = if isolated { StartupLock::none() } else { StartupLock::acquire() };
     // 이어받는 동안 다른 Sakadu가 떴을 수 있어, 창이 하나도 없을 때까지 다시 살핀다
-    while let Some(existing) = running_window() {
+    while let Some(existing) = running_window().filter(|_| !isolated) {
         // 로그인할 때 시작했는데 이미 떠 있으면 그대로 둔다
         if background {
             return Ok(());
@@ -638,14 +658,15 @@ fn main() -> Result<()> {
     }
     // 로그인할 때·폴더를 열 때 실행되는 설치 사본을 지금 실행한 버전으로 맞춘다.
     // 로그인할 때는 그 사본이 실행되고, 디버그 빌드는 콘솔 창이 붙어 있어 사본으로 쓰지 않는다
-    let sync = if background || cfg!(debug_assertions) { Ok(false) } else { defaultfm::sync_install_copy() };
+    let sync = if background || isolated || cfg!(debug_assertions) { Ok(false) } else { defaultfm::sync_install_copy() };
     diag::log(|| format!("install copy sync -> {sync:?}"));
     unsafe {
         // 매니페스트로 이미 설정돼 있으면 실패하지만 무해하다
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         OleInitialize(None)?;
         let instance = GetModuleHandleW(None)?;
-        let class = w!("SakaduWindow");
+        // 따로 띄운 시험 창은 다른 이름을 써서, 폴더 열기·이어받기가 서로를 찾지 않게 한다
+        let class = if isolated { w!("SakaduIsolatedWindow") } else { w!("SakaduWindow") };
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             style: CS_DBLCLKS,
@@ -712,7 +733,7 @@ fn main() -> Result<()> {
         if !background && !started_without_activation() {
             with_app(|a| a.focus());
         }
-        if background || tray::wait_at_start() {
+        if !isolated && (background || tray::wait_at_start()) {
             with_app(|a| a.set_tray(true));
         }
         run_deferred(hwnd);

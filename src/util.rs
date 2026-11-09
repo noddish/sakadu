@@ -92,9 +92,33 @@ pub fn invalid_name_char(name: &str) -> Option<char> {
     name.chars().find(|c| matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (*c as u32) < 0x20)
 }
 
+/// 파일·폴더 이름으로 쓸 수 없으면 그 까닭 (쓸 수 없는 문자, Windows 예약 이름)
+pub fn name_problem(name: &str) -> Option<String> {
+    if let Some(c) = invalid_name_char(name) {
+        return Some(if (c as u32) < 0x20 { "이름에 쓸 수 없는 제어 문자가 들어 있습니다".to_string() } else { format!("이름에는 {c} 문자를 쓸 수 없습니다") });
+    }
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let numbered = |p: &str| stem.len() == 4 && stem.starts_with(p) && matches!(stem.as_bytes()[3], b'1'..=b'9');
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT") {
+        return Some(format!("‘{stem}’은(는) Windows가 쓰는 이름이라 쓸 수 없습니다"));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 쓸 수 없는 문자와 Windows 예약 이름은 막고, 비슷하지만 괜찮은 이름은 통과시킨다
+    #[test]
+    fn name_problem_blocks_reserved_and_invalid() {
+        for bad in ["a?b.txt", "보고서:최종.xlsx", "CON", "con.txt", "Nul.docx", "COM1.log", "lpt9"] {
+            assert!(name_problem(bad).is_some(), "{bad}");
+        }
+        for ok in ["보고서.xlsx", "CONTRACT.pdf", "COM0.txt", "COM10.txt", "console", ".gitignore", "aux2"] {
+            assert!(name_problem(ok).is_none(), "{ok}");
+        }
+    }
 
     #[test]
     fn root_lengths() {
