@@ -153,18 +153,14 @@ impl App {
                 out.push((3, s, CmdItem::Recent(path.clone())));
             }
         }
-        for (i, w) in self.workspaces.list.iter().enumerate() {
-            if Some(i) != self.workspaces.current {
-                if let Some(s) = score(&w.name, &q) {
-                    out.push((4, s, CmdItem::Workspace(i, w.name.clone())));
-                }
+        for (i, w) in self.workspaces.list.iter().enumerate().filter(|(i, _)| Some(*i) != self.workspaces.current) {
+            if let Some(s) = score(&w.name, &q) {
+                out.push((4, s, CmdItem::Workspace(i, w.name.clone())));
             }
         }
-        for (a, _, name, _) in ACTIONS.iter() {
-            if *a != Action::Commands {
-                if let Some(s) = score(name, &q) {
-                    out.push((5, s, CmdItem::Command(*a)));
-                }
+        for (a, _, name, _) in ACTIONS.iter().filter(|x| x.0 != Action::Commands) {
+            if let Some(s) = score(name, &q) {
+                out.push((5, s, CmdItem::Command(*a)));
             }
         }
         if !raw.is_empty() && !looks_like_path(raw) {
