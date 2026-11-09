@@ -258,7 +258,7 @@ impl App {
         }
     }
 
-    fn fav_open_entry(&mut self, group: Option<usize>, index: usize, new_tab: bool) {
+    pub(super) fn fav_open_entry(&mut self, group: Option<usize>, index: usize, new_tab: bool) {
         let Some(f) = self.favs.item(group, index).cloned() else { return };
         self.fav_blur();
         // 떠 있는 패널은 위치를 골랐으니 닫는다

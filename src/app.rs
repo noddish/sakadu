@@ -37,6 +37,7 @@ mod caption;
 mod sidebar;
 mod start;
 mod workspace_ui;
+mod commands;
 use fav_ui::G_STAR;
 use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
 use sidebar::{BAR_W, Fold, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_ANIM, TIMER_SIDE_CLOSE};
@@ -64,6 +65,8 @@ pub const ID_FILTER: i32 = 100;
 pub const ID_RENAME: i32 = 101;
 pub const ID_ADDR: i32 = 102;
 pub const ID_SEARCH: i32 = 103;
+/// 명령 메뉴(Ctrl+K)의 입력 상자
+pub const ID_CMD: i32 = 104;
 /// 전역 단축키 (Ctrl+Alt+Space): 어디서든 검색 패널
 pub const HOTKEY_SEARCH: i32 = 1;
 /// 다른 Sakadu 프로세스가 WM_COPYDATA로 넘기는 "이 경로를 열어 달라" 요청
@@ -170,6 +173,10 @@ enum Hit {
     FilterClear(usize),
     /// 칸 아래쪽 알림 (누르면 아무 일도 없다: 그 아래 줄을 누르지 않게)
     Toast(usize),
+    /// 명령 메뉴의 줄, 메뉴 안 빈 곳, 메뉴 밖(누르면 닫는다)
+    CmdRow(usize),
+    CmdPanel,
+    CmdScrim,
     /// 알림의 되돌리기 단추
     ToastUndo(usize),
     Pane(usize),
@@ -425,6 +432,10 @@ pub struct App {
     /// 잠깐 강조할 즐겨찾기 줄 (이미 있는 것을 다시 넣으려 할 때. 키보드는 옮기지 않는다)
     fav_flash: Option<crate::favorites::Row>,
     search_edit: HWND,
+    /// 명령 메뉴 (Ctrl+K)
+    cmd_edit: HWND,
+    cmd: Option<commands::CmdMenu>,
+    cmd_at: Option<std::time::Instant>,
     /// 키보드가 검색 상자에 있는가 (검색 패널이 보일 때)
     pal_focus: bool,
     /// 검색 범위: 지금 칸의 폴더 아래만
@@ -439,6 +450,9 @@ pub struct App {
     pal_anchor: usize,
     pal_scroll: f32,
     pal_status: PalStatus,
+    /// 검색 결과 경로 → (수정한 때, 크기). 읽지 못했으면 None. 보이는 줄만 뒤에서 읽는다
+    pal_meta: HashMap<String, Option<(u64, u64)>>,
+    pal_meta_busy: bool,
     /// 늦게 도착한 이전 검색 결과를 버리기 위한 순번
     pal_seq: u64,
     /// 보이는 결과가 지금 검색어의 것인지, 결과보다 먼저 누른 Enter
@@ -1245,6 +1259,7 @@ impl App {
         }
         let (filter_edit, rename_edit, addr_edit, search_edit) =
             unsafe { (create_edit(hwnd, ID_FILTER), create_edit(hwnd, ID_RENAME), create_edit(hwnd, ID_ADDR), create_edit(hwnd, ID_SEARCH)) };
+        let cmd_edit = unsafe { create_edit(hwnd, ID_CMD) };
         let preview_host = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -1311,6 +1326,9 @@ impl App {
             filter_placed: Cell::new((0, 0, 0, 0)),
             fav_flash: None,
             search_edit,
+            cmd_edit,
+            cmd: None,
+            cmd_at: None,
             pal_focus: false,
             pal_here: false,
             side_before_search: None,
@@ -1320,6 +1338,8 @@ impl App {
             pal_anchor: 0,
             pal_scroll: 0.0,
             pal_status: PalStatus::Idle,
+            pal_meta: HashMap::new(),
+            pal_meta_busy: false,
             pal_seq: 0,
             pal_gate: PalGate::default(),
             undo: Vec::new(),
@@ -1364,6 +1384,8 @@ impl App {
             SendMessageW(filter_edit, EM_SETCUEBANNER, Some(WPARAM(1)), Some(LPARAM(cue.as_ptr() as isize)));
             let cue = HSTRING::from("파일·폴더 이름");
             SendMessageW(search_edit, EM_SETCUEBANNER, Some(WPARAM(1)), Some(LPARAM(cue.as_ptr() as isize)));
+            let cue = HSTRING::from("폴더·탭·명령 이름");
+            SendMessageW(cmd_edit, EM_SETCUEBANNER, Some(WPARAM(1)), Some(LPARAM(cue.as_ptr() as isize)));
         }
         app.apply_edit_font();
         app.apply_window_theme();
@@ -1478,6 +1500,9 @@ impl App {
         // 설정 창에서는 글자가 필터 상자로 들어가지 않게 메인 창이 키를 받는다
         if self.settings.is_some() {
             return self.hwnd;
+        }
+        if self.cmd.is_some() {
+            return self.cmd_edit;
         }
         match self.edit_mode {
             EditMode::Address(_) => self.addr_edit,
@@ -1687,6 +1712,10 @@ impl App {
     fn hit(&self, x: f32, y: f32) -> Hit {
         if self.settings.is_some() {
             return Hit::Set(self.settings_hit(x, y));
+        }
+        // 명령 메뉴는 모든 것 위에 떠 있다 (밖을 누르면 닫힌다)
+        if let Some(h) = self.cmd_hit(x, y) {
+            return h;
         }
         if x < BAR_W {
             return self.bar_hit(x, y);
@@ -2442,7 +2471,7 @@ impl App {
 
     fn apply_edit_font(&mut self) {
         let font = make_edit_font(self.gfx.dpi, &self.look.font);
-        for h in [self.filter_edit, self.rename_edit, self.addr_edit, self.search_edit] {
+        for h in [self.filter_edit, self.rename_edit, self.addr_edit, self.search_edit, self.cmd_edit] {
             unsafe {
                 SendMessageW(h, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
                 // EC_LEFTMARGIN | EC_RIGHTMARGIN, 좌우 2px
@@ -2521,6 +2550,7 @@ impl App {
             None
         };
         place(self.search_edit, search_at);
+        place(self.cmd_edit, self.cmd_input_rect().map(|r| center(r, 0.0, 0.0)));
         let addr = match self.edit_mode {
             EditMode::Address(p) => self.pane_rect(p).map(|r| center(addr_rect(&geom(r)), 8.0, 8.0)),
             _ => None,
@@ -2921,7 +2951,10 @@ impl App {
     }
 
     fn anims_running(&self) -> bool {
-        anim_progress(self.tip_at, TIP_FADE_MS).is_some() || anim_progress(self.toast_at, TOAST_FADE_MS).is_some() || anim_progress(self.view_menu_at, MENU_FADE_MS).is_some()
+        anim_progress(self.tip_at, TIP_FADE_MS).is_some()
+            || anim_progress(self.toast_at, TOAST_FADE_MS).is_some()
+            || anim_progress(self.view_menu_at, MENU_FADE_MS).is_some()
+            || anim_progress(self.cmd_at, commands::CMD_FADE_MS).is_some()
     }
 
     /// 휠 한 걸음: 목표 자리 쪽으로 남은 거리의 35%씩 (0.2초쯤에 닿는다)
@@ -3273,6 +3306,7 @@ impl App {
                 rename: self.rename_edit,
                 preview_host: self.preview_host,
                 filter: self.filter_edit,
+                cmd: self.cmd_edit,
             }
         };
         if let Some(old) = EDIT_COLORS.replace(Some(colors)) {
@@ -3282,7 +3316,7 @@ impl App {
                 let _ = DeleteObject(old.chip_brush.into());
             }
         }
-        for h in [self.filter_edit, self.rename_edit, self.addr_edit, self.search_edit] {
+        for h in [self.filter_edit, self.rename_edit, self.addr_edit, self.search_edit, self.cmd_edit] {
             unsafe {
                 let _ = InvalidateRect(Some(h), None, true);
             }
@@ -3566,6 +3600,7 @@ impl App {
                         match loword(wp.0) as i32 {
                             ID_FILTER => self.sync_filter_from_edit(),
                             ID_SEARCH => self.pal_query_changed(),
+                            ID_CMD => self.cmd_rebuild(),
                             _ => {}
                         }
                     }
@@ -3693,6 +3728,7 @@ impl App {
                 crate::WM_APP_PLACES => self.on_places(*Box::from_raw(lp.0 as *mut sidebar::Places)),
                 WM_APP_LISTED => self.on_listed(*Box::from_raw(lp.0 as *mut Listed)),
                 crate::WM_APP_PROBED => self.on_probed(*Box::from_raw(lp.0 as *mut Probed)),
+                crate::WM_APP_PALMETA => self.on_pal_meta(*Box::from_raw(lp.0 as *mut palette::PalMeta)),
                 WM_APP_ICONS => self.on_icons(*Box::from_raw(lp.0 as *mut IconsReady)),
                 WM_APP_SEARCH => self.on_search_done(*Box::from_raw(lp.0 as *mut SearchDone)),
                 crate::WM_APP_FILEOP => self.on_file_op(*Box::from_raw(lp.0 as *mut shell::OpReport)),
@@ -3796,6 +3832,7 @@ impl App {
                         _ => {}
                     }
                     self.hover = h;
+                    self.cmd_hover(h);
                     self.view_menu_hover(h);
                     self.update_tip();
                     self.invalidate();
@@ -3864,6 +3901,9 @@ impl App {
 
     fn press(&mut self, x: f32, y: f32, dbl: bool) {
         let hit = self.hit(x, y);
+        if self.cmd.is_some() {
+            return self.cmd_click(hit);
+        }
         // 시작 화면 항목은 누른 순간의 위치를 연다 (아래의 이름 확정 등으로 목록이 바뀌어도)
         let start_target = match hit {
             Hit::Start(p, i) => self.start_target(p, i),
@@ -3936,7 +3976,7 @@ impl App {
                     self.open_palette();
                 }
             }
-            Hit::PalRow(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalScope(_) => self.pal_mouse_down(hit),
+            Hit::PalRow(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalScope(_) => self.pal_mouse_down(hit, dbl),
             Hit::PalClose => self.close_palette(),
             Hit::NewFolder(p) => self.new_folder(p),
             Hit::Hidden => self.toggle_hidden(),
@@ -4084,7 +4124,7 @@ impl App {
 
     fn on_rbutton_down(&mut self, x: f32, y: f32) {
         let hit = self.hit(x, y);
-        if self.settings.is_some() {
+        if self.settings.is_some() || self.cmd.is_some() {
             return;
         }
         // 즐겨찾기 줄 밖을 누르면 키보드는 칸으로 (그 뒤 Delete가 즐겨찾기를 지우지 않게). 검색 상자도 마찬가지
@@ -4145,7 +4185,7 @@ impl App {
     }
 
     fn on_rbutton_up(&mut self, x: f32, y: f32) -> bool {
-        if self.settings.is_some() {
+        if self.settings.is_some() || self.cmd.is_some() {
             return true;
         }
         if let Hit::PalRow(_) = self.hit(x, y) {
@@ -4172,7 +4212,7 @@ impl App {
     }
 
     fn on_mbutton_up(&mut self, x: f32, y: f32) {
-        if self.settings.is_some() {
+        if self.settings.is_some() || self.cmd.is_some() {
             return;
         }
         let start_target = match self.hit(x, y) {
@@ -4217,6 +4257,13 @@ impl App {
         let (x, y) = (pt.x as f32 / self.scale(), pt.y as f32 / self.scale());
         if self.settings.is_some() {
             self.settings_wheel(-delta / 120.0 * self.wheel_lines * ROW_H);
+            return;
+        }
+        // 명령 메뉴가 열려 있으면 그 목록만 움직인다
+        if self.cmd.is_some() {
+            if self.cmd_rect().is_some_and(|r| r.contains(x, y)) {
+                self.cmd_wheel(-delta / 120.0 * self.wheel_lines * ROW_H);
+            }
             return;
         }
         if self.pal_visible() && self.pal_list().contains(x, y) {
@@ -4380,6 +4427,7 @@ impl App {
         let p = self.active;
         match a {
             Action::Search => self.toggle_palette(),
+            Action::Commands => self.toggle_commands(),
             Action::Favorites => self.toggle_fav_focus(),
             Action::AddFavorite => self.add_favorite(),
             Action::NewTab => self.new_tab(p, None, true),
@@ -4488,6 +4536,7 @@ impl App {
         let alt = key_down(VK_MENU);
         match id {
             ID_SEARCH => self.pal_key(vk),
+            ID_CMD => self.cmd_key(vk),
             // 보기 메뉴가 열려 있거나 키보드가 즐겨찾기에 있으면 필터 상자의 키는 그쪽 조작에 쓴다
             ID_FILTER if self.view_menu.is_some() => self.view_menu_key(vk),
             ID_FILTER if self.fav_focus => self.fav_key(vk),
@@ -4622,6 +4671,7 @@ impl App {
             self.paint_view_menu();
         }
         self.paint_toasts();
+        self.paint_commands();
         self.paint_tip();
         self.paint_fav_card(&mut missing);
         self.gfx.end();
@@ -4701,7 +4751,7 @@ impl App {
 
     /// 단추에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
     fn tip(&self) -> Option<(R, String)> {
-        if self.view_menu.is_some() || self.settings.is_some() || !matches!(self.drag, Drag::None) {
+        if self.view_menu.is_some() || self.settings.is_some() || self.cmd.is_some() || !matches!(self.drag, Drag::None) {
             return None;
         }
         use crate::keys::Action;
@@ -5495,6 +5545,7 @@ struct EditColors {
     rename: HWND,
     preview_host: HWND,
     filter: HWND,
+    cmd: HWND,
 }
 
 thread_local! {
@@ -5508,7 +5559,7 @@ pub fn edit_ctl_color(wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     let c = EDIT_COLORS.get()?;
     let hdc = HDC(wp.0 as *mut c_void);
     let target = HWND(lp.0 as *mut c_void);
-    let (bg, brush) = if target == c.rename || target == c.preview_host {
+    let (bg, brush) = if target == c.rename || target == c.preview_host || target == c.cmd {
         (c.pane, c.pane_brush)
     } else if target == c.filter {
         (c.chip, c.chip_brush)

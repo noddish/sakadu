@@ -315,11 +315,22 @@ impl App {
     pub(super) fn sync_preview(&mut self) {
         let hwnd = self.hwnd;
         let p = self.active;
+        // 검색 패널에서 결과를 고르고 있으면 칸의 선택 대신 그 결과
+        let search = if self.preview.is_some() { self.search_preview_pick() } else { None };
         let App { panes, types, preview, .. } = self;
         let Some(pv) = preview.as_mut() else { return };
         let tab = panes[p].tab();
         let pinned = pv.pin.is_some();
-        let target = tab.entry_at(tab.cursor).filter(|e| e.selected && !pinned).and_then(|e| {
+        let from_search = search.filter(|_| !pinned).map(|(path, name, is_dir, size, modified, type_name, icon)| Target {
+            path,
+            name,
+            kind: if is_dir { Kind::Dir } else { Kind::File },
+            size,
+            modified,
+            type_name,
+            icon,
+        });
+        let target = from_search.or_else(|| tab.entry_at(tab.cursor).filter(|e| e.selected && !pinned).and_then(|e| {
             let (type_name, icon) = type_info(types, e);
             Some(Target {
                 path: tab.path_of(e)?,
@@ -330,7 +341,7 @@ impl App {
                 type_name: if e.kind == Kind::Drive { drive_type_label(e.drive_type).to_string() } else { type_name },
                 icon: if e.icon >= 0 { e.icon } else { icon },
             })
-        });
+        }));
         let same = pinned
             || match (&pv.target, &target) {
                 (Some(a), Some(b)) => a.path == b.path && a.modified == b.modified && a.size == b.size,

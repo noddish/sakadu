@@ -935,9 +935,10 @@ impl App {
     }
 
     /// 검색 패널 안을 왼쪽 버튼으로 눌렀다
-    pub(super) fn pal_mouse_down(&mut self, hit: Hit) {
+    pub(super) fn pal_mouse_down(&mut self, hit: Hit, dbl: bool) {
         match hit {
-            // Ctrl+클릭은 하나씩, Shift+클릭은 범위로 고르고, 그냥 클릭은 바로 연다
+            // Ctrl+클릭은 하나씩, Shift+클릭은 범위로 고르고, 그냥 클릭은 그 줄만 고른다 (두 번 누르거나 Enter로 연다).
+            // 고른 결과는 미리 보기에 보여, 같은 이름 여러 개 중 하나를 확인하고 열 수 있다
             Hit::PalRow(i) if key_down(VK_CONTROL) => {
                 self.pal_picked.resize(self.pal_results.len(), false);
                 if let Some(p) = self.pal_picked.get_mut(i) {
@@ -951,7 +952,12 @@ impl App {
                 self.pal_pick_range(self.pal_anchor, i);
                 self.pal_sel = i;
             }
-            Hit::PalRow(i) => self.pal_activate(i, OpenMode::Open),
+            Hit::PalRow(i) if dbl => self.pal_activate(i, OpenMode::Open),
+            Hit::PalRow(i) => {
+                self.pal_clear_picks();
+                self.pal_sel = i;
+                self.pal_anchor = i;
+            }
             Hit::PalInstall => self.pal_install(),
             Hit::PalAddFolder => self.pal_add_folder(),
             // 범위를 바꾸면 같은 검색어로 다시 찾는다 (칸에 폴더가 없으면 현재 폴더는 고를 수 없다)
@@ -1000,7 +1006,18 @@ impl App {
                 crate::diag::log(|| format!("search: {pieces} piece(s), {} hit(s) shown {:.1}ms after typing", self.pal_results.len(), d.as_secs_f64() * 1000.0));
             }
         }
-        let App { gfx, pal_results, pal_picked, types, .. } = self;
+        // 보이는 줄 중 날짜·크기를 아직 모르는 것은 뒤에서 읽는다 (한 번에 한 묶음)
+        let first = (scroll / PAL_ROW_H).floor().max(0.0) as usize;
+        let count = (list.h() / PAL_ROW_H).ceil() as usize + 1;
+        if !self.pal_meta_busy {
+            let want: Vec<String> = self.pal_results.iter().skip(first).take(count).map(|(_, p)| p).filter(|p| !self.pal_meta.contains_key(*p)).cloned().collect();
+            if !want.is_empty() {
+                self.pal_meta_busy = true;
+                spawn_pal_meta(self.hwnd, want);
+            }
+        }
+        let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
+        let App { gfx, pal_results, pal_picked, types, pal_meta, .. } = self;
 
         // 머리: 제목, 닫기
         gfx.text("검색", R::new(r.l + 18.0, r.t, close.l - 4.0, r.t + 44.0), Font::Strong, t.text);
@@ -1072,8 +1089,6 @@ impl App {
             gfx.fill_round(install, 8.0, Color { r: t.accent.r * k, g: t.accent.g * k, b: t.accent.b * k, a: 1.0 });
             gfx.text(label, install, Font::Hint, if t.dark { t.window } else { Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } });
         }
-        let first = (scroll / PAL_ROW_H).floor().max(0.0) as usize;
-        let count = (list.h() / PAL_ROW_H).ceil() as usize + 1;
         for i in first..(first + count).min(pal_results.len()) {
             let (is_dir, path) = &pal_results[i];
             let y = list.t + i as f32 * PAL_ROW_H - scroll;
@@ -1102,9 +1117,29 @@ impl App {
             gfx.icon(icon, R::new(row.l + 10.0, y + 8.0, row.l + 26.0, y + 24.0));
             let (font, fg) = (Font::Normal, if current && !t.high_contrast { t.sel_text } else { t.text });
             gfx.text(name, R::new(row.l + 36.0, y + 6.0, text_r, y + 25.0), font, fg);
+            // 둘째 줄 오른쪽: 수정한 날짜(파일이면 크기도). 같은 이름이 여러 개면 최신본을 고르기 쉽게
+            // 좁은 패널에서 폴더 경로 자리가 120보다 좁아지면 크기는 빼고 날짜만
+            let (meta, mw) = match pal_meta.get(path) {
+                Some(Some((modified, size))) => {
+                    let date = if short_dates { crate::listing::format_time_short(*modified, now) } else { crate::listing::format_time(*modified) };
+                    let full = if *is_dir { date.clone() } else { format!("{date} · {}", format_size(*size)) };
+                    let fw = gfx.measure(&full, Font::Small);
+                    if text_r - (row.l + 36.0) - fw - 8.0 >= 120.0 {
+                        (full, fw)
+                    } else {
+                        let dw = gfx.measure(&date, Font::Small);
+                        (date, dw)
+                    }
+                }
+                _ => (String::new(), 0.0),
+            };
+            if mw > 0.0 {
+                gfx.text(&meta, R::new(text_r - mw, y + 25.0, text_r, y + 43.0), Font::Small, t.faint);
+            }
             // 같은 이름의 파일을 폴더로 구별할 수 있게 경로는 흐린 색이 아닌 보조 글자색으로 (넘치면 가운데를 줄인다)
             let parent = util::parent(path).unwrap_or_default();
-            gfx.text(&parent, R::new(row.l + 36.0, y + 25.0, text_r, y + 43.0), Font::Path, t.dim);
+            let path_r = if mw > 0.0 { text_r - mw - 8.0 } else { text_r };
+            gfx.text(&parent, R::new(row.l + 36.0, y + 25.0, path_r.max(row.l + 60.0), y + 43.0), Font::Path, t.dim);
         }
         if dim {
             gfx.fill(list, alpha(t.pane, 0.6));
@@ -1153,7 +1188,51 @@ impl App {
 }
 
 /// 키 모양 작은 칩. 오른쪽 끝 x를 돌려준다
-fn kbd(gfx: &Gfx, t: &Theme, x: f32, cy: f32, label: &str) -> f32 {
+/// 검색 결과 줄의 수정한 날짜·크기 (WM_APP_PALMETA)
+pub(super) struct PalMeta {
+    items: Vec<(String, Option<(u64, u64)>)>,
+}
+
+/// 보이는 결과 줄의 날짜·크기를 뒤에서 읽는다 (넣은 공유 폴더가 느려도 화면이 멈추지 않게)
+fn spawn_pal_meta(hwnd: HWND, paths: Vec<String>) {
+    let owner = shell::SendHwnd(hwnd);
+    std::thread::spawn(move || {
+        use std::os::windows::fs::MetadataExt;
+        let items = paths.into_iter().map(|p| {
+            let m = std::fs::metadata(&p).ok().map(|m| (m.last_write_time(), if m.is_dir() { 0 } else { m.file_size() }));
+            (p, m)
+        });
+        shell::post_box(owner.get(), crate::WM_APP_PALMETA, Box::new(PalMeta { items: items.collect() }));
+    });
+}
+
+impl App {
+    pub(super) fn on_pal_meta(&mut self, m: PalMeta) {
+        self.pal_meta_busy = false;
+        // 오래 쓰면 쌓이니 넉넉히 넘으면 비운다 (보이는 줄은 곧 다시 읽는다)
+        if self.pal_meta.len() > 4000 {
+            self.pal_meta.clear();
+        }
+        self.pal_meta.extend(m.items);
+        self.invalidate();
+    }
+
+    /// 검색 패널에서 결과를 고르고 있으면 그 결과를 미리 볼 대상 (날짜·크기를 읽은 뒤)
+    pub(super) fn search_preview_pick(&mut self) -> Option<(String, String, bool, u64, u64, String, i32)> {
+        if !self.pal_focus || !self.pal_visible() || !self.pal_current() {
+            return None;
+        }
+        let (is_dir, path) = self.pal_results.get(self.pal_sel)?.clone();
+        let (modified, size) = (*self.pal_meta.get(&path)?)?;
+        let name = util::file_name(&path).to_string();
+        let ext = if is_dir { String::new() } else { name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default() };
+        let key = if is_dir { "\\dir".to_string() } else { ext.clone() };
+        let (type_name, icon) = self.types.entry(key).or_insert_with(|| shell::type_info(&ext, is_dir)).clone();
+        Some((path, name, is_dir, size, modified, type_name, icon))
+    }
+}
+
+pub(super) fn kbd(gfx: &Gfx, t: &Theme, x: f32, cy: f32, label: &str) -> f32 {
     let w = gfx.measure(label, Font::Small) + 10.0;
     let r = R::new(x, cy - 10.0, x + w, cy + 10.0);
     gfx.fill_round(r, 4.0, super::sidebar::well(t));

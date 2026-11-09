@@ -16,6 +16,7 @@ pub struct Combo {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Search,
+    Commands,
     Favorites,
     AddFavorite,
     NewTab,
@@ -45,8 +46,9 @@ pub enum Action {
 }
 
 /// (동작, 저장 이름, 화면 이름, 기본 키)
-pub const ACTIONS: [(Action, &str, &str, &str); 26] = [
+pub const ACTIONS: [(Action, &str, &str, &str); 27] = [
     (Action::Search, "search", "검색", "Ctrl+F"),
+    (Action::Commands, "commands", "명령 메뉴", "Ctrl+K"),
     (Action::Favorites, "favorites", "즐겨찾기로 이동", "Ctrl+B"),
     (Action::AddFavorite, "add-favorite", "즐겨찾기에 추가", "Ctrl+D"),
     (Action::NewTab, "new-tab", "새 탭", "Ctrl+T"),
@@ -297,11 +299,11 @@ mod tests {
     #[test]
     fn rebinding_frees_the_old_owner() {
         let mut map = Keymap::default();
-        let ctrl_k = Combo::parse("Ctrl+K").unwrap();
-        assert_eq!(map.set(Action::Search, Some(ctrl_k)), None);
-        assert_eq!(map.find(ctrl_k), Some(Action::Search));
-        // 즐겨찾기(Ctrl+B)를 Ctrl+K로 바꾸면 검색은 단축키가 없어진다
-        assert_eq!(map.set(Action::Favorites, Some(ctrl_k)), Some(Action::Search));
+        let ctrl_j = Combo::parse("Ctrl+J").unwrap();
+        assert_eq!(map.set(Action::Search, Some(ctrl_j)), None);
+        assert_eq!(map.find(ctrl_j), Some(Action::Search));
+        // 즐겨찾기(Ctrl+B)를 Ctrl+J로 바꾸면 검색은 단축키가 없어진다
+        assert_eq!(map.set(Action::Favorites, Some(ctrl_j)), Some(Action::Search));
         assert_eq!(map.get(Action::Search), None);
         let back = Keymap::parse(&map.serialize());
         assert_eq!(back, map);
