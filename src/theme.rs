@@ -12,9 +12,10 @@ use windows::core::{PCWSTR, PWSTR, w};
 
 pub type Color = D2D1_COLOR_F;
 
-/// 둥글기: 팝업, 파일 줄·메뉴 줄. 크게 둥글리지 않는다 (칸 카드는 app.rs RADIUS)
-pub const R_PANE: f32 = 6.0;
-pub const R_ROW: f32 = 4.0;
+/// 둥글기: 팝업, 파일 줄·메뉴 줄, 단추 (칸 카드는 app.rs RADIUS, 칩·고르기 판은 알약)
+pub const R_PANE: f32 = 10.0;
+pub const R_ROW: f32 = 6.0;
+pub const R_CTRL: f32 = 8.0;
 /// 키보드 포커스 테두리 두께
 pub const FOCUS_W: f32 = 1.25;
 
@@ -51,8 +52,7 @@ pub struct Theme {
     pub thumb: Color,
     /// 모든 칸의 경계. 활성 여부와 상관없이 같은 색·두께라 칸을 옮겨도 화면이 흔들리지 않는다
     pub pane_border: Color,
-    /// 활성 칸의 지금 탭 칩 글자: 옅은 강조 색(accent_soft) 바탕 위에서 또렷한 강조 색.
-    /// 지금 작업 중인 칸을 이 칩과 카드 그림자로 알아본다
+    /// 옅은 강조 색(accent_soft) 바탕 위의 강조 색 글자·아이콘 (필터 칩). 어느 강조 색에서도 또렷하게 맞춘다
     pub chip_text: Color,
     /// 키보드 포커스 테두리
     pub focus: Color,
@@ -62,13 +62,13 @@ impl Theme {
     pub const LIGHT: Theme = Theme {
         dark: false,
         high_contrast: false,
-        window: hex(0xEDEFF2),
+        window: hex(0xF0F1F4),
         pane: hex(0xFFFFFF),
         strip: hex(0xF4F5F7),
         field: hex(0xF0F2F5),
         text: hex(0x1B1C1F),
         dim: hex(0x5F636B),
-        faint: hex(0x80858E),
+        faint: hex(0x70757E),
         border: hex(0xDCDFE4),
         hover: hex(0xF0F1F3),
         sel: hex(0xD5E4FD),
@@ -92,7 +92,7 @@ impl Theme {
         field: hex(0x2A2C31),
         text: hex(0xE7E8EB),
         dim: hex(0xA0A3AB),
-        faint: hex(0x6E717A),
+        faint: hex(0x858891),
         border: hex(0x2E3036),
         hover: hex(0x27292E),
         sel: hex(0x23406F),

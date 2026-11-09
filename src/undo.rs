@@ -233,6 +233,17 @@ impl Undo {
         }
     }
 
+    /// 작업이 끝났을 때 알림에 쓸 말 (되돌리기 단추와 함께). 이름 바꾸기·새 폴더는 결과가 바로 보이니 알리지 않는다
+    pub fn done_text(&self) -> Option<String> {
+        let n = |len: usize| util::grouped(len as u64);
+        match self {
+            Undo::Move(v) => Some(format!("{}개를 옮겼어요", n(v.len()))),
+            Undo::Copy(v) => Some(format!("{}개를 복사했어요", n(v.len()))),
+            Undo::Recycle(v) => Some(format!("{}개를 휴지통으로 옮겼어요", n(v.len()))),
+            Undo::Rename { .. } | Undo::Create(..) => None,
+        }
+    }
+
     pub fn len(&self) -> usize {
         match self {
             Undo::Rename { .. } | Undo::Create(..) => 1,

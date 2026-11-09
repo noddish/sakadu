@@ -71,7 +71,7 @@ fn show_item_menu(hwnd: HWND, row: Row, current: Option<usize>, groups: &[(Strin
         let _ = AppendMenuW(sub, MF_STRING, NEW_GROUP as usize, w!("새 그룹을 만들어 넣기"));
         append_items(menu, &[(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, ""), (3, "이름 바꾸기\tF2"), (4, "위로 이동\tCtrl+↑"), (5, "아래로 이동\tCtrl+↓")]);
         let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("그룹으로 이동"));
-        append_items(menu, &[(0, ""), (6, "즐겨찾기에서 삭제\tDel")]);
+        append_items(menu, &[(0, ""), (6, "즐겨찾기에서 빼기\tDel")]);
         let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
         let _ = DestroyMenu(menu);
         cmd
@@ -101,7 +101,7 @@ fn show_group_menu(hwnd: HWND, g: usize, group: &(String, usize), collapsed: boo
             (4, "아래로 이동\tCtrl+↓"),
             (0, ""),
             (5, "그룹 풀기 (안의 즐겨찾기는 남김)\tDel"),
-            (6, "그룹과 안의 즐겨찾기 삭제…"),
+            (6, "그룹과 안의 즐겨찾기 빼기…"),
         ],
     );
     if cmd == 6 {
@@ -258,7 +258,7 @@ impl App {
         }
     }
 
-    fn fav_open_entry(&mut self, group: Option<usize>, index: usize, new_tab: bool) {
+    pub(super) fn fav_open_entry(&mut self, group: Option<usize>, index: usize, new_tab: bool) {
         let Some(f) = self.favs.item(group, index).cloned() else { return };
         self.fav_blur();
         // 떠 있는 패널은 위치를 골랐으니 닫는다
@@ -266,7 +266,7 @@ impl App {
         let p = self.active;
         // 있는지·폴더인지는 뒤에서 확인한다 (꺼진 NAS 즐겨찾기를 눌러도 창이 멈추지 않게)
         let tab = self.panes[p].tab();
-        let then = ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab };
+        let then = ProbeThen::Favorite { tab: tab.id, from: tab.loc.clone(), new_tab, is_dir: Some(f.is_dir) };
         self.probe(p, util::normalize(&f.path), then);
     }
 
@@ -284,7 +284,7 @@ impl App {
             Some((path, name)) => self.add_favorite_path(&path, name),
             None => {
                 let p = self.active;
-                self.flash(p, "즐겨찾기에 추가할 폴더나 파일이 없습니다");
+                self.flash(p, "즐겨찾기에 추가할 폴더나 파일이 없어요");
             }
         }
     }
@@ -300,7 +300,7 @@ impl App {
             self.fav_flash = Some(row);
             unsafe { SetTimer(Some(self.hwnd), super::TIMER_FAV_FLASH, 1500, None) };
             let p = self.active;
-            self.flash(p, "이미 즐겨찾기에 있습니다");
+            self.flash(p, "이미 즐겨찾기에 있어요");
             return;
         }
         let target = if self.fav_focus {
@@ -336,7 +336,7 @@ impl App {
         }
         let p = self.active;
         let Some(row) = last else {
-            self.flash(p, "이미 즐겨찾기에 있습니다");
+            self.flash(p, "이미 즐겨찾기에 있어요");
             return;
         };
         match favorites::save(&self.favs) {
@@ -345,13 +345,13 @@ impl App {
                 self.side_clamp_scroll();
                 self.refresh_hover();
                 self.layout_edits();
-                self.flash(p, format!("즐겨찾기에 {added}개를 넣었습니다"));
+                self.flash(p, format!("즐겨찾기에 {added}개를 넣었어요"));
             }
             Err(e) => {
                 self.favs = before;
                 self.fav_sel = self.fav_sel.min(self.favs.rows().len().saturating_sub(1));
                 self.side_clamp_scroll();
-                self.flash(p, format!("즐겨찾기를 저장하지 못해 넣지 않았습니다: {e}"));
+                self.flash(p, format!("즐겨찾기를 저장하지 못해 넣지 않았어요: {e}"));
             }
         }
         self.invalidate();
@@ -364,11 +364,11 @@ impl App {
         let msg = match self.favs.find(&dir) {
             Some((group, index)) => {
                 self.favs.remove_item(group, index);
-                "즐겨찾기에서 뺐습니다"
+                "즐겨찾기에서 뺐어요"
             }
             None => {
                 self.favs.push(None, Favorite { name: favorites::default_name(&dir), path: dir, is_dir: true });
-                "즐겨찾기에 넣었습니다 · 즐겨찾기 패널에서 이름·순서·그룹을 정리할 수 있어요"
+                "즐겨찾기에 넣었어요 · 즐겨찾기 패널에서 이름·순서·그룹을 정리할 수 있어요"
             }
         };
         // 저장하지 못했으면 별 표시도 원래대로 두고 오류만 보인다 (성공 문구로 덮지 않게)
@@ -379,7 +379,7 @@ impl App {
             }
             Err(e) => {
                 self.favs = before;
-                self.flash(p, format!("즐겨찾기를 저장하지 못해 바꾸지 않았습니다: {e}"));
+                self.flash(p, format!("즐겨찾기를 저장하지 못해 바꾸지 않았어요: {e}"));
             }
         }
     }
@@ -387,7 +387,7 @@ impl App {
     fn save_favorites(&mut self) {
         if let Err(e) = favorites::save(&self.favs) {
             let p = self.active;
-            self.flash(p, format!("즐겨찾기를 저장하지 못했습니다: {e}"));
+            self.flash(p, format!("즐겨찾기를 저장하지 못했어요: {e}"));
         }
     }
 

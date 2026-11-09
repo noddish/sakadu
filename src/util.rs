@@ -95,19 +95,40 @@ pub fn invalid_name_char(name: &str) -> Option<char> {
 /// 파일·폴더 이름으로 쓸 수 없으면 그 까닭 (쓸 수 없는 문자, Windows 예약 이름)
 pub fn name_problem(name: &str) -> Option<String> {
     if let Some(c) = invalid_name_char(name) {
-        return Some(if (c as u32) < 0x20 { "이름에 쓸 수 없는 제어 문자가 들어 있습니다".to_string() } else { format!("이름에는 {c} 문자를 쓸 수 없습니다") });
+        return Some(if (c as u32) < 0x20 { "이름에 쓸 수 없는 제어 문자가 들어 있어요".to_string() } else { format!("이름에는 {c} 문자를 쓸 수 없어요") });
     }
     let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
     let numbered = |p: &str| stem.len() == 4 && stem.starts_with(p) && matches!(stem.as_bytes()[3], b'1'..=b'9');
     if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT") {
-        return Some(format!("‘{stem}’은(는) Windows가 쓰는 이름이라 쓸 수 없습니다"));
+        return Some(format!("‘{stem}’ 이름은 Windows가 따로 써서 쓸 수 없어요"));
     }
     None
+}
+
+/// 천 단위 쉼표 (12345 → "12,345")
+pub fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_puts_commas_every_three_digits() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1000), "1,000");
+        assert_eq!(grouped(1234567), "1,234,567");
+    }
 
     /// 쓸 수 없는 문자와 Windows 예약 이름은 막고, 비슷하지만 괜찮은 이름은 통과시킨다
     #[test]

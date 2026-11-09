@@ -1,6 +1,6 @@
 [package]
 name = "sakadu"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "가볍고 빠른 Windows 멀티뷰 파일 관리자"
 license = "GPL-3.0-or-later"
@@ -16,6 +16,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
+    "Win32_NetworkManagement_WNet",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",

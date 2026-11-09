@@ -128,6 +128,10 @@ pub struct Tab {
     pub message: Option<String>,
     /// 읽기(처음 열기·새로 고침)를 시작한 때. 다 읽으면 None. 오래 걸리면 목록 자리에 기다린다는 글을 보인다
     pub loading_since: Option<std::time::Instant>,
+    /// 네트워크 폴더를 열지 못했을 때 고칠 방법 (로그인·다시 연결 단추)
+    pub net_fix: Option<crate::listing::NetFix>,
+    /// 연결이 끊겨 이번 실행에서 마지막으로 본 목록을 보여 주는 중 (흐리게, 다시 연결되면 저절로 새로 고침)
+    pub offline: bool,
 }
 
 fn key_of(e: &Entry) -> String {
@@ -155,6 +159,8 @@ impl Tab {
             restore: None,
             message: None,
             loading_since: None,
+            net_fix: None,
+            offline: false,
         }
     }
 

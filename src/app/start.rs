@@ -9,20 +9,19 @@ use super::*;
 const RECENT_KEEP: usize = 20;
 const RECENT_SHOWN: usize = 8;
 /// 내용 좌우 여백과 가장 넓을 때의 폭 (넓은 칸에서 카드가 한없이 늘어나지 않게)
-const PAD: f32 = 24.0;
+const PAD: f32 = 16.0;
 const MAX_W: f32 = 760.0;
 const CARD_MIN_W: f32 = 150.0;
 const CARD_H: f32 = 64.0;
-const CARD_GAP: f32 = 10.0;
-const CARD_R: f32 = 8.0;
+const CARD_GAP: f32 = 12.0;
+const CARD_R: f32 = 12.0;
 const LINE_H: f32 = 32.0;
 const TITLE_H: f32 = 36.0;
 /// 시작 화면 영역이 이보다 낮으면 제목을 그리지 않는다
 const TITLE_MIN_AREA_H: f32 = 360.0;
-const SECTION_H: f32 = 26.0;
-const SECTION_GAP: f32 = 20.0;
+const SECTION_H: f32 = 24.0;
+const SECTION_GAP: f32 = 24.0;
 const NOTE_H: f32 = 22.0;
-const G_RECENT: u16 = 0xE823;
 const G_COMPUTER: u16 = 0xEC4E;
 
 /// 시작 화면에서 고를 수 있는 것
@@ -136,7 +135,10 @@ impl StartView {
                 if hot {
                     g.fill_round(r, R_ROW, t.hover);
                 }
-                g.glyph_font(G_RECENT, R::new(r.l + 12.0, r.t, r.l + 28.0, r.b), Font::GlyphMid, t.dim);
+                // 드라이브 자체(C: 등)는 드라이브 아이콘, 나머지는 폴더 아이콘
+                let drive = places.drives.iter().find(|d| d.path.trim_end_matches('\\').eq_ignore_ascii_case(path.trim_end_matches('\\')));
+                let iy = r.t + (r.h() - 16.0) / 2.0;
+                g.icon(drive.map_or(folder_icon, |d| d.icon), R::new(r.l + 12.0, iy, r.l + 28.0, iy + 16.0));
                 let name = recent_label(path);
                 g.text(name, R::new(r.l + 36.0, r.t, r.l + 36.0 + name_col, r.b), Font::Normal, t.text);
                 // 이름 뒤에 어디 있는 폴더인지 흐리게 (길면 가운데를 줄인다)
@@ -146,7 +148,9 @@ impl StartView {
                 R_ROW
             } else {
                 // 카드: 옅은 면과 테두리, 올리면 한 단계 진한 면. 첫 줄 아이콘·이름, 둘째 줄 위치나 남은 용량
-                g.fill_round(r, CARD_R, if hot { t.sel_inactive } else { t.field });
+                if hot {
+                    g.fill_round(r, CARD_R, super::sidebar::hover_fill(t));
+                }
                 g.stroke_round(r.inset(0.5, 0.5), CARD_R, t.border, 1.0);
                 let ic = R::new(r.l + 12.0, r.t + 13.0, r.l + 28.0, r.t + 29.0);
                 let name_r = R::new(r.l + 36.0, r.t + 10.0, r.r - 10.0, r.t + 32.0);
@@ -154,7 +158,7 @@ impl StartView {
                 match it {
                     StartItem::Fav { name, path } => {
                         g.icon(folder_icon, ic);
-                        g.text(name, name_r, Font::Strong, t.text);
+                        g.text(name, name_r, Font::Normal, t.text);
                         if let Some(parent) = util::parent(path) {
                             g.text(&parent, sub_r, Font::Path, t.faint);
                         }
@@ -165,21 +169,21 @@ impl StartView {
                         } else {
                             g.glyph(G_COMPUTER, ic, false, t.dim);
                         }
-                        g.text("내 PC", name_r, Font::Strong, t.text);
+                        g.text("내 PC", name_r, Font::Normal, t.text);
                     }
                     StartItem::Drive(di) => {
                         if let Some(d) = places.drives.get(*di) {
                             g.icon(d.icon, ic);
-                            g.text(&d.name, name_r, Font::Strong, t.text);
+                            g.text(&d.name, name_r, Font::Normal, t.text);
                             if d.total > 0 {
                                 let free = format!("{} 남음", format_size(d.free));
                                 g.text(&free, sub_r, Font::Small, t.faint);
                                 // 쓴 만큼 채운 막대. 거의 찼으면(90% 넘게) 빨간색
                                 let used = (1.0 - d.free as f32 / d.total as f32).clamp(0.0, 1.0);
-                                let bar = R::new(r.l + 12.0, r.b - 9.0, r.r - 12.0, r.b - 6.0);
-                                g.fill_round(bar, 1.5, t.border);
+                                let bar = R::new(r.l + 12.0, r.b - 10.0, r.r - 12.0, r.b - 6.0);
+                                g.fill_round(bar, 2.0, alpha(t.text, 0.10));
                                 let fill = if used > 0.9 { Color { r: 0.80, g: 0.20, b: 0.16, a: 1.0 } } else { t.faint };
-                                g.fill_round(R::new(bar.l, bar.t, bar.l + bar.w() * used, bar.b), 1.5, fill);
+                                g.fill_round(R::new(bar.l, bar.t, bar.l + bar.w() * used, bar.b), 2.0, fill);
                             }
                         }
                     }
@@ -256,7 +260,7 @@ impl App {
             .collect();
         if !recent.is_empty() {
             heads.push(("최근 위치", R::new(x0, y, x0 + w, y + SECTION_H)));
-            y += SECTION_H + 2.0;
+            y += SECTION_H + 4.0;
             for it in recent {
                 items.push((it, R::new(x0, y, x0 + w, y + LINE_H)));
                 y += LINE_H;
@@ -277,7 +281,7 @@ impl App {
         }
 
         if items.is_empty() && !needle.is_empty() {
-            notes.push((format!("‘{filter}’와(과) 맞는 위치가 없습니다"), R::new(x0, y, x0 + w, y + NOTE_H)));
+            notes.push((format!("필터 ‘{filter}’에 맞는 위치가 없어요"), R::new(x0, y, x0 + w, y + NOTE_H)));
             y += NOTE_H;
         }
         StartView { title, heads, items, notes, height: y - top, scroll, area }

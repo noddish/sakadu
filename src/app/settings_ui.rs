@@ -273,7 +273,7 @@ impl App {
                     .map(|(i, (path, state))| {
                         let state = match state {
                             crate::folders::State::Scanning => "훑는 중".to_string(),
-                            crate::folders::State::Ready(n) => format!("항목 {n}개"),
+                            crate::folders::State::Ready(n) => format!("항목 {}개", util::grouped(n as u64)),
                             crate::folders::State::Offline => "연결 안 됨 · 5분마다 다시 시도해요".to_string(),
                         };
                         row(path, state, Widget::Button("빼기".into(), Ctl::FolderRemove, i))
@@ -327,9 +327,10 @@ impl App {
                                 tip("여러 낱말", "띄어 쓰면 모두 들어간 것만 찾아요 · 견적 2026".into()),
                                 tip("또는", "사이에 |를 넣으면 그중 하나라도 · 견적 | 계약서 ·여러 줄을 붙여넣으면 한 번에".into()),
                                 tip("경로로 찾기", "끝에 \\를 붙이면 경로에서 찾아요 · 업무\\".into()),
+                                tip("고르고 열기", "한 번 누르면 고르고 미리 보기, 두 번 누르거나 Enter로 열어요".into()),
                                 tip("여러 개 다루기", "Ctrl·Shift+클릭으로 고르고 Enter 모두 열기 · Ctrl+C 파일 복사".into()),
                                 tip("위치 열기", "Ctrl+Enter · 지금 칸에서 그 폴더를 열고 파일을 골라 둬요 · Shift+Enter는 새 탭".into()),
-                                tip("패널", "결과는 두고 칸에서 일해요 · Esc는 키보드만 칸으로 · 현재 폴더 칩은 지금 칸 아래만".into()),
+                                tip("패널", "결과는 두고 칸에서 일해요 · Esc는 키보드만 칸으로 · 지금 폴더 칩은 지금 칸 아래만".into()),
                             ],
                         },
                         Card {
@@ -340,7 +341,8 @@ impl App {
                                 tip("탭 옮기기", "탭을 끌어 순서를 바꾸거나 다른 칸으로 · Ctrl+Tab 다음 탭".into()),
                                 tip("새 탭", format!("{} · 즐겨찾기 폴더·최근 위치·드라이브에서 고르기 · 글자를 치고 Enter로 바로", k(Action::NewTab))),
                                 tip("칸 이동", format!("Tab · Shift+Tab, 칸 나누기는 {}", layout_keys(&self.keys))),
-                                tip("되돌리기", format!("{} · 이름 바꾸기·이동·복사·휴지통 삭제를 마지막 것부터", k(Action::Undo))),
+                                tip("되돌리기", format!("{} · 이름 바꾸기·이동·복사·휴지통 삭제를 마지막 것부터 · 작업 뒤 알림의 되돌리기 단추로도", k(Action::Undo))),
+                                tip("명령 메뉴", format!("{} · 열린 탭·즐겨찾기·최근 위치로 가고, 명령을 이름이나 초성으로 찾아 실행해요", k(Action::Commands))),
                                 tip("작업 공간", "작업 줄 왼쪽 단추 · 지금 화면(칸·탭·패널·미리 보기·검색어)을 이름 붙여 저장하고 바꿔요".into()),
                                 tip("미리 보기 고정", format!("{}로 연 미리 보기의 핀 · 다른 파일을 골라도 그 파일을 계속 보고, 같은 드라이브 안에서 이름이 바뀌거나 옮겨져도 따라가요", k(Action::Preview))),
                             ],
@@ -738,12 +740,17 @@ impl App {
                 Item::Title(r, text) => g.text(text, *r, Font::Title, t.text),
                 Item::Header(r, text) => g.text(text, *r, Font::Small, t.dim),
                 Item::Note(r, text) => {
-                    g.fill_round(*r, 8.0, t.accent_soft);
+                    g.fill_round(*r, 8.0, super::sidebar::well(&t));
                     g.text(text, R::new(r.l + 14.0, r.t, r.r - 10.0, r.b), Font::Normal, t.text);
                 }
                 Item::Card(r) => {
-                    g.fill_round(*r, 10.0, t.pane);
-                    g.stroke_round(r.inset(0.5, 0.5), 10.0, t.border, 1.0);
+                    if !t.high_contrast && !t.dark {
+                        super::soft_shadow(g, *r, 12.0, 6.0, 0.06, false);
+                    }
+                    g.fill_round(*r, 12.0, t.pane);
+                    if t.high_contrast || t.dark {
+                        g.stroke_round(r.inset(0.5, 0.5), 12.0, t.border, 1.0);
+                    }
                 }
                 Item::Divider(r) => g.fill(*r, t.border),
                 Item::Label { title, desc, t: tt, d } => {
@@ -763,17 +770,21 @@ impl App {
                         g.fill_round(R::new(r.l + 11.0 - knob, r.t + 3.0, r.l + 11.0 + knob, r.b - 3.0), knob, t.dim);
                     }
                 }
+                // 칸 나누기 판과 같은 모양: 들어간 판 위에 고른 것만 흰 면 + 가는 선
                 Item::SegFrame(r) => {
-                    g.fill_round(*r, 7.0, t.pane);
-                    g.stroke_round(r.inset(0.5, 0.5), 7.0, t.border, 1.0);
+                    g.fill_round(*r, r.h() / 2.0, super::sidebar::seg_track(&t));
+                    if t.high_contrast {
+                        g.stroke_round(r.inset(0.5, 0.5), r.h() / 2.0, t.border, 1.0);
+                    }
                 }
                 Item::Seg { r, label, on, hit } => {
+                    let sr = r.inset(2.0, 2.0);
                     if *on {
-                        g.fill_round(r.inset(2.0, 2.0), 5.0, t.accent_soft);
+                        super::sidebar::seg_on(g, sr, sr.h() / 2.0, &t);
                     } else if hot(*hit) {
-                        g.fill_round(r.inset(2.0, 2.0), 5.0, t.hover);
+                        g.fill_round(sr, sr.h() / 2.0, super::sidebar::hover_fill(&t));
                     }
-                    g.text(label, *r, Font::Hint, if *on { t.accent } else { t.text });
+                    g.text(label, *r, Font::Hint, if *on { t.text } else { t.dim });
                 }
                 Item::Swatch { r, color, on, hit } => {
                     if *on || hot(*hit) {
@@ -782,8 +793,11 @@ impl App {
                     g.fill_round(*r, 12.0, *color);
                 }
                 Item::Button { r, label, chevron, hit } => {
-                    g.fill_round(*r, 7.0, if hot(*hit) { t.hover } else { t.pane });
-                    g.stroke_round(r.inset(0.5, 0.5), 7.0, t.border, 1.0);
+                    g.fill_round(*r, R_CTRL, t.pane);
+                    if hot(*hit) {
+                        g.fill_round(*r, R_CTRL, super::sidebar::hover_fill(&t));
+                    }
+                    g.stroke_round(r.inset(0.5, 0.5), R_CTRL, t.border, 1.0);
                     if *chevron {
                         g.text(label, R::new(r.l + 12.0, r.t, r.r - 26.0, r.b), Font::Normal, t.text);
                         g.glyph(G_CHEVRON_DOWN, R::new(r.r - 26.0, r.t, r.r - 8.0, r.b), true, t.dim);
@@ -810,7 +824,7 @@ impl App {
             match item {
                 Item::Back(r) => {
                     if hot(SetHit::Back) {
-                        g.fill_round(*r, 7.0, t.hover);
+                        g.fill_round(*r, R_CTRL, super::sidebar::hover_fill(&t));
                     }
                     if compact {
                         g.glyph(G_BACK, *r, false, t.text);
@@ -821,17 +835,17 @@ impl App {
                 }
                 Item::Nav { r, label, glyph, on, hit } => {
                     if *on {
-                        g.fill_round(*r, 7.0, t.sel_inactive);
+                        g.fill_round(*r, R_ROW, t.sel_inactive);
                     } else if hot(*hit) {
-                        g.fill_round(*r, 7.0, t.hover);
+                        g.fill_round(*r, R_ROW, super::sidebar::hover_fill(&t));
                     }
                     // 아이콘은 글자와 어울리는 도구 아이콘 크기(16px). 작은 크기는 글자 옆에서 흐릿하게 보인다
-                    let fg = if *on { t.accent } else { t.dim };
+                    let fg = if *on { t.text } else { t.dim };
                     if compact {
                         g.glyph(*glyph, *r, false, fg);
                     } else {
                         g.glyph(*glyph, R::new(r.l + 8.0, r.t, r.l + 30.0, r.b), false, fg);
-                        g.text(label, R::new(r.l + 38.0, r.t, r.r - 6.0, r.b), if *on { Font::Strong } else { Font::Normal }, t.text);
+                        g.text(label, R::new(r.l + 38.0, r.t, r.r - 6.0, r.b), Font::Normal, t.text);
                     }
                 }
                 _ => {}
@@ -839,7 +853,14 @@ impl App {
         }
         // 키보드 초점 테두리
         if let Some(r) = self.settings.as_ref().and_then(|s| s.focus).and_then(|f| self.focus_stops().into_iter().find(|(h, _)| *h == f)).map(|(_, r)| r) {
-            g.stroke_round(r.inset(-3.0, -3.0), 8.0, t.accent, 2.0);
+            let (pad, radius) = if (r.w() - r.h()).abs() < 1.0 && r.h() >= 20.0 {
+                (6.0, r.h() / 2.0 + 6.0)
+            } else if r.h() <= 24.0 && r.w() > r.h() {
+                (3.0, r.h() / 2.0 + 3.0)
+            } else {
+                (3.0, 9.0)
+            };
+            g.stroke_round(r.inset(-pad, -pad), radius, t.focus, 2.0);
         }
     }
 

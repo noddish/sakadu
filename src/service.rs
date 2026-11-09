@@ -356,7 +356,7 @@ fn serve(shared: Arc<Shared>) {
                 let session = acl::Client::of_pipe(pipe).map(|c| shared.sessions.session(c));
                 let resp = match &session {
                     Some(s) => handle_request(&shared, &text, Asker::Session(s.clone())),
-                    None => "ERR\t요청한 계정을 확인하지 못했습니다\n".to_string(),
+                    None => "ERR\t요청한 계정을 확인하지 못했어요\n".to_string(),
                 };
                 unsafe {
                     let _ = WriteFile(pipe, Some(resp.as_bytes()), None, None);
@@ -475,7 +475,7 @@ fn remove_existing(scm: &Sc) {
 
 pub fn install() -> Result<(), String> {
     unsafe {
-        let scm = Sc(OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS).map_err(|e| format!("서비스 관리자를 열 수 없습니다: {e}"))?);
+        let scm = Sc(OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS).map_err(|e| format!("서비스 관리자를 열 수 없어요: {e}"))?);
         remove_existing(&scm);
         // SYSTEM으로 실행할 파일은 관리자만 쓸 수 있는 위치에 둔다
         let dir = install_dir();
@@ -515,11 +515,11 @@ pub fn install() -> Result<(), String> {
             PCWSTR::null(),
             PCWSTR::null(),
         )
-        .map_err(|e| format!("서비스를 만들 수 없습니다: {e}"))?);
+        .map_err(|e| format!("서비스를 만들 수 없어요: {e}"))?);
         let mut desc = wide("Sakadu 파일 관리자의 빠른 파일 이름 검색(NTFS MFT·USN 저널 인덱스)");
         let info = SERVICE_DESCRIPTIONW { lpDescription: PWSTR(desc.as_mut_ptr()) };
         let _ = ChangeServiceConfig2W(svc.0, SERVICE_CONFIG_DESCRIPTION, Some(&info as *const _ as *const c_void));
-        StartServiceW(svc.0, None).map_err(|e| format!("서비스를 시작할 수 없습니다: {e}"))?;
+        StartServiceW(svc.0, None).map_err(|e| format!("서비스를 시작할 수 없어요: {e}"))?;
     }
     Ok(())
 }

@@ -4,7 +4,7 @@
 use super::*;
 
 const ITEM_H: f32 = 32.0;
-const PAD: f32 = 6.0;
+const PAD: f32 = 4.0;
 const MENU_W: f32 = 240.0;
 const G_CHECK: u16 = 0xE73E;
 
@@ -57,6 +57,7 @@ impl App {
         self.active = p;
         let sel = ViewMode::ALL.iter().position(|v| *v == self.panes[p].view).unwrap_or(0);
         self.view_menu = Some(ViewMenu { pane: p, sel });
+        self.start_anim(|a| &mut a.view_menu_at);
         // 필터 상자(자식 창)가 메뉴를 가리지 않게 비켜 둔다
         self.layout_edits();
         self.invalidate();
@@ -142,10 +143,13 @@ impl App {
         };
         let keys: Vec<String> = ViewMode::ALL.iter().map(|v| self.keys.get(action(*v)).map(|c| c.label()).unwrap_or_default()).collect();
         let gfx = &self.gfx;
-        let shadow = Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.45 } else { 0.12 } };
+        // 열릴 때 위에서 4px 내려오며 나타난다
+        let pushed = anim_progress(self.view_menu_at, MENU_FADE_MS).is_some_and(|f| gfx.push_fade(f, 0.0, -(1.0 - f) * 4.0));
 
-        // 그림자 + 본체
-        gfx.fill_round(R::new(r.l - 2.0, r.t + 1.0, r.r + 2.0, r.b + 4.0), R_PANE + 2.0, shadow);
+        // 그림자 + 본체 (떠 있는 다른 것과 같은 그림자)
+        if !t.high_contrast {
+            soft_shadow(gfx, r, R_PANE, 12.0, 0.16, t.dark);
+        }
         gfx.fill_round(r, R_PANE, t.pane);
         gfx.stroke_round(r.inset(0.5, 0.5), R_PANE, t.pane_border, 1.0);
 
@@ -156,13 +160,16 @@ impl App {
             }
             let on = v == current;
             if on {
-                gfx.glyph(G_CHECK, R::new(ir.l + 6.0, ir.t, ir.l + 28.0, ir.b), true, t.accent);
+                gfx.glyph(G_CHECK, R::new(ir.l + 6.0, ir.t, ir.l + 28.0, ir.b), true, t.text);
             }
             let key_w = if keys[i].is_empty() { 0.0 } else { gfx.measure(&keys[i], Font::Small) + 12.0 };
-            gfx.text(v.label(), R::new(ir.l + 34.0, ir.t, ir.r - key_w - 8.0, ir.b), if on { Font::Strong } else { Font::Normal }, t.text);
+            gfx.text(v.label(), R::new(ir.l + 34.0, ir.t, ir.r - key_w - 8.0, ir.b), Font::Normal, t.text);
             if key_w > 0.0 {
                 gfx.text(&keys[i], R::new(ir.r - key_w, ir.t, ir.r - 10.0, ir.b), Font::Small, t.dim);
             }
+        }
+        if pushed {
+            gfx.pop_fade();
         }
     }
 }

@@ -12,13 +12,13 @@ const S_INPUT_T: f32 = 48.0;
 const S_INPUT_H: f32 = 32.0;
 /// 범위 칩 줄 (PC 전체 · 현재 폴더)
 const S_CHIP_T: f32 = 88.0;
-const S_CHIP_H: f32 = 24.0;
+const S_CHIP_H: f32 = 28.0;
 const S_CHIP_W: f32 = 78.0;
 /// 결과 목록 시작
-const S_LIST_T: f32 = 120.0;
-const S_FOOT_H: f32 = 30.0;
+const S_LIST_T: f32 = 124.0;
+const S_FOOT_H: f32 = 32.0;
 /// 결과 한 줄: 이름, 그 아래 상위 폴더
-const PAL_ROW_H: f32 = 46.0;
+const PAL_ROW_H: f32 = 48.0;
 const G_CHECK: u16 = 0xE73E;
 const PAL_LIMIT: usize = 200;
 pub(super) const G_SEARCH: u16 = 0xE721;
@@ -352,14 +352,14 @@ impl App {
     /// 범위 칩: PC 전체(false), 현재 폴더(true)
     fn pal_scope_rect(&self, here: bool) -> R {
         let r = self.pal_rect();
-        let x = r.l + 8.0 + if here { S_CHIP_W + 6.0 } else { 0.0 };
-        R::new(x, r.t + S_CHIP_T, x + S_CHIP_W, r.t + S_CHIP_T + S_CHIP_H)
+        let x = r.l + 8.0 + 3.0 + if here { S_CHIP_W } else { 0.0 };
+        R::new(x, r.t + S_CHIP_T + 3.0, x + S_CHIP_W, r.t + S_CHIP_T + S_CHIP_H - 3.0)
     }
 
     /// 머리 오른쪽 닫기 (다른 패널의 핀 자리)
     pub(super) fn pal_close_rect(&self) -> R {
         let r = self.pal_rect();
-        R::new(r.r - 8.0 - 26.0, r.t + 9.0, r.r - 8.0, r.t + 35.0)
+        R::new(r.r - 8.0 - 28.0, r.t + 8.0, r.r - 8.0, r.t + 36.0)
     }
 
     fn pal_install_button(&self) -> R {
@@ -613,7 +613,7 @@ impl App {
         let Some(dir) = self.pal_outside.take() else { return };
         if let Err(e) = self.folders.add(&dir) {
             let p = self.active;
-            self.flash(p, format!("검색 폴더 목록을 저장하지 못했습니다: {e}"));
+            self.flash(p, format!("검색 폴더 목록을 저장하지 못했어요: {e}"));
         }
         self.pal_run_query();
     }
@@ -651,6 +651,8 @@ impl App {
                 // 다시 찾은 결과(파일 작업 뒤 등)에 지금 줄이 남아 있으면 그 줄과 스크롤을 지킨다
                 let sel_path = self.pal_results.get(self.pal_sel).map(|(_, p)| p.to_lowercase());
                 self.pal_results = r.hits;
+                // 결과가 새로 오면(다시 찾기·파일 작업 뒤) 보이는 줄의 날짜·크기를 다시 읽는다
+                self.pal_meta_fresh.clear();
                 self.pal_status = PalStatus::Done { total: r.total, micros: r.micros, ready: r.ready, failed: r.failed };
                 self.pal_sel = sel_path.and_then(|s| self.pal_results.iter().position(|(_, p)| p.to_lowercase() == s)).unwrap_or(0);
                 self.pal_anchor = self.pal_sel;
@@ -816,8 +818,8 @@ impl App {
         let n = paths.len();
         let p = self.active;
         match shell::set_clipboard_files(self.hwnd, &paths, false) {
-            Ok(()) => self.flash(p, format!("검색 결과 {n}개를 복사했습니다. 붙여넣을 폴더에서 Ctrl+V")),
-            Err(e) => self.flash(p, format!("클립보드에 복사하지 못했습니다: {}", e.message())),
+            Ok(()) => self.flash(p, format!("검색 결과 {n}개를 복사했어요 · 붙여넣을 폴더에서 Ctrl+V")),
+            Err(e) => self.flash(p, format!("클립보드에 복사하지 못했어요: {}", e.message())),
         }
     }
 
@@ -828,7 +830,7 @@ impl App {
         }
         let p = self.active;
         if let Err(e) = shell::set_clipboard_text(self.hwnd, &text) {
-            self.flash(p, format!("클립보드에 복사하지 못했습니다: {}", e.message()));
+            self.flash(p, format!("클립보드에 복사하지 못했어요: {}", e.message()));
         }
     }
 
@@ -935,9 +937,10 @@ impl App {
     }
 
     /// 검색 패널 안을 왼쪽 버튼으로 눌렀다
-    pub(super) fn pal_mouse_down(&mut self, hit: Hit) {
+    pub(super) fn pal_mouse_down(&mut self, hit: Hit, dbl: bool) {
         match hit {
-            // Ctrl+클릭은 하나씩, Shift+클릭은 범위로 고르고, 그냥 클릭은 바로 연다
+            // Ctrl+클릭은 하나씩, Shift+클릭은 범위로 고르고, 그냥 클릭은 그 줄만 고른다 (두 번 누르거나 Enter로 연다).
+            // 고른 결과는 미리 보기에 보여, 같은 이름 여러 개 중 하나를 확인하고 열 수 있다
             Hit::PalRow(i) if key_down(VK_CONTROL) => {
                 self.pal_picked.resize(self.pal_results.len(), false);
                 if let Some(p) = self.pal_picked.get_mut(i) {
@@ -951,7 +954,12 @@ impl App {
                 self.pal_pick_range(self.pal_anchor, i);
                 self.pal_sel = i;
             }
-            Hit::PalRow(i) => self.pal_activate(i, OpenMode::Open),
+            Hit::PalRow(i) if dbl => self.pal_activate(i, OpenMode::Open),
+            Hit::PalRow(i) => {
+                self.pal_clear_picks();
+                self.pal_sel = i;
+                self.pal_anchor = i;
+            }
             Hit::PalInstall => self.pal_install(),
             Hit::PalAddFolder => self.pal_add_folder(),
             // 범위를 바꾸면 같은 검색어로 다시 찾는다 (칸에 폴더가 없으면 현재 폴더는 고를 수 없다)
@@ -985,8 +993,14 @@ impl App {
         let folder_entries = self.folders.entry_count();
         let picks = self.pal_pick_count();
         let help = self.keys.get(crate::keys::Action::Help).map(crate::keys::Combo::label);
-        // 입력을 바꿨는데 새 결과가 아직이면 이전 결과는 흐리게 (열거나 복사할 수 없음)
+        // 입력을 바꿨는데 새 결과가 아직이면 이전 결과는 흐리게 (열거나 복사할 수 없음).
+        // 결과가 곧(0.15초 안에) 오면 흐리게 하지 않는다: 치는 동안 목록이 깜빡이지 않게
         let stale = !self.pal_current() && !self.pal_results.is_empty();
+        let stale_wait = self.pal_gate.typed.filter(|_| stale).map(|t| 150u128.saturating_sub(t.elapsed().as_millis())).filter(|ms| *ms > 0);
+        if let Some(ms) = stale_wait {
+            unsafe { SetTimer(Some(self.hwnd), TIMER_REDRAW, ms as u32, None) };
+        }
+        let dim = stale && stale_wait.is_none();
         if crate::diag::enabled() && matches!(status, PalStatus::Done { .. }) {
             let key = self.pal_key_now();
             if let Some(d) = self.pal_gate.shown_after_typing(&key) {
@@ -994,59 +1008,70 @@ impl App {
                 crate::diag::log(|| format!("search: {pieces} piece(s), {} hit(s) shown {:.1}ms after typing", self.pal_results.len(), d.as_secs_f64() * 1000.0));
             }
         }
-        let App { gfx, pal_results, pal_picked, types, .. } = self;
+        // 보이는 줄 중 날짜·크기를 아직 모르는 것은 뒤에서 읽는다 (한 번에 한 묶음)
+        let first = (scroll / PAL_ROW_H).floor().max(0.0) as usize;
+        let count = (list.h() / PAL_ROW_H).ceil() as usize + 1;
+        if !self.pal_meta_busy {
+            let want: Vec<String> = self.pal_results.iter().skip(first).take(count).map(|(_, p)| p).filter(|p| !self.pal_meta_fresh.contains(*p)).cloned().collect();
+            if !want.is_empty() {
+                self.pal_meta_busy = true;
+                spawn_pal_meta(self.hwnd, want);
+            }
+        }
+        let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
+        let App { gfx, pal_results, pal_picked, types, pal_meta, .. } = self;
 
         // 머리: 제목, 닫기
         gfx.text("검색", R::new(r.l + 18.0, r.t, close.l - 4.0, r.t + 44.0), Font::Strong, t.text);
         if hover == Hit::PalClose {
-            gfx.fill_round(close, 6.0, t.hover);
+            gfx.fill_round(close, R_CTRL, sidebar::hover_fill(&t));
         }
         gfx.glyph(G_CLOSE, close, true, if hover == Hit::PalClose { t.text } else { t.dim });
 
         // 입력 줄: 들어간 상자 (실제 입력은 위에 놓인 EDIT). 키보드가 여기 있으면 강조 테두리
-        gfx.fill_round(input, 8.0, if t.high_contrast { t.window } else { t.field });
-        gfx.stroke_round(input.inset(0.75, 0.75), 8.0, if focus { t.accent } else { t.border }, if focus { 1.5 } else { 1.0 });
-        gfx.glyph_font(G_SEARCH, R::new(input.l + 8.0, input.t, input.l + 28.0, input.b), Font::GlyphMid, if focus { t.accent } else { t.dim });
+        gfx.fill_round(input, R_CTRL, if t.high_contrast { t.window } else { t.field });
+        gfx.stroke_round(input.inset(0.75, 0.75), R_CTRL, if focus { t.accent } else { t.border }, if focus { 1.5 } else { 1.0 });
+        gfx.glyph_font(G_SEARCH, R::new(input.l + 8.0, input.t, input.l + 28.0, input.b), Font::GlyphMid, t.dim);
 
         // 범위 칩: PC 전체 · 현재 폴더 (칸에 폴더가 없으면 현재 폴더는 흐리게, 전체로 찾는다)
+        let track = R::new(scopes[0].1.l - 3.0, scopes[0].1.t - 3.0, scopes[1].1.r + 3.0, scopes[1].1.b + 3.0);
+        gfx.fill_round(track, track.h() / 2.0, sidebar::seg_track(&t));
         for (h, cr) in scopes {
             let enabled = !h || here_ok;
             let on = if here_ok { h == here } else { !h };
             if on {
-                gfx.fill_round(cr, 12.0, t.accent_soft);
+                sidebar::seg_on(gfx, cr, cr.h() / 2.0, &t);
             } else if hover == Hit::PalScope(h) && enabled {
-                gfx.fill_round(cr, 12.0, t.hover);
-            } else {
-                gfx.stroke_round(cr.inset(0.5, 0.5), 12.0, t.border, 1.0);
+                gfx.fill_round(cr, cr.h() / 2.0, sidebar::hover_fill(&t));
             }
-            let label = if h { "현재 폴더" } else { "PC 전체" };
+            let label = if h { "지금 폴더" } else { "PC 전체" };
             let w = gfx.measure(label, Font::Small);
-            let fg = if on { t.chip_text } else if enabled { t.dim } else { t.faint };
+            let fg = if on { t.text } else if enabled { t.dim } else { t.faint };
             gfx.text(label, R::new(cr.l + (cr.w() - w) / 2.0, cr.t, cr.r, cr.b), Font::Small, fg);
         }
 
         gfx.clip(list);
         let message: Option<String> = match &status {
-            PalStatus::NotInstalled => Some("검색 서비스가 설치되어 있지 않습니다\n디스크 전체를 바로 찾으려면 관리자 권한으로 한 번 설치합니다".into()),
-            PalStatus::Indexing => Some("검색 서비스가 디스크 목록을 만드는 중입니다\n준비되면 입력한 검색어로 결과를 채웁니다".into()),
-            PalStatus::Error(e) => Some(format!("검색 서비스와 통신하지 못했습니다\n{e}")),
+            PalStatus::NotInstalled => Some("검색 서비스가 설치되어 있지 않아요\n디스크 전체를 바로 찾으려면 관리자 권한으로 한 번 설치해요".into()),
+            PalStatus::Indexing => Some("검색 서비스가 디스크 목록을 만드는 중이에요\n준비되면 입력한 검색어로 결과를 채워요".into()),
+            PalStatus::Error(e) => Some(format!("검색 서비스와 통신하지 못했어요\n{e}")),
             // 준비 중·읽지 못한 드라이브 때문에 비어 있는 것은 "일치하는 항목 없음"과 다르게 알린다
             PalStatus::Done { ready: false, .. } if pal_results.is_empty() => Some(format!(
-                "검색 서비스가 디스크 목록을 아직 만드는 중입니다\n준비되면 ‘{}’ 결과를 다시 채웁니다",
+                "검색 서비스가 디스크 목록을 아직 만드는 중이에요\n준비되면 ‘{}’ 결과를 다시 채워요",
                 query.trim()
             )),
             PalStatus::Done { failed, .. } if pal_results.is_empty() && !failed.is_empty() => Some(format!(
-                "‘{}’와(과) 일치하는 항목이 없습니다\n{} 드라이브는 읽지 못해 찾지 못했습니다",
+                "‘{}’ 검색 결과가 없어요\n{} 드라이브는 읽지 못해 찾지 못했어요",
                 query.trim(),
                 drive_list(failed)
             )),
             PalStatus::Done { .. } if pal_results.is_empty() && add_folder.is_some() => Some(format!(
-                "‘{}’와(과) 일치하는 항목이 없습니다\n열어 둔 {}은(는) 아직 검색 범위 밖입니다. 넣으면 그 안도 함께 찾습니다",
+                "‘{}’ 검색 결과가 없어요\n열어 둔 폴더 {} · 아직 검색 범위 밖이에요 · 넣으면 그 안도 함께 찾아요",
                 query.trim(),
                 add_folder.as_deref().unwrap_or_default()
             )),
-            PalStatus::Done { .. } if pal_results.is_empty() && here && here_ok => Some(format!("지금 폴더 아래에 ‘{}’와(과) 일치하는 항목이 없습니다", query.trim())),
-            PalStatus::Done { .. } if pal_results.is_empty() => Some(format!("‘{}’와(과) 일치하는 항목이 없습니다", query.trim())),
+            PalStatus::Done { .. } if pal_results.is_empty() && here && here_ok => Some(format!("지금 폴더 아래에는 ‘{}’ 검색 결과가 없어요", query.trim())),
+            PalStatus::Done { .. } if pal_results.is_empty() => Some(format!("‘{}’ 검색 결과가 없어요", query.trim())),
             PalStatus::Idle | PalStatus::Ready(_) if query.trim().is_empty() => Some(format!(
                 "파일·폴더 이름을 입력하세요\n띄어 쓰면 모두 포함 · | 는 또는 · 끝에 \\ 는 경로{}",
                 help.as_deref().map(|h| format!(" · 자세히는 {h}")).unwrap_or_default()
@@ -1062,11 +1087,10 @@ impl App {
             _ => None,
         };
         if let Some((label, h)) = button {
-            gfx.fill_round(install, 8.0, if hover == h { t.accent } else { alpha(t.accent, 0.85) });
-            gfx.text(label, install, Font::Hint, Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+            let k = if hover == h { 0.88 } else { 1.0 };
+            gfx.fill_round(install, 8.0, Color { r: t.accent.r * k, g: t.accent.g * k, b: t.accent.b * k, a: 1.0 });
+            gfx.text(label, install, Font::Hint, if t.dark { t.window } else { Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } });
         }
-        let first = (scroll / PAL_ROW_H).floor().max(0.0) as usize;
-        let count = (list.h() / PAL_ROW_H).ceil() as usize + 1;
         for i in first..(first + count).min(pal_results.len()) {
             let (is_dir, path) = &pal_results[i];
             let y = list.t + i as f32 * PAL_ROW_H - scroll;
@@ -1075,54 +1099,82 @@ impl App {
             let picked = pal_picked.get(i).copied().unwrap_or(false);
             let current = i == sel;
             if current {
-                gfx.fill_round(row, 6.0, t.accent_soft);
+                gfx.fill_round(row, R_ROW, if focus { t.sel } else { t.sel_inactive });
             } else if picked {
-                gfx.fill_round(row, 6.0, alpha(t.accent, if t.dark { 0.12 } else { 0.07 }));
+                gfx.fill_round(row, R_ROW, alpha(t.accent, if t.dark { 0.12 } else { 0.07 }));
             } else if hover == Hit::PalRow(i) {
-                gfx.fill_round(row, 6.0, t.hover);
+                gfx.fill_round(row, R_ROW, sidebar::hover_fill(&t));
             }
             if t.high_contrast && (current || picked) {
-                gfx.stroke_round(row.inset(0.75, 0.75), 6.0, if current { t.focus } else { t.border }, 1.5);
+                gfx.stroke_round(row.inset(0.75, 0.75), R_ROW, if current { t.focus } else { t.border }, 1.5);
             }
             let text_r = if picked { row.r - 26.0 } else { row.r - 8.0 };
             if picked {
-                gfx.glyph(G_CHECK, R::new(row.r - 22.0, y, row.r - 8.0, y + PAL_ROW_H), true, t.accent);
+                gfx.glyph(G_CHECK, R::new(row.r - 22.0, y, row.r - 8.0, y + PAL_ROW_H), true, t.text);
             }
             let name = util::file_name(path);
             let ext = if *is_dir { String::new() } else { name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default() };
             let key = if *is_dir { "\\dir".to_string() } else { ext.clone() };
             let icon = types.entry(key).or_insert_with(|| shell::type_info(&ext, *is_dir)).1;
-            gfx.icon(icon, R::new(row.l + 10.0, y + 7.0, row.l + 26.0, y + 23.0));
-            let (font, fg) = if current && !t.high_contrast { (Font::Strong, t.chip_text) } else { (Font::Normal, t.text) };
-            gfx.text(name, R::new(row.l + 36.0, y + 5.0, text_r, y + 24.0), font, fg);
+            gfx.icon(icon, R::new(row.l + 10.0, y + 8.0, row.l + 26.0, y + 24.0));
+            let (font, fg) = (Font::Normal, if current && !t.high_contrast { t.sel_text } else { t.text });
+            gfx.text(name, R::new(row.l + 36.0, y + 6.0, text_r, y + 25.0), font, fg);
+            // 둘째 줄 오른쪽: 수정한 날짜(파일이면 크기도). 같은 이름이 여러 개면 최신본을 고르기 쉽게
+            // 좁은 패널에서 폴더 경로 자리가 120보다 좁아지면 크기는 빼고 날짜만
+            let (meta, mw) = match pal_meta.get(path) {
+                Some(Some((modified, size))) => {
+                    let date = if short_dates { crate::listing::format_time_short(*modified, now) } else { crate::listing::format_time(*modified) };
+                    let full = if *is_dir { date.clone() } else { format!("{date} · {}", format_size(*size)) };
+                    let fw = gfx.measure(&full, Font::Small);
+                    if text_r - (row.l + 36.0) - fw - 8.0 >= 120.0 {
+                        (full, fw)
+                    } else {
+                        let dw = gfx.measure(&date, Font::Small);
+                        (date, dw)
+                    }
+                }
+                _ => (String::new(), 0.0),
+            };
+            if mw > 0.0 {
+                gfx.text(&meta, R::new(text_r - mw, y + 25.0, text_r, y + 43.0), Font::Small, t.faint);
+            }
             // 같은 이름의 파일을 폴더로 구별할 수 있게 경로는 흐린 색이 아닌 보조 글자색으로 (넘치면 가운데를 줄인다)
             let parent = util::parent(path).unwrap_or_default();
-            gfx.text(&parent, R::new(row.l + 36.0, y + 24.0, text_r, y + 42.0), Font::Path, t.dim);
+            let path_r = if mw > 0.0 { text_r - mw - 8.0 } else { text_r };
+            gfx.text(&parent, R::new(row.l + 36.0, y + 25.0, path_r.max(row.l + 60.0), y + 43.0), Font::Path, t.dim);
         }
-        if stale {
+        if dim {
             gfx.fill(list, alpha(t.pane, 0.6));
         }
         gfx.unclip();
+        // 결과가 목록보다 길면 오른쪽 여백에 지금 위치 (보기만, 누르지는 않는다)
+        let content = pal_results.len() as f32 * PAL_ROW_H;
+        if content > list.h() + 0.5 {
+            let h = (list.h() * list.h() / content).max(24.0);
+            let top = list.t + (scroll / (content - list.h())).clamp(0.0, 1.0) * (list.h() - h);
+            gfx.fill_round(R::new(list.r + 2.0, top, list.r + 6.0, top + h), 2.0, t.thumb);
+        }
 
         // 아래: 결과 수 (왼쪽), 키 안내 (오른쪽, 자리가 있을 때)
         let foot = R::new(r.l + 18.0, r.b - S_FOOT_H, r.r - 12.0, r.b);
         gfx.fill(R::new(r.l + 8.0, foot.t, r.r - 8.0, foot.t + 1.0), t.border);
         let left = match &status {
-            _ if stale => "찾는 중…".to_string(),
-            PalStatus::Done { ready: false, .. } => format!("준비 중 · {}개 먼저", pal_results.len()),
+            _ if dim => "찾는 중…".to_string(),
+            PalStatus::Done { ready: false, .. } => format!("준비 중 · {}개 먼저", util::grouped(pal_results.len() as u64)),
             PalStatus::Done { total, failed, .. } => {
                 let shown = pal_results.len();
                 let skipped = if failed.is_empty() { String::new() } else { format!(" · {} 빠짐", drive_list(failed)) };
-                if *total > shown { format!("{total}개 중 {shown}개{skipped}") } else { format!("{shown}개 결과{skipped}") }
+                let (total_s, shown_s) = (util::grouped(*total as u64), util::grouped(shown as u64));
+                if *total > shown { format!("{total_s}개 중 {shown_s}개{skipped}") } else { format!("{shown_s}개 결과{skipped}") }
             }
             PalStatus::Searching => "찾는 중…".to_string(),
-            PalStatus::Ready(n) if folder_entries > 0 => format!("인덱스 {n}개 · 넣은 폴더 {folder_entries}개"),
-            PalStatus::Ready(n) => format!("인덱스 {n}개"),
+            PalStatus::Ready(n) if folder_entries > 0 => format!("인덱스 {}개 · 넣은 폴더 {}개", util::grouped(*n as u64), util::grouped(folder_entries as u64)),
+            PalStatus::Ready(n) => format!("인덱스 {}개", util::grouped(*n as u64)),
             _ => String::new(),
         };
         let left = if picks > 0 { format!("{picks}개 고름") } else { left };
         let lw = gfx.measure(&left, Font::Small);
-        gfx.text(&left, R::new(foot.l, foot.t, foot.l + lw + 2.0, foot.b), Font::Small, if picks > 0 { t.chip_text } else { t.faint });
+        gfx.text(&left, R::new(foot.l, foot.t, foot.l + lw + 2.0, foot.b), Font::Small, if picks > 0 { t.dim } else { t.faint });
         // 키 안내: 고른 게 있으면 Enter 모두 열기, 아니면 Ctrl+Enter 위치 열기
         let (keys, label): (Vec<&str>, &str) = if picks > 0 { (vec!["Enter"], "모두 열기") } else { (vec!["Ctrl+Enter"], "위치 열기") };
         let need = keys.iter().map(|k| gfx.measure(k, Font::Small) + 14.0).sum::<f32>() + gfx.measure(label, Font::Small) + 6.0;
@@ -1138,7 +1190,55 @@ impl App {
 }
 
 /// 키 모양 작은 칩. 오른쪽 끝 x를 돌려준다
-fn kbd(gfx: &Gfx, t: &Theme, x: f32, cy: f32, label: &str) -> f32 {
+/// 검색 결과 줄의 수정한 날짜·크기 (WM_APP_PALMETA)
+pub(super) struct PalMeta {
+    items: Vec<(String, Option<(u64, u64)>)>,
+}
+
+/// 보이는 결과 줄의 날짜·크기를 뒤에서 읽는다 (넣은 공유 폴더가 느려도 화면이 멈추지 않게)
+fn spawn_pal_meta(hwnd: HWND, paths: Vec<String>) {
+    let owner = shell::SendHwnd(hwnd);
+    std::thread::spawn(move || {
+        use std::os::windows::fs::MetadataExt;
+        let items = paths.into_iter().map(|p| {
+            let m = std::fs::metadata(&p).ok().map(|m| (m.last_write_time(), if m.is_dir() { 0 } else { m.file_size() }));
+            (p, m)
+        });
+        shell::post_box(owner.get(), crate::WM_APP_PALMETA, Box::new(PalMeta { items: items.collect() }));
+    });
+}
+
+impl App {
+    pub(super) fn on_pal_meta(&mut self, m: PalMeta) {
+        self.pal_meta_busy = false;
+        // 오래 쓰면 쌓이니 넉넉히 넘으면 비운다 (보이는 줄은 곧 다시 읽는다)
+        if self.pal_meta.len() > 4000 {
+            self.pal_meta.clear();
+            self.pal_meta_fresh.clear();
+        }
+        for (path, meta) in m.items {
+            self.pal_meta_fresh.insert(path.clone());
+            self.pal_meta.insert(path, meta);
+        }
+        self.invalidate();
+    }
+
+    /// 검색 패널에서 결과를 고르고 있으면 그 결과를 미리 볼 대상 (날짜·크기를 읽은 뒤)
+    pub(super) fn search_preview_pick(&mut self) -> Option<(String, String, bool, u64, u64, String, i32)> {
+        if !self.pal_focus || !self.pal_visible() || !self.pal_current() {
+            return None;
+        }
+        let (is_dir, path) = self.pal_results.get(self.pal_sel)?.clone();
+        let (modified, size) = (*self.pal_meta.get(&path)?)?;
+        let name = util::file_name(&path).to_string();
+        let ext = if is_dir { String::new() } else { name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default() };
+        let key = if is_dir { "\\dir".to_string() } else { ext.clone() };
+        let (type_name, icon) = self.types.entry(key).or_insert_with(|| shell::type_info(&ext, is_dir)).clone();
+        Some((path, name, is_dir, size, modified, type_name, icon))
+    }
+}
+
+pub(super) fn kbd(gfx: &Gfx, t: &Theme, x: f32, cy: f32, label: &str) -> f32 {
     let w = gfx.measure(label, Font::Small) + 10.0;
     let r = R::new(x, cy - 10.0, x + w, cy + 10.0);
     gfx.fill_round(r, 4.0, super::sidebar::well(t));
