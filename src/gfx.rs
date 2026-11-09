@@ -1,7 +1,9 @@
 //! Direct2D/DirectWrite 렌더링 래퍼. 좌표는 모두 DIP(96 DPI 기준) 단위
 
 use crate::theme::Color;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::mem::ManuallyDrop;
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND, RECT};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::*;
@@ -88,6 +90,8 @@ pub struct Gfx {
     sharp_params: Option<IDWriteRenderingParams>,
     /// 시스템 기본(부드럽게). 예전 방식 글자와 아이콘 글리프에 쓴다
     soft_params: Option<IDWriteRenderingParams>,
+    /// 페이드에 쓰는 레이어 (렌더 타깃마다 한 번 만든다)
+    layer: RefCell<Option<ID2D1Layer>>,
 }
 
 /// 글자 그리기 방식 (설정 → 화면 → 글자 표시)
@@ -163,6 +167,7 @@ impl Gfx {
                 text_look: TextLook::Gray,
                 sharp_params,
                 soft_params,
+                layer: RefCell::new(None),
             })
         }
     }
@@ -317,6 +322,7 @@ impl Gfx {
     }
 
     pub fn discard(&mut self) {
+        *self.layer.get_mut() = None;
         self.icons.clear();
         self.thumbs.clear();
         self.brush = None;
@@ -453,6 +459,36 @@ impl Gfx {
                 return 0.0;
             }
             m.widthIncludingTrailingWhitespace
+        }
+    }
+
+    /// 이어서 그리는 것을 투명도 opacity로 겹치고 (dx, dy)만큼 옮긴다. true를 받았으면 pop_fade로 닫는다
+    pub fn push_fade(&self, opacity: f32, dx: f32, dy: f32) -> bool {
+        let mut layer = self.layer.borrow_mut();
+        if layer.is_none() {
+            *layer = unsafe { self.rt().CreateLayer(None) }.ok();
+        }
+        let Some(l) = layer.as_ref() else { return false };
+        let params = D2D1_LAYER_PARAMETERS {
+            contentBounds: D2D_RECT_F { left: -1.0e6, top: -1.0e6, right: 1.0e6, bottom: 1.0e6 },
+            geometricMask: ManuallyDrop::new(None),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: windows_numerics::Matrix3x2::identity(),
+            opacity: opacity.clamp(0.0, 1.0),
+            opacityBrush: ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS_NONE,
+        };
+        unsafe {
+            self.rt().PushLayer(&params, l);
+            self.rt().SetTransform(&windows_numerics::Matrix3x2::translation(dx, dy));
+        }
+        true
+    }
+
+    pub fn pop_fade(&self) {
+        unsafe {
+            self.rt().SetTransform(&windows_numerics::Matrix3x2::identity());
+            self.rt().PopLayer();
         }
     }
 

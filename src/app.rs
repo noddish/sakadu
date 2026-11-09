@@ -83,6 +83,9 @@ const TIMER_TIP: usize = 42;
 /// 칸 아래 알림(flash)을 지우기까지
 const TIMER_FLASH: usize = 44;
 const FLASH_MS: u32 = 5000;
+/// 되돌리기 단추가 달린 알림은 조금 더 오래 (누를 시간)
+const UNDO_TOAST_MS: u32 = 7000;
+const TOAST_UNDO: &str = "되돌리기";
 /// 이미 있는 즐겨찾기를 다시 넣으려 할 때 그 줄을 잠깐 강조하는 시간
 const TIMER_FAV_FLASH: usize = 45;
 
@@ -165,6 +168,10 @@ enum Hit {
     Track(usize),
     /// 칩 줄 필터 칩의 × (필터 지우기)
     FilterClear(usize),
+    /// 칸 아래쪽 알림 (누르면 아무 일도 없다: 그 아래 줄을 누르지 않게)
+    Toast(usize),
+    /// 알림의 되돌리기 단추
+    ToastUndo(usize),
     Pane(usize),
     /// 왼쪽 패널 안의 줄·단추 (즐겨찾기·드라이브·검색 폴더)
     Side(Side),
@@ -487,6 +494,13 @@ pub struct App {
     key_repeat: bool,
     /// 패널이 펼쳐지기 시작한 때 (움직이는 중일 때만)
     side_anim: Option<std::time::Instant>,
+    /// 되돌리기 단추가 달린 알림: (칸, 알릴 때의 되돌리기 기록 수). 그 뒤로 기록이 바뀌면 단추를 감춘다
+    toast_undo: Option<(usize, usize)>,
+    wheel: Option<Wheel>,
+    /// 페이드가 시작된 때: 말풍선·정보 카드, 알림, 보기 메뉴
+    tip_at: Option<std::time::Instant>,
+    toast_at: Option<std::time::Instant>,
+    view_menu_at: Option<std::time::Instant>,
     /// 패널 머리의 작은 단추를 마지막으로 그렸는지. 그려지지 않은 단추는 누르지 않는다 (터치로 탭하면 보이기 전에 눌리므로)
     side_minis_shown: bool,
     /// 단추 말풍선이 떠 있는지
@@ -1035,6 +1049,28 @@ const TIMER_LOADING: usize = 51;
 const LOADING_SHOW_MS: u128 = 300;
 /// 잠시 뒤 한 번 다시 그린다 (빨리 끝나면 보이지 않을 '불러오는 중…'·흐림을 늦게 보일 때)
 const TIMER_REDRAW: usize = 52;
+/// 휠 스크롤을 목표 자리까지 부드럽게 옮긴다
+const TIMER_WHEEL: usize = 53;
+/// 페이드가 도는 동안 다시 그린다
+const TIMER_ANIM: usize = 54;
+const TIP_FADE_MS: f32 = 140.0;
+const TOAST_FADE_MS: f32 = 200.0;
+const MENU_FADE_MS: f32 = 160.0;
+
+/// 휠로 움직이는 중인 목록: 칸, 탭, 목표 스크롤, 마지막으로 놓은 스크롤 (다른 곳에서 스크롤을 바꾸면 멈춘다)
+#[derive(Clone, Copy)]
+struct Wheel {
+    pane: usize,
+    tab: u64,
+    target: f32,
+    last: f32,
+}
+
+/// 페이드 진행 (0→1, 빠르게 시작해 천천히 멈춘다). 시작하지 않았거나 끝났으면 None
+fn anim_progress(at: Option<std::time::Instant>, ms: f32) -> Option<f32> {
+    let p = at?.elapsed().as_secs_f32() * 1000.0 / ms;
+    (p < 1.0).then(|| 1.0 - (1.0 - p).powi(3))
+}
 
 fn default_locations() -> [Location; 4] {
     let known = |id| shell::known_folder(id).map(Location::Dir).unwrap_or(Location::Computer);
@@ -1304,6 +1340,11 @@ impl App {
             workspaces: crate::workspaces::load(),
             folded: Fold::ALL.map(|f| sess.as_ref().is_some_and(|s| s.folded.iter().any(|k| k == f.key()))),
             side_anim: None,
+            toast_undo: None,
+            wheel: None,
+            tip_at: None,
+            toast_at: None,
+            view_menu_at: None,
             side_minis_shown: false,
             ws_restore: false,
             closed_tabs: Vec::new(),
@@ -1652,6 +1693,16 @@ impl App {
         }
         if let Some(h) = self.view_menu_hit(x, y) {
             return h;
+        }
+        for (p, _) in self.pane_rects() {
+            if let Some((pill, btn)) = self.toast_rects(p) {
+                if btn.is_some_and(|b| b.contains(x, y)) {
+                    return Hit::ToastUndo(p);
+                }
+                if pill.contains(x, y) {
+                    return Hit::Toast(p);
+                }
+            }
         }
         // 패널은 칸보다 위에 있다 (떠 있을 때 그 아래 칸을 누르지 않게)
         if self.side_panel_rect().is_some_and(|r| r.contains(x, y)) {
@@ -2854,12 +2905,55 @@ impl App {
 
     /// 칸 아래쪽에 잠깐 알림을 띄운다 (몇 초 뒤 사라진다)
     fn flash(&mut self, p: usize, msg: impl Into<String>) {
+        self.toast_undo = None;
         self.panes[p].tab_mut().message = Some(msg.into());
+        self.start_anim(|a| &mut a.toast_at);
         unsafe { SetTimer(Some(self.hwnd), TIMER_FLASH, FLASH_MS, None) };
         self.invalidate();
     }
 
+    /// 페이드를 시작한다 (Windows에서 애니메이션을 끄면 하지 않는다)
+    fn start_anim(&mut self, at: fn(&mut App) -> &mut Option<std::time::Instant>) {
+        *at(self) = sidebar::motion_on().then(std::time::Instant::now);
+        if at(self).is_some() {
+            unsafe { SetTimer(Some(self.hwnd), TIMER_ANIM, 15, None) };
+        }
+    }
+
+    fn anims_running(&self) -> bool {
+        anim_progress(self.tip_at, TIP_FADE_MS).is_some() || anim_progress(self.toast_at, TOAST_FADE_MS).is_some() || anim_progress(self.view_menu_at, MENU_FADE_MS).is_some()
+    }
+
+    /// 휠 한 걸음: 목표 자리 쪽으로 남은 거리의 35%씩 (0.2초쯤에 닿는다)
+    fn on_wheel_timer(&mut self) {
+        let Some(w) = self.wheel else {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_WHEEL);
+            }
+            return;
+        };
+        let alive = w.pane < self.layout.count() && self.panes[w.pane].tab().id == w.tab && (self.panes[w.pane].tab().scroll - w.last).abs() < 0.5;
+        let mut done = !alive;
+        if alive {
+            let cur = self.panes[w.pane].tab().scroll;
+            let next = if (w.target - cur).abs() < 1.0 { w.target } else { cur + (w.target - cur) * 0.35 };
+            self.panes[w.pane].tab_mut().scroll = next;
+            self.clamp_scroll(w.pane);
+            let now = self.panes[w.pane].tab().scroll;
+            done = (now - w.target).abs() < 0.5 || (now - cur).abs() < 0.01;
+            self.wheel = Some(Wheel { last: now, ..w });
+            self.invalidate();
+        }
+        if done {
+            self.wheel = None;
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_WHEEL);
+            }
+        }
+    }
+
     fn clear_flash(&mut self) {
+        self.toast_undo = None;
         for pane in &mut self.panes {
             for tab in &mut pane.tabs {
                 tab.message = None;
@@ -3034,7 +3128,15 @@ impl App {
 
     fn on_file_op(&mut self, r: shell::OpReport) {
         if let Some(u) = r.undo {
+            // 옮기기·복사·휴지통: 무엇을 했는지와 되돌리기 단추를 알림으로 (Ctrl+Z와 같은 기록을 쓴다)
+            let text = u.done_text();
             self.push_undo(u);
+            if let Some(text) = text {
+                let p = self.active;
+                self.flash(p, text);
+                self.toast_undo = Some((p, self.undo.len()));
+                unsafe { SetTimer(Some(self.hwnd), TIMER_FLASH, UNDO_TOAST_MS, None) };
+            }
         }
         if let Some(o) = r.undone {
             self.on_undone(o);
@@ -3067,6 +3169,34 @@ impl App {
             (n, false) => format!("{n}개를 되돌리지 못했어요({key}로 다시 시도) · {changed}"),
         };
         self.flash(self.active, msg);
+    }
+
+    /// 알림의 되돌리기: 알린 뒤로 다른 작업·되돌리기가 없었을 때만 (그 작업이 기록 맨 위에 있다)
+    fn toast_undo_click(&mut self, p: usize) {
+        let ours = self.toast_undo.is_some_and(|(tp, n)| tp == p && n == self.undo.len());
+        self.panes[p].tab_mut().message = None;
+        self.toast_undo = None;
+        if ours {
+            self.undo_last();
+        }
+        self.invalidate();
+    }
+
+    /// 칸 p의 알림 자리: (알약, 되돌리기 단추)
+    fn toast_rects(&self, p: usize) -> Option<(R, Option<R>)> {
+        let r = self.pane_rect(p)?;
+        let m = self.panes[p].tab().message.as_ref()?;
+        let g = &self.gfx;
+        let list = geom(r).list;
+        let undo = self.toast_undo.is_some_and(|(tp, n)| tp == p && n == self.undo.len());
+        let bw = if undo { g.measure(TOAST_UNDO, Font::Normal) + 24.0 } else { 0.0 };
+        let extra = if undo { bw + 8.0 } else { 0.0 };
+        let tw = g.measure(m, Font::Normal).min((r.w() - 80.0 - extra).max(40.0));
+        let cx = (r.l + r.r) / 2.0;
+        let w = tw + 30.0 + extra;
+        let pill = R::new(cx - w / 2.0, list.b - 52.0, cx + w / 2.0, list.b - 16.0);
+        let btn = undo.then(|| R::new(pill.r - 6.0 - bw, pill.t + 5.0, pill.r - 6.0, pill.b - 5.0));
+        Some((pill, btn))
     }
 
     /// 잘라내기 붙여넣기가 끝나면 클립보드를 정리한다. 다 옮겼으면 비우고, 남은 파일이 있으면 그것만 다시 잘라 둔다.
@@ -3459,6 +3589,9 @@ impl App {
                         let busy = (0..self.layout.count()).any(|p| self.panes[p].tab().loading_since.is_some());
                         if !busy {
                             let _ = KillTimer(Some(hwnd), id);
+                        } else if sidebar::motion_on() {
+                            // 로딩 막대가 움직이도록 자주 다시 그린다
+                            SetTimer(Some(hwnd), id, 32, None);
                         }
                         self.refresh_cursor();
                         self.invalidate();
@@ -3475,7 +3608,15 @@ impl App {
                         }
                     } else if id == TIMER_TIP {
                         let _ = KillTimer(Some(hwnd), id);
+                        self.start_anim(|a| &mut a.tip_at);
                         self.tip_shown = true;
+                        self.invalidate();
+                    } else if id == TIMER_WHEEL {
+                        self.on_wheel_timer();
+                    } else if id == TIMER_ANIM {
+                        if !self.anims_running() {
+                            let _ = KillTimer(Some(hwnd), id);
+                        }
                         self.invalidate();
                     } else if id == TIMER_BAR_HOVER {
                         self.on_bar_hover_timer();
@@ -3644,6 +3785,16 @@ impl App {
             Drag::None => {
                 let h = self.hit(x, y);
                 if h != self.hover {
+                    let on_toast = |h: Hit| matches!(h, Hit::Toast(_) | Hit::ToastUndo(_));
+                    match (on_toast(self.hover), on_toast(h)) {
+                        (false, true) => unsafe {
+                            let _ = KillTimer(Some(self.hwnd), TIMER_FLASH);
+                        },
+                        (true, false) => unsafe {
+                            SetTimer(Some(self.hwnd), TIMER_FLASH, 3000, None);
+                        },
+                        _ => {}
+                    }
                     self.hover = h;
                     self.view_menu_hover(h);
                     self.update_tip();
@@ -3897,6 +4048,8 @@ impl App {
                 capture(self, Drag::MarqueeArm { pane: p, x, y, additive: ctrl });
             }
             Hit::FilterClear(_) => self.clear_filter(),
+            Hit::ToastUndo(p) => self.toast_undo_click(p),
+            Hit::Toast(_) => {}
             // 한 번 누르면 연다 (Ctrl이면 새 탭에서)
             Hit::Start(p, _) if !dbl => {
                 if let Some(loc) = start_target {
@@ -4097,7 +4250,24 @@ impl App {
             Some((_, g)) if matches!(g.cell, CellKind::Tile(_)) => g.cell_h,
             _ => self.wheel_lines * ROW_H,
         };
-        self.scroll_by(p, -delta / 120.0 * step);
+        let dy = -delta / 120.0 * step;
+        if !sidebar::motion_on() || self.edit_mode == EditMode::Rename(p) {
+            self.wheel = None;
+            return self.scroll_by(p, dy);
+        }
+        let (id, cur) = (self.panes[p].tab().id, self.panes[p].tab().scroll);
+        let base = match self.wheel {
+            Some(w) if w.pane == p && w.tab == id && (w.last - cur).abs() < 0.5 => w.target,
+            _ => cur,
+        };
+        // 목표도 목록 끝을 넘지 않게 (clamp_scroll로 잰다)
+        self.panes[p].tab_mut().scroll = base + dy;
+        self.clamp_scroll(p);
+        let target = self.panes[p].tab().scroll;
+        self.panes[p].tab_mut().scroll = cur;
+        self.wheel = Some(Wheel { pane: p, tab: id, target, last: cur });
+        unsafe { SetTimer(Some(self.hwnd), TIMER_WHEEL, 15, None) };
+        self.on_wheel_timer();
     }
 
     /// 마우스가 칸 위에 그대로 있을 때도 커서 모양(기다림 표시)을 지금 상태로 맞춘다
@@ -4463,12 +4633,9 @@ impl App {
     fn paint_toasts(&self) {
         let t = self.theme;
         let g = &self.gfx;
-        for (p, r) in self.pane_rects() {
-            let Some(m) = &self.panes[p].tab().message else { continue };
-            let list = geom(r).list;
-            let tw = g.measure(m, Font::Normal).min((r.w() - 80.0).max(40.0));
-            let cx = (r.l + r.r) / 2.0;
-            let tr = R::new(cx - tw / 2.0 - 16.0, list.b - 52.0, cx + tw / 2.0 + 16.0, list.b - 16.0);
+        for (p, _) in self.pane_rects() {
+            let (Some(m), Some((tr, btn))) = (&self.panes[p].tab().message, self.toast_rects(p)) else { continue };
+            let pushed = anim_progress(self.toast_at, TOAST_FADE_MS).is_some_and(|f| g.push_fade(f, 0.0, (1.0 - f) * 8.0));
             let (bg, fg) = if t.high_contrast {
                 (t.sel, t.sel_text)
             } else if t.dark {
@@ -4476,12 +4643,24 @@ impl App {
             } else {
                 (Color { r: 0.12, g: 0.14, b: 0.16, a: 1.0 }, Color { r: 0.95, g: 0.95, b: 0.96, a: 1.0 })
             };
-            g.fill_round(R::new(tr.l - 1.0, tr.t + 2.0, tr.r + 1.0, tr.b + 5.0), 12.0, Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.35 } else { 0.12 } });
-            g.fill_round(tr, 10.0, bg);
-            if t.high_contrast {
-                g.stroke_round(tr.inset(0.5, 0.5), 10.0, t.border, 1.0);
+            let radius = tr.h() / 2.0;
+            if !t.high_contrast {
+                soft_shadow(g, tr, radius, 10.0, 0.18, t.dark);
             }
-            g.text(m, R::new(tr.l + 16.0, tr.t, tr.r - 14.0, tr.b), Font::Normal, fg);
+            g.fill_round(tr, radius, bg);
+            if t.high_contrast {
+                g.stroke_round(tr.inset(0.5, 0.5), radius, t.border, 1.0);
+            }
+            g.text(m, R::new(tr.l + 16.0, tr.t, btn.map_or(tr.r - 14.0, |b| b.l - 8.0), tr.b), Font::Normal, fg);
+            if let Some(b) = btn {
+                let hot = self.hover == Hit::ToastUndo(p);
+                g.fill_round(b, b.h() / 2.0, alpha(fg, if hot { 0.26 } else { 0.14 }));
+                let w = g.measure(TOAST_UNDO, Font::Normal);
+                g.text(TOAST_UNDO, R::new(b.l + (b.w() - w) / 2.0, b.t, b.r, b.b), Font::Normal, fg);
+            }
+            if pushed {
+                g.pop_fade();
+            }
         }
     }
 
@@ -4599,6 +4778,11 @@ impl App {
             _ if t.dark => (Color { r: 0.24, g: 0.25, b: 0.27, a: 1.0 }, t.text),
             _ => (t.text, Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
         };
+        let fade = anim_progress(self.tip_at, TIP_FADE_MS);
+        let pushed = fade.is_some_and(|f| {
+            let off = (1.0 - f) * 4.0;
+            if b.r <= BAR_W { self.gfx.push_fade(f, -off, 0.0) } else { self.gfx.push_fade(f, 0.0, -off) }
+        });
         if !t.high_contrast {
             soft_shadow(&self.gfx, r, R_CTRL, 8.0, 0.14, t.dark);
         }
@@ -4611,6 +4795,9 @@ impl App {
             let kr = R::new(r.r - 10.0 - (key_w - 8.0), r.t + 4.0, r.r - 10.0, r.b - 4.0);
             self.gfx.fill_round(kr, 4.0, alpha(fg, 0.16));
             self.gfx.text(k, R::new(kr.l + 5.0, kr.t, kr.r, kr.b), Font::Small, fg);
+        }
+        if pushed {
+            self.gfx.pop_fade();
         }
     }
 
@@ -4656,6 +4843,7 @@ impl App {
         let start_focus = (keyboard_here && self.start_keys).then(|| self.panes[p].tab().cursor);
         // 목록의 수정한 날짜를 짧게(오늘·어제) 쓸지와 그 기준 시각
         let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
+        let motion = sidebar::motion_on();
         let App { gfx, panes, types, thumb_failed, places, .. } = self;
         let pane = &panes[p];
         let tab = pane.tab();
@@ -5037,6 +5225,16 @@ impl App {
             gfx.clip(g.list);
             gfx.fill(m, alpha(t.accent, 0.15));
             gfx.stroke_round(m.inset(0.5, 0.5), 1.0, t.accent, 1.0);
+            gfx.unclip();
+        }
+
+        // 늦게 읽히는 폴더: 머리글 아래를 오가는 가는 막대 (0.3초 안에 끝나면 보이지 않는다, 애니메이션을 끄면 글자만)
+        if let Some(ms) = tab.loading_since.map(|s| s.elapsed().as_millis()).filter(|ms| *ms >= LOADING_SHOW_MS && motion) {
+            let track = R::new(g.list.l + 8.0, g.header.b - 2.0, g.list.r - SCROLL_W - 6.0, g.header.b);
+            let seg = track.w() * 0.3;
+            let x = track.l - seg + (track.w() + seg) * ((ms % 1400) as f32 / 1400.0);
+            gfx.clip(track);
+            gfx.fill_round(R::new(x, track.t, x + seg, track.b), 1.0, t.accent);
             gfx.unclip();
         }
 

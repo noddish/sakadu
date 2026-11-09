@@ -172,6 +172,13 @@ pub(super) fn well(t: &Theme) -> Color {
     if t.high_contrast { t.window } else { t.sel_inactive }
 }
 
+/// Windows 설정의 "애니메이션 효과"가 켜져 있는지 (끄면 움직임 없이 바로 보인다)
+pub(super) fn motion_on() -> bool {
+    let mut on = BOOL(1);
+    let read = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut BOOL as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
+    read.is_err() || on.as_bool()
+}
+
 /// 고르기 판(칸 나누기, 검색 범위, 설정의 고르기)의 들어간 바탕. 어두운 테마는 바탕보다 어둡게 겹친다
 pub(super) fn seg_track(t: &Theme) -> Color {
     if t.high_contrast {
@@ -853,9 +860,7 @@ impl App {
 
     /// 패널이 새로 열렸다: 막대 쪽에서 펼쳐지게 한다 (검색 패널은 입력 상자가 함께 움직이지 못해 바로 연다)
     fn start_side_anim(&mut self) {
-        let mut on = BOOL(1);
-        let read = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut BOOL as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
-        if read.is_ok() && !on.as_bool() {
+        if !motion_on() {
             self.side_anim = None;
             return;
         }
@@ -908,7 +913,9 @@ impl App {
         let top = row.t.min(self.h - MARGIN - h).max(WORKBAR_H);
         let r = R::new(l, top, l + w, top + h);
         let scale = self.scale();
+        let fade = super::anim_progress(self.tip_at, super::TIP_FADE_MS);
         let App { gfx: g, thumb_failed, .. } = self;
+        let pushed = fade.is_some_and(|f| g.push_fade(f, -(1.0 - f) * 6.0, 0.0));
         if !t.high_contrast {
             super::soft_shadow(g, r, 10.0, 14.0, 0.14, t.dark);
         }
@@ -928,6 +935,9 @@ impl App {
                     missing.push(crate::thumbs::Request { key, path: f.path.clone(), px });
                 }
             }
+        }
+        if pushed {
+            g.pop_fade();
         }
     }
 
@@ -994,11 +1004,13 @@ impl App {
     pub(super) fn paint_sidebar(&mut self) {
         self.side_minis_shown = false;
         match (self.side_open_progress(), self.side_panel_rect()) {
-            (Some(f), Some(pr)) => {
-                // 그림자까지 들어가게 조금 넉넉히
-                let w = (pr.w() + 24.0) * f;
-                self.gfx.clip(R::new(BAR_W, 0.0, BAR_W + w, self.h));
+            (Some(f), Some(_)) => {
+                self.gfx.clip(R::new(BAR_W, 0.0, self.w, self.h));
+                let pushed = self.gfx.push_fade(f, -(1.0 - f) * 12.0, 0.0);
                 self.paint_side_panel();
+                if pushed {
+                    self.gfx.pop_fade();
+                }
                 self.gfx.unclip();
             }
             _ => self.paint_side_panel(),
