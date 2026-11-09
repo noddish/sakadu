@@ -343,28 +343,45 @@ fn serve(shared: Arc<Shared>) {
     let sa = pipe_security();
     let name = HSTRING::from(PIPE_NAME);
     let mut req = vec![0u8; 64 * 1024];
+    // 통로는 처음 한 번만 첫 인스턴스(최대 1개)로 만들고, 요청마다 끊고 다시 받으며 계속 쓴다.
+    // 다른 프로세스가 이 이름을 먼저 잡고 있으면 만들기가 실패해 남이 만든 통로에 끼지 않고(앱도 서버를 확인한다),
+    // 최대 1개라 누구도 두 번째 인스턴스를 만들지 못한다. 요청마다 닫고 다시 만들면 앱이 아직 핸들을 쥐고 있는 동안
+    // 첫 인스턴스를 만들지 못해 검색이 멈췄다
+    let mut owned: Option<PipeHandle> = None;
     while !STOP.load(Ordering::SeqCst) {
-        // 통로는 한 번에 하나만 열고 닫으므로 늘 첫 인스턴스로 만든다. 다른 프로세스가 이 이름을 먼저 잡고 있으면
-        // 만들기가 실패해, 남이 만든 통로에 끼어 답하지 않는다 (앱도 서버가 이 서비스인지 확인한다)
-        let pipe = unsafe {
-            CreateNamedPipeW(
-                &name,
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                PIPE_UNLIMITED_INSTANCES,
-                4 << 20,
-                64 * 1024,
-                0,
-                sa.as_ref().map(|s| s as *const _),
-            )
+        let pipe = match &owned {
+            Some(p) => p.0,
+            None => {
+                let h = unsafe {
+                    CreateNamedPipeW(
+                        &name,
+                        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                        1,
+                        4 << 20,
+                        64 * 1024,
+                        0,
+                        sa.as_ref().map(|s| s as *const _),
+                    )
+                };
+                if h.is_invalid() {
+                    diag::log(|| "pipe: CreateNamedPipe failed".to_string());
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                }
+                owned = Some(PipeHandle(h));
+                h
+            }
         };
-        if pipe.is_invalid() {
-            diag::log(|| "pipe: CreateNamedPipe failed".to_string());
-            std::thread::sleep(std::time::Duration::from_secs(1));
+        let connected = unsafe { ConnectNamedPipe(pipe, None) };
+        let gone = connected.as_ref().err().is_some_and(|e| e.code() == ERROR_NO_DATA.to_hresult());
+        if !gone && connected.as_ref().err().is_some_and(|e| e.code() != ERROR_PIPE_CONNECTED.to_hresult()) {
+            // 통로가 망가졌다: 닫고 다시 만든다
+            diag::log(|| format!("pipe: ConnectNamedPipe failed ({:?}), recreating", connected.as_ref().err()));
+            owned = None;
             continue;
         }
-        let connected = unsafe { ConnectNamedPipe(pipe, None) };
-        if connected.is_ok() || connected.as_ref().err().is_some_and(|e| e.code() == ERROR_PIPE_CONNECTED.to_hresult()) {
+        if !gone {
             let mut got = 0u32;
             if unsafe { ReadFile(pipe, Some(&mut req), Some(&mut got), None) }.is_ok() && !STOP.load(Ordering::SeqCst) {
                 let text = String::from_utf8_lossy(&req[..got as usize]).into_owned();
@@ -387,12 +404,10 @@ fn serve(shared: Arc<Shared>) {
                     });
                 }
             }
-            unsafe {
-                let _ = DisconnectNamedPipe(pipe);
-            }
         }
+        // 앱이 아직 핸들을 쥐고 있어도 끊으면 다음 앱을 받을 수 있다
         unsafe {
-            let _ = CloseHandle(pipe);
+            let _ = DisconnectNamedPipe(pipe);
         }
     }
 }
@@ -429,8 +444,8 @@ unsafe extern "system" fn control_handler(control: u32, _event: u32, _data: *mut
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             STOP.store(true, Ordering::SeqCst);
             set_status(SERVICE_STOP_PENDING, 0);
-            // ConnectNamedPipe에서 기다리는 서버를 깨운다
-            let _ = query_raw("S");
+            // ConnectNamedPipe에서 기다리는 서버를 깨운다 (자기 통로라 서버 확인은 하지 않는다)
+            let _ = transact(PIPE_NAME, b"S", false);
             NO_ERROR.0
         }
         SERVICE_CONTROL_INTERROGATE => NO_ERROR.0,
@@ -764,6 +779,49 @@ mod tests {
         let resp = transact(&name, b"S", false).expect("transact");
         t.join().unwrap();
         assert_eq!(resp, "OK\tS");
+        drop(server);
+    }
+
+    /// 서비스가 쓰는 방식: 최대 1개인 첫 인스턴스를 끊고 다시 받으며 쓴다. 앞 앱이 핸들을 쥐고 있어도 다음 앱이 바로 붙고,
+    /// 그동안 누구도 같은 이름의 인스턴스를 더 만들지 못한다
+    #[test]
+    fn single_instance_serves_next_client_while_previous_holds_handle() {
+        let name = format!("\\\\.\\pipe\\SakaduTest1-{}", std::process::id());
+        let sa = pipe_security().expect("security descriptor");
+        let h = HSTRING::from(name.as_str());
+        let mode = PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
+        let server = unsafe { CreateNamedPipeW(&h, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, mode, 1, 4096, 4096, 0, Some(&sa)) };
+        assert!(!server.is_invalid());
+        let extra = unsafe { CreateNamedPipeW(&h, PIPE_ACCESS_DUPLEX, mode, 1, 4096, 4096, 0, Some(&sa)) };
+        assert!(extra.is_invalid(), "a second instance must not be possible");
+        let server = PipeHandle(server);
+        let raw = server.0.0 as usize;
+        let t = std::thread::spawn(move || unsafe {
+            let p = HANDLE(raw as *mut c_void);
+            for _ in 0..2 {
+                let _ = ConnectNamedPipe(p, None);
+                let mut buf = [0u8; 64];
+                let mut got = 0u32;
+                let _ = ReadFile(p, Some(&mut buf), Some(&mut got), None);
+                let _ = WriteFile(p, Some(&buf[..got as usize]), None, None);
+                let _ = FlushFileBuffers(p);
+                let _ = DisconnectNamedPipe(p);
+            }
+        });
+        // 첫 앱은 답을 받은 뒤에도 핸들을 쥐고 있다
+        let first = unsafe { CreateFileW(&h, CLIENT_PIPE_ACCESS, FILE_SHARE_NONE, None, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, None) }.expect("first client");
+        let first = PipeHandle(first);
+        let pmode = PIPE_READMODE_MESSAGE;
+        unsafe { SetNamedPipeHandleState(first.0, Some(&pmode), None, None) }.unwrap();
+        let mut out = [0u8; 64];
+        let mut read = 0u32;
+        unsafe { TransactNamedPipe(first.0, Some(b"one".as_ptr() as *const c_void), 3, Some(out.as_mut_ptr() as *mut c_void), 64, &mut read, None) }.unwrap();
+        assert_eq!(&out[..read as usize], b"one");
+        let started = std::time::Instant::now();
+        assert_eq!(transact(&name, b"two", false).expect("second client"), "two");
+        assert!(started.elapsed() < std::time::Duration::from_millis(900), "second client waited {:?}", started.elapsed());
+        t.join().unwrap();
+        drop(first);
         drop(server);
     }
 
