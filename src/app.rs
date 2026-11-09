@@ -1033,6 +1033,8 @@ const TIMER_PROBE: usize = 50;
 const TIMER_LOADING: usize = 51;
 /// 폴더 읽기가 이보다 오래 걸리면 목록 자리에 기다린다는 글을 보인다
 const LOADING_SHOW_MS: u128 = 300;
+/// 잠시 뒤 한 번 다시 그린다 (빨리 끝나면 보이지 않을 '불러오는 중…'·흐림을 늦게 보일 때)
+const TIMER_REDRAW: usize = 52;
 
 fn default_locations() -> [Location; 4] {
     let known = |id| shell::known_folder(id).map(Location::Dir).unwrap_or(Location::Computer);
@@ -1574,9 +1576,9 @@ impl App {
                 let (sel, bytes) = tab.selection_stats();
                 let n = tab.view.len();
                 match (sel, bytes) {
-                    (0, _) => format!("{n}개"),
-                    (s, 0) => format!("{n}개 중 {s}개 선택"),
-                    (s, b) => format!("{n}개 중 {s}개 선택 · {}", format_size(b)),
+                    (0, _) => format!("{}개", util::grouped(n as u64)),
+                    (s, 0) => format!("{}개 중 {}개 선택", util::grouped(n as u64), util::grouped(s as u64)),
+                    (s, b) => format!("{}개 중 {}개 선택 · {}", util::grouped(n as u64), util::grouped(s as u64), format_size(b)),
                 }
             }
         }
@@ -1625,16 +1627,16 @@ impl App {
         }
         let tab = self.panes[p].tab();
         match tab.selection_stats().0 {
-            0 => format!("{}개", tab.view.len()),
-            s => format!("{s}/{}개", tab.view.len()),
+            0 => format!("{}개", util::grouped(tab.view.len() as u64)),
+            s => format!("{}/{}개", util::grouped(s as u64), util::grouped(tab.view.len() as u64)),
         }
     }
 
     /// 필터 칩 안: (입력 상자 자리, 개수 글자 자리, × 단추).
-    /// 개수 자리는 "0000개"만큼은 늘 잡아 둬, 개수가 바뀌어도 입력 상자(자식 창)가 개수를 덮지 않게 한다
+    /// 개수 자리는 "0,000개"만큼은 늘 잡아 둬, 개수가 바뀌어도 입력 상자(자식 창)가 개수를 덮지 않게 한다
     fn filter_parts(&self, p: usize, chip: R) -> (R, R, R) {
         let n = self.filter_count_text(p);
-        let nw = self.gfx.measure(&n, Font::Small).max(self.gfx.measure("0000개", Font::Small));
+        let nw = self.gfx.measure(&n, Font::Small).max(self.gfx.measure("0,000개", Font::Small));
         let clear = R::new(chip.r - 24.0, chip.t + 4.0, chip.r - 4.0, chip.b - 4.0);
         let count = R::new(clear.l - 4.0 - nw, chip.t, clear.l - 4.0, chip.b);
         let edit = R::new(chip.l + 28.0, chip.t, (count.l - 6.0).max(chip.l + 60.0), chip.b);
@@ -3449,6 +3451,9 @@ impl App {
                         self.start_preview();
                     } else if id == TIMER_PROBE {
                         self.on_probe_timer();
+                    } else if id == TIMER_REDRAW {
+                        let _ = KillTimer(Some(hwnd), id);
+                        self.invalidate();
                     } else if id == TIMER_LOADING {
                         // 읽는 중인 탭이 남아 있는 동안만 다시 그려 "불러오는 중…"을 띄운다
                         let busy = (0..self.layout.count()).any(|p| self.panes[p].tab().loading_since.is_some());

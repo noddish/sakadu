@@ -105,9 +105,30 @@ pub fn name_problem(name: &str) -> Option<String> {
     None
 }
 
+/// 천 단위 쉼표 (12345 → "12,345")
+pub fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_puts_commas_every_three_digits() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1000), "1,000");
+        assert_eq!(grouped(1234567), "1,234,567");
+    }
 
     /// 쓸 수 없는 문자와 Windows 예약 이름은 막고, 비슷하지만 괜찮은 이름은 통과시킨다
     #[test]

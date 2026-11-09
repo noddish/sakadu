@@ -985,8 +985,14 @@ impl App {
         let folder_entries = self.folders.entry_count();
         let picks = self.pal_pick_count();
         let help = self.keys.get(crate::keys::Action::Help).map(crate::keys::Combo::label);
-        // 입력을 바꿨는데 새 결과가 아직이면 이전 결과는 흐리게 (열거나 복사할 수 없음)
+        // 입력을 바꿨는데 새 결과가 아직이면 이전 결과는 흐리게 (열거나 복사할 수 없음).
+        // 결과가 곧(0.15초 안에) 오면 흐리게 하지 않는다: 치는 동안 목록이 깜빡이지 않게
         let stale = !self.pal_current() && !self.pal_results.is_empty();
+        let stale_wait = self.pal_gate.typed.filter(|_| stale).map(|t| 150u128.saturating_sub(t.elapsed().as_millis())).filter(|ms| *ms > 0);
+        if let Some(ms) = stale_wait {
+            unsafe { SetTimer(Some(self.hwnd), TIMER_REDRAW, ms as u32, None) };
+        }
+        let dim = stale && stale_wait.is_none();
         if crate::diag::enabled() && matches!(status, PalStatus::Done { .. }) {
             let key = self.pal_key_now();
             if let Some(d) = self.pal_gate.shown_after_typing(&key) {
@@ -1100,7 +1106,7 @@ impl App {
             let parent = util::parent(path).unwrap_or_default();
             gfx.text(&parent, R::new(row.l + 36.0, y + 25.0, text_r, y + 43.0), Font::Path, t.dim);
         }
-        if stale {
+        if dim {
             gfx.fill(list, alpha(t.pane, 0.6));
         }
         gfx.unclip();
@@ -1116,16 +1122,17 @@ impl App {
         let foot = R::new(r.l + 18.0, r.b - S_FOOT_H, r.r - 12.0, r.b);
         gfx.fill(R::new(r.l + 8.0, foot.t, r.r - 8.0, foot.t + 1.0), t.border);
         let left = match &status {
-            _ if stale => "찾는 중…".to_string(),
-            PalStatus::Done { ready: false, .. } => format!("준비 중 · {}개 먼저", pal_results.len()),
+            _ if dim => "찾는 중…".to_string(),
+            PalStatus::Done { ready: false, .. } => format!("준비 중 · {}개 먼저", util::grouped(pal_results.len() as u64)),
             PalStatus::Done { total, failed, .. } => {
                 let shown = pal_results.len();
                 let skipped = if failed.is_empty() { String::new() } else { format!(" · {} 빠짐", drive_list(failed)) };
-                if *total > shown { format!("{total}개 중 {shown}개{skipped}") } else { format!("{shown}개 결과{skipped}") }
+                let (total_s, shown_s) = (util::grouped(*total as u64), util::grouped(shown as u64));
+                if *total > shown { format!("{total_s}개 중 {shown_s}개{skipped}") } else { format!("{shown_s}개 결과{skipped}") }
             }
             PalStatus::Searching => "찾는 중…".to_string(),
-            PalStatus::Ready(n) if folder_entries > 0 => format!("인덱스 {n}개 · 넣은 폴더 {folder_entries}개"),
-            PalStatus::Ready(n) => format!("인덱스 {n}개"),
+            PalStatus::Ready(n) if folder_entries > 0 => format!("인덱스 {}개 · 넣은 폴더 {}개", util::grouped(*n as u64), util::grouped(folder_entries as u64)),
+            PalStatus::Ready(n) => format!("인덱스 {}개", util::grouped(*n as u64)),
             _ => String::new(),
         };
         let left = if picks > 0 { format!("{picks}개 고름") } else { left };

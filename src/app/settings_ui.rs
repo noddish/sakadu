@@ -273,7 +273,7 @@ impl App {
                     .map(|(i, (path, state))| {
                         let state = match state {
                             crate::folders::State::Scanning => "훑는 중".to_string(),
-                            crate::folders::State::Ready(n) => format!("항목 {n}개"),
+                            crate::folders::State::Ready(n) => format!("항목 {}개", util::grouped(n as u64)),
                             crate::folders::State::Offline => "연결 안 됨 · 5분마다 다시 시도해요".to_string(),
                         };
                         row(path, state, Widget::Button("빼기".into(), Ctl::FolderRemove, i))

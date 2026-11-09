@@ -89,11 +89,13 @@ pub(super) struct Preview {
     layout: Option<(f32, IDWriteTextLayout)>,
     /// 처리기 창(호스트)을 둔 자리(클라이언트 픽셀). 숨겼으면 None
     host_rect: Option<RECT>,
+    /// 지금 대상을 읽기 시작한 때 ('불러오는 중…'은 0.3초가 지나야 보인다)
+    since: std::time::Instant,
 }
 
 impl Preview {
     pub(super) fn new() -> Preview {
-        Preview { target: None, pin: None, dims: None, content: Content::Waiting, seq: next_seq(), scroll: 0.0, layout: None, host_rect: None }
+        Preview { target: None, pin: None, dims: None, content: Content::Waiting, seq: next_seq(), scroll: 0.0, layout: None, host_rect: None, since: std::time::Instant::now() }
     }
 }
 
@@ -337,6 +339,7 @@ impl App {
             };
         if !same {
             pv.seq = next_seq();
+            pv.since = std::time::Instant::now();
             pv.target = target;
             pv.content = Content::Waiting;
             pv.scroll = 0.0;
@@ -474,6 +477,7 @@ impl App {
         pv.target = Some(Target { path: path.to_string(), name, kind, size: 0, modified: 0, type_name, icon });
         pv.pin = Some(Pin { id, round: next_seq(), busy: false, again: false });
         pv.seq = next_seq();
+        pv.since = std::time::Instant::now();
         pv.content = Content::Waiting;
         pv.scroll = 0.0;
         pv.layout = None;
@@ -560,6 +564,7 @@ impl App {
     fn preview_reload(&mut self) {
         let Some(pv) = self.preview.as_mut() else { return };
         pv.seq = next_seq();
+        pv.since = std::time::Instant::now();
         pv.content = Content::Waiting;
         pv.scroll = 0.0;
         pv.layout = None;
@@ -648,6 +653,7 @@ impl App {
         let t = self.theme;
         let scale = self.scale();
         let hover = self.hover;
+        let (hwnd, short_dates) = (self.hwnd, self.look.dates != "full");
         let App { gfx, preview, thumb_failed, .. } = self;
         let Some(pv) = preview.as_mut() else { return };
         if !t.high_contrast && !t.dark {
@@ -719,7 +725,9 @@ impl App {
             y += 24.0;
         };
         if target.kind != Kind::Drive {
-            row("수정한 날짜", &format_time(target.modified));
+            let full = format_time(target.modified);
+            let short = if short_dates && target.modified != 0 { crate::listing::format_time_short(target.modified, crate::listing::now_filetime()) } else { String::new() };
+            row("수정한 날짜", &if short.is_empty() || short == full { full } else { format!("{short} · {full}") });
         }
         row("위치", &util::parent(&target.path).unwrap_or_default());
 
@@ -741,7 +749,15 @@ impl App {
                 let px = image_px(body.w().max(body.h()), scale);
                 if !image(gfx, body, px) {
                     let failed = thumb_failed.contains(&thumb_key(&target.path, target.modified, px));
-                    gfx.text(if failed { "미리 볼 수 없어요" } else { "불러오는 중…" }, body, Font::Hint, t.faint);
+                    let waited = pv.since.elapsed().as_millis();
+                    if failed {
+                        gfx.text("미리 볼 수 없어요", body, Font::Hint, t.faint);
+                    } else if waited >= 300 {
+                        gfx.text("불러오는 중…", body, Font::Hint, t.faint);
+                    } else {
+                        // 그림이 곧 오면 글자를 보이지 않는다. 늦으면 0.3초에 다시 그려 띄운다
+                        unsafe { SetTimer(Some(hwnd), TIMER_REDRAW, (300 - waited) as u32, None) };
+                    }
                 }
             }
             Content::Text(s) => {

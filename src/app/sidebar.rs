@@ -818,8 +818,8 @@ impl App {
                 let (path, state) = self.folders.list().get(i)?.clone();
                 match state {
                     crate::folders::State::Scanning => format!("{path} · 훑는 중"),
-                    crate::folders::State::Ready(n) => format!("{path} · {n}개"),
-                    crate::folders::State::Offline => format!("{path} · 연결되지 않음"),
+                    crate::folders::State::Ready(n) => format!("{path} · {}개", util::grouped(n as u64)),
+                    crate::folders::State::Offline => format!("{path} · 연결 안 됨"),
                 }
             }
             _ => return None,
