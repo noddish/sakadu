@@ -1,6 +1,6 @@
 [package]
 name = "sakadu"
-version = "0.7.0"
+version = "0.7.2"
 edition = "2024"
 description = "가볍고 빠른 Windows 멀티뷰 파일 관리자"
 license = "GPL-3.0-or-later"
