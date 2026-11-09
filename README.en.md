@@ -54,6 +54,7 @@ Dark mode follows your Windows setting.
 | Key | What it does |
 |---|---|
 | Ctrl+F | Search the whole disk |
+| Ctrl+K | Command menu: go to an open tab, favorite or recent location, or run a command |
 | Just start typing | Filter the current folder (Esc clears) |
 | Ctrl+1 – Ctrl+5 | Change the pane layout |
 | Tab / Shift+Tab | Next / previous pane |
@@ -87,7 +88,8 @@ Dark mode follows your Windows setting.
 | Ctrl+Shift+N | New folder |
 | Ctrl+H | Show hidden items |
 | Ctrl+F | Whole-disk search |
-| Ctrl+Z | Undo the last file operation |
+| Ctrl+K | Command menu (filter by name or Korean initial consonants; Enter current pane · Alt+Enter other pane · Ctrl+Enter new tab) |
+| Ctrl+Z | Undo the last file operation (same as the **되돌리기** (undo) button on the notice after a move, copy or delete) |
 | Ctrl+B | Open the favorites panel (pinned) and move the keyboard to it (↑↓, Enter, F2, Del, Ctrl+↑↓, ←→ collapse/expand groups, type to jump, Esc back to the pane) |
 | Ctrl+D | Add to favorites (the selected folder or file, or the current folder) |
 | Alt+Enter | Properties |
@@ -107,8 +109,8 @@ Dark mode follows your Windows setting.
 - Results only include what the searching Windows account can see: every folder from the drive root down to the file's folder must be listable by that account (what you could browse in Explorer). Hidden files are left out of both the results and the total count. See [docs/search-permissions-check.md](docs/search-permissions-check.md) for a two-account check (Korean).
 - Query syntax: space-separated words must all match. A word ending in `\`, like `work\`, matches the path. `|` means "or" (`quote 2026 | contract`). Pasting several lines joins them with `|`.
 - Search opens as a **panel** on the left, so the results stay while you work in the panes. Esc only moves the keyboard back to the pane; close the panel with the search icon on the bar or its ×. Reopen it after closing and your last query is still there, selected: type to replace it, or press End to keep going.
-- Results: Enter opens, Ctrl+Enter opens the containing folder in the current pane with the file selected, Shift+Enter opens in a new tab. Pick several with Ctrl+click, Shift+click or Shift+↑↓, then Enter opens them all and Ctrl+C copies the files. The right-click menu also has copy path and pick all.
-- The **현재 폴더** (current folder) chip limits the search to the folder shown in the active pane. When that folder changes, or files are moved or renamed, the same query runs again so the results stay current.
+- Results: a single click picks a result (and shows it in the preview pane if it is open), a double click or Enter opens it. Each result shows its modified date and size, so the newest of several same-named files is easy to spot. Ctrl+Enter opens the containing folder in the current pane with the file selected, Shift+Enter opens in a new tab. Pick several with Ctrl+click, Shift+click or Shift+↑↓, then Enter opens them all and Ctrl+C copies the files. The right-click menu also has copy path and pick all.
+- The **지금 폴더** (current folder) chip limits the search to the folder shown in the active pane. When that folder changes, or files are moved or renamed, the same query runs again so the results stay current.
 - The global hotkey is the first free one of Ctrl+Alt+Space, Win+Shift+F and Ctrl+Alt+F. Hover over the search icon on the left bar to see which one you got.
 - The service exe is copied to `C:\Program Files\Sakadu`. After updating Sakadu, reinstall the service to update it too.
 
@@ -126,6 +128,8 @@ The search service only reads this PC's own (NTFS) disks. Shared folders (`\\ser
 - Changes come in through folder change notifications. In case a server doesn't send them, the folder is walked again every few hours, and opening it in Sakadu also brings it up to date.
 - If the connection drops, the last results stay searchable and Sakadu tries to reconnect every 5 minutes.
 - The app has to be running to keep up, so this pairs well with **트레이에서 대기** (stay in tray).
+- When a share needs a sign-in, the list shows a **로그인** (sign in) button. It opens the Windows network sign-in dialog (Windows takes the account and password) and reads the folder again once connected. A disconnected mapped drive (Z: and so on) gets a **다시 연결** (reconnect) button.
+- If an open shared folder loses its connection, the last list seen in this session stays visible, dimmed, and refreshes by itself once the connection is back.
 
 </details>
 
@@ -240,6 +244,7 @@ cargo test
 | `keys.rs` | Remappable shortcuts (key map, saving) |
 | `app/sidebar.rs` · `app/fav_ui.rs` | Icon bar and panels on the left (places, favorites; peek, pin, resize) · favorites actions |
 | `app/palette.rs` · `app/preview.rs` | Ctrl+F search panel · preview pane |
+| `app/commands.rs` | Ctrl+K command menu (open tabs, favorites, recent locations, workspaces, commands) |
 | `app/start.rs` | New tab start page (favorite folder cards, recent locations, drives) |
 | `app/workspace_ui.rs` · `workspaces.rs` | Workspace button, menu and switching · file format |
 | `pane.rs` | Tab state (history, sort, filter, selection) |
