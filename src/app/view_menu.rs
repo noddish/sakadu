@@ -4,7 +4,7 @@
 use super::*;
 
 const ITEM_H: f32 = 32.0;
-const PAD: f32 = 6.0;
+const PAD: f32 = 4.0;
 const MENU_W: f32 = 240.0;
 const G_CHECK: u16 = 0xE73E;
 
@@ -156,10 +156,10 @@ impl App {
             }
             let on = v == current;
             if on {
-                gfx.glyph(G_CHECK, R::new(ir.l + 6.0, ir.t, ir.l + 28.0, ir.b), true, t.accent);
+                gfx.glyph(G_CHECK, R::new(ir.l + 6.0, ir.t, ir.l + 28.0, ir.b), true, t.text);
             }
             let key_w = if keys[i].is_empty() { 0.0 } else { gfx.measure(&keys[i], Font::Small) + 12.0 };
-            gfx.text(v.label(), R::new(ir.l + 34.0, ir.t, ir.r - key_w - 8.0, ir.b), if on { Font::Strong } else { Font::Normal }, t.text);
+            gfx.text(v.label(), R::new(ir.l + 34.0, ir.t, ir.r - key_w - 8.0, ir.b), Font::Normal, t.text);
             if key_w > 0.0 {
                 gfx.text(&keys[i], R::new(ir.r - key_w, ir.t, ir.r - 10.0, ir.b), Font::Small, t.dim);
             }

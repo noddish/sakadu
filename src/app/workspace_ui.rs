@@ -28,13 +28,13 @@ impl App {
         let want = if self.edit_mode == EditMode::WorkspaceRename {
             220.0
         } else {
-            (self.gfx.measure(&self.workspace_label(), Font::Strong) + 40.0).clamp(WS_MIN_W, 220.0)
+            (self.gfx.measure(&self.workspace_label(), Font::Normal) + 40.0).clamp(WS_MIN_W, 220.0)
         };
         let l = BAR_W + MARGIN;
         // 칸 나누기 판(166)과 오른쪽 `…` 단추 사이에 들어갈 만큼만 (좁은 창에서 겹치지 않게. 긴 이름은 말줄임)
         let room = self.more_button().l - 8.0 - 166.0 - 8.0 - l;
         let w = want.min(room).max(WS_MIN_W);
-        R::new(l, 7.0, l + w, 37.0)
+        R::new(l, 6.0, l + w, 38.0)
     }
 
     fn workspace_label(&self) -> String {
@@ -52,11 +52,11 @@ impl App {
             return;
         }
         if self.hover == Hit::Workspace {
-            g.fill_round(r, 6.0, t.sel_inactive);
+            g.fill_round(r, R_CTRL, super::sidebar::hover_fill(&t));
         }
         // 작업 공간이 없으면 이름 대신 흐린 "작업 공간"
         let named = self.workspaces.current.is_some();
-        g.text(&self.workspace_label(), R::new(r.l + 10.0, r.t, r.r - 24.0, r.b), Font::Strong, if named { t.text } else { t.dim });
+        g.text(&self.workspace_label(), R::new(r.l + 10.0, r.t, r.r - 24.0, r.b), Font::Normal, if named { t.text } else { t.dim });
         g.glyph(G_CHEVRON_DOWN, R::new(r.r - 22.0, r.t + 1.0, r.r - 8.0, r.b + 1.0), true, t.faint);
     }
 

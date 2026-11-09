@@ -266,7 +266,7 @@ fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextF
                 path,
                 caption,
                 mono,
-                make(ui, 22.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
+                make(ui, 24.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
                 make(ui, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
                 make(icons, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false)?,
             ])

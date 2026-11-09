@@ -46,7 +46,7 @@ pub struct Session {
 
 /// 왼쪽 패널 너비의 기본값과 범위
 pub const SIDE_W_DEFAULT: f32 = 220.0;
-pub const SIDE_W_RANGE: (f32, f32) = (180.0, 420.0);
+pub const SIDE_W_RANGE: (f32, f32) = (210.0, 420.0);
 
 /// 화면 설정: 테마("system"·"light"·"dark"), 강조 색(theme::ACCENTS의 키), 글꼴(빈 문자열이면 기본), 크기(%),
 /// 글자 표시("soft"·"sharp"·"gray", gfx::TextLook)

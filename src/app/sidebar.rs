@@ -15,11 +15,11 @@ const BAR_ITEM: f32 = 32.0;
 const BAR_PITCH: f32 = 44.0;
 /// 패널 머리 줄 (제목, 작은 단추, 핀)
 const HEADER_H: f32 = 44.0;
-pub(super) const SIDE_ROW_H: f32 = 30.0;
+pub(super) const SIDE_ROW_H: f32 = 32.0;
 const ROW_L: f32 = 8.0;
-const HEAD_GAP: f32 = 12.0;
-const HEAD_H: f32 = 22.0;
-const MINI: f32 = 26.0;
+const HEAD_GAP: f32 = 16.0;
+const HEAD_H: f32 = 24.0;
+const MINI: f32 = 28.0;
 const DRIVE_H: f32 = 44.0;
 /// 그룹 안 항목의 들여쓰기
 const INDENT: f32 = 20.0;
@@ -31,7 +31,7 @@ pub(super) const TIMER_BAR_HOVER: usize = 46;
 pub(super) const TIMER_SIDE_CLOSE: usize = 47;
 /// 패널이 열릴 때 펼쳐지는 움직임 (Windows에서 애니메이션을 끄면 하지 않는다)
 pub(super) const TIMER_SIDE_ANIM: usize = 48;
-const SIDE_ANIM_SECS: f32 = 0.15;
+const SIDE_ANIM_SECS: f32 = 0.18;
 const G_PLACES: u16 = 0xE8B7;
 pub(super) const G_PIN: u16 = 0xE718;
 /// 채운 핀의 안쪽 (바늘이 없어 G_PIN을 겹쳐 그린다: draw_pin)
@@ -172,8 +172,33 @@ pub(super) fn well(t: &Theme) -> Color {
     if t.high_contrast { t.window } else { t.sel_inactive }
 }
 
+/// 고르기 판(칸 나누기, 검색 범위, 설정의 고르기)의 들어간 바탕. 어두운 테마는 바탕보다 어둡게 겹친다
+pub(super) fn seg_track(t: &Theme) -> Color {
+    if t.high_contrast {
+        t.window
+    } else if t.dark {
+        Color { r: 0.0, g: 0.0, b: 0.0, a: 0.28 }
+    } else {
+        t.sel_inactive
+    }
+}
+
+/// 고르기 판에서 고른 칸·켜진 단추: 밝은 테마는 흰 면 + 아주 작은 그림자, 어두운 테마는 한 단계 밝은 면 + 위쪽 빛 선 (떠 보이게)
+pub(super) fn seg_on(g: &Gfx, r: R, radius: f32, t: &Theme) {
+    if t.high_contrast {
+        g.fill_round(r, radius, t.pane);
+        g.stroke_round(r.inset(0.5, 0.5), radius, t.border, 1.0);
+    } else if t.dark {
+        g.fill_round(r, radius, t.sel_inactive);
+        g.fill(R::new(r.l + radius, r.t + 0.5, r.r - radius, r.t + 1.5), Color { r: 1.0, g: 1.0, b: 1.0, a: 0.10 });
+    } else {
+        super::soft_shadow(g, r, radius, 3.0, 0.12, false);
+        g.fill_round(r, radius, t.pane);
+    }
+}
+
 /// 줄의 마우스 올림 바탕: 창 바탕에서도 보이도록 반투명으로 겹친다
-fn hover_fill(t: &Theme) -> Color {
+pub(super) fn hover_fill(t: &Theme) -> Color {
     if t.high_contrast {
         t.hover
     } else if t.dark {
@@ -737,8 +762,8 @@ impl App {
                 if let Some(dir) = self.side_outside() {
                     let p = self.active;
                     match self.folders.add(&dir) {
-                        Ok(()) => self.flash(p, format!("검색에 넣었습니다 · 훑는 동안에도 찾을 수 있어요: {dir}")),
-                        Err(e) => self.flash(p, format!("검색 폴더 목록을 저장하지 못했습니다: {e}")),
+                        Ok(()) => self.flash(p, format!("검색에 넣었어요 · 훑는 동안에도 찾을 수 있어요: {dir}")),
+                        Err(e) => self.flash(p, format!("검색 폴더 목록을 저장하지 못했어요: {e}")),
                     }
                 }
             }
@@ -853,7 +878,7 @@ impl App {
     /// 펼쳐지는 중이면 보일 너비의 비율 (빠르게 시작해 천천히 멈춘다). 다 펼쳤으면 None
     fn side_open_progress(&self) -> Option<f32> {
         let p = self.side_anim?.elapsed().as_secs_f32() / SIDE_ANIM_SECS;
-        (p < 1.0).then(|| 1.0 - (1.0 - p).powi(3))
+        (p < 1.0).then(|| 1.0 - (1.0 - p).powi(4))
     }
 
     /// 즐겨찾기 항목에 마우스를 잠시 올려 두면 말풍선 대신 뜨는 정보 카드: 아이콘·이름, 종류, 전체 경로, 사진이면 작은 그림.
@@ -878,8 +903,8 @@ impl App {
         let image = !f.is_dir && !remote && preview::is_image_ext(&ext);
         let t = self.theme;
         let w = 300.0;
-        let h = if image { 78.0 + 150.0 } else { 78.0 };
-        let l = (row.r + 10.0).min(self.w - MARGIN - w).max(BAR_W);
+        let h = if image { 80.0 + 152.0 } else { 80.0 };
+        let l = (row.r + 8.0).min(self.w - MARGIN - w).max(BAR_W);
         let top = row.t.min(self.h - MARGIN - h).max(WORKBAR_H);
         let r = R::new(l, top, l + w, top + h);
         let scale = self.scale();
@@ -889,16 +914,16 @@ impl App {
         }
         g.fill_round(r, 10.0, t.pane);
         g.stroke_round(r.inset(0.5, 0.5), 10.0, t.border, 1.0);
-        g.icon(icon, R::new(l + 14.0, top + 14.0, l + 30.0, top + 30.0));
-        g.text(&f.name, R::new(l + 40.0, top + 10.0, r.r - 14.0, top + 32.0), Font::Strong, t.text);
-        g.text(&kind, R::new(l + 40.0, top + 32.0, r.r - 14.0, top + 50.0), Font::Small, t.dim);
-        g.text(&f.path, R::new(l + 14.0, top + 52.0, r.r - 14.0, top + 72.0), Font::Path, t.faint);
+        g.icon(icon, R::new(l + 16.0, top + 16.0, l + 32.0, top + 32.0));
+        g.text(&f.name, R::new(l + 44.0, top + 12.0, r.r - 16.0, top + 34.0), Font::Strong, t.text);
+        g.text(&kind, R::new(l + 44.0, top + 34.0, r.r - 16.0, top + 52.0), Font::Small, t.dim);
+        g.text(&f.path, R::new(l + 16.0, top + 54.0, r.r - 16.0, top + 74.0), Font::Path, t.faint);
         if image {
-            let ir = R::new(l + 14.0, top + 78.0, r.r - 14.0, r.b - 12.0);
+            let ir = R::new(l + 16.0, top + 80.0, r.r - 16.0, r.b - 16.0);
             let px = ((ir.w() * scale) as u32).clamp(64, 512);
             let key = thumb_key(&f.path, 0, px);
             if !g.thumb(&key, ir, 1.0) {
-                g.fill_round(ir, 6.0, t.field);
+                g.fill_round(ir, 4.0, t.field);
                 if !thumb_failed.contains(&key) {
                     missing.push(crate::thumbs::Request { key, path: f.path.clone(), px });
                 }
@@ -946,17 +971,16 @@ impl App {
         let t = self.theme;
         let g = &self.gfx;
         let hover = self.hover;
-        g.fill(R::new(BAR_W - 1.0, 0.0, BAR_W, self.h), t.border);
+        if t.high_contrast {
+            g.fill(R::new(BAR_W - 1.0, 0.0, BAR_W, self.h), t.border);
+        }
         let item = |r: R, glyph: u16, on: bool, hovered: bool| {
             if on {
-                g.fill_round(r, 8.0, t.accent_soft);
+                seg_on(g, r, R_CTRL, &t);
             } else if hovered {
-                g.fill_round(r, 8.0, hover_fill(&t));
+                g.fill_round(r, R_CTRL, hover_fill(&t));
             }
-            if t.high_contrast && on {
-                g.stroke_round(r.inset(0.5, 0.5), 8.0, t.border, 1.0);
-            }
-            g.glyph(glyph, r, false, if on { t.accent } else if hovered { t.text } else { t.dim });
+            g.glyph(glyph, r, false, if on || hovered { t.text } else { t.dim });
         };
         for p in [Panel::Places, Panel::Favorites] {
             // 파일을 끌어 별 위에 올리면 즐겨찾기에 넣을 수 있다고 켜 보인다
@@ -1026,22 +1050,26 @@ impl App {
         let hot = self.side_hot();
         self.side_minis_shown = hot;
         let minis: Vec<(Side, R)> = if hot { self.side_minis().iter().enumerate().filter_map(|(i, s)| self.side_mini_rect(i).map(|r| (*s, r))).collect() } else { Vec::new() };
+        let title_r = (0..self.side_minis().len()).filter_map(|i| self.side_mini_rect(i)).map(|r| r.l).chain(pin.map(|r| r.l)).fold(pr.r - 8.0, f32::min) - 6.0;
         let folded = self.folded;
         let App { gfx: g, favs, places, .. } = self;
 
         // 패널 바탕: 떠 있으면 그림자 달린 카드, 고정이면 창 바탕 그대로
         if floating {
+            let card = R::new(pr.l - 12.0, pr.t, pr.r, pr.b);
+            g.clip(R::new(BAR_W, pr.t - 40.0, pr.r + 40.0, pr.b + 40.0));
             if !t.high_contrast {
-                super::soft_shadow(g, pr, 10.0, 16.0, 0.16, t.dark);
+                super::soft_shadow(g, card, 12.0, 16.0, 0.16, t.dark);
             }
-            g.fill_round(pr, 10.0, t.pane);
-            g.stroke_round(pr.inset(0.5, 0.5), 10.0, t.border, 1.0);
+            g.fill_round(card, 12.0, t.pane);
+            g.stroke_round(card.inset(0.5, 0.5), 12.0, t.border, 1.0);
+            g.unclip();
         }
         // 머리 줄: 제목, (즐겨찾기면 추가·정렬·새 그룹), 핀
-        g.text(panel.title(), R::new(pr.l + ROW_L + 10.0, pr.t, pr.r - 8.0, pr.t + HEADER_H), Font::Strong, t.text);
+        g.text(panel.title(), R::new(pr.l + ROW_L + 10.0, pr.t, title_r, pr.t + HEADER_H), Font::Strong, t.text);
         let mini_btn = |g: &Gfx, r: R, glyph: u16, hovered: bool| {
             if hovered {
-                g.fill_round(r, 6.0, hover_fill(&t));
+                g.fill_round(r, R_CTRL, hover_fill(&t));
             }
             g.glyph(glyph, r, false, if hovered { t.text } else { t.dim });
         };
@@ -1056,7 +1084,7 @@ impl App {
         if let Some(r) = pin {
             let hot = hover == Hit::SidePin;
             if hot {
-                g.fill_round(r, 6.0, hover_fill(&t));
+                g.fill_round(r, R_CTRL, hover_fill(&t));
             }
             draw_pin(g, r, !floating, if hot { t.text } else { t.dim });
         }
@@ -1065,14 +1093,14 @@ impl App {
         g.clip(list);
         let row_bg = |g: &Gfx, r: R, current: bool, hovered: bool| {
             if current {
-                g.fill_round(r, 6.0, well(&t));
+                g.fill_round(r, R_ROW, well(&t));
                 // 고대비에서는 들어간 면이 창 바탕과 같은 색이라 테두리로 지금 위치를 보인다
                 if t.high_contrast {
-                    g.stroke_round(r.inset(0.5, 0.5), 6.0, t.border, 1.0);
+                    g.stroke_round(r.inset(0.5, 0.5), R_ROW, t.border, 1.0);
                 }
             }
             if hovered {
-                g.fill_round(r, 6.0, hover_fill(&t));
+                g.fill_round(r, R_ROW, hover_fill(&t));
             }
         };
         for (r, slot) in &slots {
@@ -1092,7 +1120,7 @@ impl App {
                 // 구역 머리: 접힘 표시와 이름. 올리면 옅은 바탕
                 Slot::Item(s @ Side::Fold(f)) => {
                     if hover == Hit::Side(s) {
-                        g.fill_round(r, 6.0, hover_fill(&t));
+                        g.fill_round(r, R_ROW, hover_fill(&t));
                     }
                     let closed = folded[f as usize];
                     let lw = g.measure(f.label(), Font::Small);
@@ -1104,7 +1132,7 @@ impl App {
                 Slot::Item(Side::FavAdd | Side::FavSort | Side::FavNewGroup) => {}
                 Slot::Item(Side::FavEmpty) => {
                     if side_drop == Some(Side::FavEmpty) {
-                        g.fill_round(r, 6.0, alpha(t.accent, 0.10));
+                        g.fill_round(r, R_ROW, alpha(t.accent, 0.10));
                     }
                     let how = add_key.as_deref().map(|k| format!("별(☆)이나 {k}로 넣어 보세요")).unwrap_or_else(|| "경로 오른쪽 별(☆)로 넣어 보세요".to_string());
                     g.text("즐겨찾기가 비어 있어요", R::new(r.l + 10.0, r.t + 4.0, r.r - 6.0, r.t + 22.0), Font::Small, t.faint);
@@ -1126,7 +1154,7 @@ impl App {
                             // 항목을 그룹 머리 줄에 끌어 놓으면 그 그룹으로
                             if let Some((Row::Item { .. }, Row::Group(at), _)) = moving {
                                 if at == gi {
-                                    g.stroke_round(r.inset(0.75, 0.75), 6.0, t.accent, 1.5);
+                                    g.stroke_round(r.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                                 }
                             }
                         }
@@ -1136,11 +1164,11 @@ impl App {
                             row_bg(g, r, f.is_dir && is_current(&f.path), hover == Hit::Side(s));
                             // 이미 있는 것을 다시 넣으려 했을 때: 그 줄을 잠깐 강조
                             if flash_row == Some(row) {
-                                g.fill_round(r, 6.0, t.accent_soft);
-                                g.stroke_round(r.inset(0.75, 0.75), 6.0, t.accent, 1.5);
+                                g.fill_round(r, R_ROW, t.accent_soft);
+                                g.stroke_round(r.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                             }
                             let il = lx - 26.0;
-                            g.icon(icon, R::new(il, r.t + 7.0, il + 16.0, r.t + 23.0));
+                            g.icon(icon, R::new(il, r.t + 8.0, il + 16.0, r.t + 24.0));
                             if editing != Some(row) {
                                 g.text(&f.name, R::new(lx, r.t, r.r - 8.0, r.b), Font::Normal, fg);
                             }
@@ -1148,7 +1176,7 @@ impl App {
                     }
                     // 키보드 포커스 테두리 (이름을 바꾸는 중이면 입력 상자 테두리만)
                     if sel_row == Some(row) && editing != Some(row) {
-                        g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), 6.0, t.focus, FOCUS_W);
+                        g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
                     }
                     if editing == Some(row) {
                         let er = R::new(lx - 4.0, r.t + 3.0, r.r - 6.0, r.b - 3.0);
@@ -1160,9 +1188,9 @@ impl App {
                     row_bg(g, r, at_computer, hover == Hit::Side(s));
                     let il = r.l + 10.0;
                     if places.computer_icon >= 0 {
-                        g.icon(places.computer_icon, R::new(il, r.t + 7.0, il + 16.0, r.t + 23.0));
+                        g.icon(places.computer_icon, R::new(il, r.t + 8.0, il + 16.0, r.t + 24.0));
                     } else {
-                        g.glyph(0xEC4E, R::new(il, r.t, il + 16.0, r.b), true, t.dim);
+                        g.glyph(0xEC4E, R::new(il, r.t, il + 16.0, r.b), false, t.dim);
                     }
                     g.text("내 PC", R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
                 }
@@ -1170,19 +1198,19 @@ impl App {
                     let Some(d) = places.drives.get(i) else { continue };
                     row_bg(g, r, is_current(&d.path), hover == Hit::Side(s) || side_drop == Some(s));
                     if side_drop == Some(s) {
-                        g.stroke_round(r.inset(0.75, 0.75), 6.0, t.accent, 1.5);
+                        g.stroke_round(r.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                     }
                     let head = R::new(r.l, r.t + 6.0, r.r, r.t + 24.0);
                     g.icon(d.icon, R::new(r.l + 10.0, head.t + 1.0, r.l + 26.0, head.t + 17.0));
                     let free = (d.total > 0).then(|| format!("{} 남음", format_size(d.free)));
                     let fw = free.as_deref().map_or(0.0, |f| g.measure(f, Font::Small));
-                    g.text(&d.name, R::new(r.l + 36.0, head.t, r.r - 16.0 - fw, head.b), Font::Normal, t.text);
+                    g.text(&d.name, R::new(r.l + 36.0, head.t, r.r - 8.0, head.b), Font::Normal, t.text);
                     if let Some(f) = &free {
-                        g.text(f, R::new(r.r - 10.0 - fw, head.t, r.r - 8.0, head.b), Font::Small, t.faint);
+                        g.text(f, R::new(r.r - 10.0 - fw, head.b, r.r - 8.0, head.b + 18.0), Font::Small, t.faint);
                         // 쓴 만큼 채운 막대. 거의 찼으면(90% 넘게) 빨간색
                         let used = (1.0 - d.free as f32 / d.total as f32).clamp(0.0, 1.0);
-                        let bar = R::new(r.l + 36.0, head.b + 7.0, r.r - 10.0, head.b + 11.0);
-                        g.fill_round(bar, 2.0, well(&t));
+                        let bar = R::new(r.l + 36.0, head.b + 7.0, (r.r - 10.0 - fw - 8.0).max(r.l + 60.0), head.b + 11.0);
+                        g.fill_round(bar, 2.0, alpha(t.text, 0.10));
                         let fill = if used > 0.9 { Color { r: 0.80, g: 0.20, b: 0.16, a: 1.0 } } else { t.faint };
                         g.fill_round(R::new(bar.l, bar.t, bar.l + bar.w() * used, bar.b), 2.0, fill);
                     }
@@ -1191,9 +1219,9 @@ impl App {
                     let Some((path, state)) = folders.get(i) else { continue };
                     row_bg(g, r, is_current(path), hover == Hit::Side(s) || side_drop == Some(s));
                     if side_drop == Some(s) {
-                        g.stroke_round(r.inset(0.75, 0.75), 6.0, t.accent, 1.5);
+                        g.stroke_round(r.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                     }
-                    g.icon(folder_icon, R::new(r.l + 10.0, r.t + 7.0, r.l + 26.0, r.t + 23.0));
+                    g.icon(folder_icon, R::new(r.l + 10.0, r.t + 8.0, r.l + 26.0, r.t + 24.0));
                     let note = match state {
                         crate::folders::State::Scanning => Some("훑는 중"),
                         crate::folders::State::Offline => Some("연결 안 됨"),
