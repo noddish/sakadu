@@ -733,7 +733,7 @@ fn main() -> Result<()> {
         if !background && !started_without_activation() {
             with_app(|a| a.focus());
         }
-        if !isolated && (background || tray::is_enabled(tray::RUN_KEY)) {
+        if !isolated && (background || tray::wait_at_start()) {
             with_app(|a| a.set_tray(true));
         }
         run_deferred(hwnd);
