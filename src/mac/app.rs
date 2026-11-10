@@ -232,6 +232,8 @@ pub struct App {
     pub lights_bottom: f32,
     /// 그림 시험에서는 신호등도 그린다 (창에서는 시스템이 그린다)
     pub draw_lights: bool,
+    /// 사이드바 목록 스크롤 (줄이 창 아래로 넘칠 때)
+    side_scroll: f32,
     /// 열어 달라는 파일 (창 쪽이 macOS '열기'로 연다)
     pub open_files: Vec<String>,
     /// 즐겨찾기를 파일에 저장할지 (시험·그림에서는 저장하지 않는다)
@@ -260,6 +262,7 @@ impl App {
             requests: Vec::new(),
             lights_bottom: LIGHTS_BOTTOM,
             draw_lights: false,
+            side_scroll: 0.0,
             open_files: Vec::new(),
             persist: false,
         };
@@ -330,6 +333,7 @@ impl App {
     pub fn on_listed(&mut self, tab_id: u64, generation: u64, result: Result<Vec<Entry>, String>) {
         let (sort, hidden) = (self.sort, self.show_hidden);
         let Some(p) = self.panes.iter().position(|pane| pane.tabs.iter().any(|t| t.id == tab_id)) else { return };
+        let list = self.list_rect(p);
         let Some(tab) = self.panes[p].tabs.iter_mut().find(|t| t.id == tab_id) else { return };
         if tab.generation != generation {
             return;
@@ -337,10 +341,12 @@ impl App {
         match result {
             Ok(entries) => {
                 let restore = tab.set_entries(entries, sort, hidden);
-                let reveal = restore.is_some_and(|r| r.reveal);
-                self.clamp_scroll(p);
-                if reveal {
-                    self.ensure_visible(p);
+                // 스크롤은 다 읽은 그 탭에 맞춘다 (그 사이 다른 탭으로 옮겼어도 보고 있는 탭은 그대로)
+                if let Some(list) = list {
+                    clamp_tab(tab, list);
+                    if restore.is_some_and(|r| r.reveal) {
+                        reveal(tab, list);
+                    }
                 }
             }
             Err(msg) => {
@@ -515,7 +521,10 @@ impl App {
     }
 
     pub fn set_side(&mut self, side: Side) {
-        self.side = side;
+        if self.side != side {
+            self.side = side;
+            self.side_scroll = 0.0;
+        }
     }
 
     // ---------- 고르기 ----------
@@ -580,7 +589,8 @@ impl App {
         self.side = Side::Favorites;
     }
 
-    fn save_favorites(&self) {
+    fn save_favorites(&mut self) {
+        self.clamp_side_scroll();
         if self.persist
             && let Err(e) = favorites::save(&self.favs)
         {
@@ -668,20 +678,13 @@ impl App {
     fn clamp_scroll(&mut self, p: usize) {
         let Some(list) = self.list_rect(p) else { return };
         for tab in &mut self.panes[p].tabs {
-            let max = (tab.view.len() as f32 * ROW_H - list.h()).max(0.0);
-            tab.scroll = tab.scroll.clamp(0.0, max);
+            clamp_tab(tab, list);
         }
     }
 
     fn ensure_visible(&mut self, p: usize) {
         let Some(list) = self.list_rect(p) else { return };
-        let tab = self.panes[p].tab_mut();
-        let top = tab.cursor as f32 * ROW_H;
-        if top < tab.scroll {
-            tab.scroll = top;
-        } else if top + ROW_H > tab.scroll + list.h() {
-            tab.scroll = top + ROW_H - list.h();
-        }
+        reveal(self.panes[p].tab_mut(), list);
     }
 
     /// 사이드바 고르기 단추 판
@@ -700,10 +703,22 @@ impl App {
         R::new(0.0, self.seg_track().b + 8.0, SIDE_W, self.h - MARGIN)
     }
 
-    fn side_row_rect(&self, i: usize) -> R {
+    /// 사이드바 목록이 보이는 곳 (머리 줄 아래)
+    fn side_list(&self) -> R {
         let pr = self.side_panel();
-        let y = pr.t + SIDE_HEADER_H + 2.0 + i as f32 * SIDE_ROW_H;
-        R::new(pr.l + 8.0, y, pr.r - 8.0, y + SIDE_ROW_H)
+        R::new(pr.l, pr.t + SIDE_HEADER_H + 2.0, pr.r, pr.b.max(pr.t + SIDE_HEADER_H + 2.0))
+    }
+
+    fn side_row_rect(&self, i: usize) -> R {
+        let list = self.side_list();
+        let y = list.t + i as f32 * SIDE_ROW_H - self.side_scroll;
+        R::new(list.l + 8.0, y, list.r - 8.0, y + SIDE_ROW_H)
+    }
+
+    /// 사이드바 스크롤을 줄 수 안으로 (줄이 바뀌거나 창 크기가 바뀐 뒤)
+    fn clamp_side_scroll(&mut self) {
+        let max = (self.side_rows().len() as f32 * SIDE_ROW_H - self.side_list().h()).max(0.0);
+        self.side_scroll = self.side_scroll.clamp(0.0, max);
     }
 
     fn workspace_button(&self, g: &Gfx) -> R {
@@ -779,6 +794,9 @@ impl App {
                 }
             }
             let n = self.side_rows().len();
+            if !self.side_list().contains(x, y) {
+                return Hit::None;
+            }
             return (0..n).find(|&i| self.side_row_rect(i).contains(x, y)).map_or(Hit::None, Hit::SideRow);
         }
         if y < WORKBAR_H {
@@ -918,6 +936,10 @@ impl App {
 
     /// 스크롤 (dy > 0이면 아래 항목이 보이게). 마우스 아래 칸을 움직인다
     pub fn scroll(&mut self, g: &Gfx, x: f32, y: f32, dy: f32) {
+        if x < SIDE_W {
+            self.side_scroll += dy;
+            return self.clamp_side_scroll();
+        }
         let p = match self.hit(g, x, y) {
             Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) => p,
             _ => return,
@@ -932,6 +954,7 @@ impl App {
         for p in 0..self.layout.count() {
             self.clamp_scroll(p);
         }
+        self.clamp_side_scroll();
     }
 
     /// Finder 관례 키. 처리했으면 true
@@ -1018,7 +1041,7 @@ impl App {
             _ => {}
         }
         let current = self.panes[self.active].tab().loc.dir().map(str::to_string);
-        g.clip(R::new(pr.l, pr.t + SIDE_HEADER_H, pr.r, pr.b));
+        g.clip(self.side_list());
         for (i, row) in rows.iter().enumerate() {
             let r = self.side_row_rect(i);
             if let Some((_, collapsed)) = row.group {
@@ -1262,6 +1285,22 @@ fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
         return None;
     }
     rest.trim_start_matches(sep).split(sep).next().filter(|s| !s.is_empty()).map(String::from)
+}
+
+/// 탭의 스크롤을 목록 길이 안으로
+fn clamp_tab(tab: &mut Tab, list: R) {
+    let max = (tab.view.len() as f32 * ROW_H - list.h()).max(0.0);
+    tab.scroll = tab.scroll.clamp(0.0, max);
+}
+
+/// 커서 줄이 보이게 탭을 스크롤한다
+fn reveal(tab: &mut Tab, list: R) {
+    let top = tab.cursor as f32 * ROW_H;
+    if top < tab.scroll {
+        tab.scroll = top;
+    } else if top + ROW_H > tab.scroll + list.h() {
+        tab.scroll = top + ROW_H - list.h();
+    }
 }
 
 fn close_rect(tr: R) -> R {
@@ -1570,6 +1609,60 @@ mod tests {
         let (x, y) = (close_rect(cur).l + 4.0, cur.t + 8.0);
         a.mouse_down(&g, x, y, Mods::default(), 1);
         assert_eq!(a.pane(0).tabs.len(), 12, "the active tab's close button works");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 즐겨찾기가 사이드바 아래로 넘치면 스크롤해서 마지막 줄까지 누를 수 있다
+    #[test]
+    fn sidebar_scrolls_to_rows_below_the_window() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let favs: Vec<Favorite> = (0..40).map(|i| Favorite { name: format!("폴더 {i}"), path: util::join(&home, "다운로드"), is_dir: true }).collect();
+        a.favs = Favorites { items: favs, groups: Vec::new() };
+        a.resize(1280.0, 420.0);
+        let last = a.side_row_rect(39);
+        assert!(last.t > a.side_list().b, "the last row starts below the window");
+        a.scroll(&g, 100.0, 300.0, 100_000.0);
+        let last = a.side_row_rect(39);
+        assert!(last.b <= a.side_list().b + 0.5 && last.t >= a.side_list().t, "{last:?}");
+        a.mouse_down(&g, last.l + 40.0, last.t + 10.0, Mods::default(), 1);
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(util::join(&home, "다운로드")));
+        // 헤더 위로 밀려난 줄은 누를 수 없다
+        let first = a.side_row_rect(0);
+        assert!(first.b < a.side_list().t);
+        assert_eq!(a.hit(&g, first.l + 40.0, a.side_list().t - 6.0), Hit::None);
+        // 줄이 줄면 스크롤도 줄 수 안으로
+        a.favs.items.truncate(3);
+        a.resize(1280.0, 420.0);
+        assert_eq!(a.side_scroll, 0.0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 위로 간 뒤 다 읽기 전에 다른 탭으로 옮겨도, 떠난 폴더가 보이게 하는 스크롤은 그 탭에만 적용된다
+    #[test]
+    fn reveal_scroll_stays_with_the_listed_tab() {
+        let (root, home) = demo();
+        let long = util::join(&home, "긴 폴더");
+        for i in 0..100 {
+            std::fs::create_dir_all(util::join(&long, &format!("sub_{i:03}"))).unwrap();
+        }
+        let (mut a, _g) = app(&long);
+        a.new_tab(0);
+        a.settle();
+        // 보고 있을 탭: 커서는 아래쪽, 스크롤은 맨 위
+        a.tab_mut(0).cursor = 80;
+        a.tab_mut(0).scroll = 0.0;
+        a.activate_tab(0, 0);
+        a.navigate(0, Location::Dir(util::join(&long, "sub_090")), None);
+        a.settle();
+        a.go_up(0);
+        a.activate_tab(0, 1);
+        a.settle();
+        assert_eq!(a.pane(0).tabs[1].scroll, 0.0, "the tab being viewed did not jump");
+        let listed = &a.pane(0).tabs[0];
+        assert_eq!(listed.cursor_entry().unwrap().name_string(), "sub_090");
+        assert!(listed.scroll > 0.0, "the folder we left is scrolled into view in its own tab");
         std::fs::remove_dir_all(root).unwrap();
     }
 
