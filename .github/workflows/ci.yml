@@ -26,3 +26,33 @@ jobs:
       - uses: actions/checkout@v7
       - name: Test core
         run: cargo test --lib --locked
+      # 맥 시제품(sakadu-mac): 화면 모양 후보를 실제 맥 글꼴·그리기로 PNG에 그려 올린다
+      - name: Build mac prototype
+        run: cargo build --features mac-app --bin sakadu-mac --locked
+      - name: Render layouts
+        run: |
+          # README 데모와 같은 한글 이름의 빈 파일 (개인 파일 없음). 날짜는 고정해 목록의 짧은 날짜가 늘 같게
+          D="$RUNNER_TEMP/Sakadu 데모"
+          mk() { mkdir -p "$(dirname "$D/$1")"; head -c "$2" /dev/zero > "$D/$1"; touch -t "$3" "$D/$1"; }
+          mk "업무/2026 4분기/4분기_사업계획.pptx" 2516582 202610281410
+          mk "업무/2026 4분기/매출_분석_10월.xlsx" 186368 202611020930
+          mk "업무/2026 4분기/예산.csv" 67584 202610301120
+          mk "업무/2026 4분기/제주살이_휴가.docx" 23552 202610081600
+          mk "업무/2026 4분기/주간보고_11월.docx" 55296 202611031000
+          mk "업무/2026 4분기/출장비_정산.xlsx" 31744 202610221500
+          mk "업무/2026 4분기/회의록_11월.md" 278 202611031130
+          mk "업무/문서/안내.txt" 120 202610010900
+          mk "다운로드/제주 사진 원본/성산 일출 원본.jpg" 2048 202610170642
+          mk "다운로드/제주살이_숙소_안내.zip" 3145728 202610091200
+          mk "다운로드/제주살이_짐_체크리스트.txt" 27 202610141900
+          mk "다운로드/회의자료_모음.zip" 4718592 202610291700
+          touch -t 202610171800 "$D/다운로드/제주 사진 원본"
+          mk "팀 공유/공지.txt" 64 202610200900
+          mk "사진/제주살이/성산 일출.jpg" 1024 202610170642
+          mk "사진/제주살이/맛집 메모.md" 512 202610170700
+          ./target/debug/sakadu-mac --render "$D" --out mac-render
+      - name: Upload layout renders
+        uses: actions/upload-artifact@v7
+        with:
+          name: mac-layouts
+          path: mac-render/*.png
