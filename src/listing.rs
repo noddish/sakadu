@@ -1,5 +1,6 @@
 //! 폴더 항목(Entry)과 폴더 열거, 네트워크 폴더 오류, 표시용 포맷.
-//! 열거·시간 변환·네트워크 연결은 Win32를 쓰므로 Windows에서만 빌드된다 ("내 PC" 목록은 shell.rs)
+//! 폴더 열거와 시간 변환은 Windows(Win32)와 맥·리눅스(표준 라이브러리, 맥 시간대는 Core Foundation)에 따로 있다.
+//! 네트워크 연결은 Windows에서만 빌드된다 ("내 PC" 목록은 shell.rs)
 
 #[cfg(windows)]
 use crate::util;
@@ -259,6 +260,57 @@ pub fn filetime_u64(ft: &FILETIME) -> u64 {
     ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
 }
 
+/// 1601-01-01부터 1970-01-01까지 (FILETIME 단위 100ns)
+#[cfg(not(windows))]
+const UNIX_EPOCH_FT: u64 = 116_444_736_000_000_000;
+
+/// 시각을 FILETIME 단위(1601년부터 100ns)로. Windows와 같은 값이라 날짜 표시 코드를 함께 쓴다
+#[cfg(not(windows))]
+pub fn filetime_of(t: std::time::SystemTime) -> u64 {
+    let ticks = |d: std::time::Duration| d.as_secs() * 10_000_000 + u64::from(d.subsec_nanos()) / 100;
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => UNIX_EPOCH_FT + ticks(d),
+        Err(e) => UNIX_EPOCH_FT.saturating_sub(ticks(e.duration())),
+    }
+}
+
+/// 폴더 열거 (맥·리눅스). 심볼릭 링크는 가리키는 대상의 종류·크기를 쓰고, 대상이 없으면 링크 자체를 쓴다.
+/// 숨김: 이름이 점으로 시작하거나, 맥 Finder의 '숨김' 표시(UF_HIDDEN)가 있는 항목
+#[cfg(not(windows))]
+pub fn list_dir(dir: &str) -> Result<Vec<Entry>, String> {
+    let items = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(128);
+    for item in items.flatten() {
+        let path = item.path();
+        let Ok(meta) = std::fs::metadata(&path).or_else(|_| std::fs::symlink_metadata(&path)) else { continue };
+        let name = item.file_name().to_string_lossy().into_owned();
+        let kind = if meta.is_dir() { Kind::Dir } else { Kind::File };
+        let mut e = Entry::from_str(&name, kind);
+        e.attrs = if kind == Kind::Dir { ATTR_DIR } else { 0 };
+        if name.starts_with('.') || finder_hidden(&meta) {
+            e.attrs |= ATTR_HIDDEN;
+        }
+        if kind == Kind::File {
+            e.size = meta.len();
+        }
+        e.modified = meta.modified().map(filetime_of).unwrap_or(0);
+        out.push(e);
+    }
+    Ok(out)
+}
+
+#[cfg(target_os = "macos")]
+fn finder_hidden(meta: &std::fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    // UF_HIDDEN (sys/stat.h)
+    meta.st_flags() & 0x8000 != 0
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn finder_hidden(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
 /// 탐색기처럼 읽기 쉬운 크기: 512 B, 1.5 KB, 23 KB, 4.7 GB
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -291,10 +343,28 @@ pub fn format_time(ft: u64) -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}", local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute)
 }
 
+/// 현지 시간 "2026-11-02 14:03" (맥·리눅스)
+#[cfg(not(windows))]
+pub fn format_time(ft: u64) -> String {
+    if ft == 0 {
+        return String::new();
+    }
+    match local_time(ft) {
+        Some(t) => format!("{:04}-{:02}-{:02} {:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute),
+        None => String::new(),
+    }
+}
+
 /// 지금 시각 (FILETIME과 같은 100ns 단위)
 #[cfg(windows)]
 pub fn now_filetime() -> u64 {
     filetime_u64(&unsafe { GetSystemTimeAsFileTime() })
+}
+
+/// 지금 시각 (FILETIME과 같은 100ns 단위)
+#[cfg(not(windows))]
+pub fn now_filetime() -> u64 {
+    filetime_of(std::time::SystemTime::now())
 }
 
 /// 현지 시각의 날짜·시·분
@@ -317,6 +387,46 @@ fn local_time(ft: u64) -> Option<LocalTime> {
         SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()?;
     }
     Some(LocalTime { year: local.wYear as i64, month: local.wMonth as i64, day: local.wDay as i64, hour: local.wHour, minute: local.wMinute })
+}
+
+/// 맥·리눅스: 그 시각의 현지 날짜·시·분
+#[cfg(not(windows))]
+fn local_time(ft: u64) -> Option<LocalTime> {
+    let unix = (ft as i64 - UNIX_EPOCH_FT as i64).div_euclid(10_000_000);
+    let local = unix + utc_offset_secs(unix);
+    let (days, secs) = (local.div_euclid(86_400), local.rem_euclid(86_400));
+    let (year, month, day) = civil_from_days(days);
+    Some(LocalTime { year, month, day, hour: (secs / 3600) as u16, minute: (secs % 3600 / 60) as u16 })
+}
+
+/// 그 시각(1970년부터 초)의 현지 시간대 UTC 차이(초). 맥은 시스템 시간대를 따른다 (일광 절약 시간 반영)
+#[cfg(target_os = "macos")]
+fn utc_offset_secs(unix_secs: i64) -> i64 {
+    use objc2_core_foundation::CFTimeZone;
+    // CFAbsoluteTime은 2001-01-01 UTC부터 초
+    let at = (unix_secs - 978_307_200) as f64;
+    CFTimeZone::system().map(|tz| tz.seconds_from_gmt(at) as i64).unwrap_or(0)
+}
+
+/// 맥이 아닌 유닉스는 아직 UTC로 보인다 (사카두가 지원하는 OS는 Windows와 맥)
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn utc_offset_secs(_unix_secs: i64) -> i64 {
+    0
+}
+
+/// day_number의 거꾸로: 1970-01-01부터 며칠째인지 → (년, 월, 일)
+#[cfg(not(windows))]
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// 날짜의 일련번호 (1970-01-01이 0). 두 날짜가 며칠 떨어졌는지 셀 때 쓴다
@@ -347,7 +457,6 @@ pub fn relative_label(t: LocalTime, now: LocalTime, secs: i64) -> String {
 }
 
 /// 목록의 수정한 날짜를 짧게 (now는 now_filetime). 읽을 수 없으면 빈 글자
-#[cfg(windows)]
 pub fn format_time_short(ft: u64, now: u64) -> String {
     if ft == 0 {
         return String::new();
@@ -432,5 +541,39 @@ mod tests {
     #[test]
     fn missing_dir_is_error() {
         assert!(list_dir("C:\\__sakadu_does_not_exist__").is_err());
+    }
+
+    /// 맥·리눅스 폴더 열거: 한글 이름, 크기, 폴더, 점으로 시작하는 숨김, 없는 폴더는 오류
+    #[cfg(not(windows))]
+    #[test]
+    fn lists_temp_dir_unix() {
+        let dir = std::env::temp_dir().join(format!("sakadu-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("한글 파일.txt"), b"hello").unwrap();
+        std::fs::write(dir.join(".숨김"), b"").unwrap();
+        let entries = list_dir(dir.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(entries.len(), 3);
+        let file = entries.iter().find(|e| e.name_string() == "한글 파일.txt").unwrap();
+        assert_eq!((file.kind, file.size, file.is_hidden()), (Kind::File, 5, false));
+        assert!(file.modified > UNIX_EPOCH_FT);
+        assert!(entries.iter().any(|e| e.kind == Kind::Dir && e.name_string() == "sub" && !e.is_hidden()));
+        assert!(entries.iter().any(|e| e.name_string() == ".숨김" && e.is_hidden()));
+        assert!(list_dir("/__sakadu_does_not_exist__").is_err());
+    }
+
+    /// 날짜 일련번호와 그 거꾸로가 맞고, FILETIME 변환과 현지 시각이 말이 된다
+    #[cfg(not(windows))]
+    #[test]
+    fn dates_round_trip_unix() {
+        for (y, m, d) in [(1970, 1, 1), (2000, 2, 29), (2026, 11, 10), (1601, 1, 1), (2100, 12, 31)] {
+            assert_eq!(civil_from_days(day_number(y, m, d)), (y, m, d));
+        }
+        assert_eq!(filetime_of(std::time::UNIX_EPOCH), UNIX_EPOCH_FT);
+        // 2027-01-15 08:00 UTC: 어느 시간대든 현지 날짜는 그 앞뒤 하루 안
+        let t = local_time(filetime_of(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000))).unwrap();
+        assert_eq!((t.year, t.month), (2027, 1));
+        assert!((14..=16).contains(&t.day), "{t:?}");
+        assert!(format_time(now_filetime()).starts_with("20"));
     }
 }

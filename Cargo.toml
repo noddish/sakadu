@@ -49,6 +49,10 @@ windows-core = "0.62.2"
 # Direct2D DrawTextLayout의 좌표 형식. windows가 이미 쓰는 버전이라 새로 받는 것은 없다
 windows-numerics = "0.3.1"
 
+# macOS: 시간대(공통 코드의 날짜 표시). 맥에서만 받는다
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3.2"
+
 [profile.release]
 opt-level = 3
 lto = true
