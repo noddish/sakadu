@@ -726,20 +726,18 @@ impl App {
     }
 
     /// 탭 칩 자리와 새 탭(+) 자리
+    /// app.rs chips·chip_strip·add_rect와 같다: 넘치면 지금 탭은 제 폭을 지키고 나머지를 줄이며, 그래도 넘치는 탭은
+    /// 폭 0으로 가린다 (⌃Tab으로 닿는다)
     fn chips(&self, g: &Gfx, p: usize, head: R) -> (Vec<R>, R) {
         let pane = &self.panes[p];
         let n = pane.tabs.len();
-        let mut x = head.l + 8.0;
-        let right = head.r - 8.0 - g.measure(&count_text(pane.tab()), Font::Small) - 8.0 - 32.0;
-        let mut out = Vec::with_capacity(n);
-        for tab in &pane.tabs {
-            let w = (g.measure(&tab.loc.title(), Font::Normal) + 22.0 + if n > 1 { 20.0 } else { 0.0 }).clamp(52.0, 180.0);
-            let w = w.min((right - x).max(0.0));
-            out.push(R::new(x, head.t + 8.0, x + w, head.t + 36.0));
-            x += w + 2.0;
-        }
-        let add_l = out.last().map_or(head.l + 8.0, |r| r.r + 4.0);
-        (out, R::new(add_l, head.t + 8.0, add_l + 28.0, head.t + 36.0))
+        let right = g.measure(&count_text(pane.tab()), Font::Small);
+        let l = head.l + 8.0;
+        let strip = R::new(l, head.t + 8.0, (head.r - 8.0 - right - 8.0).max(l + 100.0), head.t + 36.0);
+        let natural: Vec<f32> = pane.tabs.iter().map(|t| (g.measure(&t.loc.title(), Font::Normal) + 22.0 + if n > 1 { 20.0 } else { 0.0 }).clamp(52.0, 180.0)).collect();
+        let trs = tab_rects(strip, &natural, pane.active);
+        let add_l = trs.iter().map(|r| r.r + 4.0).fold(strip.l, f32::max);
+        (trs, R::new(add_l, strip.t, add_l + 28.0, strip.b))
     }
 
     /// 경로 조각: (자리, 그 조각의 전체 경로, 이름). 앞쪽이 넘치면 "…" 조각(경로 없음)으로 줄인다
@@ -1255,15 +1253,61 @@ fn count_text(tab: &Tab) -> String {
 /// app.rs child_toward: ancestor 아래로 current가 있으면 ancestor 바로 밑 이름
 fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
     let (Location::Dir(a), Location::Dir(cur)) = (ancestor, current) else { return None };
-    if cur.len() <= a.len() || !util::eq_path(&cur[..a.len()], a) {
+    // 한글처럼 여러 바이트인 글자 가운데를 자르지 않게 글자 경계에서만 비교한다
+    let head = cur.get(..a.len()).filter(|h| cur.len() > a.len() && util::eq_path(h, a))?;
+    let sep = if cur.starts_with('/') { '/' } else { '\\' };
+    let rest = &cur[head.len()..];
+    // "/tmp/a"는 "/tmp/ab"의 상위 폴더가 아니다 (구분자 바로 앞에서 끝나야 한다)
+    if !a.ends_with(sep) && !rest.starts_with(sep) {
         return None;
     }
-    let sep = if cur.starts_with('/') { '/' } else { '\\' };
-    cur[a.len()..].trim_start_matches(sep).split(sep).next().filter(|s| !s.is_empty()).map(String::from)
+    rest.trim_start_matches(sep).split(sep).next().filter(|s| !s.is_empty()).map(String::from)
 }
 
 fn close_rect(tr: R) -> R {
     R::new(tr.r - 24.0, tr.t + 4.0, tr.r - 4.0, tr.b - 4.0)
+}
+
+/// 줄어든 탭 칩의 가장 좁은 폭
+const CHIP_MIN: f32 = 64.0;
+
+/// app.rs tab_rects와 같다. 다 들어가면 칩마다 이름 길이(natural)대로 둔다. 넘치면 지금 탭(active)은 제 폭을 지키고
+/// 나머지가 남는 폭을 고르게 나눈다. 그래도 넘치면 지금 탭이 보이는 만큼만 보이고 나머지는 폭 0으로 양 끝에 둔다.
+/// 새 탭(+) 자리 32를 늘 남긴다
+fn tab_rects(strip: R, natural: &[f32], active: usize) -> Vec<R> {
+    const GAP_X: f32 = 2.0;
+    let n = natural.len();
+    let avail = strip.w() - 32.0;
+    let total = natural.iter().sum::<f32>() + GAP_X * n.saturating_sub(1) as f32;
+    let place = |widths: &mut dyn Iterator<Item = (usize, f32)>, first: usize, shown: usize| -> Vec<R> {
+        let mut out = vec![R::new(strip.l, strip.t, strip.l, strip.b); n];
+        let mut x = strip.l;
+        for (i, w) in widths {
+            out[i] = R::new(x, strip.t, x + w, strip.b);
+            x += w + GAP_X;
+        }
+        let end = (x - GAP_X).max(strip.l);
+        for (i, r) in out.iter_mut().enumerate() {
+            if i >= first + shown {
+                *r = R::new(end, strip.t, end, strip.b);
+            }
+        }
+        out
+    };
+    if n == 0 {
+        return Vec::new();
+    }
+    if total <= avail {
+        return place(&mut natural.iter().copied().enumerate(), 0, n);
+    }
+    let active = active.min(n - 1);
+    let cur_w = natural[active].min((avail - CHIP_MIN - GAP_X).max(CHIP_MIN)).min(avail.max(0.0));
+    let rest = avail - cur_w - GAP_X;
+    let others = (((rest + GAP_X) / (CHIP_MIN + GAP_X) + 0.001).floor().max(0.0) as usize).min(n - 1);
+    let shown = others + 1;
+    let first = (active + 1).saturating_sub(shown).min(n - shown);
+    let w_other = if others > 0 { ((rest + GAP_X) / others as f32 - GAP_X).min(180.0) } else { 0.0 };
+    place(&mut (first..first + shown).map(|i| (i, if i == active { cur_w } else { natural[i].min(w_other) })), first, shown)
 }
 
 struct Cols {
@@ -1495,6 +1539,37 @@ mod tests {
         let (x, y) = row_point(&a, 0, 0);
         a.scroll(&g, x, y, 500.0);
         assert_eq!(a.pane(0).tab().scroll, 0.0, "a short list does not scroll");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 회귀: 한글 이름 폴더 사이를 뒤로 갈 때 글자 가운데를 잘라 멈추지 않는다. 이름이 겹치는 형제 폴더는 상위가 아니다
+    #[test]
+    fn child_toward_is_safe_with_korean_names() {
+        let d = |s: &str| Location::Dir(s.to_string());
+        assert_eq!(child_toward(&d("/tmp/a"), &d("/tmp/한글")), None);
+        assert_eq!(child_toward(&d("/tmp/a"), &d("/tmp/ab/c")), None);
+        assert_eq!(child_toward(&d("/tmp"), &d("/tmp/한글/사진")).as_deref(), Some("한글"));
+        assert_eq!(child_toward(&d("/"), &d("/Users/hong")).as_deref(), Some("Users"));
+    }
+
+    /// 탭이 넘쳐도 지금 탭은 보이고 닫을 수 있다 (나머지는 줄거나 가려지고 ⌃Tab으로 닿는다)
+    #[test]
+    fn active_tab_stays_visible_when_tabs_overflow() {
+        let (root, home) = demo();
+        let long = util::join(&home, "업무");
+        let (mut a, g) = app(&long);
+        for _ in 0..12 {
+            a.new_tab(0);
+        }
+        a.settle();
+        let head = geom(a.pane_rects()[0].1).head;
+        let (trs, add) = a.chips(&g, 0, head);
+        let cur = trs[a.pane(0).active];
+        assert!(cur.w() >= 52.0 && cur.r <= add.l, "{cur:?} {add:?}");
+        assert!(add.r <= head.r, "the + button stays inside the pane");
+        let (x, y) = (close_rect(cur).l + 4.0, cur.t + 8.0);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        assert_eq!(a.pane(0).tabs.len(), 12, "the active tab's close button works");
         std::fs::remove_dir_all(root).unwrap();
     }
 
