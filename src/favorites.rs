@@ -5,8 +5,6 @@
 use crate::util::{self, wide};
 use std::cmp::Ordering;
 use std::path::PathBuf;
-use windows::Win32::UI::Shell::StrCmpLogicalW;
-use windows::core::PCWSTR;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Favorite {
@@ -341,9 +339,8 @@ pub fn default_name(path: &str) -> String {
 }
 
 /// 탐색기와 같은 자연 정렬 ("2.주간" < "10.월간")
-pub(crate) fn natural(a: &str, b: &str) -> Ordering {
-    let (wa, wb) = (wide(a), wide(b));
-    unsafe { StrCmpLogicalW(PCWSTR(wa.as_ptr()), PCWSTR(wb.as_ptr())) }.cmp(&0)
+pub fn natural(a: &str, b: &str) -> Ordering {
+    crate::natural::cmp_z(&wide(a), &wide(b))
 }
 
 #[cfg(test)]

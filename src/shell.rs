@@ -1,13 +1,15 @@
 //! Windows 셸 연동: PIDL, 아이콘·형식 이름, 우클릭 메뉴, 파일 작업, 클립보드, 드래그, 변경 알림.
 //! 복사·이동·삭제·이름 바꾸기는 IFileOperation을 써서 탐색기와 같은 진행 창, 충돌 처리, 실행 취소를 얻는다.
 
+use crate::listing::{ATTR_DIR, Entry, Kind};
 use crate::undo::{Done, Sink, Undo, Undone};
 use crate::util::{self, wide};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use windows::Win32::Foundation::*;
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, GetDiskFreeSpaceExW, GetDriveTypeW, GetFileAttributesW,
+    GetLogicalDrives, INVALID_FILE_ATTRIBUTES,
 };
 use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
@@ -392,6 +394,58 @@ pub fn system_imagelist() -> HIMAGELIST {
         )
     };
     HIMAGELIST(h as isize)
+}
+
+// ---------- 내 PC ----------
+
+/// "내 PC": 주요 사용자 폴더 + 드라이브. 네트워크·광학 드라이브 때문에 느릴 수 있어 백그라운드에서 호출한다
+pub fn list_computer() -> Vec<Entry> {
+    let mut out = Vec::new();
+    for id in [
+        FOLDERID_Desktop,
+        FOLDERID_Downloads,
+        FOLDERID_Documents,
+        FOLDERID_Pictures,
+        FOLDERID_Music,
+        FOLDERID_Videos,
+    ] {
+        if let Some(path) = known_folder(&id) {
+            let (name, icon) = display_info(&path);
+            let mut e = Entry::from_str(&name, Kind::Known);
+            e.attrs = ATTR_DIR;
+            e.icon = icon;
+            e.target = Some(path.into());
+            out.push(e);
+        }
+    }
+    out.extend(list_drives());
+    out
+}
+
+/// 드라이브마다 표시 이름·아이콘·종류·남은/전체 용량. 네트워크·광 드라이브는 느릴 수 있으니 백그라운드에서 부른다
+pub fn list_drives() -> Vec<Entry> {
+    let mut out = Vec::new();
+    let mask = unsafe { GetLogicalDrives() };
+    for i in 0..26u8 {
+        if mask & (1 << i) == 0 {
+            continue;
+        }
+        let root = format!("{}:\\", (b'A' + i) as char);
+        let h = HSTRING::from(root.as_str());
+        let (name, icon) = display_info(&root);
+        let mut e = Entry::from_str(&name, Kind::Drive);
+        e.attrs = ATTR_DIR;
+        e.icon = icon;
+        e.drive_type = unsafe { GetDriveTypeW(&h) };
+        let (mut free, mut total) = (0u64, 0u64);
+        if unsafe { GetDiskFreeSpaceExW(&h, Some(&mut free), Some(&mut total), None) }.is_ok() {
+            e.free = free;
+            e.size = total;
+        }
+        e.target = Some(root.into());
+        out.push(e);
+    }
+    out
 }
 
 // ---------- 파일 작업 ----------

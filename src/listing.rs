@@ -1,16 +1,19 @@
-//! 폴더 열거, "내 PC" 목록, 표시용 포맷
+//! 폴더 항목(Entry)과 폴더 열거, 네트워크 폴더 오류, 표시용 포맷.
+//! 열거·시간 변환·네트워크 연결은 Win32를 쓰므로 Windows에서만 빌드된다 ("내 PC" 목록은 shell.rs)
 
-use crate::{shell, util};
+#[cfg(windows)]
+use crate::util;
+#[cfg(windows)]
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, FILETIME, SYSTEMTIME};
+#[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
-    FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, WIN32_FIND_DATAW,
+    FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, WIN32_FIND_DATAW,
 };
+#[cfg(windows)]
 use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+#[cfg(windows)]
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-use windows::Win32::UI::Shell::{
-    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Videos,
-};
+#[cfg(windows)]
 use windows::core::HSTRING;
 
 pub const ATTR_HIDDEN: u32 = 0x2;
@@ -119,26 +122,31 @@ pub fn share_root(path: &str) -> Option<String> {
 }
 
 /// 로그인이 필요해서 못 여는 오류 (접근 거부, 잘못된 비밀번호, 인증 안 됨, 다른 계정으로 연결됨, 계정 제한·잠김)
+#[cfg(windows)]
 fn needs_login(code: u32) -> bool {
     matches!(code, 5 | 86 | 1219 | 1244 | 1326 | 1327 | 1331 | 1385 | 1909)
 }
 
 /// 서버·연결에 닿지 못한 오류 (경로 없음, 네트워크 경로·이름 없음, 연결 끊김)
+#[cfg(windows)]
 fn unreachable(code: u32) -> bool {
     matches!(code, 3 | 53 | 64 | 67 | 1201 | 1222 | 2250)
 }
 
+#[cfg(windows)]
 thread_local! {
     /// 이 스레드에서 list_dir이 마지막으로 받은 Win32 오류 번호
     static LAST_LIST_ERROR: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// 같은 스레드에서 방금 실패한 list_dir의 Win32 오류 번호
+#[cfg(windows)]
 pub fn last_list_error() -> u32 {
     LAST_LIST_ERROR.get()
 }
 
 /// 네트워크 폴더를 열지 못한 까닭(오류 번호 code)에 맞는 고칠 방법. 연결 드라이브 이름을 물으므로 뒤 스레드에서 부른다
+#[cfg(windows)]
 pub fn net_fix(dir: &str, code: u32) -> Option<NetFix> {
     if let Some(share) = share_root(dir) {
         return needs_login(code).then_some(NetFix { share, ask: true });
@@ -149,6 +157,7 @@ pub fn net_fix(dir: &str, code: u32) -> Option<NetFix> {
 }
 
 /// 연결 드라이브의 원격 경로. 끊겨 있어도(ERROR_CONNECTION_UNAVAIL) 기억해 둔 이름을 준다
+#[cfg(windows)]
 fn mapped_remote(drive: &str) -> Option<String> {
     use windows::Win32::NetworkManagement::WNet::WNetGetConnectionW;
     let mut buf = [0u16; 512];
@@ -163,6 +172,7 @@ fn mapped_remote(drive: &str) -> Option<String> {
 
 /// Windows의 네트워크 로그인 창으로 공유에 연결한다 (계정·비밀번호는 Windows가 받고 저장한다).
 /// 0이면 연결됨, 1223이면 사용자가 취소. 창이 떠 있는 동안 돌아오지 않으므로 App을 빌리지 않은 채 부른다
+#[cfg(windows)]
 pub fn net_connect(owner: windows::Win32::Foundation::HWND, share: &str, ask: bool) -> u32 {
     use windows::Win32::NetworkManagement::WNet::{CONNECT_INTERACTIVE, CONNECT_PROMPT, NETRESOURCEW, RESOURCETYPE_DISK, WNetUseConnectionW};
     let remote: Vec<u16> = share.encode_utf16().chain(Some(0)).collect();
@@ -183,6 +193,7 @@ mod net_tests {
         assert_eq!(share_root("C:\\자료"), None);
     }
 
+    #[cfg(windows)]
     #[test]
     fn login_and_unreachable_codes_are_apart() {
         assert!(needs_login(1326) && needs_login(5) && !needs_login(53));
@@ -190,6 +201,7 @@ mod net_tests {
     }
 }
 
+#[cfg(windows)]
 pub fn list_dir(dir: &str) -> Result<Vec<Entry>, String> {
     let pattern = HSTRING::from(util::join(dir, "*"));
     let mut data = WIN32_FIND_DATAW::default();
@@ -226,6 +238,7 @@ pub fn list_dir(dir: &str) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
+#[cfg(windows)]
 fn from_find_data(d: &WIN32_FIND_DATAW) -> Option<Entry> {
     let len = d.cFileName.iter().position(|&c| c == 0).unwrap_or(d.cFileName.len());
     let name = &d.cFileName[..len];
@@ -241,56 +254,7 @@ fn from_find_data(d: &WIN32_FIND_DATAW) -> Option<Entry> {
     Some(e)
 }
 
-/// "내 PC": 주요 사용자 폴더 + 드라이브. 네트워크·광학 드라이브 때문에 느릴 수 있어 백그라운드에서 호출한다
-pub fn list_computer() -> Vec<Entry> {
-    let mut out = Vec::new();
-    for id in [
-        FOLDERID_Desktop,
-        FOLDERID_Downloads,
-        FOLDERID_Documents,
-        FOLDERID_Pictures,
-        FOLDERID_Music,
-        FOLDERID_Videos,
-    ] {
-        if let Some(path) = shell::known_folder(&id) {
-            let (name, icon) = shell::display_info(&path);
-            let mut e = Entry::from_str(&name, Kind::Known);
-            e.attrs = ATTR_DIR;
-            e.icon = icon;
-            e.target = Some(path.into());
-            out.push(e);
-        }
-    }
-    out.extend(list_drives());
-    out
-}
-
-/// 드라이브마다 표시 이름·아이콘·종류·남은/전체 용량. 네트워크·광 드라이브는 느릴 수 있으니 백그라운드에서 부른다
-pub fn list_drives() -> Vec<Entry> {
-    let mut out = Vec::new();
-    let mask = unsafe { GetLogicalDrives() };
-    for i in 0..26u8 {
-        if mask & (1 << i) == 0 {
-            continue;
-        }
-        let root = format!("{}:\\", (b'A' + i) as char);
-        let h = HSTRING::from(root.as_str());
-        let (name, icon) = shell::display_info(&root);
-        let mut e = Entry::from_str(&name, Kind::Drive);
-        e.attrs = ATTR_DIR;
-        e.icon = icon;
-        e.drive_type = unsafe { GetDriveTypeW(&h) };
-        let (mut free, mut total) = (0u64, 0u64);
-        if unsafe { GetDiskFreeSpaceExW(&h, Some(&mut free), Some(&mut total), None) }.is_ok() {
-            e.free = free;
-            e.size = total;
-        }
-        e.target = Some(root.into());
-        out.push(e);
-    }
-    out
-}
-
+#[cfg(windows)]
 pub fn filetime_u64(ft: &FILETIME) -> u64 {
     ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
 }
@@ -311,6 +275,7 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// 현지 시간 "2026-11-02 14:03" (일광 절약 시간 반영)
+#[cfg(windows)]
 pub fn format_time(ft: u64) -> String {
     if ft == 0 {
         return String::new();
@@ -327,6 +292,7 @@ pub fn format_time(ft: u64) -> String {
 }
 
 /// 지금 시각 (FILETIME과 같은 100ns 단위)
+#[cfg(windows)]
 pub fn now_filetime() -> u64 {
     filetime_u64(&unsafe { GetSystemTimeAsFileTime() })
 }
@@ -341,6 +307,7 @@ pub struct LocalTime {
     pub minute: u16,
 }
 
+#[cfg(windows)]
 fn local_time(ft: u64) -> Option<LocalTime> {
     let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
     let mut utc = SYSTEMTIME::default();
@@ -380,6 +347,7 @@ pub fn relative_label(t: LocalTime, now: LocalTime, secs: i64) -> String {
 }
 
 /// 목록의 수정한 날짜를 짧게 (now는 now_filetime). 읽을 수 없으면 빈 글자
+#[cfg(windows)]
 pub fn format_time_short(ft: u64, now: u64) -> String {
     if ft == 0 {
         return String::new();
@@ -445,6 +413,7 @@ mod tests {
         assert_eq!(Entry::from_str("dir.d", Kind::Dir).ext_lower(), "");
     }
 
+    #[cfg(windows)]
     #[test]
     fn lists_temp_dir() {
         let dir = std::env::temp_dir().join(format!("sakadu-test-{}", std::process::id()));
@@ -459,6 +428,7 @@ mod tests {
         assert!(entries.iter().any(|e| e.kind == Kind::Dir && e.name_string() == "sub"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn missing_dir_is_error() {
         assert!(list_dir("C:\\__sakadu_does_not_exist__").is_err());

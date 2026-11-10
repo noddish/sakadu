@@ -5,7 +5,8 @@ edition = "2024"
 description = "가볍고 빠른 Windows 멀티뷰 파일 관리자"
 license = "GPL-3.0-or-later"
 
-[dependencies]
+# Windows API는 Windows에서만 받는다. 공통 코드(src/lib.rs)는 다른 OS에서도 빌드·테스트된다 (macOS 버전 준비)
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Globalization",

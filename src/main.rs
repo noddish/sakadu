@@ -3,25 +3,19 @@
 
 mod app;
 mod defaultfm;
-mod diag;
 mod droptarget;
-mod favorites;
 mod folders;
 mod gfx;
 mod acl;
-mod index;
-mod keys;
-mod listing;
-mod pane;
 mod service;
-mod session;
 mod shell;
 mod theme;
 mod thumbs;
 mod tray;
 mod undo;
-mod util;
-mod workspaces;
+
+// 공통 코드(src/lib.rs). 다른 모듈은 지금처럼 crate::listing 등으로 쓴다
+use sakadu::{diag, favorites, index, keys, listing, pane, session, util, workspaces};
 
 use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::*;

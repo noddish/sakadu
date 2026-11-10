@@ -4,9 +4,9 @@
 //! 처리 중에 직접 하지 않고 `pending`에 넣어 빌림이 풀린 뒤 `execute`에서 실행한다.
 
 use crate::gfx::{Font, Gfx, R};
-use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time, list_computer, list_dir};
+use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time, list_dir};
 use crate::pane::*;
-use crate::shell::{self, FileOp, key_down};
+use crate::shell::{self, FileOp, key_down, list_computer};
 use crate::theme::{Color, FOCUS_W, R_CTRL, R_PANE, R_ROW, Theme, alpha, colorref};
 use crate::{WM_APP_ICONS, WM_APP_LISTED, WM_APP_NOTIFY, WM_APP_SEARCH, session, util, with_app};
 use std::cell::{Cell, RefCell};

@@ -17,3 +17,12 @@ jobs:
         run: cargo test --locked
       - name: Build release
         run: cargo build --release --locked
+
+  # macOS 버전 준비: Win32 없는 공통 코드(src/lib.rs)가 macOS에서도 빌드·테스트되는지 본다.
+  # 실행 파일(main.rs)은 아직 Windows 전용이라 --lib만 돌린다
+  core-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test core
+        run: cargo test --lib --locked
