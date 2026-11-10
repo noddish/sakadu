@@ -257,7 +257,7 @@ fn sort_section(favs: &mut [Favorite], by: SortBy) {
 }
 
 fn file_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Sakadu").join("favorites.txt"))
+    crate::util::config_dir().map(|d| d.join("favorites.txt"))
 }
 
 pub fn load() -> Favorites {

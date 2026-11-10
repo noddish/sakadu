@@ -132,6 +132,15 @@ pub fn name_problem(name: &str) -> Option<String> {
     None
 }
 
+/// 설정 파일(세션·즐겨찾기·작업 공간·단축키)을 두는 폴더. Windows는 %APPDATA%\Sakadu, 맥은 ~/Library/Application Support/Sakadu
+pub fn config_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from);
+    #[cfg(not(windows))]
+    let base = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library").join("Application Support"));
+    base.map(|b| b.join("Sakadu"))
+}
+
 /// 천 단위 쉼표 (12345 → "12,345")
 pub fn grouped(n: u64) -> String {
     let digits = n.to_string();
@@ -226,6 +235,14 @@ mod tests {
         let s = segments("/Users/hong");
         let want = [("/", "/"), ("Users", "/Users"), ("hong", "/Users/hong")];
         assert_eq!(s, want.map(|(a, b)| (a.to_string(), b.to_string())));
+    }
+
+    #[test]
+    fn config_dir_is_the_app_folder() {
+        let d = config_dir().expect("설정 폴더");
+        assert!(d.ends_with("Sakadu"));
+        #[cfg(not(windows))]
+        assert!(d.ends_with("Library/Application Support/Sakadu"), "{d:?}");
     }
 
     #[test]

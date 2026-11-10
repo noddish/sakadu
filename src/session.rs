@@ -75,7 +75,7 @@ pub const NEW_TAB_START: &str = "::start";
 const OLD_DEFAULT_COLS: [f32; 3] = [140.0, 130.0, 84.0];
 
 pub fn file_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Sakadu").join("session.txt"))
+    crate::util::config_dir().map(|d| d.join("session.txt"))
 }
 
 pub fn load() -> Option<Session> {

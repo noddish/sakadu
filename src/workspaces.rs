@@ -55,7 +55,7 @@ pub fn clean_name(s: &str) -> String {
 }
 
 pub fn file_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Sakadu").join("workspaces.txt"))
+    crate::util::config_dir().map(|d| d.join("workspaces.txt"))
 }
 
 pub fn load() -> Workspaces {
