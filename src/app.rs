@@ -964,10 +964,14 @@ fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
         Location::Computer => Some(util::segments(cur).first()?.1.clone()),
         Location::Start => None,
         Location::Dir(a) => {
-            if cur.len() <= a.len() || !util::eq_path(&cur[..a.len()], a) {
+            // 한글처럼 여러 바이트인 글자 가운데를 자르지 않게 글자 경계에서만 비교한다
+            let head = cur.get(..a.len()).filter(|h| cur.len() > a.len() && util::eq_path(h, a))?;
+            let rest = &cur[head.len()..];
+            // "C:\tmp\a"는 "C:\tmp\ab"의 상위 폴더가 아니다 (구분자 바로 앞에서 끝나야 한다)
+            if !a.ends_with('\\') && !rest.starts_with('\\') {
                 return None;
             }
-            cur[a.len()..].trim_start_matches('\\').split('\\').next().map(String::from)
+            rest.trim_start_matches('\\').split('\\').next().map(String::from)
         }
     }
 }
@@ -5971,5 +5975,20 @@ mod tests {
         assert!(m.busy(&["c:\\S\\B.TXT".to_string(), "C:\\s\\c.txt".to_string()]), "any overlapping file counts");
         m.end(idb);
         assert!(!m.busy(&b));
+    }
+
+    /// 회귀: 한글 이름 폴더 사이를 뒤로 갈 때 글자 가운데를 잘라 꺼지지 않는다. 이름이 겹치는 형제 폴더는 상위가 아니다
+    #[test]
+    fn child_toward_is_safe_with_korean_names() {
+        let d = |s: &str| Location::Dir(s.to_string());
+        // "C:\tmp\a"는 8바이트이고 "C:\tmp\한글"의 8바이트째는 '한'의 가운데다
+        assert_eq!(child_toward(&d("C:\\tmp\\a"), &d("C:\\tmp\\한글")), None);
+        assert_eq!(child_toward(&d("C:\\tmp\\a"), &d("C:\\tmp\\ab")), None);
+        assert_eq!(child_toward(&d("C:\\tmp\\a"), &d("C:\\tmp\\ab\\c")), None);
+        assert_eq!(child_toward(&d("C:\\tmp"), &d("C:\\tmp\\한글\\사진")).as_deref(), Some("한글"));
+        assert_eq!(child_toward(&d("C:\\TMP"), &d("C:\\tmp\\a")).as_deref(), Some("a"));
+        assert_eq!(child_toward(&d("C:\\"), &d("C:\\사용자\\hong")).as_deref(), Some("사용자"));
+        assert_eq!(child_toward(&d("\\\\서버\\공유"), &d("\\\\서버\\공유\\사진\\2024")).as_deref(), Some("사진"));
+        assert_eq!(child_toward(&d("\\\\서버\\공유"), &d("\\\\서버\\공유2\\사진")), None);
     }
 }
