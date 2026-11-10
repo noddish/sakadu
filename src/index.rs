@@ -470,8 +470,7 @@ fn path_matches(vol: &Volume, i: usize, terms: &[String], memo: &[AtomicU32], bu
     terms.iter().enumerate().all(|(j, t)| state & (1 << (j + 2)) == 0 || starts_with_lower(name, after_last_sep(t)))
 }
 
-/// 여러 볼륨에서 찾는다. (상위 결과, 전체 일치 개수)
-#[cfg(test)]
+/// 여러 볼륨에서 찾는다. (상위 결과, 전체 일치 개수). 테스트용 (실행 파일 쪽 acl.rs 테스트도 쓰므로 늘 빌드한다)
 pub fn search(vols: &[&Volume], q: &Query, limit: usize) -> (Vec<Hit>, usize) {
     search_visible(vols, q, limit, &|_, _| true)
 }
@@ -550,6 +549,7 @@ pub fn search_visible(vols: &[&Volume], q: &Query, limit: usize, visible: &(dyn 
 
 // ---------- 볼륨 접근 (관리자 권한 필요) ----------
 
+#[cfg(windows)]
 pub mod volume_io {
     use super::*;
     use windows::Win32::Foundation::{CloseHandle, ERROR_HANDLE_EOF, GENERIC_READ, HANDLE};

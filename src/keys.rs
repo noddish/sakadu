@@ -3,7 +3,6 @@
 //! 방향키·Enter·Esc·Tab, 복사·붙여넣기(Ctrl+C/X/V/A) 같은 기본 조작은 바꾸지 않는다.
 
 use std::path::PathBuf;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Combo {
@@ -122,7 +121,9 @@ fn key_code(name: &str) -> Option<u16> {
 
 impl Combo {
     /// 지금 눌린 수정 키와 함께
+    #[cfg(windows)]
     pub fn now(vk: u16) -> Combo {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
         let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
         Combo { ctrl: down(VK_CONTROL.0), shift: down(VK_SHIFT.0), alt: down(VK_MENU.0), vk }
     }

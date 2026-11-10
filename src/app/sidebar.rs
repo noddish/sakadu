@@ -159,7 +159,7 @@ pub(super) fn spawn_places(hwnd: HWND) {
     let owner = shell::SendHwnd(hwnd);
     std::thread::spawn(move || {
         let _com = shell::ComInit::sta();
-        let drives = crate::listing::list_drives()
+        let drives = shell::list_drives()
             .into_iter()
             .map(|e| Drive { name: e.name_string(), path: e.target.as_deref().unwrap_or_default().to_string(), icon: e.icon, free: e.free, total: e.size })
             .collect();

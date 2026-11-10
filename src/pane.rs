@@ -3,8 +3,6 @@
 use crate::listing::Entry;
 use crate::util;
 use std::cmp::Ordering;
-use windows::Win32::UI::Shell::StrCmpLogicalW;
-use windows::core::PCWSTR;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Location {
@@ -414,8 +412,7 @@ pub fn compare(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
 
 /// 탐색기와 같은 자연 정렬 ("file2" < "file10")
 fn natural(a: &Entry, b: &Entry) -> Ordering {
-    let r = unsafe { StrCmpLogicalW(PCWSTR(a.name_z().as_ptr()), PCWSTR(b.name_z().as_ptr())) };
-    r.cmp(&0)
+    crate::natural::cmp_z(a.name_z(), b.name_z())
 }
 
 fn cmp_ext(a: &[u16], b: &[u16]) -> Ordering {
@@ -578,6 +575,7 @@ mod tests {
     }
 
     /// 성능 측정: QP_BENCH_DIR 폴더를 열거·정렬·필터하는 시간 (cargo test --release -- --ignored --nocapture)
+    #[cfg(windows)]
     #[test]
     #[ignore]
     fn bench_list_sort_filter() {

@@ -98,6 +98,7 @@ cargo test
 - 시험용 환경 변수: `SAKADU_THEME=dark|light`, `SAKADU_TRAY=0|1`, `SAKADU_ISOLATED=1`(쓰고 있는 Sakadu와 따로 뜨는 시험 창. `APPDATA`·`LOCALAPPDATA`도 다른 폴더로 돌려 두세요)
 - 릴리스: `Cargo.toml`의 `version`을 올리고 `v0.7.0` 같은 태그를 푸시하면 GitHub Actions가 초안 릴리스를 만들어요.
 - 코드: `app.rs`(레이아웃·입력·그리기)와 `app/`(패널·검색·미리 보기·명령 메뉴·시작 화면·설정), `index.rs`·`service.rs`(검색 인덱스·서비스), `shell.rs`(셸 메뉴·파일 작업), `listing.rs`(폴더 읽기)
+- 공통 코드: `src/lib.rs`에 묶인 모듈(칸·탭 상태, 저장 형식, 이름 검색, 자연 정렬)은 Windows API 없이도 빌드돼요. macOS 버전을 준비하려고 CI가 macOS에서 `cargo test --lib`로 확인해요.
 
 기여는 환영해요. 큰 변경은 이슈로 먼저 이야기해 주세요.
 
