@@ -275,8 +275,9 @@ pub struct App {
     probes: Vec<Probe>,
     /// 칸마다 마지막으로 낸 경로 확인 요청 번호
     probe_seq: [u64; 4],
-    /// 저장한 세션에서 연 탭 (처음 읽기가 실패하면 home으로 바꾼다)
-    restored: std::collections::HashSet<u64>,
+    /// 저장한 세션에서 연 탭과 그 폴더. 그 폴더의 첫 읽기가 실패하면 home으로 바꾼다
+    /// (그 사이 다른 곳으로 옮겼으면 그곳의 오류는 그대로 보인다)
+    restored: std::collections::HashMap<u64, String>,
     /// 홈 폴더 (세션에서 연 폴더가 없을 때)
     home: String,
     /// 사이드바 목록 스크롤 (줄이 창 아래로 넘칠 때)
@@ -313,7 +314,7 @@ impl App {
             flash: None,
             probes: Vec::new(),
             probe_seq: [0; 4],
-            restored: std::collections::HashSet::new(),
+            restored: std::collections::HashMap::new(),
             home: home.to_string(),
             side_scroll: 0.0,
             open_files: Vec::new(),
@@ -391,10 +392,11 @@ impl App {
         if !current {
             return;
         }
-        // 세션에서 연 탭인지는 그 탭의 첫 읽기 결과에서만 본다
-        let restored = self.restored.remove(&tab_id);
+        // 세션에서 연 탭인지는 그 탭의 첫 읽기 결과에서만, 그리고 아직 저장한 그 폴더에 있을 때만 본다
+        let saved = self.restored.remove(&tab_id);
         let home = self.home.clone();
         let Some(tab) = self.panes[p].tabs.iter_mut().find(|t| t.id == tab_id) else { return };
+        let restored = saved.is_some_and(|d| tab.loc.dir() == Some(d.as_str()));
         match result {
             Ok(entries) => {
                 let restore = tab.set_entries(entries, sort, hidden);
@@ -573,8 +575,8 @@ impl App {
                     Location::Dir(d) => d,
                     _ => home.to_string(),
                 };
-                let tab = self.new_tab_at(Location::Dir(dir));
-                self.restored.insert(tab.id);
+                let tab = self.new_tab_at(Location::Dir(dir.clone()));
+                self.restored.insert(tab.id, dir);
                 tabs.push(tab);
             }
             if !tabs.is_empty() {
@@ -2026,6 +2028,16 @@ mod tests {
         assert_eq!(b.pane(1).tab().loc, Location::Dir(util::join(&home, "다운로드")));
         assert_eq!(b.pane(2).tab().loc, Location::Dir(home.clone()), "a missing folder opens home after its listing fails");
         assert!(b.pane(2).tab().back.is_empty(), "the fallback leaves no history");
+        // 첫 읽기 전에 다른 곳으로 옮겼으면 그곳의 오류는 홈으로 바꾸지 않고 보인다
+        let mut s2 = s.clone();
+        s2.panes[0].tabs = vec![util::join(&home, "지운 폴더")];
+        let (mut c, _g) = app(&home);
+        c.restore(&s2, &home);
+        let gone = util::join(&home, "없는 곳");
+        c.navigate(0, Location::Dir(gone.clone()), None);
+        c.settle();
+        assert_eq!(c.pane(0).tab().loc, Location::Dir(gone));
+        assert!(matches!(c.pane(0).tab().state, LoadState::Error(_)));
         assert!(names(&b, 0).contains(&"예산.csv".to_string()), "visible panes are loaded");
         std::fs::remove_dir_all(root).unwrap();
     }
