@@ -26,10 +26,12 @@ jobs:
       - uses: actions/checkout@v7
       - name: Test core
         run: cargo test --lib --locked
-      # 맥 시제품(sakadu-mac): 화면 모양 후보를 실제 맥 글꼴·그리기로 PNG에 그려 올린다
+      # 맥 시제품(sakadu-mac): 누르기 → 동작 시험, 그리고 여러 상태를 실제 맥 글꼴·그리기로 PNG에 그려 올린다
+      - name: Test mac prototype
+        run: cargo test --features mac-app --bin sakadu-mac --locked
       - name: Build mac prototype
         run: cargo build --features mac-app --bin sakadu-mac --locked
-      - name: Render layouts
+      - name: Render screens
         run: |
           # README 데모와 같은 한글 이름의 빈 파일 (개인 파일 없음). 날짜는 고정해 목록의 짧은 날짜가 늘 같게
           D="$RUNNER_TEMP/Sakadu 데모"
@@ -50,9 +52,17 @@ jobs:
           mk "팀 공유/공지.txt" 64 202610200900
           mk "사진/제주살이/성산 일출.jpg" 1024 202610170642
           mk "사진/제주살이/맛집 메모.md" 512 202610170700
+          mk "다운로드/.숨김 설정" 16 202610010900
+          mkdir -p "$D/업무/빈 폴더"
           ./target/debug/sakadu-mac --render "$D" --out mac-render
-      - name: Upload layout renders
+          echo "DEMO=$D" >> "$GITHUB_ENV"
+      # 실제 창(신호등 포함). 러너에서 창을 열 수 없으면 이 단계만 실패로 남긴다
+      - name: Window snapshot
+        continue-on-error: true
+        timeout-minutes: 2
+        run: ./target/debug/sakadu-mac --snapshot mac-render/window.png --start "$DEMO/업무"
+      - name: Upload screens
         uses: actions/upload-artifact@v7
         with:
-          name: mac-layouts
+          name: mac-screens
           path: mac-render/*.png

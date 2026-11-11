@@ -261,7 +261,7 @@ impl Keymap {
 }
 
 fn file_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Sakadu").join("keys.txt"))
+    crate::util::config_dir().map(|d| d.join("keys.txt"))
 }
 
 #[cfg(test)]

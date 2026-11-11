@@ -61,10 +61,18 @@ impl Gfx {
         // 왼쪽 위를 0으로, pt 단위로
         CGContext::translate_ctm(Some(&ctx), 0.0, ph as CGFloat);
         CGContext::scale_ctm(Some(&ctx), scale as CGFloat, -scale as CGFloat);
+        Some(Self::with(ctx))
+    }
+
+    /// 창(위아래를 뒤집은 NSView)의 drawRect: 안에서 지금 그림판에 그린다
+    pub fn for_context(ctx: &CGContext) -> Gfx {
+        Self::with(unsafe { CFRetained::retain(std::ptr::NonNull::from(ctx)) })
+    }
+
+    fn with(ctx: CFRetained<CGContext>) -> Gfx {
         // 위아래를 뒤집은 좌표에서 글자가 거꾸로 서지 않게
         CGContext::set_text_matrix(Some(&ctx), CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: -1.0, tx: 0.0, ty: 0.0 });
         let ns = NSGraphicsContext::graphicsContextWithCGContext_flipped(&ctx, true);
-        NSGraphicsContext::setCurrentContext(Some(&ns));
         let font = |size: CGFloat, strong: bool| NSFont::systemFontOfSize_weight(size, unsafe { if strong { NSFontWeightSemibold } else { NSFontWeightRegular } });
         // Windows gfx의 글꼴 표와 같은 순서·크기 (아이콘 글꼴 자리는 글자 크기만 쓴다)
         let fonts = vec![
@@ -81,7 +89,7 @@ impl Gfx {
             font(12.0, false),
             font(12.0, false),
         ];
-        Some(Gfx { ctx, ns, fonts })
+        Gfx { ctx, ns, fonts }
     }
 
     fn c(&self) -> Option<&CGContext> {
@@ -212,9 +220,13 @@ impl Gfx {
         CGContext::restore_g_state(self.c());
     }
 
+    /// AppKit 그림을 이 그림판에 그린다 (그동안만 이 그림판을 AppKit의 지금 그림판으로 둔다)
     fn draw_image(&self, img: &NSImage, r: R) {
         let dst = NSRect::new(NSPoint::new(r.l as CGFloat, r.t as CGFloat), NSSize::new(r.w() as CGFloat, r.h() as CGFloat));
+        NSGraphicsContext::saveGraphicsState_class();
+        NSGraphicsContext::setCurrentContext(Some(&self.ns));
         unsafe { img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(dst, NSRect::ZERO, NSCompositingOperation::SourceOver, 1.0, true, None) };
+        NSGraphicsContext::restoreGraphicsState_class();
     }
 
     /// 그 경로의 Finder 아이콘 (파일 종류·폴더)
