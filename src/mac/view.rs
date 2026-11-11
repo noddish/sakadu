@@ -2,7 +2,8 @@
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인은 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다.
 //! 끝낼 때 화면 상태(세션)를 저장하고, 다음에 그대로 연다
 
-use crate::app::{App, Key, LIGHTS_BOTTOM, Mods, ROW_H};
+use crate::app::{App, Key, LIGHTS_BOTTOM, Mods};
+use sakadu::ui::ROW_H;
 use crate::gfx::Gfx;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;

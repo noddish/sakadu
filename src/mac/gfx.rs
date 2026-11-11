@@ -52,6 +52,31 @@ fn symbol_name(code: u16) -> &'static str {
     }
 }
 
+/// 공통 화면 코드(sakadu::ui)가 쓰는 그리기: 같은 이름의 메서드를 그대로 부른다
+impl sakadu::ui::Canvas for Gfx {
+    fn fill(&self, r: R, c: Color) {
+        Gfx::fill(self, r, c)
+    }
+    fn fill_round(&self, r: R, radius: f32, c: Color) {
+        Gfx::fill_round(self, r, radius, c)
+    }
+    fn stroke_round(&self, r: R, radius: f32, c: Color, width: f32) {
+        Gfx::stroke_round(self, r, radius, c, width)
+    }
+    fn text(&self, s: &str, r: R, f: Font, c: Color) {
+        Gfx::text(self, s, r, f, c)
+    }
+    fn measure(&self, s: &str, f: Font) -> f32 {
+        Gfx::measure(self, s, f)
+    }
+    fn glyph(&self, code: u16, r: R, small: bool, c: Color) {
+        Gfx::glyph(self, code, r, small, c)
+    }
+    fn glyph_font(&self, code: u16, r: R, f: Font, c: Color) {
+        Gfx::glyph_font(self, code, r, f, c)
+    }
+}
+
 impl Gfx {
     /// 너비 w × 높이 h(pt) 그림판. scale배 픽셀로 그린다 (레티나는 2)
     pub fn bitmap(w: f32, h: f32, scale: f32) -> Option<Gfx> {

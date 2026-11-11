@@ -1,6 +1,7 @@
 //! 그림 시험: 창 없이 App을 몇 가지 상태로 만들어 PNG로 그린다 (CI에서 맥 화면을 확인하는 용도)
 
-use crate::app::{App, Hit, Layout, Side};
+use crate::app::{App, Hit, Side};
+use sakadu::ui::Layout;
 use crate::gfx::Gfx;
 use sakadu::favorites::{Favorite, Favorites, Group};
 use sakadu::palette::Theme;
