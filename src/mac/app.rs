@@ -178,6 +178,10 @@ pub struct Request {
 pub struct Probe {
     pub pane: usize,
     pub tab: u64,
+    /// 확인을 시작할 때 그 탭의 세대 번호 (그 사이 다른 곳으로 옮기면 바뀐다)
+    pub generation: u64,
+    /// 그 칸의 경로 확인 요청 번호 (나중에 낸 요청이 이긴다)
+    pub seq: u64,
     pub text: String,
 }
 
@@ -269,6 +273,12 @@ pub struct App {
     /// 칸 p의 칩 줄 오른쪽에 잠깐 보일 알림 (다음 입력 때 지운다)
     flash: Option<(usize, String)>,
     probes: Vec<Probe>,
+    /// 칸마다 마지막으로 낸 경로 확인 요청 번호
+    probe_seq: [u64; 4],
+    /// 저장한 세션에서 연 탭 (처음 읽기가 실패하면 home으로 바꾼다)
+    restored: std::collections::HashSet<u64>,
+    /// 홈 폴더 (세션에서 연 폴더가 없을 때)
+    home: String,
     /// 사이드바 목록 스크롤 (줄이 창 아래로 넘칠 때)
     side_scroll: f32,
     /// 열어 달라는 파일 (창 쪽이 macOS '열기'로 연다)
@@ -302,6 +312,9 @@ impl App {
             editing: None,
             flash: None,
             probes: Vec::new(),
+            probe_seq: [0; 4],
+            restored: std::collections::HashSet::new(),
+            home: home.to_string(),
             side_scroll: 0.0,
             open_files: Vec::new(),
             persist: false,
@@ -374,10 +387,14 @@ impl App {
         let (sort, hidden) = (self.sort, self.show_hidden);
         let Some(p) = self.panes.iter().position(|pane| pane.tabs.iter().any(|t| t.id == tab_id)) else { return };
         let list = self.list_rect(p);
-        let Some(tab) = self.panes[p].tabs.iter_mut().find(|t| t.id == tab_id) else { return };
-        if tab.generation != generation {
+        let current = self.panes[p].tabs.iter().any(|t| t.id == tab_id && t.generation == generation);
+        if !current {
             return;
         }
+        // 세션에서 연 탭인지는 그 탭의 첫 읽기 결과에서만 본다
+        let restored = self.restored.remove(&tab_id);
+        let home = self.home.clone();
+        let Some(tab) = self.panes[p].tabs.iter_mut().find(|t| t.id == tab_id) else { return };
         match result {
             Ok(entries) => {
                 let restore = tab.set_entries(entries, sort, hidden);
@@ -388,6 +405,13 @@ impl App {
                         reveal(tab, list);
                     }
                 }
+            }
+            // 세션에서 연 폴더가 없어졌거나 닿지 않으면 home을 연다 (기록은 남기지 않는다)
+            Err(_) if restored && tab.loc != Location::Dir(home.clone()) => {
+                tab.loc = Location::Dir(home.clone());
+                tab.generation += 1;
+                tab.state = LoadState::Loading;
+                self.requests.push(Request { tab: tab.id, generation: tab.generation, dir: home });
             }
             Err(msg) => {
                 tab.entries.clear();
@@ -411,7 +435,7 @@ impl App {
             }
             for p in probes {
                 let result = resolve_input(&p.text, &home);
-                self.on_probed(p.pane, p.tab, result);
+                self.on_probed(&p, result);
             }
         }
     }
@@ -433,8 +457,9 @@ impl App {
     /// 입력한 경로로 간다. 확인은 뒷줄에서 하고 결과는 on_probed로 받는다
     pub fn commit_address(&mut self, text: &str) {
         let Some(p) = self.editing.take() else { return };
-        let tab = self.panes[p].tab().id;
-        self.probes.push(Probe { pane: p, tab, text: text.to_string() });
+        let (tab, generation) = (self.panes[p].tab().id, self.panes[p].tab().generation);
+        self.probe_seq[p] += 1;
+        self.probes.push(Probe { pane: p, tab, generation, seq: self.probe_seq[p], text: text.to_string() });
     }
 
     /// 그림 시험용: 칸 p에서 text를 입력해 확정한 결과까지 바로 반영한다
@@ -448,9 +473,12 @@ impl App {
         std::mem::take(&mut self.probes)
     }
 
-    /// 경로 확인 결과. 그 사이 그 칸의 지금 탭이 바뀌었으면 버린다
-    pub fn on_probed(&mut self, p: usize, tab: u64, result: Result<(String, Option<String>), String>) {
-        if self.panes[p].tab().id != tab {
+    /// 경로 확인 결과. 그 사이 그 칸의 지금 탭이 바뀌었거나, 그 탭이 다른 곳으로 옮겼거나, 더 나중에 낸 경로 입력이
+    /// 있으면 버린다 (확인이 늦게 끝난 순서대로 옮겨 다니지 않게)
+    pub fn on_probed(&mut self, probe: &Probe, result: Result<(String, Option<String>), String>) {
+        let p = probe.pane;
+        let tab = self.panes[p].tab();
+        if tab.id != probe.tab || tab.generation != probe.generation || self.probe_seq[p] != probe.seq {
             return;
         }
         match result {
@@ -534,14 +562,19 @@ impl App {
             "search" => Side::Search,
             _ => Side::Favorites,
         };
+        self.home = home.to_string();
         for (p, ps) in s.panes.iter().take(self.panes.len()).enumerate() {
             let mut tabs = Vec::new();
             for t in &ps.tabs {
+                // 폴더가 아직 있는지는 여기서 보지 않는다 (꺼진 네트워크 폴더면 창이 뜨기 전에 멈춘다).
+                // 처음 읽기가 실패하면 on_listed가 home으로 바꾼다
                 let dir = match Location::from_session(t) {
-                    Location::Dir(d) if std::path::Path::new(&d).is_dir() => d,
+                    Location::Dir(d) => d,
                     _ => home.to_string(),
                 };
-                tabs.push(self.new_tab_at(Location::Dir(dir)));
+                let tab = self.new_tab_at(Location::Dir(dir));
+                self.restored.insert(tab.id);
+                tabs.push(tab);
             }
             if !tabs.is_empty() {
                 let active = ps.active.min(tabs.len() - 1);
@@ -1905,8 +1938,11 @@ mod tests {
     fn address_edit_commits_cancels_and_flashes() {
         let (root, home) = demo();
         let (mut a, g) = app(&home);
+        a.resize(3600.0, 800.0);
         let gm = geom(a.pane_rects()[1].1);
-        let (x, y) = (gm.crumb.r - 6.0, gm.crumb.t + 10.0);
+        let last = a.crumbs(&g, gm.crumb, &home).last().unwrap().0;
+        let (x, y) = (last.r + CHEV_W + 8.0, gm.crumb.t + 10.0);
+        assert!(x < gm.crumb.r, "an empty spot after the last crumb");
         assert_eq!(a.hit(&g, x, y), Hit::CrumbEmpty(1));
         a.mouse_down(&g, x, y, Mods::default(), 1);
         assert_eq!((a.editing, a.active()), (Some(1), 1));
@@ -1924,6 +1960,24 @@ mod tests {
         a.settle();
         assert!(a.flash.as_ref().is_some_and(|(p, m)| *p == 1 && m.contains("찾을 수 없어요")));
         assert_eq!(a.pane(1).tab().loc, Location::Dir(util::join(&home, "업무")));
+        // 늦게 끝난 확인은 버린다: 경로 입력 두 번이면 나중 것이, 확인 중에 다른 곳으로 옮기면 그 곳이 이긴다
+        a.begin_address(1);
+        a.commit_address(&util::join(&home, "다운로드"));
+        let first = a.take_probes().pop().unwrap();
+        a.begin_address(1);
+        a.commit_address(&home);
+        let second = a.take_probes().pop().unwrap();
+        a.on_probed(&second, resolve_input(&second.text, &home));
+        a.on_probed(&first, resolve_input(&first.text, &home));
+        a.settle();
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(home.clone()), "the later address wins");
+        a.begin_address(1);
+        a.commit_address(&util::join(&home, "다운로드"));
+        let slow = a.take_probes().pop().unwrap();
+        a.navigate(1, Location::Dir(util::join(&home, "업무")), None);
+        a.on_probed(&slow, resolve_input(&slow.text, &home));
+        a.settle();
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(util::join(&home, "업무")), "navigation after the address wins");
         // ⌘⇧G로 열고, 목록을 누르면 취소된다 (알림도 지운다)
         a.key(Key::Char('g'), Mods { cmd: true, shift: true, ..Default::default() });
         assert_eq!(a.editing, Some(1));
@@ -1950,7 +2004,7 @@ mod tests {
         let mut s = a.to_session();
         // 다시 읽은 세션 글자로 연다 (파일 형식까지)
         s = session::parse(&session::serialize(&s)).expect("session");
-        s.panes[3].tabs = vec![util::join(&home, "지운 폴더")];
+        s.panes[2].tabs = vec![util::join(&home, "지운 폴더")];
         let (mut b, _g) = app(&home);
         b.restore(&s, &home);
         b.settle();
@@ -1959,7 +2013,8 @@ mod tests {
         assert_eq!(b.pane(1).tabs.len(), 2);
         assert_eq!(b.pane(1).active, 1);
         assert_eq!(b.pane(1).tab().loc, Location::Dir(util::join(&home, "다운로드")));
-        assert_eq!(b.pane(3).tab().loc, Location::Dir(home.clone()), "a missing folder opens home");
+        assert_eq!(b.pane(2).tab().loc, Location::Dir(home.clone()), "a missing folder opens home after its listing fails");
+        assert!(b.pane(2).tab().back.is_empty(), "the fallback leaves no history");
         assert!(names(&b, 0).contains(&"예산.csv".to_string()), "visible panes are loaded");
         std::fs::remove_dir_all(root).unwrap();
     }

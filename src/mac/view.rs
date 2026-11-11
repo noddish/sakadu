@@ -273,7 +273,7 @@ fn pump() {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
             let result = crate::app::resolve_input(&p.text, &home);
             DispatchQueue::main().exec_async(move || {
-                with_app(|a| a.on_probed(p.pane, p.tab, result));
+                with_app(|a| a.on_probed(&p, result));
                 // 확인한 폴더로 옮겼으면 그 폴더를 읽는다
                 pump();
                 VIEW.with(|v| {
