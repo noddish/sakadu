@@ -944,6 +944,11 @@ impl App {
 
     // ---------- 누르기 판정 ----------
 
+    /// 창을 끌 수 있는 곳인지: 도구 막대 높이 안의 빈 곳 (단추가 없는 자리, 사이드바 위 신호등 옆 포함)
+    pub fn drag_zone(&self, g: &Gfx, x: f32, y: f32) -> bool {
+        y < WORKBAR_H && self.hit(g, x, y) == Hit::None
+    }
+
     pub fn hit(&self, g: &Gfx, x: f32, y: f32) -> Hit {
         if x < SIDE_W {
             for (i, side) in Side::ALL.iter().enumerate() {
@@ -1197,7 +1202,7 @@ impl App {
             g.text(l2, R::new(r.l + 10.0, r.t + 22.0, r.r - 6.0, r.t + 40.0), Font::Small, t.faint);
         };
         match self.side {
-            Side::Favorites if rows.is_empty() => note("즐겨찾기가 비어 있어요", "경로 오른쪽 별(☆)이나 ⌃⌘T로 넣어 보세요"),
+            Side::Favorites if rows.is_empty() => note("즐겨찾기가 비어 있어요", "경로 오른쪽 책갈피나 ⌃⌘T로 넣어 보세요"),
             Side::Search => note("검색은 다음 단계에서 넣어요", "지금은 폴더를 열어 찾아 주세요"),
             _ => {}
         }

@@ -242,7 +242,7 @@ impl App {
             heads.push(("즐겨찾기", R::new(x0, y, x0 + w, y + SECTION_H)));
             y += SECTION_H + 4.0;
             if favs.is_empty() {
-                notes.push(("경로 오른쪽 별(☆)로 즐겨찾기에 넣은 폴더가 여기에 카드로 보여요".to_string(), R::new(x0, y, x0 + w, y + NOTE_H)));
+                notes.push(("경로 오른쪽 책갈피로 즐겨찾기에 넣은 폴더가 여기에 카드로 보여요".to_string(), R::new(x0, y, x0 + w, y + NOTE_H)));
                 y += NOTE_H;
             }
             place_cards(favs, x0, &mut y, cols, card_w, &mut items);

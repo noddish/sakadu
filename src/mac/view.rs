@@ -13,8 +13,8 @@ use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_cl
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
     NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
-    NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    NSTextField, NSTextFieldDelegate, NSTextView, NSTitlebarSeparatorStyle, NSToolbar, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 use sakadu::draw::Color;
@@ -96,11 +96,28 @@ define_class!(
             self.sync_field();
         }
 
+        /// 제목 표시줄 자리까지 이 뷰가 덮고 있다. 기본값(true)이면 그 자리의 클릭이 창 끌기로만 쓰여 도구 막대 단추가 눌리지 않는다
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool {
+            false
+        }
+
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, e: &NSEvent) {
             let (x, y) = self.point(e);
             let m = mods(e);
             let clicks = e.clickCount().max(1) as usize;
+            // 도구 막대의 빈 곳: 끌면 창이 움직이고, 두 번 누르면 확대·축소 (제목 표시줄과 같게)
+            if with_app(|a| a.drag_zone(&self.ivars().measure, x, y)).unwrap_or(false) {
+                if let Some(w) = self.window() {
+                    if clicks == 2 {
+                        w.performZoom(None);
+                    } else {
+                        w.performWindowDragWithEvent(e);
+                    }
+                }
+                return;
+            }
             with_app(|a| a.mouse_down(&self.ivars().measure, x, y, m, clicks));
             self.after_input();
         }
@@ -459,7 +476,7 @@ impl Delegate {
     }
 }
 
-/// 모양 2의 창: 제목 표시줄을 투명하게 하고 내용이 창 전체를 쓴다 (신호등은 사이드바 위에 겹친다).
+/// 창: 제목 표시줄을 투명하게 하고 내용이 창 전체를 쓴다 (신호등은 사이드바 위에 겹친다).
 /// start가 있으면 그 폴더에서 시작한다 (없으면 홈)
 fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindow> {
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
@@ -468,6 +485,11 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitlebarAppearsTransparent(true);
     window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    // 빈 도구 막대를 달면 제목 표시줄이 도구 막대 높이(52)가 되어, 신호등이 우리가 그리는 도구 막대 단추와 같은 높이에 온다.
+    // 최신 macOS에서는 도구 막대가 있는 창의 모서리가 Finder처럼 더 둥글다
+    window.setToolbar(Some(&NSToolbar::new(mtm)));
+    window.setToolbarStyle(NSWindowToolbarStyle::Unified);
+    window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
     window.setContentMinSize(NSSize::new(760.0, 420.0));
     window.center();
     let _ = window.setFrameAutosaveName(&NSString::from_str("SakaduMain"));
