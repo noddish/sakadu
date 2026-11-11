@@ -483,7 +483,8 @@ impl App {
         }
         match result {
             Ok((dir, select)) => {
-                let here = self.panes[p].tab().loc.dir().is_some_and(|d| util::eq_path(d, &dir));
+                // 대소문자를 가리는 볼륨에서는 Work와 work가 다른 폴더라 글자 그대로 비교한다
+                let here = self.panes[p].tab().loc.dir() == Some(dir.as_str());
                 if here && select.is_none() {
                     self.refresh(p);
                 } else {
@@ -1978,6 +1979,16 @@ mod tests {
         a.on_probed(&slow, resolve_input(&slow.text, &home));
         a.settle();
         assert_eq!(a.pane(1).tab().loc, Location::Dir(util::join(&home, "업무")), "navigation after the address wins");
+        // 대소문자만 다른 경로는 같은 폴더로 보지 않고 그 경로로 간다 (대소문자를 가리는 볼륨에서는 다른 폴더)
+        let work = util::join(&home, "업무");
+        let other_case: String = work.chars().map(|c| if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c }).collect();
+        if other_case != work && resolve_input(&other_case, &home).is_ok() {
+            a.begin_address(1);
+            a.commit_address(&other_case);
+            a.settle();
+            assert_eq!(a.pane(1).tab().loc, Location::Dir(other_case.clone()));
+            assert_eq!(a.pane(1).tab().back.last(), Some(&Location::Dir(work)));
+        }
         // ⌘⇧G로 열고, 목록을 누르면 취소된다 (알림도 지운다)
         a.key(Key::Char('g'), Mods { cmd: true, shift: true, ..Default::default() });
         assert_eq!(a.editing, Some(1));
