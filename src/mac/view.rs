@@ -1,16 +1,19 @@
-//! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView.
-//! 마우스·스크롤·키를 App으로 넘기고, 폴더는 뒷줄에서 읽어 메인 줄(dispatch)로 돌려받는다
+//! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 경로 입력 상자(NSTextField).
+//! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인은 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다.
+//! 끝낼 때 화면 상태(세션)를 저장하고, 다음에 그대로 연다
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, Mods, ROW_H};
 use crate::gfx::Gfx;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::runtime::{Bool, Sel};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
-    NSColorSpace, NSEvent, NSEventModifierFlags, NSGraphicsContext, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton,
-    NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    NSColorSpace, NSControl, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
+    NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 use sakadu::draw::Color;
@@ -51,6 +54,10 @@ fn theme(mtm: MainThreadMarker) -> Theme {
 pub struct ViewIvars {
     /// 그리기 밖(누르기 판정)에서 글자 폭을 재는 그림판
     measure: Gfx,
+    /// 경로 입력 상자. 입력할 때만 보인다 (한글 조합은 맥이 처리)
+    field: OnceCell<Retained<NSTextField>>,
+    /// 입력 상자가 지금 어느 칸의 경로를 담고 있는지 (다른 칸으로 옮기면 다시 채운다)
+    field_pane: std::cell::Cell<Option<usize>>,
 }
 
 define_class!(
@@ -85,6 +92,7 @@ define_class!(
                 a.resize(size.width as f32, size.height as f32);
                 a.paint(&g);
             });
+            self.sync_field();
         }
 
         #[unsafe(method(mouseDown:))]
@@ -143,6 +151,13 @@ define_class!(
             }
         }
 
+        /// 편집 메뉴의 모두 선택(⌘A): 목록에 키 입력이 있을 때 모든 줄을 고른다
+        #[unsafe(method(selectAll:))]
+        fn select_all(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            with_app(App::select_all);
+            self.after_input();
+        }
+
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
         fn appearance_changed(&self) {
             let t = theme(self.mtm());
@@ -150,13 +165,53 @@ define_class!(
             self.setNeedsDisplay(true);
         }
     }
+
+    unsafe impl NSObjectProtocol for SakaduView {}
+
+    unsafe impl NSControlTextEditingDelegate for SakaduView {
+        /// Return은 확정, Esc는 취소. 한글을 조합하는 중의 Return은 맥이 조합을 마치는 데 써서 여기로 오지 않는다
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn do_command(&self, _control: &NSControl, _text_view: &NSTextView, command: Sel) -> Bool {
+            if command == sel!(insertNewline:) {
+                let text = self.ivars().field.get().map(|f| f.stringValue().to_string()).unwrap_or_default();
+                with_app(|a| a.commit_address(&text));
+            } else if command == sel!(cancelOperation:) {
+                with_app(App::cancel_address);
+            } else {
+                return Bool::NO;
+            }
+            self.after_input();
+            Bool::YES
+        }
+
+        /// 다른 곳을 눌러 입력을 마치면 취소
+        #[unsafe(method(controlTextDidEndEditing:))]
+        fn did_end_editing(&self, _n: &NSNotification) {
+            if with_app(|a| a.editing.take().is_some()).unwrap_or(false) {
+                self.after_input();
+            }
+        }
+    }
+
+    unsafe impl NSTextFieldDelegate for SakaduView {}
 );
 
 impl SakaduView {
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let measure = Gfx::bitmap(8.0, 8.0, 1.0).expect("글자 폭을 잴 그림판");
-        let this = Self::alloc(mtm).set_ivars(ViewIvars { measure });
+        let this = Self::alloc(mtm).set_ivars(ViewIvars { measure, field: OnceCell::new(), field_pane: std::cell::Cell::new(None) });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        // 경로 입력 상자: 테두리·바탕 없이 (바탕과 강조 색 테두리는 App이 그린다)
+        let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
+        field.setBezeled(false);
+        field.setBordered(false);
+        field.setDrawsBackground(false);
+        field.setFocusRingType(NSFocusRingType::None);
+        field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        field.setHidden(true);
+        unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*view))) };
+        view.addSubview(&field);
+        let _ = view.ivars().field.set(field);
         // 마우스 올림: 보이는 곳 전체, 창이 앞에 있을 때
         let opts = NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveInKeyWindow | NSTrackingAreaOptions::InVisibleRect;
         let area = unsafe { NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), NSRect::ZERO, opts, Some(&view), None) };
@@ -176,19 +231,71 @@ impl SakaduView {
         if let (Some(w), Some(title)) = (self.window(), with_app(|a| a.title())) {
             w.setTitle(&NSString::from_str(&title));
         }
+        self.sync_field();
         self.setNeedsDisplay(true);
+    }
+
+    /// 경로 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 칸의 경로 자리에 보이고 키 입력을 받는다
+    fn sync_field(&self) {
+        let Some(field) = self.ivars().field.get() else { return };
+        let Some((rect, text, color, pane)) = with_app(|a| (a.address_rect(), a.address_text(), a.theme.text, a.editing)) else { return };
+        match rect {
+            Some(r) => {
+                // 한 줄 글자가 세로 가운데에 오게 (시스템 13pt 글꼴의 줄 높이 약 17)
+                let h = 18.0;
+                let frame = NSRect::new(NSPoint::new((r.l + 6.0) as f64, (r.t + (r.h() - h) / 2.0) as f64), NSSize::new((r.w() - 12.0).max(0.0) as f64, h as f64));
+                field.setFrame(frame);
+                field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(color.r as f64, color.g as f64, color.b as f64, 1.0)));
+                // 처음 열 때와, 입력 중에 다른 칸의 경로 입력으로 옮겼을 때 그 칸의 경로로 다시 채운다
+                if field.isHidden() || self.ivars().field_pane.get() != pane {
+                    self.ivars().field_pane.set(pane);
+                    field.setStringValue(&NSString::from_str(&text));
+                    field.setHidden(false);
+                    if let Some(w) = self.window() {
+                        w.makeFirstResponder(Some(field));
+                    }
+                    unsafe { field.selectText(None) };
+                }
+            }
+            None if !field.isHidden() => {
+                self.ivars().field_pane.set(None);
+                field.setHidden(true);
+                if let Some(w) = self.window() {
+                    w.makeFirstResponder(Some(self));
+                }
+            }
+            None => {}
+        }
     }
 }
 
 /// 쌓인 폴더 읽기 요청은 뒷줄에서 읽어 메인 줄로 돌려받고, 열어 달라는 파일은 macOS '열기'로 연다
 /// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다)
 fn pump() {
-    let Some((reqs, files)) = with_app(|a| (a.take_requests(), std::mem::take(&mut a.open_files))) else { return };
+    let Some((reqs, probes, files)) = with_app(|a| (a.take_requests(), a.take_probes(), std::mem::take(&mut a.open_files))) else { return };
+    for p in probes {
+        std::thread::spawn(move || {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+            let result = crate::app::resolve_input(&p.text, &home);
+            DispatchQueue::main().exec_async(move || {
+                with_app(|a| a.on_probed(&p, result));
+                // 확인한 폴더로 옮겼으면 그 폴더를 읽는다
+                pump();
+                VIEW.with(|v| {
+                    if let Some(v) = v.get() {
+                        v.setNeedsDisplay(true);
+                    }
+                });
+            });
+        });
+    }
     for r in reqs {
         std::thread::spawn(move || {
             let result = sakadu::listing::list_dir(&r.dir);
             DispatchQueue::main().exec_async(move || {
                 with_app(|a| a.on_listed(r.tab, r.generation, result));
+                // 읽기 결과가 새 요청을 낼 수 있다 (세션에서 연 폴더가 없으면 홈을 읽는다)
+                pump();
                 VIEW.with(|v| {
                     if let Some(v) = v.get() {
                         v.setNeedsDisplay(true);
@@ -227,6 +334,8 @@ fn key_of(code: u16) -> Option<Key> {
         0x30 => Key::Tab,
         0x35 => Key::Esc,
         0x00 => Key::Char('a'),
+        0x25 => Key::Char('l'),
+        0x05 => Key::Char('g'),
         0x1F => Key::Char('o'),
         0x0F => Key::Char('r'),
         0x11 => Key::Char('t'),
@@ -277,10 +386,11 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
+            let app = NSApplication::sharedApplication(mtm);
+            main_menu(mtm, &app);
             let window = open_window(mtm, None);
             window.setDelegate(Some(ProtocolObject::from_ref(self)));
             let _ = self.ivars().window.set(window);
-            let app = NSApplication::sharedApplication(mtm);
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
             #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
@@ -289,6 +399,17 @@ define_class!(
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn quit_after_last_window(&self, _app: &NSApplication) -> bool {
             true
+        }
+
+        /// 끝낼 때(⌘Q, 창 닫기) 화면 상태를 저장한다
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, _n: &NSNotification) {
+            let s = with_app(|a| a.persist.then(|| a.to_session())).flatten();
+            if let Some(s) = s
+                && let Err(e) = sakadu::session::save(&s)
+            {
+                sakadu::diag::log(|| format!("session: {e}"));
+            }
         }
     }
 
@@ -315,9 +436,16 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
     window.center();
     let _ = window.setFrameAutosaveName(&NSString::from_str("SakaduMain"));
 
-    let home = sakadu::util::normalize(&start.unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".to_string())));
-    let mut app = App::new(1280.0, 800.0, theme(mtm), &home, sakadu::favorites::load(), places());
-    app.persist = true;
+    let home = sakadu::util::normalize(&std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
+    let first = start.as_deref().map(sakadu::util::normalize).unwrap_or_else(|| home.clone());
+    let mut app = App::new(1280.0, 800.0, theme(mtm), &first, sakadu::favorites::load(), places());
+    // 보통 실행: 지난번 화면 상태로 열고 끝낼 때 저장한다 (CI 창 확인처럼 시작 폴더를 준 경우는 그대로)
+    if start.is_none() {
+        app.persist = true;
+        if let Some(s) = sakadu::session::load() {
+            app.restore(&s, &home);
+        }
+    }
     app.lights_bottom = lights_bottom(&window);
     window.setTitle(&NSString::from_str(&app.title()));
     APP.with(|a| *a.borrow_mut() = Some(app));
@@ -331,6 +459,45 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
     pump();
     window.makeKeyAndOrderFront(None);
     window
+}
+
+/// 앱 메뉴: Sakadu(정보·가리기·끝내기), 편집(입력 상자의 실행 취소·복사·붙여넣기·모두 선택), 윈도(최소화·확대/축소)
+fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
+    let item = |menu: &NSMenu, title: &str, action: Sel, key: &str, mods: Option<NSEventModifierFlags>| {
+        let it = unsafe { menu.addItemWithTitle_action_keyEquivalent(&NSString::from_str(title), Some(action), &NSString::from_str(key)) };
+        if let Some(m) = mods {
+            it.setKeyEquivalentModifierMask(m);
+        }
+    };
+    let submenu = |bar: &NSMenu, title: &str| {
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+        let top = NSMenuItem::new(mtm);
+        top.setSubmenu(Some(&menu));
+        bar.addItem(&top);
+        menu
+    };
+    let bar = NSMenu::new(mtm);
+    let m = submenu(&bar, "Sakadu");
+    item(&m, "Sakadu 정보", sel!(orderFrontStandardAboutPanel:), "", None);
+    m.addItem(&NSMenuItem::separatorItem(mtm));
+    item(&m, "Sakadu 가리기", sel!(hide:), "h", None);
+    item(&m, "기타 가리기", sel!(hideOtherApplications:), "h", Some(NSEventModifierFlags::Command | NSEventModifierFlags::Option));
+    item(&m, "모두 보기", sel!(unhideAllApplications:), "", None);
+    m.addItem(&NSMenuItem::separatorItem(mtm));
+    item(&m, "Sakadu 종료", sel!(terminate:), "q", None);
+    let e = submenu(&bar, "편집");
+    item(&e, "실행 취소", sel!(undo:), "z", None);
+    item(&e, "실행 복귀", sel!(redo:), "z", Some(NSEventModifierFlags::Command | NSEventModifierFlags::Shift));
+    e.addItem(&NSMenuItem::separatorItem(mtm));
+    item(&e, "오려두기", sel!(cut:), "x", None);
+    item(&e, "복사하기", sel!(copy:), "c", None);
+    item(&e, "붙여넣기", sel!(paste:), "v", None);
+    item(&e, "전체 선택", sel!(selectAll:), "a", None);
+    let w = submenu(&bar, "윈도우");
+    item(&w, "최소화", sel!(performMiniaturize:), "m", None);
+    item(&w, "확대/축소", sel!(performZoom:), "", None);
+    app.setMainMenu(Some(&bar));
+    app.setWindowsMenu(Some(&w));
 }
 
 /// 신호등(닫기 단추)의 아래 끝을 창 위에서부터 잰 값
