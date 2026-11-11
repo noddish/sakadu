@@ -394,6 +394,26 @@ impl Tab {
     }
 }
 
+/// 상위 위치로 갈 때, 방금 있던 하위 항목을 선택하기 위한 이름(내 PC면 드라이브 경로)
+pub fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
+    let Location::Dir(cur) = current else { return None };
+    match ancestor {
+        Location::Computer => Some(util::segments(cur).first()?.1.clone()),
+        Location::Start => None,
+        Location::Dir(a) => {
+            // 한글처럼 여러 바이트인 글자 가운데를 자르지 않게 글자 경계에서만 비교한다
+            let head = cur.get(..a.len()).filter(|h| cur.len() > a.len() && util::eq_path(h, a))?;
+            let rest = &cur[head.len()..];
+            // "C:\tmp\a"는 "C:\tmp\ab"의 상위 폴더가 아니다 (구분자 바로 앞에서 끝나야 한다). 맥 경로는 '/'
+            let sep = if cur.starts_with('/') { '/' } else { '\\' };
+            if !a.ends_with(sep) && !rest.starts_with(sep) {
+                return None;
+            }
+            rest.trim_start_matches(sep).split(sep).next().filter(|s| !s.is_empty()).map(String::from)
+        }
+    }
+}
+
 pub fn compare(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
     // 폴더는 정렬 방향과 관계없이 항상 위
     match (a.is_dir(), b.is_dir()) {
@@ -612,6 +632,31 @@ mod tests {
             assert_eq!(t.selection_stats().0, 10_000);
             println!("round {round}: reload with 10000 selected: {took:?}");
         }
+    }
+
+    /// 회귀: 한글 이름 폴더 사이를 뒤로 갈 때 글자 가운데를 잘라 꺼지지 않는다. 이름이 겹치는 형제 폴더는 상위가 아니다
+    #[test]
+    fn child_toward_is_safe_with_korean_names() {
+        let d = |s: &str| Location::Dir(s.to_string());
+        // "C:\tmp\a"는 8바이트이고 "C:\tmp\한글"의 8바이트째는 '한'의 가운데다
+        assert_eq!(child_toward(&d("C:\\tmp\\a"), &d("C:\\tmp\\한글")), None);
+        assert_eq!(child_toward(&d("C:\\tmp\\a"), &d("C:\\tmp\\ab")), None);
+        assert_eq!(child_toward(&d("C:\\tmp\\a"), &d("C:\\tmp\\ab\\c")), None);
+        assert_eq!(child_toward(&d("C:\\tmp"), &d("C:\\tmp\\한글\\사진")).as_deref(), Some("한글"));
+        assert_eq!(child_toward(&d("C:\\TMP"), &d("C:\\tmp\\a")).as_deref(), Some("a"));
+        assert_eq!(child_toward(&d("C:\\"), &d("C:\\사용자\\hong")).as_deref(), Some("사용자"));
+        assert_eq!(child_toward(&d("\\\\서버\\공유"), &d("\\\\서버\\공유\\사진\\2024")).as_deref(), Some("사진"));
+        assert_eq!(child_toward(&d("\\\\서버\\공유"), &d("\\\\서버\\공유2\\사진")), None);
+    }
+
+    /// 맥 경로: '/' 구분자, 루트 '/'
+    #[test]
+    fn child_toward_on_mac_paths() {
+        let d = |s: &str| Location::Dir(s.to_string());
+        assert_eq!(child_toward(&d("/tmp/a"), &d("/tmp/한글")), None);
+        assert_eq!(child_toward(&d("/tmp/a"), &d("/tmp/ab/c")), None);
+        assert_eq!(child_toward(&d("/tmp"), &d("/tmp/한글/사진")).as_deref(), Some("한글"));
+        assert_eq!(child_toward(&d("/"), &d("/Users/hong")).as_deref(), Some("Users"));
     }
 
     #[test]

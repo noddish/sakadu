@@ -1,6 +1,7 @@
 //! 맥 시제품 앱: 칸·탭·사이드바 상태, 그리기(paint), 누르기 판정(hit), 동작.
 //! 화면 모양은 '모양 2(맥 관례)': 사이드바가 창 위까지 올라가고 신호등은 그 안, 아이콘 막대 대신 고르기 단추,
-//! 설정은 작업 줄 오른쪽 끝. 치수·색·규칙은 Windows app.rs와 같다 (3단계에서 공통 화면 코드로 합친다).
+//! 설정은 작업 줄 오른쪽 끝. 화면 계산·그리기 도우미·치수는 Windows와 함께 쓰는 sakadu::ui를 쓰고,
+//! 칸 그리기는 Windows app.rs와 같은 규칙으로 따로 그린다 (3단계에서 칸 그리기도 함께 쓴다).
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
 use crate::gfx::Gfx;
@@ -8,74 +9,16 @@ use sakadu::draw::{Color, Font, R};
 use sakadu::favorites::{self, Favorite, Favorites, Row};
 use sakadu::listing::{self, Entry, Kind};
 use sakadu::palette::{FOCUS_W, R_CTRL, R_ROW, Theme, alpha};
-use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab};
+use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab, ViewMode, child_toward};
 use sakadu::session::{self, Look, PaneState, Session};
+use sakadu::ui::glyph::*;
+use sakadu::ui::*;
 use sakadu::util;
 
-// app.rs와 같은 치수
-const WORKBAR_H: f32 = 44.0;
-const MARGIN: f32 = 8.0;
-const GAP: f32 = 8.0;
-const HEAD_H: f32 = 44.0;
-const PATH_H: f32 = 36.0;
-const HEADER_H: f32 = 28.0;
-pub const ROW_H: f32 = 28.0;
-const SCROLL_W: f32 = 10.0;
-const RADIUS: f32 = 12.0;
-const CHEV_W: f32 = 16.0;
-const CRUMB_PAD: f32 = 8.0;
-/// 경로 입력 상자의 가장 좁은 폭 (app.rs ADDR_MIN_W)
-const ADDR_MIN_W: f32 = 80.0;
-// app/sidebar.rs와 같은 치수 (모양 2는 아이콘 막대와 패널을 합친 폭)
-const SIDE_W: f32 = 44.0 + 220.0;
-const SIDE_HEADER_H: f32 = 44.0;
-const SIDE_ROW_H: f32 = 32.0;
-const INDENT: f32 = 20.0;
+/// 모양 2의 사이드바 폭: 아이콘 막대와 패널(기본 220)을 합친 폭
+const SIDE_W: f32 = BAR_W + 220.0;
 /// 맥 창의 신호등 아래 끝 (창에서 읽기 전 기본값, 그림 시험에서도 쓴다)
 pub const LIGHTS_BOTTOM: f32 = 28.0;
-
-// Windows 아이콘 글꼴 번호 (gfx가 SF Symbols로 바꾼다)
-const G_BACK: u16 = 0xE72B;
-const G_FWD: u16 = 0xE72A;
-const G_UP: u16 = 0xE74A;
-const G_ADD: u16 = 0xE710;
-const G_CLOSE: u16 = 0xE8BB;
-const G_CHEVRON: u16 = 0xE76C;
-const G_CHEVRON_DOWN: u16 = 0xE70D;
-const G_SORT_UP: u16 = 0xE70E;
-const G_STAR: u16 = 0xE734;
-const G_STAR_FILL: u16 = 0xE735;
-const G_NEW_FOLDER: u16 = 0xE8F4;
-const G_HIDDEN: u16 = 0xE7B3;
-const G_LIST: u16 = 0xE8FD;
-const G_SETTINGS: u16 = 0xE713;
-const G_MORE: u16 = 0xE712;
-const G_PREVIEW: u16 = 0xE90D;
-const G_SEARCH: u16 = 0xE721;
-const G_PLACES: u16 = 0xE8B7;
-const G_PIN_FILL: u16 = 0xE841;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Layout {
-    One,
-    TwoV,
-    TwoH,
-    Three,
-    Four,
-}
-
-impl Layout {
-    pub const ALL: [Layout; 5] = [Layout::One, Layout::TwoV, Layout::TwoH, Layout::Three, Layout::Four];
-
-    pub fn count(self) -> usize {
-        match self {
-            Layout::One => 1,
-            Layout::TwoV | Layout::TwoH => 2,
-            Layout::Three => 3,
-            Layout::Four => 4,
-        }
-    }
-}
 
 /// 사이드바 고르기: 바로가기, 즐겨찾기, 검색
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -213,36 +156,6 @@ struct SideRow {
     indent: bool,
     /// 즐겨찾기 그룹 머리 (그룹 번호, 접힘)
     group: Option<(usize, bool)>,
-}
-
-/// 칸 하나의 자리 (app.rs PaneGeom과 같은 계산)
-struct Geom {
-    head: R,
-    back: R,
-    fwd: R,
-    up: R,
-    crumb: R,
-    star: R,
-    new_folder: R,
-    view: R,
-    header: R,
-    list: R,
-}
-
-fn geom(r: R) -> Geom {
-    let head = R::new(r.l, r.t, r.r, r.t + HEAD_H);
-    let path = R::new(r.l, head.b, r.r, head.b + PATH_H);
-    let (t, b) = (path.t + 4.0, path.b - 4.0);
-    let view = R::new(path.r - 8.0 - 40.0, t, path.r - 8.0, b);
-    let new_folder = R::new(view.l - 4.0 - 28.0, t, view.l - 4.0, b);
-    let star = R::new(new_folder.l - 4.0 - 28.0, t, new_folder.l - 4.0, b);
-    let back = R::new(path.l + 8.0, t, path.l + 36.0, b);
-    let fwd = R::new(back.r + 2.0, t, back.r + 30.0, b);
-    let up = R::new(fwd.r + 2.0, t, fwd.r + 30.0, b);
-    let crumb = R::new(up.r + 8.0, path.t + 4.0, (star.l - 4.0).max(up.r + 8.0), path.b - 4.0);
-    let header = R::new(r.l, path.b, r.r, path.b + HEADER_H);
-    let list = R::new(r.l, header.b, r.r, (r.b - 6.0).max(header.b));
-    Geom { head, back, fwd, up, crumb, star, new_folder, view, header, list }
 }
 
 pub struct App {
@@ -501,8 +414,7 @@ impl App {
     pub fn address_rect(&self) -> Option<R> {
         let p = self.editing?;
         let r = self.pane_rects().into_iter().find(|(q, _)| *q == p)?.1;
-        let gm = geom(r);
-        Some(if gm.crumb.w() >= ADDR_MIN_W { gm.crumb } else { R::new(gm.up.r + 8.0, gm.crumb.t, gm.view.r, gm.crumb.b) })
+        Some(addr_rect(&geom(r)))
     }
 
     /// 경로 입력 상자에 처음 넣을 글자 (지금 폴더)
@@ -856,38 +768,12 @@ impl App {
         R::new(l, WORKBAR_H, (self.w - MARGIN).max(l + 100.0), (self.h - MARGIN).max(WORKBAR_H + 100.0))
     }
 
-    fn split_points(&self) -> (f32, f32) {
-        let a = self.area();
-        (a.l + (a.w() - GAP) * self.split.0, a.t + (a.h() - GAP) * self.split.1)
-    }
-
     fn pane_rects(&self) -> Vec<(usize, R)> {
-        let a = self.area();
-        let (xm, ym) = self.split_points();
-        match self.layout {
-            Layout::One => vec![(0, a)],
-            Layout::TwoV => vec![(0, R::new(a.l, a.t, xm, a.b)), (1, R::new(xm + GAP, a.t, a.r, a.b))],
-            Layout::TwoH => vec![(0, R::new(a.l, a.t, a.r, ym)), (1, R::new(a.l, ym + GAP, a.r, a.b))],
-            Layout::Three => vec![(0, R::new(a.l, a.t, xm, a.b)), (1, R::new(xm + GAP, a.t, a.r, ym)), (2, R::new(xm + GAP, ym + GAP, a.r, a.b))],
-            Layout::Four => vec![
-                (0, R::new(a.l, a.t, xm, ym)),
-                (1, R::new(xm + GAP, a.t, a.r, ym)),
-                (2, R::new(a.l, ym + GAP, xm, a.b)),
-                (3, R::new(xm + GAP, ym + GAP, a.r, a.b)),
-            ],
-        }
+        pane_rects(self.area(), self.split, self.layout)
     }
 
     fn splitters(&self) -> (Option<R>, Option<R>) {
-        let a = self.area();
-        let (xm, ym) = self.split_points();
-        let sx = matches!(self.layout, Layout::TwoV | Layout::Three | Layout::Four).then(|| R::new(xm, a.t, xm + GAP, a.b));
-        let sy = match self.layout {
-            Layout::TwoH | Layout::Four => Some(R::new(a.l, ym, a.r, ym + GAP)),
-            Layout::Three => Some(R::new(xm + GAP, ym, a.r, ym + GAP)),
-            _ => None,
-        };
-        (sx, sy)
+        splitters(self.area(), self.split, self.layout)
     }
 
     fn list_rect(&self, p: usize) -> Option<R> {
@@ -959,48 +845,23 @@ impl App {
         R::new(r - 32.0, 6.0, r, 38.0)
     }
 
-    /// 탭 칩 자리와 새 탭(+) 자리
-    /// app.rs chips·chip_strip·add_rect와 같다: 넘치면 지금 탭은 제 폭을 지키고 나머지를 줄이며, 그래도 넘치는 탭은
-    /// 폭 0으로 가린다 (⌃Tab으로 닿는다)
-    fn chips(&self, g: &Gfx, p: usize, head: R) -> (Vec<R>, R) {
+    /// 탭 칩 자리와 새 탭(+) 자리 (app.rs chips와 같다: 오른쪽 항목 수 자리 앞까지, 넘치면 지금 탭을 지킨다)
+    fn chips(&self, g: &Gfx, p: usize, gm: &PaneGeom) -> (Vec<R>, R) {
         let pane = &self.panes[p];
         let n = pane.tabs.len();
-        let right = g.measure(&count_text(pane.tab()), Font::Small);
-        let l = head.l + 8.0;
-        let strip = R::new(l, head.t + 8.0, (head.r - 8.0 - right - 8.0).max(l + 100.0), head.t + 36.0);
+        let strip = chip_strip(gm, g.measure(&count_text(pane.tab()), Font::Small));
         let natural: Vec<f32> = pane.tabs.iter().map(|t| (g.measure(&t.loc.title(), Font::Normal) + 22.0 + if n > 1 { 20.0 } else { 0.0 }).clamp(52.0, 180.0)).collect();
         let trs = tab_rects(strip, &natural, pane.active);
-        let add_l = trs.iter().map(|r| r.r + 4.0).fold(strip.l, f32::max);
-        (trs, R::new(add_l, strip.t, add_l + 28.0, strip.b))
+        let add = add_rect(strip, &trs);
+        (trs, add)
     }
 
-    /// 경로 조각: (자리, 그 조각의 전체 경로, 이름). 앞쪽이 넘치면 "…" 조각(경로 없음)으로 줄인다
+    /// 경로 조각 (공통 crumbs, 맥에는 '내 PC'가 없다): (자리, 그 조각의 폴더, 이름). 앞쪽을 접은 "…"도 그 상위 폴더로 간다
     fn crumbs(&self, g: &Gfx, area: R, dir: &str) -> Vec<(R, Option<String>, String)> {
-        let segs = util::segments(dir);
-        let width = |s: &str| g.measure(s, Font::Normal) + CRUMB_PAD * 1.5;
-        let more_w = 28.0;
-        let mut used = 0.0;
-        let mut take = 0;
-        for (label, _) in segs.iter().rev() {
-            let w = width(label) + if take == 0 { 0.0 } else { CHEV_W };
-            if used + w + more_w + CHEV_W > area.w() && take > 0 {
-                break;
-            }
-            used += w;
-            take += 1;
-        }
-        let mut out = Vec::new();
-        let mut x = area.l;
-        if take < segs.len() {
-            out.push((R::new(x, area.t, x + more_w, area.b), None, "…".to_string()));
-            x += more_w + CHEV_W;
-        }
-        for (label, path) in &segs[segs.len() - take..] {
-            let w = width(label);
-            out.push((R::new(x, area.t, x + w, area.b), Some(path.clone()), label.clone()));
-            x += w + CHEV_W;
-        }
-        out
+        crumbs(g, area, &Location::Dir(dir.to_string()), None)
+            .into_iter()
+            .map(|c| (R::new(c.x0, area.t, c.x1, area.b), c.target.dir().map(str::to_string), c.label))
+            .collect()
     }
 
     // ---------- 누르기 판정 ----------
@@ -1041,7 +902,7 @@ impl App {
             let gm = geom(r);
             let tab = self.panes[p].tab();
             if gm.head.contains(x, y) {
-                let (trs, add) = self.chips(g, p, gm.head);
+                let (trs, add) = self.chips(g, p, &gm);
                 for (i, tr) in trs.iter().enumerate() {
                     if tr.contains(x, y) {
                         let closable = self.panes[p].tabs.len() > 1 && (i == self.panes[p].active || self.hover == Hit::Tab(p, i) || self.hover == Hit::TabClose(p, i));
@@ -1064,8 +925,8 @@ impl App {
                 return Hit::CrumbEmpty(p);
             }
             if gm.list.contains(x, y) {
-                let vi = ((y - gm.list.t + tab.scroll) / ROW_H).floor() as usize;
-                return if vi < tab.view.len() && x < gm.list.r - SCROLL_W - 6.0 { Hit::Row(p, vi) } else { Hit::List(p) };
+                let grid = Grid::of(gm.list, ViewMode::Details);
+                return grid.at(x, y, tab.scroll, tab.view.len()).map_or(Hit::List(p), |vi| Hit::Row(p, vi));
             }
             return Hit::Pane(p);
         }
@@ -1309,7 +1170,7 @@ impl App {
             } else if self.hover == Hit::Layout(i) {
                 g.fill_round(*r, r.h() / 2.0, hover_fill(t));
             }
-            draw_layout_icon(g, *r, i, if current || self.hover == Hit::Layout(i) { t.text } else { t.dim });
+            draw_layout_icon(g, *r, Layout::ALL[i], if current || self.hover == Hit::Layout(i) { t.text } else { t.dim });
         }
         // 오른쪽 끝부터 설정, 미리 보기, 숨김 항목, … (설정·미리 보기·…는 뒤 단계라 흐리게)
         let off = alpha(t.dim, 0.45);
@@ -1347,7 +1208,7 @@ impl App {
         let count = flash.map_or_else(|| count_text(tab), str::to_string);
         let cw = g.measure(&count, Font::Small).min(gm.head.w() * 0.6);
         g.text(&count, R::new(gm.head.r - 8.0 - cw, gm.head.t + 8.0, gm.head.r - 8.0, gm.head.t + 36.0), Font::Small, if flash.is_some() { t.text } else { t.faint });
-        let (trs, add) = self.chips(g, p, gm.head);
+        let (trs, add) = self.chips(g, p, &gm);
         for (i, tr) in trs.iter().enumerate() {
             if tr.w() <= 0.0 {
                 continue;
@@ -1378,6 +1239,10 @@ impl App {
         // 경로 줄
         let off = alpha(t.dim, 0.45);
         let nav = |rr: R, glyph: u16, font: Font, enabled: bool, h: Hit| {
+            // 좁은 칸에서 덜어 낸 단추 (폭 0)
+            if rr.w() <= 0.0 {
+                return;
+            }
             let hot = enabled && hover == h;
             if hot {
                 g.fill_round(rr, R_CTRL, t.hover);
@@ -1412,19 +1277,21 @@ impl App {
         g.glyph(G_LIST, R::new(gm.view.l + 2.0, gm.view.t, gm.view.l + 26.0, gm.view.b), false, off);
         g.glyph(G_CHEVRON_DOWN, R::new(gm.view.r - 16.0, gm.view.t + 1.0, gm.view.r - 4.0, gm.view.b + 1.0), true, t.faint);
         let starred = self.favs.find(dir).is_some();
-        if hover == Hit::Star(p) {
-            g.fill_round(gm.star, R_CTRL, t.hover);
+        if gm.star.w() > 0.0 {
+            if hover == Hit::Star(p) {
+                g.fill_round(gm.star, R_CTRL, t.hover);
+            }
+            g.glyph(if starred { G_STAR_FILL } else { G_STAR }, gm.star, false, if starred || hover == Hit::Star(p) { t.text } else { t.dim });
         }
-        g.glyph(if starred { G_STAR_FILL } else { G_STAR }, gm.star, false, if starred || hover == Hit::Star(p) { t.text } else { t.dim });
         let cs = self.crumbs(g, gm.crumb, dir);
         let n = cs.len();
         g.clip(gm.crumb);
-        for (i, (cr, path, label)) in cs.iter().enumerate() {
+        for (i, (cr, _, label)) in cs.iter().enumerate() {
             let last = i + 1 == n;
             if hover == Hit::Crumb(p, i) {
                 g.fill_round(R::new(cr.l, gm.crumb.t + 2.0, cr.r, gm.crumb.b - 2.0), R_ROW, t.sel_inactive);
             }
-            if path.is_none() {
+            if label == "…" && !last {
                 g.glyph(G_MORE, *cr, true, t.dim);
             } else {
                 g.text(label, R::new(cr.l + CRUMB_PAD, cr.t, cr.r - CRUMB_PAD / 2.0, cr.b), Font::Normal, if last { t.text } else { t.dim });
@@ -1438,13 +1305,13 @@ impl App {
     }
 
     /// 칸의 열 머리글·목록·안내·스크롤 막대·테두리
-    fn paint_list(&self, g: &Gfx, t: &Theme, p: usize, r: R, gm: &Geom) {
+    fn paint_list(&self, g: &Gfx, t: &Theme, p: usize, r: R, gm: &PaneGeom) {
         let pane = &self.panes[p];
         let tab = pane.tab();
         let active = p == self.active;
         let hover = self.hover;
         // 열 머리글
-        let cols = columns(gm.list);
+        let cols = columns(gm.list, DEFAULT_COLS);
         g.text("이름", R::new(cols.name.0 + 4.0, gm.header.t, cols.name.1, gm.header.b), Font::Normal, t.dim);
         let nw = g.measure("이름", Font::Normal);
         g.glyph(G_SORT_UP, R::new(cols.name.0 + 8.0 + nw, gm.header.t, cols.name.0 + 22.0 + nw, gm.header.b), true, t.faint);
@@ -1459,12 +1326,11 @@ impl App {
         // 목록
         let now = listing::now_filetime();
         let list = gm.list;
+        let grid = Grid::of(list, ViewMode::Details);
         g.clip(list);
-        let first = (tab.scroll / ROW_H).floor().max(0.0) as usize;
-        let last = ((tab.scroll + list.h()) / ROW_H).ceil() as usize;
-        for vi in first..last.min(tab.view.len()) {
+        for vi in grid.visible(list, tab.scroll, tab.view.len()) {
             let e = &tab.entries[tab.view[vi] as usize];
-            let y = list.t + vi as f32 * ROW_H - tab.scroll;
+            let y = grid.item(vi, tab.scroll).t;
             let row = R::new(list.l + 8.0, y + 1.0, list.r - SCROLL_W - 6.0, y + ROW_H - 1.0);
             if e.selected {
                 g.fill_round(row, R_ROW, if active { t.sel } else { t.sel_inactive });
@@ -1504,12 +1370,10 @@ impl App {
             }
         }
 
-        // 스크롤 막대: 넘칠 때만
-        let content = tab.view.len() as f32 * ROW_H;
-        if content > list.h() && list.h() > 0.0 {
-            let th = (list.h() * list.h() / content).max(24.0);
-            let ty = list.t + (list.h() - th) * (tab.scroll / (content - list.h()));
-            g.fill_round(R::new(list.r - SCROLL_W + 1.0, ty, list.r - 4.0, ty + th), 2.5, t.thumb);
+        // 스크롤 막대: 넘칠 때만 (app.rs와 같은 자리)
+        if let Some((_, thumb)) = grid.bar(list, tab.view.len(), tab.scroll) {
+            let thumb = thumb.inset(1.0, 0.0);
+            g.fill_round(thumb, thumb.w() / 2.0, t.thumb);
         }
 
         if t.dark {
@@ -1529,20 +1393,6 @@ fn count_text(tab: &Tab) -> String {
     }
 }
 
-/// app.rs child_toward: ancestor 아래로 current가 있으면 ancestor 바로 밑 이름
-fn child_toward(ancestor: &Location, current: &Location) -> Option<String> {
-    let (Location::Dir(a), Location::Dir(cur)) = (ancestor, current) else { return None };
-    // 한글처럼 여러 바이트인 글자 가운데를 자르지 않게 글자 경계에서만 비교한다
-    let head = cur.get(..a.len()).filter(|h| cur.len() > a.len() && util::eq_path(h, a))?;
-    let sep = if cur.starts_with('/') { '/' } else { '\\' };
-    let rest = &cur[head.len()..];
-    // "/tmp/a"는 "/tmp/ab"의 상위 폴더가 아니다 (구분자 바로 앞에서 끝나야 한다)
-    if !a.ends_with(sep) && !rest.starts_with(sep) {
-        return None;
-    }
-    rest.trim_start_matches(sep).split(sep).next().filter(|s| !s.is_empty()).map(String::from)
-}
-
 /// 탭의 스크롤을 목록 길이 안으로
 fn clamp_tab(tab: &mut Tab, list: R) {
     let max = (tab.view.len() as f32 * ROW_H - list.h()).max(0.0);
@@ -1556,138 +1406,6 @@ fn reveal(tab: &mut Tab, list: R) {
         tab.scroll = top;
     } else if top + ROW_H > tab.scroll + list.h() {
         tab.scroll = top + ROW_H - list.h();
-    }
-}
-
-fn close_rect(tr: R) -> R {
-    R::new(tr.r - 24.0, tr.t + 4.0, tr.r - 4.0, tr.b - 4.0)
-}
-
-/// 줄어든 탭 칩의 가장 좁은 폭
-const CHIP_MIN: f32 = 64.0;
-
-/// app.rs tab_rects와 같다. 다 들어가면 칩마다 이름 길이(natural)대로 둔다. 넘치면 지금 탭(active)은 제 폭을 지키고
-/// 나머지가 남는 폭을 고르게 나눈다. 그래도 넘치면 지금 탭이 보이는 만큼만 보이고 나머지는 폭 0으로 양 끝에 둔다.
-/// 새 탭(+) 자리 32를 늘 남긴다
-fn tab_rects(strip: R, natural: &[f32], active: usize) -> Vec<R> {
-    const GAP_X: f32 = 2.0;
-    let n = natural.len();
-    let avail = strip.w() - 32.0;
-    let total = natural.iter().sum::<f32>() + GAP_X * n.saturating_sub(1) as f32;
-    let place = |widths: &mut dyn Iterator<Item = (usize, f32)>, first: usize, shown: usize| -> Vec<R> {
-        let mut out = vec![R::new(strip.l, strip.t, strip.l, strip.b); n];
-        let mut x = strip.l;
-        for (i, w) in widths {
-            out[i] = R::new(x, strip.t, x + w, strip.b);
-            x += w + GAP_X;
-        }
-        let end = (x - GAP_X).max(strip.l);
-        for (i, r) in out.iter_mut().enumerate() {
-            if i >= first + shown {
-                *r = R::new(end, strip.t, end, strip.b);
-            }
-        }
-        out
-    };
-    if n == 0 {
-        return Vec::new();
-    }
-    if total <= avail {
-        return place(&mut natural.iter().copied().enumerate(), 0, n);
-    }
-    let active = active.min(n - 1);
-    let cur_w = natural[active].min((avail - CHIP_MIN - GAP_X).max(CHIP_MIN)).min(avail.max(0.0));
-    let rest = avail - cur_w - GAP_X;
-    let others = (((rest + GAP_X) / (CHIP_MIN + GAP_X) + 0.001).floor().max(0.0) as usize).min(n - 1);
-    let shown = others + 1;
-    let first = (active + 1).saturating_sub(shown).min(n - shown);
-    let w_other = if others > 0 { ((rest + GAP_X) / others as f32 - GAP_X).min(180.0) } else { 0.0 };
-    place(&mut (first..first + shown).map(|i| (i, if i == active { cur_w } else { natural[i].min(w_other) })), first, shown)
-}
-
-struct Cols {
-    name: (f32, f32),
-    modified: Option<(f32, f32)>,
-    size: Option<(f32, f32)>,
-}
-
-/// app.rs columns와 같은 규칙 (유형 열은 아직 그리지 않지만 자리는 같게 비운다)
-fn columns(list: R) -> Cols {
-    let w = DEFAULT_COLS;
-    let mut x = list.r - SCROLL_W - 6.0;
-    let size = (list.w() >= 460.0).then(|| {
-        let c = (x - w[2], x);
-        x -= w[2];
-        c
-    });
-    if list.w() >= 590.0 {
-        x -= w[1];
-    }
-    let modified = (list.w() >= 300.0).then(|| {
-        let c = (x - w[0], x);
-        x -= w[0];
-        c
-    });
-    Cols { name: (list.l + 12.0, x.max(list.l + 124.0)), modified, size }
-}
-
-// ---------- sidebar.rs와 같은 면 ----------
-
-fn well(t: &Theme) -> Color {
-    t.sel_inactive
-}
-
-fn seg_track(t: &Theme) -> Color {
-    if t.dark { Color { r: 0.0, g: 0.0, b: 0.0, a: 0.28 } } else { t.sel_inactive }
-}
-
-fn hover_fill(t: &Theme) -> Color {
-    if t.dark { Color { r: 1.0, g: 1.0, b: 1.0, a: 0.06 } } else { Color { r: 0.06, g: 0.09, b: 0.16, a: 0.05 } }
-}
-
-fn seg_on(g: &Gfx, r: R, radius: f32, t: &Theme) {
-    if t.dark {
-        g.fill_round(r, radius, t.sel_inactive);
-        g.fill(R::new(r.l + radius, r.t + 0.5, r.r - radius, r.t + 1.5), Color { r: 1.0, g: 1.0, b: 1.0, a: 0.10 });
-    } else {
-        soft_shadow(g, r, radius, 3.0, 0.12, false);
-        g.fill_round(r, radius, t.pane);
-    }
-}
-
-/// app.rs soft_shadow와 같다
-fn soft_shadow(g: &Gfx, r: R, radius: f32, depth: f32, strength: f32, dark: bool) {
-    const LAYERS: usize = 8;
-    let (base, k) = if dark { ((0.0, 0.0, 0.0), 2.5) } else { ((0.06, 0.09, 0.16), 1.0) };
-    let ink = Color { r: base.0, g: base.1, b: base.2, a: (strength * k).min(0.7) / LAYERS as f32 };
-    for i in 1..=LAYERS {
-        let f = i as f32 / LAYERS as f32;
-        let spread = depth * (f * 0.5 - 0.25);
-        let dy = depth * f * 0.6;
-        g.fill_round(R::new(r.l - spread, r.t + dy - spread, r.r + spread, r.b + dy + spread), radius + spread.max(0.0), ink);
-    }
-    g.fill_round(R::new(r.l - 0.5, r.t + 0.5, r.r + 0.5, r.b + 1.5), radius + 0.5, Color { a: if dark { 0.25 } else { 0.05 }, ..ink });
-}
-
-/// app.rs draw_layout_icon과 같다 (0 한 칸, 1 좌우, 2 위아래, 3 세 칸, 4 네 칸)
-fn draw_layout_icon(g: &Gfx, r: R, layout: usize, c: Color) {
-    let (cx, cy) = ((r.l + r.r) / 2.0, (r.t + r.b) / 2.0);
-    let ic = R::new(cx - 9.0, cy - 7.0, cx + 9.0, cy + 7.0);
-    g.stroke_round(ic, 2.0, c, 1.3);
-    let v = |x: f32, t: f32, b: f32| g.fill(R::new(x - 0.65, t, x + 0.65, b), c);
-    let h = |y: f32, l: f32, rr: f32| g.fill(R::new(l, y - 0.65, rr, y + 0.65), c);
-    match layout {
-        1 => v(cx, ic.t, ic.b),
-        2 => h(cy, ic.l, ic.r),
-        3 => {
-            v(cx, ic.t, ic.b);
-            h(cy, cx, ic.r);
-        }
-        4 => {
-            v(cx, ic.t, ic.b);
-            h(cy, ic.l, ic.r);
-        }
-        _ => {}
     }
 }
 
@@ -1837,16 +1555,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// 회귀: 한글 이름 폴더 사이를 뒤로 갈 때 글자 가운데를 잘라 멈추지 않는다. 이름이 겹치는 형제 폴더는 상위가 아니다
-    #[test]
-    fn child_toward_is_safe_with_korean_names() {
-        let d = |s: &str| Location::Dir(s.to_string());
-        assert_eq!(child_toward(&d("/tmp/a"), &d("/tmp/한글")), None);
-        assert_eq!(child_toward(&d("/tmp/a"), &d("/tmp/ab/c")), None);
-        assert_eq!(child_toward(&d("/tmp"), &d("/tmp/한글/사진")).as_deref(), Some("한글"));
-        assert_eq!(child_toward(&d("/"), &d("/Users/hong")).as_deref(), Some("Users"));
-    }
-
     /// 탭이 넘쳐도 지금 탭은 보이고 닫을 수 있다 (나머지는 줄거나 가려지고 ⌃Tab으로 닿는다)
     #[test]
     fn active_tab_stays_visible_when_tabs_overflow() {
@@ -1857,8 +1565,9 @@ mod tests {
             a.new_tab(0);
         }
         a.settle();
-        let head = geom(a.pane_rects()[0].1).head;
-        let (trs, add) = a.chips(&g, 0, head);
+        let gm = geom(a.pane_rects()[0].1);
+        let head = gm.head;
+        let (trs, add) = a.chips(&g, 0, &gm);
         let cur = trs[a.pane(0).active];
         assert!(cur.w() >= 52.0 && cur.r <= add.l, "{cur:?} {add:?}");
         assert!(add.r <= head.r, "the + button stays inside the pane");

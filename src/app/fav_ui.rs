@@ -6,7 +6,7 @@ use super::sidebar::SIDE_ROW_H;
 use super::*;
 use crate::favorites::{self, Favorite, Row, SortBy};
 
-pub(super) const G_STAR: u16 = 0xE734;
+pub(super) use sakadu::ui::glyph::G_STAR;
 
 /// 네이티브 팝업 메뉴. id 0은 구분선. 고른 id(없으면 0)
 pub(super) fn popup_menu(hwnd: HWND, pt: POINT, items: &[(u32, &str)]) -> u32 {
