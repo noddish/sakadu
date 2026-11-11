@@ -9,6 +9,7 @@ use sakadu::favorites::{self, Favorite, Favorites, Row};
 use sakadu::listing::{self, Entry, Kind};
 use sakadu::palette::{FOCUS_W, R_CTRL, R_ROW, Theme, alpha};
 use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab};
+use sakadu::session::{self, Look, PaneState, Session};
 use sakadu::util;
 
 // app.rs와 같은 치수
@@ -23,6 +24,8 @@ const SCROLL_W: f32 = 10.0;
 const RADIUS: f32 = 12.0;
 const CHEV_W: f32 = 16.0;
 const CRUMB_PAD: f32 = 8.0;
+/// 경로 입력 상자의 가장 좁은 폭 (app.rs ADDR_MIN_W)
+const ADDR_MIN_W: f32 = 80.0;
 // app/sidebar.rs와 같은 치수 (모양 2는 아이콘 막대와 패널을 합친 폭)
 const SIDE_W: f32 = 44.0 + 220.0;
 const SIDE_HEADER_H: f32 = 44.0;
@@ -117,6 +120,8 @@ pub enum Hit {
     Fwd(usize),
     Up(usize),
     Crumb(usize, usize),
+    /// 경로 줄의 빈 곳 (누르면 경로 입력)
+    CrumbEmpty(usize),
     Star(usize),
     Row(usize, usize),
     List(usize),
@@ -167,6 +172,33 @@ pub struct Request {
     pub tab: u64,
     pub generation: u64,
     pub dir: String,
+}
+
+/// 경로 입력 확인 요청: 창 쪽이 뒷줄에서 resolve_input을 돌려 on_probed로 돌려준다 (꺼진 NAS를 확인하는 동안 멈추지 않게)
+pub struct Probe {
+    pub pane: usize,
+    pub tab: u64,
+    pub text: String,
+}
+
+/// 주소 입력 해석 (app.rs resolve_input과 같은 규칙): 앞의 ~는 홈, 폴더면 그 폴더, 파일이면 그 폴더에서 그 파일을 고른다
+pub fn resolve_input(text: &str, home: &str) -> Result<(String, Option<String>), String> {
+    let t = text.trim();
+    let missing = || format!("경로를 찾을 수 없어요: {t}");
+    let expanded = match t.strip_prefix('~') {
+        Some("") => home.to_string(),
+        Some(rest) if rest.starts_with('/') => format!("{}{rest}", home.trim_end_matches('/')),
+        _ => t.to_string(),
+    };
+    if !expanded.starts_with('/') {
+        return Err(missing());
+    }
+    let path = util::normalize(&expanded);
+    match std::fs::metadata(&path) {
+        Ok(m) if m.is_dir() => Ok((path, None)),
+        Ok(_) => util::parent(&path).map(|p| (p, Some(util::file_name(&path).to_string()))).ok_or_else(missing),
+        Err(_) => Err(missing()),
+    }
 }
 
 /// 사이드바 한 줄
@@ -230,8 +262,13 @@ pub struct App {
     requests: Vec<Request>,
     /// 신호등 아래 끝 (창에서 읽는다). 사이드바 고르기 단추를 그 아래에 둔다
     pub lights_bottom: f32,
-    /// 그림 시험에서는 신호등도 그린다 (창에서는 시스템이 그린다)
-    pub draw_lights: bool,
+    /// 창 없이 그림만 그릴 때 (그림 시험): 신호등과 경로 입력 글자도 직접 그린다 (창에서는 시스템·입력 상자가 그린다)
+    pub standalone: bool,
+    /// 경로를 입력하는 칸 (창 쪽 입력 상자가 그 자리에 뜬다)
+    pub editing: Option<usize>,
+    /// 칸 p의 칩 줄 오른쪽에 잠깐 보일 알림 (다음 입력 때 지운다)
+    flash: Option<(usize, String)>,
+    probes: Vec<Probe>,
     /// 사이드바 목록 스크롤 (줄이 창 아래로 넘칠 때)
     side_scroll: f32,
     /// 열어 달라는 파일 (창 쪽이 macOS '열기'로 연다)
@@ -261,7 +298,10 @@ impl App {
             places,
             requests: Vec::new(),
             lights_bottom: LIGHTS_BOTTOM,
-            draw_lights: false,
+            standalone: false,
+            editing: None,
+            flash: None,
+            probes: Vec::new(),
             side_scroll: 0.0,
             open_files: Vec::new(),
             persist: false,
@@ -359,15 +399,158 @@ impl App {
 
     /// 쌓인 읽기 요청을 바로 처리한다 (시험·그림용, 창에서는 뒷줄에서 읽는다)
     pub fn settle(&mut self) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         loop {
-            let reqs = self.take_requests();
-            if reqs.is_empty() {
+            let (reqs, probes) = (self.take_requests(), self.take_probes());
+            if reqs.is_empty() && probes.is_empty() {
                 break;
             }
             for r in reqs {
                 let result = listing::list_dir(&r.dir);
                 self.on_listed(r.tab, r.generation, result);
             }
+            for p in probes {
+                let result = resolve_input(&p.text, &home);
+                self.on_probed(p.pane, p.tab, result);
+            }
+        }
+    }
+
+    // ---------- 경로 입력 ----------
+
+    /// 칸 p에서 경로 입력을 시작한다 (폴더를 보고 있을 때만)
+    pub fn begin_address(&mut self, p: usize) {
+        if self.panes[p].tab().loc.dir().is_some() {
+            self.activate_pane(p);
+            self.editing = Some(p);
+        }
+    }
+
+    pub fn cancel_address(&mut self) {
+        self.editing = None;
+    }
+
+    /// 입력한 경로로 간다. 확인은 뒷줄에서 하고 결과는 on_probed로 받는다
+    pub fn commit_address(&mut self, text: &str) {
+        let Some(p) = self.editing.take() else { return };
+        let tab = self.panes[p].tab().id;
+        self.probes.push(Probe { pane: p, tab, text: text.to_string() });
+    }
+
+    /// 그림 시험용: 칸 p에서 text를 입력해 확정한 결과까지 바로 반영한다
+    pub fn commit_address_for_render(&mut self, p: usize, text: &str) {
+        self.begin_address(p);
+        self.commit_address(text);
+        self.settle();
+    }
+
+    pub fn take_probes(&mut self) -> Vec<Probe> {
+        std::mem::take(&mut self.probes)
+    }
+
+    /// 경로 확인 결과. 그 사이 그 칸의 지금 탭이 바뀌었으면 버린다
+    pub fn on_probed(&mut self, p: usize, tab: u64, result: Result<(String, Option<String>), String>) {
+        if self.panes[p].tab().id != tab {
+            return;
+        }
+        match result {
+            Ok((dir, select)) => {
+                let here = self.panes[p].tab().loc.dir().is_some_and(|d| util::eq_path(d, &dir));
+                if here && select.is_none() {
+                    self.refresh(p);
+                } else {
+                    self.navigate(p, Location::Dir(dir), select);
+                }
+            }
+            Err(msg) => self.flash = Some((p, msg)),
+        }
+    }
+
+    /// 경로 입력 상자 자리: 칸의 경로 자리, 너무 좁으면 새 폴더·보기 단추 자리까지 (app.rs addr_rect)
+    pub fn address_rect(&self) -> Option<R> {
+        let p = self.editing?;
+        let r = self.pane_rects().into_iter().find(|(q, _)| *q == p)?.1;
+        let gm = geom(r);
+        Some(if gm.crumb.w() >= ADDR_MIN_W { gm.crumb } else { R::new(gm.up.r + 8.0, gm.crumb.t, gm.view.r, gm.crumb.b) })
+    }
+
+    /// 경로 입력 상자에 처음 넣을 글자 (지금 폴더)
+    pub fn address_text(&self) -> String {
+        self.editing.and_then(|p| self.panes[p].tab().loc.dir().map(str::to_string)).unwrap_or_default()
+    }
+
+    // ---------- 세션 ----------
+
+    /// 끝낼 때 저장할 화면 상태 (맥이 쓰지 않는 값은 기본값)
+    pub fn to_session(&self) -> Session {
+        let layout = Layout::ALL.iter().position(|l| *l == self.layout).unwrap_or(1) as u8;
+        let side = match self.side {
+            Side::Places => "places",
+            Side::Favorites => "favorites",
+            Side::Search => "search",
+        };
+        Session {
+            window: None,
+            maximized: false,
+            layout,
+            split: self.split,
+            active: self.active,
+            show_hidden: self.show_hidden,
+            preview: false,
+            new_tab: session::NEW_TAB_SAME.to_string(),
+            recent: Vec::new(),
+            side: side.to_string(),
+            side_w: session::SIDE_W_DEFAULT,
+            pin: None,
+            pin_id: None,
+            ws: None,
+            query: String::new(),
+            scope_here: false,
+            folded: Vec::new(),
+            look: Look::default(),
+            panes: self
+                .panes
+                .iter()
+                .map(|pane| PaneState {
+                    tabs: pane.tabs.iter().map(|t| t.loc.to_session()).collect(),
+                    active: pane.active,
+                    cols: DEFAULT_COLS,
+                    sort_key: 0,
+                    sort_desc: false,
+                    view: 0,
+                })
+                .collect(),
+        }
+    }
+
+    /// 저장한 화면 상태로 연다. 없어진 폴더(와 맥에서 쓰지 않는 '내 PC'·시작 화면)는 home으로 바꾼다
+    pub fn restore(&mut self, s: &Session, home: &str) {
+        self.requests.clear();
+        self.layout = Layout::ALL[(s.layout as usize).min(4)];
+        self.split = (s.split.0.clamp(0.15, 0.85), s.split.1.clamp(0.15, 0.85));
+        self.show_hidden = s.show_hidden;
+        self.side = match s.side.as_str() {
+            "places" => Side::Places,
+            "search" => Side::Search,
+            _ => Side::Favorites,
+        };
+        for (p, ps) in s.panes.iter().take(self.panes.len()).enumerate() {
+            let mut tabs = Vec::new();
+            for t in &ps.tabs {
+                let dir = match Location::from_session(t) {
+                    Location::Dir(d) if std::path::Path::new(&d).is_dir() => d,
+                    _ => home.to_string(),
+                };
+                tabs.push(self.new_tab_at(Location::Dir(dir)));
+            }
+            if !tabs.is_empty() {
+                let active = ps.active.min(tabs.len() - 1);
+                self.panes[p] = Pane { tabs, active };
+            }
+        }
+        self.active = s.active.min(self.layout.count() - 1);
+        for p in 0..self.layout.count() {
+            self.load_if_new(p);
         }
     }
 
@@ -842,7 +1025,7 @@ impl App {
                 {
                     return Hit::Crumb(p, i);
                 }
-                return Hit::Pane(p);
+                return Hit::CrumbEmpty(p);
             }
             if gm.list.contains(x, y) {
                 let vi = ((y - gm.list.t + tab.scroll) / ROW_H).floor() as usize;
@@ -858,13 +1041,17 @@ impl App {
     /// 누름. clicks는 연속으로 누른 횟수 (2면 두 번 누르기)
     pub fn mouse_down(&mut self, g: &Gfx, x: f32, y: f32, mods: Mods, clicks: usize) {
         let hit = self.hit(g, x, y);
+        // 입력 상자 밖을 누르면 입력을 그만둔다. 알림은 다음 입력 때 지운다
+        self.editing = None;
+        self.flash = None;
         match hit {
-            Hit::Tab(p, _) | Hit::TabClose(p, _) | Hit::TabAdd(p) | Hit::Back(p) | Hit::Fwd(p) | Hit::Up(p) | Hit::Crumb(p, _) | Hit::Star(p) | Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) => {
+            Hit::Tab(p, _) | Hit::TabClose(p, _) | Hit::TabAdd(p) | Hit::Back(p) | Hit::Fwd(p) | Hit::Up(p) | Hit::Crumb(p, _) | Hit::CrumbEmpty(p) | Hit::Star(p) | Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) => {
                 self.activate_pane(p)
             }
             _ => {}
         }
         match hit {
+            Hit::CrumbEmpty(p) => self.begin_address(p),
             Hit::Seg(side) => self.set_side(side),
             Hit::SideRow(i) => self.open_side_row(i),
             Hit::Layout(i) => self.set_layout(Layout::ALL[i]),
@@ -960,7 +1147,11 @@ impl App {
     /// Finder 관례 키. 처리했으면 true
     pub fn key(&mut self, key: Key, m: Mods) -> bool {
         let p = self.active;
+        self.flash = None;
         match (key, m.cmd, m.ctrl, m.alt) {
+            // 경로 입력: ⌘L(Windows Ctrl+L), ⌘⇧G(Finder '폴더로 이동')
+            (Key::Char('l'), true, false, false) => self.begin_address(p),
+            (Key::Char('g'), true, false, false) if m.shift => self.begin_address(p),
             (Key::Up | Key::Down, false, false, false) | (Key::Home | Key::End | Key::PageUp | Key::PageDown, false, false, false) => self.move_cursor(key, m.shift),
             (Key::Down, true, false, false) | (Key::Char('o'), true, false, false) => self.open_selected(p),
             (Key::Up, true, false, false) => self.go_up(p),
@@ -1008,7 +1199,7 @@ impl App {
         // 창 바탕 위에 아주 옅은 면, 오른쪽에 얇은 선
         g.fill(R::new(0.0, 0.0, SIDE_W, self.h), alpha(t.text, if t.dark { 0.03 } else { 0.025 }));
         g.fill(R::new(SIDE_W - 1.0, 0.0, SIDE_W, self.h), alpha(t.text, 0.08));
-        if self.draw_lights {
+        if self.standalone {
             traffic_lights(g, WORKBAR_H / 2.0);
         }
         // 바로가기·즐겨찾기·검색 고르기
@@ -1116,9 +1307,10 @@ impl App {
         let gm = geom(r);
 
         // 칩 줄: 탭 칩, 새 탭(+), 오른쪽에 항목 수·고른 개수
-        let count = count_text(tab);
-        let cw = g.measure(&count, Font::Small);
-        g.text(&count, R::new(gm.head.r - 8.0 - cw, gm.head.t + 8.0, gm.head.r - 8.0, gm.head.t + 36.0), Font::Small, t.faint);
+        let flash = self.flash.as_ref().filter(|(fp, _)| *fp == p).map(|(_, m)| m.as_str());
+        let count = flash.map_or_else(|| count_text(tab), str::to_string);
+        let cw = g.measure(&count, Font::Small).min(gm.head.w() * 0.6);
+        g.text(&count, R::new(gm.head.r - 8.0 - cw, gm.head.t + 8.0, gm.head.r - 8.0, gm.head.t + 36.0), Font::Small, if flash.is_some() { t.text } else { t.faint });
         let (trs, add) = self.chips(g, p, gm.head);
         for (i, tr) in trs.iter().enumerate() {
             if tr.w() <= 0.0 {
@@ -1160,6 +1352,26 @@ impl App {
         nav(gm.back, G_BACK, Font::GlyphMid, !tab.back.is_empty(), Hit::Back(p));
         nav(gm.fwd, G_FWD, Font::GlyphMid, !tab.fwd.is_empty(), Hit::Fwd(p));
         nav(gm.up, G_UP, Font::GlyphMid, util::parent(dir).is_some(), Hit::Up(p));
+        // 경로 입력 중: 경로 자리에 입력 바탕과 강조 색 테두리 (글자는 창의 입력 상자가 그린다)
+        if self.editing == Some(p)
+            && let Some(ar) = self.address_rect()
+        {
+            g.fill_round(ar, R_CTRL, t.field);
+            g.stroke_round(ar.inset(0.75, 0.75), R_CTRL, t.accent, 1.5);
+            if self.standalone {
+                g.text(dir, R::new(ar.l + 8.0, ar.t, ar.r - 8.0, ar.b), Font::Path, t.text);
+            }
+            if gm.crumb.w() < ADDR_MIN_W {
+                return self.paint_list(g, t, p, r, &gm);
+            }
+            g.glyph(G_NEW_FOLDER, gm.new_folder, false, off);
+            g.glyph(G_LIST, R::new(gm.view.l + 2.0, gm.view.t, gm.view.l + 26.0, gm.view.b), false, off);
+            g.glyph(G_CHEVRON_DOWN, R::new(gm.view.r - 16.0, gm.view.t + 1.0, gm.view.r - 4.0, gm.view.b + 1.0), true, t.faint);
+            return self.paint_list(g, t, p, r, &gm);
+        }
+        if hover == Hit::CrumbEmpty(p) {
+            g.fill_round(gm.crumb, R_CTRL, t.hover);
+        }
         g.glyph(G_NEW_FOLDER, gm.new_folder, false, off);
         g.glyph(G_LIST, R::new(gm.view.l + 2.0, gm.view.t, gm.view.l + 26.0, gm.view.b), false, off);
         g.glyph(G_CHEVRON_DOWN, R::new(gm.view.r - 16.0, gm.view.t + 1.0, gm.view.r - 4.0, gm.view.b + 1.0), true, t.faint);
@@ -1186,7 +1398,15 @@ impl App {
             }
         }
         g.unclip();
+        self.paint_list(g, t, p, r, &gm);
+    }
 
+    /// 칸의 열 머리글·목록·안내·스크롤 막대·테두리
+    fn paint_list(&self, g: &Gfx, t: &Theme, p: usize, r: R, gm: &Geom) {
+        let pane = &self.panes[p];
+        let tab = pane.tab();
+        let active = p == self.active;
+        let hover = self.hover;
         // 열 머리글
         let cols = columns(gm.list);
         g.text("이름", R::new(cols.name.0 + 4.0, gm.header.t, cols.name.1, gm.header.b), Font::Normal, t.dim);
@@ -1663,6 +1883,84 @@ mod tests {
         let listed = &a.pane(0).tabs[0];
         assert_eq!(listed.cursor_entry().unwrap().name_string(), "sub_090");
         assert!(listed.scroll > 0.0, "the folder we left is scrolled into view in its own tab");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 주소 입력 해석: 폴더, 파일(그 폴더에서 고름), ~, 없는 경로·상대 경로
+    #[test]
+    fn resolve_input_like_windows() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        assert_eq!(resolve_input(&format!("  {work}/ "), "/x"), Ok((work.clone(), None)));
+        assert_eq!(resolve_input(&util::join(&work, "예산.csv"), "/x"), Ok((work.clone(), Some("예산.csv".to_string()))));
+        assert_eq!(resolve_input("~", &home), Ok((home.clone(), None)));
+        assert_eq!(resolve_input("~/업무", &home), Ok((work.clone(), None)));
+        assert!(resolve_input(&util::join(&home, "없는 폴더"), "/x").is_err());
+        assert!(resolve_input("업무", &home).is_err(), "relative paths are not guessed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 경로 줄 빈 곳을 누르면 입력, Return이면 그 경로로, 없는 경로면 칩 줄 알림, 다른 곳을 누르면 취소
+    #[test]
+    fn address_edit_commits_cancels_and_flashes() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let gm = geom(a.pane_rects()[1].1);
+        let (x, y) = (gm.crumb.r - 6.0, gm.crumb.t + 10.0);
+        assert_eq!(a.hit(&g, x, y), Hit::CrumbEmpty(1));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        assert_eq!((a.editing, a.active()), (Some(1), 1));
+        assert_eq!(a.address_text(), home);
+        assert!(a.address_rect().is_some());
+        a.commit_address(&util::join(&util::join(&home, "업무"), "회의록.md"));
+        a.settle();
+        assert_eq!(a.editing, None);
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(util::join(&home, "업무")));
+        assert_eq!(a.pane(1).tab().cursor_entry().unwrap().name_string(), "회의록.md");
+        // 없는 경로: 그대로 두고 알림
+        a.key(Key::Char('l'), Mods { cmd: true, ..Default::default() });
+        assert_eq!(a.editing, Some(1));
+        a.commit_address("/없는/경로");
+        a.settle();
+        assert!(a.flash.as_ref().is_some_and(|(p, m)| *p == 1 && m.contains("찾을 수 없어요")));
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(util::join(&home, "업무")));
+        // ⌘⇧G로 열고, 목록을 누르면 취소된다 (알림도 지운다)
+        a.key(Key::Char('g'), Mods { cmd: true, shift: true, ..Default::default() });
+        assert_eq!(a.editing, Some(1));
+        let l = a.list_rect(0).unwrap();
+        a.mouse_down(&g, l.l + 60.0, l.b - 10.0, Mods::default(), 1);
+        assert_eq!((a.editing, a.flash.is_none()), (None, true));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 세션: 화면 상태를 저장했다가 그대로 연다. 없어진 폴더는 홈으로
+    #[test]
+    fn session_round_trip() {
+        let (root, home) = demo();
+        let (mut a, _g) = app(&home);
+        a.navigate(0, Location::Dir(util::join(&home, "업무")), None);
+        a.new_tab(1);
+        a.navigate(1, Location::Dir(util::join(&home, "다운로드")), None);
+        a.set_layout(Layout::Three);
+        a.activate_pane(2);
+        a.set_side(Side::Places);
+        a.toggle_hidden();
+        a.split = (0.3, 0.6);
+        a.settle();
+        let mut s = a.to_session();
+        // 다시 읽은 세션 글자로 연다 (파일 형식까지)
+        s = session::parse(&session::serialize(&s)).expect("session");
+        s.panes[3].tabs = vec![util::join(&home, "지운 폴더")];
+        let (mut b, _g) = app(&home);
+        b.restore(&s, &home);
+        b.settle();
+        assert_eq!((b.layout(), b.active(), b.side, b.show_hidden, b.split), (Layout::Three, 2, Side::Places, true, (0.3, 0.6)));
+        assert_eq!(b.pane(0).tab().loc, Location::Dir(util::join(&home, "업무")));
+        assert_eq!(b.pane(1).tabs.len(), 2);
+        assert_eq!(b.pane(1).active, 1);
+        assert_eq!(b.pane(1).tab().loc, Location::Dir(util::join(&home, "다운로드")));
+        assert_eq!(b.pane(3).tab().loc, Location::Dir(home.clone()), "a missing folder opens home");
+        assert!(names(&b, 0).contains(&"예산.csv".to_string()), "visible panes are loaded");
         std::fs::remove_dir_all(root).unwrap();
     }
 
