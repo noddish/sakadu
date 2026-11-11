@@ -309,12 +309,16 @@ impl App {
         let pane = &panes[p];
         let scene = PaneScene {
             r,
-            pane,
+            tabs: &pane.tabs,
+            current: pane.active,
+            sort: pane.sort,
+            cols: pane.cols,
+            view: pane.view,
             active,
             multi,
             keyboard_here,
             hover,
-            tabs,
+            chips: tabs,
             add,
             count_text,
             count_rect,
@@ -405,7 +409,7 @@ struct WinArt<'a> {
 }
 
 impl EntryArt<Gfx> for WinArt<'_> {
-    fn icon(&mut self, g: &mut Gfx, e: &Entry, r: R) {
+    fn icon(&mut self, g: &mut Gfx, _: &Tab, e: &Entry, r: R) {
         let (_, type_icon) = type_info(self.types, e);
         g.icon(if e.icon >= 0 { e.icon } else { type_icon }, r);
     }
@@ -421,7 +425,7 @@ impl EntryArt<Gfx> for WinArt<'_> {
         ok
     }
 
-    fn type_name(&mut self, e: &Entry) -> String {
+    fn type_name(&mut self, _: &Tab, e: &Entry) -> String {
         type_info(self.types, e).0
     }
 }

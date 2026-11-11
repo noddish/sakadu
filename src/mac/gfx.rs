@@ -6,7 +6,7 @@ use objc2_app_kit::{NSCompositingOperation, NSFont, NSFontWeightRegular, NSFontW
 use objc2_core_foundation::{CFAttributedString, CFDictionary, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
 use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImageAlphaInfo, CGPath, kCGColorSpaceSRGB};
 use objc2_core_text::{CTFont, CTLine, CTLineTruncationType, kCTFontAttributeName, kCTForegroundColorFromContextAttributeName};
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL, NSURLLocalizedTypeDescriptionKey};
 use objc2_image_io::CGImageDestination;
 use sakadu::draw::{Color, Font, R};
 
@@ -64,6 +64,14 @@ impl sakadu::ui::Canvas for Gfx {
         Gfx::stroke_round(self, r, radius, c, width)
     }
     fn text(&self, s: &str, r: R, f: Font, c: Color) {
+        // Core Text 한 줄 그리기라, 여러 줄 글(목록 안내)은 줄마다 20pt씩 내려 그린다
+        if s.contains('\n') {
+            for (i, line) in s.lines().enumerate() {
+                let y = r.t + i as f32 * 20.0;
+                Gfx::text(self, line, R::new(r.l, y, r.r, y + 20.0), f, c);
+            }
+            return;
+        }
         Gfx::text(self, s, r, f, c)
     }
     fn measure(&self, s: &str, f: Font) -> f32 {
@@ -258,6 +266,14 @@ impl Gfx {
         NSGraphicsContext::setCurrentContext(Some(&self.ns));
         unsafe { img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(dst, NSRect::ZERO, NSCompositingOperation::SourceOver, 1.0, true, None) };
         NSGraphicsContext::restoreGraphicsState_class();
+    }
+
+    /// 그 경로의 Finder '종류' 이름 ("폴더", "PDF 문서"). 읽지 못하면 None
+    pub fn type_description(path: &str) -> Option<String> {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        let mut value = None;
+        unsafe { url.getResourceValue_forKey_error(&mut value, NSURLLocalizedTypeDescriptionKey) }.ok()?;
+        value?.downcast::<NSString>().ok().map(|s| s.to_string())
     }
 
     /// 그 경로의 Finder 아이콘 (파일 종류·폴더)

@@ -92,8 +92,8 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         shots.push(("address", a));
 
         for (name, a) in shots {
-            let g = Gfx::bitmap(W, H, 2.0).ok_or("그림판을 만들지 못함")?;
-            a.paint(&g);
+            let mut g = Gfx::bitmap(W, H, 2.0).ok_or("그림판을 만들지 못함")?;
+            a.paint(&mut g);
             let path = out.join(format!("{name}-{}.png", if dark { "dark" } else { "light" }));
             g.save_png(&path)?;
             written.push(path);

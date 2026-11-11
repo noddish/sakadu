@@ -6,7 +6,7 @@ use super::glyph::*;
 use super::*;
 use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time, format_time_short};
 use crate::palette::{FOCUS_W, R_CTRL, R_ROW, alpha};
-use crate::pane::{Pane, Tab};
+use crate::pane::{Sort, Tab};
 
 /// 칸 안에서 마우스가 올라간 곳 (앱의 Hit을 그리기 직전에 바꿔 넘긴다)
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -46,7 +46,12 @@ pub struct FilterChip {
 /// 칸 하나를 그리는 데 필요한 것 (앱이 자기 상태로 채운다)
 pub struct PaneScene<'a> {
     pub r: R,
-    pub pane: &'a Pane,
+    /// 칸의 탭들과 지금 탭, 정렬, 열 너비(수정한 날짜·유형·크기), 보기 방식
+    pub tabs: &'a [Tab],
+    pub current: usize,
+    pub sort: Sort,
+    pub cols: [f32; 3],
+    pub view: ViewMode,
     /// 지금 칸, 칸이 여럿인지
     pub active: bool,
     pub multi: bool,
@@ -54,7 +59,7 @@ pub struct PaneScene<'a> {
     pub keyboard_here: bool,
     pub hover: PaneHover,
     /// 탭 칩 자리와 새 탭(+) 자리
-    pub tabs: Vec<R>,
+    pub chips: Vec<R>,
     pub add: R,
     /// 칩 줄 오른쪽 글(항목 수·고른 개수)과 그 자리. hot이면 진하게 (잠깐 뜨는 알림 글)
     pub count_text: String,
@@ -96,12 +101,19 @@ pub struct PaneScene<'a> {
     pub now: u64,
 }
 
+impl PaneScene<'_> {
+    /// 지금 탭
+    pub fn tab(&self) -> &Tab {
+        &self.tabs[self.current]
+    }
+}
+
 /// OS마다 다른 그림: 항목 아이콘, 썸네일, 유형 이름
 pub trait EntryArt<G> {
-    fn icon(&mut self, g: &mut G, e: &Entry, r: R);
+    fn icon(&mut self, g: &mut G, tab: &Tab, e: &Entry, r: R);
     /// 썸네일을 bx 안에 그린다 (size는 DIP 크기). 아직 없으면 false
     fn thumbnail(&mut self, g: &mut G, tab: &Tab, e: &Entry, bx: R, size: f32, opacity: f32) -> bool;
-    fn type_name(&mut self, e: &Entry) -> String;
+    fn type_name(&mut self, tab: &Tab, e: &Entry) -> String;
 }
 
 /// 칸 테두리 두께와 색: 모든 칸이 같은 옅은 선. 끌어 놓을 대상일 때만 강조 색으로.
@@ -120,11 +132,11 @@ fn border(t: &Theme, s: &PaneScene) -> (f32, Color) {
 /// 카드, 칩 줄(탭·새 탭·개수 또는 필터 칩), 경로 줄(탐색 단추·경로·별·경로 입력 자리)
 pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
     let t = *t;
-    let (r, p_hover, pane) = (s.r, s.hover, s.pane);
+    let (r, p_hover) = (s.r, s.hover);
     let (active, multi) = (s.active, s.multi);
-    let tab = pane.tab();
+    let tab = s.tab();
     let g = geom(r);
-    let (trs, add) = (&s.tabs, s.add);
+    let (trs, add) = (&s.chips, s.add);
 
     // 카드: 밝은 테마는 테두리 없이 옅은 그림자로 떠 있고, 지금 칸은 조금 더 높이 뜬다 (고대비는 테두리로)
     if active && multi && !t.high_contrast {
@@ -151,7 +163,7 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
         if tr.w() <= 0.0 {
             continue;
         }
-        let current = i == pane.active;
+        let current = i == s.current;
         let hovered = hovered_tab == Some(i);
         if current {
             gfx.fill_round(*tr, tr.h() / 2.0, well(&t));
@@ -162,11 +174,11 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
         } else if hovered {
             gfx.fill_round(*tr, tr.h() / 2.0, t.hover);
         }
-        let closable = pane.tabs.len() > 1 && (current || hovered);
+        let closable = s.tabs.len() > 1 && (current || hovered);
         let label = R::new(tr.l + 12.0, tr.t, tr.r - if closable { 26.0 } else { 10.0 }, tr.b);
         let fg = t.text;
         let color = if s.dragged_tab == Some(i) { alpha(fg, 0.5) } else { fg };
-        gfx.text(&pane.tabs[i].loc.title(), label, Font::Normal, color);
+        gfx.text(&s.tabs[i].loc.title(), label, Font::Normal, color);
         if closable {
             let cr = close_rect(*tr);
             if p_hover == PaneHover::TabClose(i) {
@@ -233,7 +245,7 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
         if view_hot {
             gfx.fill_round(g.view, R_CTRL, t.hover);
         }
-        let view_glyph = if matches!(pane.view, ViewMode::Huge | ViewMode::Large | ViewMode::Medium) { G_GRID } else { G_LIST };
+        let view_glyph = if matches!(s.view, ViewMode::Huge | ViewMode::Large | ViewMode::Medium) { G_GRID } else { G_LIST };
         let view_color = if !s.view_ok { off } else if view_hot { t.text } else { t.dim };
         gfx.glyph(view_glyph, R::new(g.view.l + 2.0, g.view.t, g.view.l + 26.0, g.view.b), false, view_color);
         gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - 16.0, g.view.t + 1.0, g.view.r - 4.0, g.view.b + 1.0), true, t.faint);
@@ -292,27 +304,27 @@ fn up_ok(loc: &Location) -> bool {
 /// 열 머리글, 줄·칸, 안내 글, 네트워크 단추, 스크롤 막대, 네모 고르기, 불러오기 막대
 pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &Theme, s: &PaneScene) {
     let t = *t;
-    let (p_hover, pane) = (s.hover, s.pane);
+    let p_hover = s.hover;
     let active = s.active;
     let keyboard_here = s.keyboard_here;
-    let tab = pane.tab();
+    let tab = s.tab();
     let g = geom(s.r);
     let (short_dates, now) = (s.short_dates, s.now);
 
     // 열 머리글
-    let cols = columns(g.list, pane.cols);
+    let cols = columns(g.list, s.cols);
     let header = |gfx: &G, (l, rr): (f32, f32), label: &str, key: SortKey, right: bool| {
-        let sorted = pane.sort.key == key;
+        let sorted = s.sort.key == key;
         let color = if sorted || p_hover == PaneHover::Header(key) { t.text } else { t.dim };
         let tr = R::new(l + 8.0, g.header.t, rr - 8.0, g.header.b);
         gfx.text(label, tr, if right { Font::Right } else { Font::Normal }, color);
         if sorted {
-            let glyph = if pane.sort.desc { G_SORT_DOWN } else { G_SORT_UP };
+            let glyph = if s.sort.desc { G_SORT_DOWN } else { G_SORT_UP };
             let gx = if right { l } else { (tr.l + gfx.measure(label, Font::Normal) + 4.0).min(rr - 18.0) };
             gfx.glyph(glyph, R::new(gx, g.header.t, gx + 16.0, g.header.b), true, t.dim);
         }
     };
-    if pane.view == ViewMode::Details {
+    if s.view == ViewMode::Details {
         header(gfx, (cols.name.0 - 4.0, cols.name.1), "이름", SortKey::Name, false);
         if let Some(c) = cols.modified {
             header(gfx, c, "수정한 날짜", SortKey::Modified, false);
@@ -326,8 +338,8 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
         gfx.fill(R::new(g.list.l + 8.0, g.header.b - 1.0, g.list.r - SCROLL_W - 6.0, g.header.b), t.border);
     } else {
         // 아이콘·목록 보기: 열 대신 정렬 버튼. 지금 기준은 바탕이 있는 버튼으로 보인다
-        for (key, label, cr) in sort_chips(gfx, g.header, pane.sort.key) {
-            let sorted = pane.sort.key == key;
+        for (key, label, cr) in sort_chips(gfx, g.header, s.sort.key) {
+            let sorted = s.sort.key == key;
             let hot = p_hover == PaneHover::Header(key);
             if sorted {
                 gfx.fill_round(cr, cr.h() / 2.0, well(&t));
@@ -340,7 +352,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
             let tr = R::new(cr.l + 12.0, cr.t, cr.r - if sorted { 28.0 } else { 12.0 }, cr.b);
             gfx.text(label, tr, Font::Normal, if sorted || hot { t.text } else { t.dim });
             if sorted {
-                let glyph = if pane.sort.desc { G_SORT_DOWN } else { G_SORT_UP };
+                let glyph = if s.sort.desc { G_SORT_DOWN } else { G_SORT_UP };
                 gfx.glyph(glyph, R::new(cr.r - 26.0, cr.t, cr.r - 10.0, cr.b), true, t.dim);
             }
         }
@@ -348,7 +360,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
 
     // 행·칸: 보이는 부분만 그린다
     gfx.clip(g.list);
-    let grid = Grid::of(g.list, pane.view);
+    let grid = Grid::of(g.list, s.view);
     // 여러 개를 골랐으면 그중 포커스가 어느 것인지도 보인다
     let many_selected = tab.selection_stats().0 > 1;
     for vi in grid.visible(g.list, tab.scroll, tab.view.len()) {
@@ -372,7 +384,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
                 gfx.stroke_round(cell.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
             }
             let iy = it.t + (ROW_H - 16.0) / 2.0;
-            art.icon(gfx, e, R::new(it.l + 4.0, iy, it.l + 20.0, iy + 16.0));
+            art.icon(gfx, tab, e, R::new(it.l + 4.0, iy, it.l + 20.0, iy + 16.0));
             if renaming_here {
                 let er = R::new(it.l + 24.0, it.t + 2.0, it.r - 6.0, it.b - 2.0);
                 gfx.fill_round(er, R_ROW, t.pane);
@@ -401,7 +413,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
             if !art.thumbnail(gfx, tab, e, bx, thumb, opacity) {
                 // 썸네일이 오기 전까지는 작은 아이콘
                 let my = (bx.t + bx.b) / 2.0;
-                art.icon(gfx, e, R::new(cx - 16.0, my - 16.0, cx + 16.0, my + 16.0));
+                art.icon(gfx, tab, e, R::new(cx - 16.0, my - 16.0, cx + 16.0, my + 16.0));
             }
             let cap = R::new(tile.l + 4.0, bx.b + 6.0, tile.r - 4.0, tile.b - 2.0);
             if renaming_here {
@@ -427,7 +439,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
         }
         // 고대비에서는 선택 바탕(Highlight) 위 글자를 모두 HighlightText로
         let dim = if e.selected && active && t.high_contrast { t.sel_text } else { t.dim };
-        art.icon(gfx, e, R::new(cols.name.0 + 4.0, y + (ROW_H - 16.0) / 2.0, cols.name.0 + 20.0, y + (ROW_H + 16.0) / 2.0));
+        art.icon(gfx, tab, e, R::new(cols.name.0 + 4.0, y + (ROW_H - 16.0) / 2.0, cols.name.0 + 20.0, y + (ROW_H + 16.0) / 2.0));
         let fg = if e.is_hidden() && !(e.selected && active) { t.faint } else { fg };
         gfx.text_w(e.name(), R::new(cols.name.0 + 28.0, y, cols.name.1 - 8.0, y + ROW_H), Font::Normal, fg);
         if let Some((l, rr)) = cols.modified {
@@ -440,7 +452,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
             gfx.text(&s, R::new(l + 8.0, y, rr - 8.0, y + ROW_H), Font::Normal, dim);
         }
         if let Some((l, rr)) = cols.kind {
-            let s = if e.kind == Kind::Drive { drive_type_label(e.drive_type).to_string() } else { art.type_name(e) };
+            let s = if e.kind == Kind::Drive { drive_type_label(e.drive_type).to_string() } else { art.type_name(tab, e) };
             gfx.text(&s, R::new(l + 8.0, y, rr - 8.0, y + ROW_H), Font::Normal, dim);
         }
         if let Some((l, rr)) = cols.size {
@@ -542,35 +554,39 @@ mod tests {
     }
 
     impl EntryArt<Rec> for Art {
-        fn icon(&mut self, _: &mut Rec, _: &Entry, _: R) {}
+        fn icon(&mut self, _: &mut Rec, _: &Tab, _: &Entry, _: R) {}
         fn thumbnail(&mut self, _: &mut Rec, _: &Tab, _: &Entry, _: R, _: f32, _: f32) -> bool {
             false
         }
-        fn type_name(&mut self, _: &Entry) -> String {
+        fn type_name(&mut self, _: &Tab, _: &Entry) -> String {
             self.type_names += 1;
             "유형".to_string()
         }
     }
 
     /// 파일 n개가 든 폴더 탭 하나와, 이름이 다른 빈 탭 하나
-    fn pane(n: usize) -> Pane {
+    fn tabs(n: usize) -> Vec<Tab> {
         let mut tab = Tab::new(1, Location::Dir("C:\\자료".to_string()));
         tab.entries = (0..n).map(|i| Entry::from_str(&format!("파일{i:03}.txt"), Kind::File)).collect();
         tab.view = (0..n as u32).collect();
         tab.state = LoadState::Ready;
         let other = Tab::new(2, Location::Dir("C:\\숨은탭".to_string()));
-        Pane { tabs: vec![tab, other], active: 0, sort: Sort::default(), cols: DEFAULT_COLS, view: ViewMode::Details }
+        vec![tab, other]
     }
 
-    fn scene(pane: &Pane, r: R, tabs: Vec<R>) -> PaneScene<'_> {
+    fn scene(tabs: &[Tab], r: R, chips: Vec<R>) -> PaneScene<'_> {
         PaneScene {
             r,
-            pane,
+            tabs,
+            current: 0,
+            sort: Sort::default(),
+            cols: DEFAULT_COLS,
+            view: ViewMode::Details,
             active: true,
             multi: false,
             keyboard_here: true,
             hover: PaneHover::None,
-            tabs,
+            chips,
             add: R::new(r.l + 200.0, r.t + 8.0, r.l + 228.0, r.t + 36.0),
             count_text: "10개".to_string(),
             count_rect: R::new(r.r - 60.0, r.t + 8.0, r.r - 8.0, r.t + 36.0),
@@ -601,20 +617,20 @@ mod tests {
 
     #[test]
     fn hidden_tab_chips_are_not_drawn() {
-        let p = pane(0);
+        let p = tabs(0);
         let r = R::new(0.0, 0.0, 800.0, 600.0);
         // 둘째 탭은 칸이 좁아 가려졌다 (폭 0)
-        let tabs = vec![R::new(8.0, 8.0, 120.0, 36.0), R::new(120.0, 8.0, 120.0, 36.0)];
+        let chips = vec![R::new(8.0, 8.0, 120.0, 36.0), R::new(120.0, 8.0, 120.0, 36.0)];
         let g = Rec::default();
-        paint_pane_head(&g, &Theme::LIGHT, &scene(&p, r, tabs));
+        paint_pane_head(&g, &Theme::LIGHT, &scene(&p, r, chips));
         let texts = g.texts.borrow();
-        assert!(texts.contains(&p.tabs[0].loc.title()));
-        assert!(!texts.contains(&p.tabs[1].loc.title()));
+        assert!(texts.contains(&p[0].loc.title()));
+        assert!(!texts.contains(&p[1].loc.title()));
     }
 
     #[test]
     fn only_visible_rows_are_drawn_once_with_their_type() {
-        let p = pane(200);
+        let p = tabs(200);
         // 유형 열이 생기는 폭 (590 이상), 목록 높이에 줄 몇 개만 보인다
         let r = R::new(0.0, 0.0, 800.0, 400.0);
         let mut g = Rec::default();
