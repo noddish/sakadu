@@ -56,6 +56,8 @@ pub struct ViewIvars {
     measure: Gfx,
     /// 경로 입력 상자. 입력할 때만 보인다 (한글 조합은 맥이 처리)
     field: OnceCell<Retained<NSTextField>>,
+    /// 입력 상자가 지금 어느 칸의 경로를 담고 있는지 (다른 칸으로 옮기면 다시 채운다)
+    field_pane: std::cell::Cell<Option<usize>>,
 }
 
 define_class!(
@@ -197,7 +199,7 @@ define_class!(
 impl SakaduView {
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let measure = Gfx::bitmap(8.0, 8.0, 1.0).expect("글자 폭을 잴 그림판");
-        let this = Self::alloc(mtm).set_ivars(ViewIvars { measure, field: OnceCell::new() });
+        let this = Self::alloc(mtm).set_ivars(ViewIvars { measure, field: OnceCell::new(), field_pane: std::cell::Cell::new(None) });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         // 경로 입력 상자: 테두리·바탕 없이 (바탕과 강조 색 테두리는 App이 그린다)
         let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
@@ -236,7 +238,7 @@ impl SakaduView {
     /// 경로 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 칸의 경로 자리에 보이고 키 입력을 받는다
     fn sync_field(&self) {
         let Some(field) = self.ivars().field.get() else { return };
-        let Some((rect, text, color)) = with_app(|a| (a.address_rect(), a.address_text(), a.theme.text)) else { return };
+        let Some((rect, text, color, pane)) = with_app(|a| (a.address_rect(), a.address_text(), a.theme.text, a.editing)) else { return };
         match rect {
             Some(r) => {
                 // 한 줄 글자가 세로 가운데에 오게 (시스템 13pt 글꼴의 줄 높이 약 17)
@@ -244,7 +246,9 @@ impl SakaduView {
                 let frame = NSRect::new(NSPoint::new((r.l + 6.0) as f64, (r.t + (r.h() - h) / 2.0) as f64), NSSize::new((r.w() - 12.0).max(0.0) as f64, h as f64));
                 field.setFrame(frame);
                 field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(color.r as f64, color.g as f64, color.b as f64, 1.0)));
-                if field.isHidden() {
+                // 처음 열 때와, 입력 중에 다른 칸의 경로 입력으로 옮겼을 때 그 칸의 경로로 다시 채운다
+                if field.isHidden() || self.ivars().field_pane.get() != pane {
+                    self.ivars().field_pane.set(pane);
                     field.setStringValue(&NSString::from_str(&text));
                     field.setHidden(false);
                     if let Some(w) = self.window() {
@@ -254,6 +258,7 @@ impl SakaduView {
                 }
             }
             None if !field.isHidden() => {
+                self.ivars().field_pane.set(None);
                 field.setHidden(true);
                 if let Some(w) = self.window() {
                     w.makeFirstResponder(Some(self));
@@ -289,6 +294,8 @@ fn pump() {
             let result = sakadu::listing::list_dir(&r.dir);
             DispatchQueue::main().exec_async(move || {
                 with_app(|a| a.on_listed(r.tab, r.generation, result));
+                // 읽기 결과가 새 요청을 낼 수 있다 (세션에서 연 폴더가 없으면 홈을 읽는다)
+                pump();
                 VIEW.with(|v| {
                     if let Some(v) = v.get() {
                         v.setNeedsDisplay(true);
