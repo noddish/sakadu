@@ -9,20 +9,16 @@
 use super::*;
 use crate::favorites::Row;
 
-/// 아이콘 막대 너비 (DIP). 패널이나 칸 영역은 그 오른쪽부터
-pub(super) const BAR_W: f32 = 44.0;
+pub(super) use sakadu::ui::{BAR_W, SIDE_ROW_H, draw_pin, hover_fill, seg_on, seg_track, well};
 const BAR_ITEM: f32 = 32.0;
 const BAR_PITCH: f32 = 44.0;
 /// 패널 머리 줄 (제목, 작은 단추, 핀)
 const HEADER_H: f32 = 44.0;
-pub(super) const SIDE_ROW_H: f32 = 32.0;
 const ROW_L: f32 = 8.0;
 const HEAD_GAP: f32 = 16.0;
 const HEAD_H: f32 = 24.0;
 const MINI: f32 = 28.0;
 const DRIVE_H: f32 = 44.0;
-/// 그룹 안 항목의 들여쓰기
-const INDENT: f32 = 20.0;
 /// 아이콘에 머무른 뒤 패널이 떠서 열리기까지
 const HOVER_OPEN_MS: u32 = 300;
 /// 떠 있는 패널 밖으로 나간 뒤 닫히기까지
@@ -32,10 +28,6 @@ pub(super) const TIMER_SIDE_CLOSE: usize = 47;
 /// 패널이 열릴 때 펼쳐지는 움직임 (Windows에서 애니메이션을 끄면 하지 않는다)
 pub(super) const TIMER_SIDE_ANIM: usize = 48;
 const SIDE_ANIM_SECS: f32 = 0.18;
-const G_PLACES: u16 = 0xE8B7;
-pub(super) const G_PIN: u16 = 0xE718;
-/// 채운 핀의 안쪽 (바늘이 없어 G_PIN을 겹쳐 그린다: draw_pin)
-const G_PIN_FILL: u16 = 0xE841;
 const G_SORT: u16 = 0xE8CB;
 const G_NEW_GROUP: u16 = 0xE8F4;
 const G_TWIST_OPEN: u16 = 0xE70D;
@@ -167,60 +159,11 @@ pub(super) fn spawn_places(hwnd: HWND) {
     });
 }
 
-/// 창 바탕 위에 한 단계 들어간 면 (칸 나누기 판, 지금 위치 줄)
-pub(super) fn well(t: &Theme) -> Color {
-    if t.high_contrast { t.window } else { t.sel_inactive }
-}
-
 /// Windows 설정의 "애니메이션 효과"가 켜져 있는지 (끄면 움직임 없이 바로 보인다)
 pub(super) fn motion_on() -> bool {
     let mut on = BOOL(1);
     let read = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut BOOL as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
     read.is_err() || on.as_bool()
-}
-
-/// 고르기 판(칸 나누기, 검색 범위, 설정의 고르기)의 들어간 바탕. 어두운 테마는 바탕보다 어둡게 겹친다
-pub(super) fn seg_track(t: &Theme) -> Color {
-    if t.high_contrast {
-        t.window
-    } else if t.dark {
-        Color { r: 0.0, g: 0.0, b: 0.0, a: 0.28 }
-    } else {
-        t.sel_inactive
-    }
-}
-
-/// 고르기 판에서 고른 칸·켜진 단추: 밝은 테마는 흰 면 + 아주 작은 그림자, 어두운 테마는 한 단계 밝은 면 + 위쪽 빛 선 (떠 보이게)
-pub(super) fn seg_on(g: &Gfx, r: R, radius: f32, t: &Theme) {
-    if t.high_contrast {
-        g.fill_round(r, radius, t.pane);
-        g.stroke_round(r.inset(0.5, 0.5), radius, t.border, 1.0);
-    } else if t.dark {
-        g.fill_round(r, radius, t.sel_inactive);
-        g.fill(R::new(r.l + radius, r.t + 0.5, r.r - radius, r.t + 1.5), Color { r: 1.0, g: 1.0, b: 1.0, a: 0.10 });
-    } else {
-        super::soft_shadow(g, r, radius, 3.0, 0.12, false);
-        g.fill_round(r, radius, t.pane);
-    }
-}
-
-/// 줄의 마우스 올림 바탕: 창 바탕에서도 보이도록 반투명으로 겹친다
-pub(super) fn hover_fill(t: &Theme) -> Color {
-    if t.high_contrast {
-        t.hover
-    } else if t.dark {
-        Color { r: 1.0, g: 1.0, b: 1.0, a: 0.06 }
-    } else {
-        Color { r: 0.06, g: 0.09, b: 0.16, a: 0.05 }
-    }
-}
-
-/// 핀 그림. 고정했으면 채운 핀(E841)에 빈 핀(E718)을 겹쳐 바늘까지 그린다 (E841만으로는 바늘 없는 덩어리)
-pub(super) fn draw_pin(g: &Gfx, r: R, pinned: bool, c: Color) {
-    if pinned {
-        g.glyph(G_PIN_FILL, r, false, c);
-    }
-    g.glyph(G_PIN, r, false, c);
 }
 
 fn bar_item(y: f32) -> R {

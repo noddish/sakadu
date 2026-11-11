@@ -21,7 +21,7 @@ const S_FOOT_H: f32 = 32.0;
 const PAL_ROW_H: f32 = 48.0;
 const G_CHECK: u16 = 0xE73E;
 const PAL_LIMIT: usize = 200;
-pub(super) const G_SEARCH: u16 = 0xE721;
+pub(super) use sakadu::ui::glyph::G_SEARCH;
 pub(super) const TIMER_SEARCH: usize = 20;
 /// 검색 서비스가 준비 중일 때 준비됐는지 다시 묻는 간격
 pub(super) const TIMER_SEARCH_READY: usize = 21;

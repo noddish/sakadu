@@ -12,5 +12,6 @@ pub mod natural;
 pub mod palette;
 pub mod pane;
 pub mod session;
+pub mod ui;
 pub mod util;
 pub mod workspaces;
