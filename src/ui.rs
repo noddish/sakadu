@@ -6,16 +6,25 @@ use crate::pane::{Location, SortKey, ViewMode};
 use crate::palette::Theme;
 use crate::util;
 
+pub mod paint;
+
 /// 공통 화면 코드가 쓰는 그리기 (각 OS의 Gfx가 같은 이름의 메서드로 구현한다)
 pub trait Canvas {
     fn fill(&self, r: R, c: Color);
     fn fill_round(&self, r: R, radius: f32, c: Color);
     fn stroke_round(&self, r: R, radius: f32, c: Color, width: f32);
     fn text(&self, s: &str, r: R, f: Font, c: Color);
+    /// 파일 이름처럼 UTF-16으로 가진 글자 (Windows는 바꾸지 않고 바로 그린다)
+    fn text_w(&self, s: &[u16], r: R, f: Font, c: Color) {
+        self.text(&String::from_utf16_lossy(s), r, f, c)
+    }
     fn measure(&self, s: &str, f: Font) -> f32;
     /// 아이콘 글자 (Segoe 번호, 맥은 SF Symbols로 바꿔 그린다). small은 10px, 아니면 16px
     fn glyph(&self, code: u16, r: R, small: bool, c: Color);
     fn glyph_font(&self, code: u16, r: R, f: Font, c: Color);
+    /// r 밖에는 그리지 않는다 (unclip까지)
+    fn clip(&self, r: R);
+    fn unclip(&self);
 }
 
 /// 아이콘 글자 번호 (Segoe Fluent Icons / Segoe MDL2 Assets)

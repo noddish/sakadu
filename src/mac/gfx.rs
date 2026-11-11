@@ -75,6 +75,12 @@ impl sakadu::ui::Canvas for Gfx {
     fn glyph_font(&self, code: u16, r: R, f: Font, c: Color) {
         Gfx::glyph_font(self, code, r, f, c)
     }
+    fn clip(&self, r: R) {
+        Gfx::clip(self, r)
+    }
+    fn unclip(&self) {
+        Gfx::unclip(self)
+    }
 }
 
 impl Gfx {
