@@ -1,4 +1,6 @@
-//! 문자열·경로 유틸리티 (Win32 의존 없음)
+//! 문자열·경로 유틸리티 (Win32 의존 없음).
+//! 경로 규칙은 Windows("C:\", "\\서버\공유")를 따른다. 맥·리눅스에서는 "/"로 시작하는 경로를 "/" 구분자로 다루고,
+//! 그 밖의 글자는 Windows 규칙 그대로 둔다 (Windows에서는 이 갈래가 아예 없다)
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -9,8 +11,21 @@ pub fn from_wide(w: &[u16]) -> String {
     String::from_utf16_lossy(&w[..end])
 }
 
-/// 경로의 루트 길이. "C:\" → 3, "\\server\share\x" → "\\server\share"의 길이
+/// 맥·리눅스 경로("/Users/…")인지. Windows에서는 늘 아니다
+fn unix_path(path: &str) -> bool {
+    cfg!(not(windows)) && path.starts_with('/')
+}
+
+/// 경로의 구분자: 맥·리눅스 경로는 '/', 그 밖에는 '\'
+fn sep_of(path: &str) -> char {
+    if unix_path(path) { '/' } else { '\\' }
+}
+
+/// 경로의 루트 길이. "C:\" → 3, "\\server\share\x" → "\\server\share"의 길이, 맥·리눅스 "/…" → 1
 pub fn root_len(path: &str) -> usize {
+    if unix_path(path) {
+        return 1;
+    }
     let b = path.as_bytes();
     if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
         return if b.len() >= 3 && b[2] == b'\\' { 3 } else { 2 };
@@ -32,6 +47,17 @@ pub fn root_len(path: &str) -> usize {
 
 /// 사용자 입력 경로 정규화: 따옴표 제거, '/'→'\', 드라이브 문자 대문자, 루트가 아닌 끝 '\' 제거
 pub fn normalize(path: &str) -> String {
+    if cfg!(not(windows)) {
+        // 맥·리눅스 경로는 따옴표와 루트가 아닌 끝 '/'만 정리한다 ('\'는 이름에 쓸 수 있는 글자)
+        let t = path.trim().trim_matches('"');
+        if t.starts_with('/') {
+            let mut s = t.to_string();
+            while s.len() > 1 && s.ends_with('/') {
+                s.pop();
+            }
+            return s;
+        }
+    }
     let mut s = path.trim().trim_matches('"').replace('/', "\\");
     if s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic() {
         let up = s[..1].to_ascii_uppercase();
@@ -47,7 +73,8 @@ pub fn normalize(path: &str) -> String {
 }
 
 pub fn join(dir: &str, name: &str) -> String {
-    if dir.ends_with('\\') { format!("{dir}{name}") } else { format!("{dir}\\{name}") }
+    let sep = sep_of(dir);
+    if dir.ends_with(sep) { format!("{dir}{name}") } else { format!("{dir}{sep}{name}") }
 }
 
 /// 상위 폴더. 루트면 None
@@ -56,7 +83,7 @@ pub fn parent(path: &str) -> Option<String> {
     if r == 0 || path.len() <= r {
         return None;
     }
-    let idx = path.rfind('\\')?;
+    let idx = path.rfind(sep_of(path))?;
     let root = if r == 2 { format!("{}\\", &path[..2]) } else { path[..r].to_string() };
     if idx < r { Some(root) } else { Some(path[..idx].to_string()) }
 }
@@ -67,7 +94,7 @@ pub fn file_name(path: &str) -> &str {
     if path.len() <= r {
         return path.trim_end_matches('\\');
     }
-    path[r..].rsplit('\\').find(|s| !s.is_empty()).unwrap_or("")
+    path[r..].rsplit(sep_of(path)).find(|s| !s.is_empty()).unwrap_or("")
 }
 
 /// 경로 표시줄용 (표시 이름, 전체 경로) 목록
@@ -76,7 +103,7 @@ pub fn segments(path: &str) -> Vec<(String, String)> {
     let root = &path[..r];
     let mut cur = if root.len() == 2 { format!("{root}\\") } else { root.to_string() };
     let mut out = vec![(root.trim_end_matches('\\').to_string(), cur.clone())];
-    for part in path[r..].split('\\').filter(|p| !p.is_empty()) {
+    for part in path[r..].split(sep_of(path)).filter(|p| !p.is_empty()) {
         cur = join(&cur, part);
         out.push((part.to_string(), cur.clone()));
     }
@@ -179,6 +206,26 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert_eq!(s[0], ("C:".to_string(), "C:\\".to_string()));
         assert_eq!(s[2], ("hong".to_string(), "C:\\Users\\hong".to_string()));
+    }
+
+    /// 맥·리눅스 경로: "/" 루트와 "/" 구분자. 드라이브 문자 경로는 위의 Windows 규칙 그대로
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_paths() {
+        assert_eq!(root_len("/"), 1);
+        assert_eq!(root_len("/Users/hong"), 1);
+        assert_eq!(normalize(" \"/Users/hong/문서/\" "), "/Users/hong/문서");
+        assert_eq!(normalize("/"), "/");
+        assert_eq!(join("/", "Users"), "/Users");
+        assert_eq!(join("/Users", "hong"), "/Users/hong");
+        assert_eq!(parent("/Users/hong").as_deref(), Some("/Users"));
+        assert_eq!(parent("/Users").as_deref(), Some("/"));
+        assert_eq!(parent("/"), None);
+        assert_eq!(file_name("/Users/hong/a\\b.txt"), "a\\b.txt");
+        assert_eq!(file_name("/"), "/");
+        let s = segments("/Users/hong");
+        let want = [("/", "/"), ("Users", "/Users"), ("hong", "/Users/hong")];
+        assert_eq!(s, want.map(|(a, b)| (a.to_string(), b.to_string())));
     }
 
     #[test]

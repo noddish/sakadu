@@ -3,11 +3,13 @@
 //! Windows API가 필요한 부분은 `#[cfg(windows)]`로 묶어, 다른 OS(macOS 버전 준비)에서도 빌드·테스트되게 한다.
 
 pub mod diag;
+pub mod draw;
 pub mod favorites;
 pub mod index;
 pub mod keys;
 pub mod listing;
 pub mod natural;
+pub mod palette;
 pub mod pane;
 pub mod session;
 pub mod util;

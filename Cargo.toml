@@ -49,6 +49,26 @@ windows-core = "0.62.2"
 # Direct2D DrawTextLayout의 좌표 형식. windows가 이미 쓰는 버전이라 새로 받는 것은 없다
 windows-numerics = "0.3.1"
 
+# macOS: 시간대(공통 코드의 날짜 표시)와 맥 시제품의 그리기. 맥에서만 받는다.
+# 그리기 쪽 크레이트는 맥 실행 파일(mac-app 기능)을 빌드할 때만 받는다
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3.2"
+objc2 = { version = "0.6.5", optional = true }
+objc2-foundation = { version = "0.3.2", optional = true }
+objc2-app-kit = { version = "0.3.2", optional = true }
+objc2-core-graphics = { version = "0.3.2", optional = true }
+objc2-core-text = { version = "0.3.2", optional = true }
+objc2-image-io = { version = "0.3.2", optional = true }
+
+[features]
+# 맥 시제품 실행 파일(sakadu-mac). Windows 빌드에는 쓰지 않는다
+mac-app = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:objc2-core-graphics", "dep:objc2-core-text", "dep:objc2-image-io"]
+
+[[bin]]
+name = "sakadu-mac"
+path = "src/mac/main.rs"
+required-features = ["mac-app"]
+
 [profile.release]
 opt-level = 3
 lto = true

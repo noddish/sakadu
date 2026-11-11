@@ -1,0 +1,236 @@
+//! Core Graphics·Core Text 그리기. Windows `gfx.rs`(Direct2D)와 같은 이름·좌표(왼쪽 위가 0, pt 단위)를 쓴다.
+//! 지금은 비트맵(PNG로 저장)에 그리고, 다음 단계에서 창(NSView)에 그릴 때도 같은 함수를 쓴다
+
+use objc2::rc::Retained;
+use objc2_app_kit::{NSCompositingOperation, NSFont, NSFontWeightRegular, NSFontWeightSemibold, NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSWorkspace};
+use objc2_core_foundation::{CFAttributedString, CFDictionary, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
+use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImageAlphaInfo, CGPath, kCGColorSpaceSRGB};
+use objc2_core_text::{CTFont, CTLine, CTLineTruncationType, kCTFontAttributeName, kCTForegroundColorFromContextAttributeName};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_image_io::CGImageDestination;
+use sakadu::draw::{Color, Font, R};
+
+pub struct Gfx {
+    ctx: CFRetained<CGContext>,
+    /// AppKit 그림(심벌·파일 아이콘)을 같은 비트맵에 그리기 위한 틀
+    ns: Retained<NSGraphicsContext>,
+    /// Font 순서와 같다
+    fonts: Vec<Retained<NSFont>>,
+}
+
+fn rect(r: R) -> CGRect {
+    CGRect::new(CGPoint::new(r.l as CGFloat, r.t as CGFloat), CGSize::new(r.w().max(0.0) as CGFloat, r.h().max(0.0) as CGFloat))
+}
+
+/// Windows 아이콘 글꼴(Segoe Fluent Icons) 글자를 SF Symbols 이름으로. 화면 코드는 Windows와 같은 번호를 쓴다
+fn symbol_name(code: u16) -> &'static str {
+    match code {
+        0xE72B => "arrow.left",
+        0xE72A => "arrow.right",
+        0xE74A => "arrow.up",
+        0xE710 => "plus",
+        0xE8BB => "xmark",
+        0xE76C => "chevron.right",
+        0xE70D => "chevron.down",
+        0xE70E => "chevron.up",
+        0xE734 => "star",
+        0xE735 => "star.fill",
+        0xE8F4 => "folder.badge.plus",
+        0xE7B3 => "eye",
+        0xE71C => "line.3.horizontal.decrease",
+        0xE8FD => "list.bullet",
+        0xF0E2 => "square.grid.2x2",
+        0xE713 => "gearshape",
+        0xE712 => "ellipsis",
+        0xE90D => "sidebar.right",
+        0xE721 => "magnifyingglass",
+        0xE8B7 => "folder",
+        0xE718 => "pin",
+        0xE841 => "pin.fill",
+        0xE8CB => "arrow.up.arrow.down",
+        _ => "questionmark.square.dashed",
+    }
+}
+
+impl Gfx {
+    /// 너비 w × 높이 h(pt) 그림판. scale배 픽셀로 그린다 (레티나는 2)
+    pub fn bitmap(w: f32, h: f32, scale: f32) -> Option<Gfx> {
+        let (pw, ph) = ((w * scale).round() as usize, (h * scale).round() as usize);
+        let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))?;
+        let ctx = unsafe { CGBitmapContextCreate(std::ptr::null_mut(), pw, ph, 8, pw * 4, Some(&space), CGImageAlphaInfo::PremultipliedLast.0) }?;
+        // 왼쪽 위를 0으로, pt 단위로
+        CGContext::translate_ctm(Some(&ctx), 0.0, ph as CGFloat);
+        CGContext::scale_ctm(Some(&ctx), scale as CGFloat, -scale as CGFloat);
+        // 위아래를 뒤집은 좌표에서 글자가 거꾸로 서지 않게
+        CGContext::set_text_matrix(Some(&ctx), CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: -1.0, tx: 0.0, ty: 0.0 });
+        let ns = NSGraphicsContext::graphicsContextWithCGContext_flipped(&ctx, true);
+        NSGraphicsContext::setCurrentContext(Some(&ns));
+        let font = |size: CGFloat, strong: bool| NSFont::systemFontOfSize_weight(size, unsafe { if strong { NSFontWeightSemibold } else { NSFontWeightRegular } });
+        // Windows gfx의 글꼴 표와 같은 순서·크기 (아이콘 글꼴 자리는 글자 크기만 쓴다)
+        let fonts = vec![
+            font(13.0, false),
+            font(13.0, false),
+            font(13.0, true),
+            font(16.0, false),
+            font(10.0, false),
+            font(13.0, false),
+            font(13.0, false),
+            font(12.0, false),
+            NSFont::monospacedSystemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular }),
+            font(24.0, false),
+            font(12.0, false),
+            font(12.0, false),
+        ];
+        Some(Gfx { ctx, ns, fonts })
+    }
+
+    fn c(&self) -> Option<&CGContext> {
+        Some(&self.ctx)
+    }
+
+    fn set_fill(&self, c: Color) {
+        CGContext::set_rgb_fill_color(self.c(), c.r as CGFloat, c.g as CGFloat, c.b as CGFloat, c.a as CGFloat);
+    }
+
+    pub fn clear(&self, c: Color) {
+        self.set_fill(c);
+        CGContext::fill_rect(self.c(), CGRect::new(CGPoint::new(-1.0e4, -1.0e4), CGSize::new(2.0e4, 2.0e4)));
+    }
+
+    pub fn fill(&self, r: R, c: Color) {
+        self.set_fill(c);
+        CGContext::fill_rect(self.c(), rect(r));
+    }
+
+    fn round_path(r: R, radius: f32) -> CFRetained<CGPath> {
+        let k = radius.min(r.w() / 2.0).min(r.h() / 2.0).max(0.0) as CGFloat;
+        unsafe { CGPath::with_rounded_rect(rect(r), k, k, std::ptr::null()) }
+    }
+
+    pub fn fill_round(&self, r: R, radius: f32, c: Color) {
+        if r.w() <= 0.0 || r.h() <= 0.0 {
+            return;
+        }
+        self.set_fill(c);
+        CGContext::add_path(self.c(), Some(&Self::round_path(r, radius)));
+        CGContext::fill_path(self.c());
+    }
+
+    pub fn stroke_round(&self, r: R, radius: f32, c: Color, width: f32) {
+        if r.w() <= 0.0 || r.h() <= 0.0 {
+            return;
+        }
+        CGContext::set_rgb_stroke_color(self.c(), c.r as CGFloat, c.g as CGFloat, c.b as CGFloat, c.a as CGFloat);
+        CGContext::set_line_width(self.c(), width as CGFloat);
+        CGContext::add_path(self.c(), Some(&Self::round_path(r, radius)));
+        CGContext::stroke_path(self.c());
+    }
+
+    pub fn clip(&self, r: R) {
+        CGContext::save_g_state(self.c());
+        CGContext::clip_to_rect(self.c(), rect(r));
+    }
+
+    pub fn unclip(&self) {
+        CGContext::restore_g_state(self.c());
+    }
+
+    fn line(&self, s: &str, f: Font) -> CFRetained<CTLine> {
+        let font: &CTFont = unsafe { &*(Retained::as_ptr(&self.fonts[f as usize]) as *const CTFont) };
+        let keys: [&CFString; 2] = unsafe { [kCTFontAttributeName, kCTForegroundColorFromContextAttributeName] };
+        let yes: &CFType = unsafe { kCFBooleanTrue }.expect("kCFBooleanTrue");
+        let values: [&CFType; 2] = [font.as_ref(), yes];
+        let attrs = CFDictionary::from_slices(&keys, &values);
+        let text = CFString::from_str(s);
+        let attributed = unsafe { CFAttributedString::new(None, Some(&text), Some(attrs.as_opaque())) }.expect("CFAttributedString");
+        unsafe { CTLine::with_attributed_string(&attributed) }
+    }
+
+    /// 글자 폭 (pt)
+    pub fn measure(&self, s: &str, f: Font) -> f32 {
+        let l = self.line(s, f);
+        unsafe { l.typographic_bounds(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) as f32 }
+    }
+
+    /// 한 줄 글자: 세로 가운데, 넘치면 말줄임 (경로는 가운데를 줄인다). Right는 오른쪽, Hint·Caption은 가운데 정렬
+    pub fn text(&self, s: &str, r: R, f: Font, c: Color) {
+        if s.is_empty() || r.w() <= 0.0 {
+            return;
+        }
+        let mut line = self.line(s, f);
+        let (mut ascent, mut descent, mut leading) = (0.0, 0.0, 0.0);
+        let mut w = unsafe { line.typographic_bounds(&mut ascent, &mut descent, &mut leading) } as f32;
+        if w > r.w() {
+            let kind = if matches!(f, Font::Path) { CTLineTruncationType::Middle } else { CTLineTruncationType::End };
+            let token = self.line("…", f);
+            if let Some(t) = unsafe { CTLine::truncated_line(&line, r.w() as f64, kind, Some(&token)) } {
+                line = t;
+                w = unsafe { line.typographic_bounds(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) } as f32;
+            }
+        }
+        let x = match f {
+            Font::Right => r.r - w,
+            Font::Hint | Font::Caption | Font::Glyph | Font::GlyphSmall | Font::GlyphMid => r.l + (r.w() - w) / 2.0,
+            _ => r.l,
+        };
+        // 위아래 뒤집힌 좌표: 기준선은 글자 덩어리를 세로 가운데에 둔 곳
+        let base = r.t + (r.h() + (ascent - descent) as f32) / 2.0;
+        self.set_fill(c);
+        CGContext::save_g_state(self.c());
+        CGContext::clip_to_rect(self.c(), rect(R::new(r.l - 1.0, r.t - 4.0, r.r + 1.0, r.b + 4.0)));
+        CGContext::set_text_position(self.c(), x as CGFloat, base as CGFloat);
+        unsafe { line.draw(&self.ctx) };
+        CGContext::restore_g_state(self.c());
+    }
+
+    /// 아이콘 글자(Windows Segoe 번호)를 SF Symbols로. small은 10pt, 아니면 16pt
+    pub fn glyph(&self, code: u16, r: R, small: bool, c: Color) {
+        self.glyph_font(code, r, if small { Font::GlyphSmall } else { Font::Glyph }, c);
+    }
+
+    /// 크기를 고른 아이콘 (Glyph 16, GlyphMid 12, GlyphSmall 10pt). 템플릿 그림을 c 색으로 칠한다
+    pub fn glyph_font(&self, code: u16, r: R, f: Font, c: Color) {
+        let size = match f {
+            Font::GlyphSmall => 10.0,
+            Font::GlyphMid => 12.0,
+            _ => 15.0,
+        };
+        let name = NSString::from_str(symbol_name(code));
+        let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, None) else { return };
+        let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(size, unsafe { NSFontWeightRegular });
+        let Some(img) = img.imageWithSymbolConfiguration(&config) else { return };
+        let s = img.size();
+        let (w, h) = (s.width as f32, s.height as f32);
+        let dst = R::new(r.l + (r.w() - w) / 2.0, r.t + (r.h() - h) / 2.0, r.l + (r.w() + w) / 2.0, r.t + (r.h() + h) / 2.0);
+        // 검은 템플릿 그림을 따로 그린 뒤 그 모양에만 색을 칠한다
+        CGContext::save_g_state(self.c());
+        unsafe { CGContext::begin_transparency_layer(self.c(), None) };
+        self.draw_image(&img, dst);
+        CGContext::set_blend_mode(self.c(), objc2_core_graphics::CGBlendMode::SourceIn);
+        self.fill(dst.inset(-1.0, -1.0), c);
+        CGContext::end_transparency_layer(self.c());
+        CGContext::restore_g_state(self.c());
+    }
+
+    fn draw_image(&self, img: &NSImage, r: R) {
+        let dst = NSRect::new(NSPoint::new(r.l as CGFloat, r.t as CGFloat), NSSize::new(r.w() as CGFloat, r.h() as CGFloat));
+        unsafe { img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(dst, NSRect::ZERO, NSCompositingOperation::SourceOver, 1.0, true, None) };
+    }
+
+    /// 그 경로의 Finder 아이콘 (파일 종류·폴더)
+    pub fn icon_for_path(&self, path: &str, r: R) {
+        let img = NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(path));
+        self.draw_image(&img, r);
+    }
+
+    /// 지금까지 그린 그림을 PNG로
+    pub fn save_png(&self, path: &std::path::Path) -> Result<(), String> {
+        self.ns.flushGraphics();
+        let img = CGBitmapContextCreateImage(self.c()).ok_or("그림을 만들지 못함")?;
+        let url = CFURL::from_file_path(path).ok_or("경로를 URL로 바꾸지 못함")?;
+        let png = CFString::from_static_str("public.png");
+        let dest = unsafe { CGImageDestination::with_url(&url, &png, 1, None) }.ok_or("PNG 파일을 만들지 못함")?;
+        unsafe { dest.add_image(&img, None) };
+        if unsafe { dest.finalize() } { Ok(()) } else { Err("PNG를 쓰지 못함".into()) }
+    }
+}

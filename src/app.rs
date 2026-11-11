@@ -1309,7 +1309,7 @@ impl App {
         let mut app = App {
             hwnd,
             gfx,
-            theme: Theme::resolve(&look.theme, &look.accent),
+            theme: crate::theme::resolve(&look.theme, &look.accent),
             panes,
             layout,
             split: sess.as_ref().map(|s| (s.split.0.clamp(0.15, 0.85), s.split.1.clamp(0.15, 0.85))).unwrap_or((0.5, 0.5)),
@@ -3479,7 +3479,7 @@ impl App {
     /// 화면 설정을 바꾼 뒤: 바뀐 것만 다시 적용하고 저장한다.
     /// 색(테마·강조 색)만 바뀌면 글꼴을 다시 만들거나 아이콘·썸네일을 비우지 않는다
     pub(super) fn apply_look(&mut self, changed: LookPart) {
-        self.theme = Theme::resolve(&self.look.theme, &self.look.accent);
+        self.theme = crate::theme::resolve(&self.look.theme, &self.look.accent);
         if changed == LookPart::Font {
             if let Err(e) = self.gfx.set_font(&self.look.font) {
                 crate::diag::log(|| format!("font: {e}"));
@@ -3811,7 +3811,7 @@ impl App {
                 }
                 // 고대비 모드를 켜고 끄면 시스템 색이 바뀐다
                 WM_SYSCOLORCHANGE => {
-                    self.theme = Theme::resolve(&self.look.theme, &self.look.accent);
+                    self.theme = crate::theme::resolve(&self.look.theme, &self.look.accent);
                     self.apply_window_theme();
                     return None;
                 }
@@ -3821,7 +3821,7 @@ impl App {
                     }
                     let colors = wp.0 == SPI_SETHIGHCONTRAST.0 as usize;
                     if colors || lp.0 != 0 && PCWSTR(lp.0 as *const u16).to_string().is_ok_and(|s| s == "ImmersiveColorSet") {
-                        self.theme = Theme::resolve(&self.look.theme, &self.look.accent);
+                        self.theme = crate::theme::resolve(&self.look.theme, &self.look.accent);
                         self.apply_window_theme();
                         let tip = self.tray_tip();
                         if let Some(t) = &mut self.tray {
