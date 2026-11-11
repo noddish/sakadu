@@ -87,11 +87,11 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             let Some(ns) = NSGraphicsContext::currentContext() else { return };
-            let g = Gfx::for_context(&ns.CGContext());
+            let mut g = Gfx::for_context(&ns.CGContext());
             let size = self.bounds().size;
             with_app(|a| {
                 a.resize(size.width as f32, size.height as f32);
-                a.paint(&g);
+                a.paint(&mut g);
             });
             self.sync_field();
         }

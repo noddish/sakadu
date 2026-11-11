@@ -1,19 +1,22 @@
 //! 맥 시제품 앱: 칸·탭·사이드바 상태, 그리기(paint), 누르기 판정(hit), 동작.
 //! 화면 모양은 '모양 2(맥 관례)': 사이드바가 창 위까지 올라가고 신호등은 그 안, 아이콘 막대 대신 고르기 단추,
-//! 설정은 작업 줄 오른쪽 끝. 화면 계산·그리기 도우미·치수는 Windows와 함께 쓰는 sakadu::ui를 쓰고,
-//! 칸 그리기는 Windows app.rs와 같은 규칙으로 따로 그린다 (3단계에서 칸 그리기도 함께 쓴다).
+//! 설정은 작업 줄 오른쪽 끝. 화면 계산·그리기 도우미·치수와 칸 그리기는 Windows와 함께 쓰는 sakadu::ui를 쓴다
+//! (칸은 이 앱의 상태로 장면을 채워 sakadu::ui::paint가 그린다).
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
 use crate::gfx::Gfx;
 use sakadu::draw::{Color, Font, R};
 use sakadu::favorites::{self, Favorite, Favorites, Row};
 use sakadu::listing::{self, Entry, Kind};
-use sakadu::palette::{FOCUS_W, R_CTRL, R_ROW, Theme, alpha};
+use sakadu::palette::{R_CTRL, R_ROW, Theme, alpha};
 use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab, ViewMode, child_toward};
 use sakadu::session::{self, Look, PaneState, Session};
 use sakadu::ui::glyph::*;
+use sakadu::ui::paint::{EntryArt, PaneHover, PaneScene, paint_pane_border, paint_pane_head, paint_pane_list};
 use sakadu::ui::*;
 use sakadu::util;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// 모양 2의 사이드바 폭: 아이콘 막대와 패널(기본 220)을 합친 폭
 const SIDE_W: f32 = BAR_W + 220.0;
@@ -199,6 +202,8 @@ pub struct App {
     pub open_files: Vec<String>,
     /// 즐겨찾기를 파일에 저장할지 (시험·그림에서는 저장하지 않는다)
     pub persist: bool,
+    /// Finder '종류' 이름: 확장자별로 한 번만 묻는다 (폴더는 앞에 '/')
+    kinds: RefCell<HashMap<String, String>>,
 }
 
 impl App {
@@ -232,6 +237,7 @@ impl App {
             side_scroll: 0.0,
             open_files: Vec::new(),
             persist: false,
+            kinds: RefCell::new(HashMap::new()),
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
@@ -918,7 +924,7 @@ impl App {
             }
             if gm.crumb.contains(x, y) {
                 if let Some(dir) = tab.loc.dir()
-                    && let Some(i) = self.crumbs(g, gm.crumb, dir).iter().position(|(cr, path, _)| path.is_some() && cr.contains(x, y))
+                    && let Some(i) = self.crumbs(g, gm.crumbs, dir).iter().position(|(cr, path, _)| path.is_some() && cr.contains(x, y))
                 {
                     return Hit::Crumb(p, i);
                 }
@@ -961,7 +967,7 @@ impl App {
             Hit::Up(p) => self.go_up(p),
             Hit::Star(p) => self.toggle_star(p),
             Hit::Crumb(p, i) => {
-                let Some(r) = self.pane_rects().into_iter().find(|(q, _)| *q == p).map(|(_, r)| geom(r).crumb) else { return };
+                let Some(r) = self.pane_rects().into_iter().find(|(q, _)| *q == p).map(|(_, r)| geom(r).crumbs) else { return };
                 let Some(dir) = self.panes[p].tab().loc.dir().map(str::to_string) else { return };
                 if let Some((_, Some(path), _)) = self.crumbs(g, r, &dir).get(i).cloned() {
                     if util::eq_path(&path, &dir) {
@@ -1074,7 +1080,7 @@ impl App {
 
     // ---------- 그리기 ----------
 
-    pub fn paint(&self, g: &Gfx) {
+    pub fn paint(&self, g: &mut Gfx) {
         let t = &self.theme;
         g.clear(t.window);
         self.paint_sidebar(g, t);
@@ -1186,199 +1192,126 @@ impl App {
         }
     }
 
-    fn paint_pane(&self, g: &Gfx, t: &Theme, p: usize, r: R) {
+    /// 칸 하나: 이 앱의 상태로 장면을 채워 공통 칸 그리기에 넘긴다 (맥에 아직 없는 필터·이름 바꾸기·끌어 놓기는 비워 둔다)
+    fn paint_pane(&self, g: &mut Gfx, t: &Theme, p: usize, r: R) {
         let pane = &self.panes[p];
         let tab = pane.tab();
         let active = p == self.active;
-        let multi = self.layout.count() > 1;
-        let hover = self.hover;
-        if active && multi {
-            soft_shadow(g, r, RADIUS, 12.0, 0.10, t.dark);
-        } else if !t.dark {
-            soft_shadow(g, r, RADIUS, 6.0, 0.06, false);
-        }
-        g.fill_round(r, RADIUS, t.pane);
-        if active && multi {
-            g.fill_round(R::new(r.l + RADIUS, r.t + 1.0, r.r - RADIUS, r.t + 3.0), 1.0, t.accent);
-        }
         let gm = geom(r);
-
-        // 칩 줄: 탭 칩, 새 탭(+), 오른쪽에 항목 수·고른 개수
-        let flash = self.flash.as_ref().filter(|(fp, _)| *fp == p).map(|(_, m)| m.as_str());
-        let count = flash.map_or_else(|| count_text(tab), str::to_string);
-        let cw = g.measure(&count, Font::Small).min(gm.head.w() * 0.6);
-        g.text(&count, R::new(gm.head.r - 8.0 - cw, gm.head.t + 8.0, gm.head.r - 8.0, gm.head.t + 36.0), Font::Small, if flash.is_some() { t.text } else { t.faint });
-        let (trs, add) = self.chips(g, p, &gm);
-        for (i, tr) in trs.iter().enumerate() {
-            if tr.w() <= 0.0 {
-                continue;
-            }
-            let current = i == pane.active;
-            let hovered = matches!(hover, Hit::Tab(hp, hi) | Hit::TabClose(hp, hi) if hp == p && hi == i);
-            if current {
-                g.fill_round(*tr, tr.h() / 2.0, well(t));
-            } else if hovered {
-                g.fill_round(*tr, tr.h() / 2.0, t.hover);
-            }
-            let closable = pane.tabs.len() > 1 && (current || hovered);
-            g.text(&pane.tabs[i].loc.title(), R::new(tr.l + 12.0, tr.t, tr.r - if closable { 26.0 } else { 10.0 }, tr.b), Font::Normal, t.text);
-            if closable {
-                let cr = close_rect(*tr);
-                let hot = hover == Hit::TabClose(p, i);
-                if hot {
-                    g.fill_round(cr, cr.h() / 2.0, alpha(t.text, 0.12));
-                }
-                g.glyph(G_CLOSE, cr, true, if hot { t.text } else { t.dim });
-            }
-        }
-        if hover == Hit::TabAdd(p) {
-            g.fill_round(add, add.h() / 2.0, t.hover);
-        }
-        g.glyph_font(G_ADD, add, Font::GlyphMid, if hover == Hit::TabAdd(p) { t.text } else { t.dim });
-
-        // 경로 줄
-        let off = alpha(t.dim, 0.45);
-        let nav = |rr: R, glyph: u16, font: Font, enabled: bool, h: Hit| {
-            // 좁은 칸에서 덜어 낸 단추 (폭 0)
-            if rr.w() <= 0.0 {
-                return;
-            }
-            let hot = enabled && hover == h;
-            if hot {
-                g.fill_round(rr, R_CTRL, t.hover);
-            }
-            g.glyph_font(glyph, rr, font, if !enabled { off } else if hot { t.text } else { t.dim });
+        let (tabs, add) = self.chips(g, p, &gm);
+        // 칩 줄 오른쪽: 항목 수·고른 개수, 잠깐 뜨는 알림이면 그 글을 진하게
+        let flash = self.flash.as_ref().filter(|(fp, _)| *fp == p).map(|(_, m)| m.clone());
+        let count_hot = flash.is_some();
+        let count_text = flash.unwrap_or_else(|| count_text(tab));
+        let cw = g.measure(&count_text, Font::Small).min(gm.head.w() * 0.6);
+        let count_rect = R::new(gm.head.r - 8.0 - cw, gm.head.t + 8.0, gm.head.r - 8.0, gm.head.t + 36.0);
+        let editing = self.editing == Some(p);
+        let dir = tab.loc.dir();
+        let scene = PaneScene {
+            r,
+            tabs: &pane.tabs,
+            current: pane.active,
+            sort: self.sort,
+            cols: DEFAULT_COLS,
+            view: ViewMode::Details,
+            active,
+            multi: self.layout.count() > 1,
+            keyboard_here: active,
+            hover: pane_hover(self.hover, p),
+            chips: tabs,
+            add,
+            count_text,
+            count_rect,
+            count_hot,
+            filter: None,
+            starred: dir.map(|d| self.favs.find(d).is_some()),
+            root: None,
+            address: editing,
+            // 창에서는 입력 상자가 글자를 그린다. 그림 시험에서만 직접 그린다
+            address_text: dir.filter(|_| editing && self.standalone),
+            tools: true,
+            new_folder_ok: false,
+            view_ok: false,
+            view_menu_open: false,
+            renaming: false,
+            dragged_tab: None,
+            tab_drop: None,
+            drop_on_pane: false,
+            drop_row: None,
+            marquee: None,
+            scroll_drag: false,
+            hint: list_hint(tab),
+            net_button: None,
+            loading: None,
+            short_dates: true,
+            now: listing::now_filetime(),
         };
-        let dir = tab.loc.dir().unwrap_or_default();
-        nav(gm.back, G_BACK, Font::GlyphMid, !tab.back.is_empty(), Hit::Back(p));
-        nav(gm.fwd, G_FWD, Font::GlyphMid, !tab.fwd.is_empty(), Hit::Fwd(p));
-        nav(gm.up, G_UP, Font::GlyphMid, util::parent(dir).is_some(), Hit::Up(p));
-        // 경로 입력 중: 경로 자리에 입력 바탕과 강조 색 테두리 (글자는 창의 입력 상자가 그린다)
-        if self.editing == Some(p)
-            && let Some(ar) = self.address_rect()
-        {
-            g.fill_round(ar, R_CTRL, t.field);
-            g.stroke_round(ar.inset(0.75, 0.75), R_CTRL, t.accent, 1.5);
-            if self.standalone {
-                g.text(dir, R::new(ar.l + 8.0, ar.t, ar.r - 8.0, ar.b), Font::Path, t.text);
-            }
-            if gm.crumb.w() < ADDR_MIN_W {
-                return self.paint_list(g, t, p, r, &gm);
-            }
-            g.glyph(G_NEW_FOLDER, gm.new_folder, false, off);
-            g.glyph(G_LIST, R::new(gm.view.l + 2.0, gm.view.t, gm.view.l + 26.0, gm.view.b), false, off);
-            g.glyph(G_CHEVRON_DOWN, R::new(gm.view.r - 16.0, gm.view.t + 1.0, gm.view.r - 4.0, gm.view.b + 1.0), true, t.faint);
-            return self.paint_list(g, t, p, r, &gm);
+        paint_pane_head(g, t, &scene);
+        paint_pane_list(g, &mut MacArt { kinds: &self.kinds }, t, &scene);
+        paint_pane_border(g, t, &scene);
+    }
+}
+
+/// 칸 p 안에서 마우스가 올라간 곳 (공통 칸 그리기에 넘긴다)
+fn pane_hover(h: Hit, p: usize) -> PaneHover {
+    match h {
+        Hit::Tab(q, i) if q == p => PaneHover::Tab(i),
+        Hit::TabClose(q, i) if q == p => PaneHover::TabClose(i),
+        Hit::TabAdd(q) if q == p => PaneHover::TabAdd,
+        Hit::Back(q) if q == p => PaneHover::Back,
+        Hit::Fwd(q) if q == p => PaneHover::Fwd,
+        Hit::Up(q) if q == p => PaneHover::Up,
+        Hit::Star(q) if q == p => PaneHover::Star,
+        Hit::Crumb(q, i) if q == p => PaneHover::Crumb(i),
+        Hit::CrumbEmpty(q) if q == p => PaneHover::CrumbEmpty,
+        Hit::Row(q, vi) if q == p => PaneHover::Row(vi),
+        _ => PaneHover::None,
+    }
+}
+
+/// 빈 목록 안내 (Windows와 같은 글, 다시 시도는 ⌘R)
+fn list_hint(tab: &Tab) -> Option<String> {
+    match &tab.state {
+        LoadState::Loading if tab.entries.is_empty() => Some(format!("불러오는 중…\n{}", tab.loc.title())),
+        LoadState::Error(msg) => Some(format!("폴더를 열 수 없어요\n{msg}\n⌘R을 누르면 다시 시도해요")),
+        LoadState::Ready if tab.entries.is_empty() => Some("빈 폴더예요".to_string()),
+        LoadState::Ready if tab.view.is_empty() => Some("숨김 항목만 있어요".to_string()),
+        _ => None,
+    }
+}
+
+/// 칸 그리기의 맥 갈고리: Finder 아이콘과 '종류' 이름 (썸네일은 아직 없다)
+struct MacArt<'a> {
+    kinds: &'a RefCell<HashMap<String, String>>,
+}
+
+impl EntryArt<Gfx> for MacArt<'_> {
+    fn icon(&mut self, g: &mut Gfx, tab: &Tab, e: &Entry, r: R) {
+        if let Some(path) = tab.path_of(e) {
+            g.icon_for_path(&path, r);
         }
-        if hover == Hit::CrumbEmpty(p) {
-            g.fill_round(gm.crumb, R_CTRL, t.hover);
-        }
-        g.glyph(G_NEW_FOLDER, gm.new_folder, false, off);
-        g.glyph(G_LIST, R::new(gm.view.l + 2.0, gm.view.t, gm.view.l + 26.0, gm.view.b), false, off);
-        g.glyph(G_CHEVRON_DOWN, R::new(gm.view.r - 16.0, gm.view.t + 1.0, gm.view.r - 4.0, gm.view.b + 1.0), true, t.faint);
-        let starred = self.favs.find(dir).is_some();
-        if gm.star.w() > 0.0 {
-            if hover == Hit::Star(p) {
-                g.fill_round(gm.star, R_CTRL, t.hover);
-            }
-            g.glyph(if starred { G_STAR_FILL } else { G_STAR }, gm.star, false, if starred || hover == Hit::Star(p) { t.text } else { t.dim });
-        }
-        let cs = self.crumbs(g, gm.crumb, dir);
-        let n = cs.len();
-        g.clip(gm.crumb);
-        for (i, (cr, _, label)) in cs.iter().enumerate() {
-            let last = i + 1 == n;
-            if hover == Hit::Crumb(p, i) {
-                g.fill_round(R::new(cr.l, gm.crumb.t + 2.0, cr.r, gm.crumb.b - 2.0), R_ROW, t.sel_inactive);
-            }
-            if label == "…" && !last {
-                g.glyph(G_MORE, *cr, true, t.dim);
-            } else {
-                g.text(label, R::new(cr.l + CRUMB_PAD, cr.t, cr.r - CRUMB_PAD / 2.0, cr.b), Font::Normal, if last { t.text } else { t.dim });
-            }
-            if !last {
-                g.glyph(G_CHEVRON, R::new(cr.r, cr.t, cr.r + CHEV_W, cr.b), true, t.faint);
-            }
-        }
-        g.unclip();
-        self.paint_list(g, t, p, r, &gm);
     }
 
-    /// 칸의 열 머리글·목록·안내·스크롤 막대·테두리
-    fn paint_list(&self, g: &Gfx, t: &Theme, p: usize, r: R, gm: &PaneGeom) {
-        let pane = &self.panes[p];
-        let tab = pane.tab();
-        let active = p == self.active;
-        let hover = self.hover;
-        // 열 머리글
-        let cols = columns(gm.list, DEFAULT_COLS);
-        g.text("이름", R::new(cols.name.0 + 4.0, gm.header.t, cols.name.1, gm.header.b), Font::Normal, t.dim);
-        let nw = g.measure("이름", Font::Normal);
-        g.glyph(G_SORT_UP, R::new(cols.name.0 + 8.0 + nw, gm.header.t, cols.name.0 + 22.0 + nw, gm.header.b), true, t.faint);
-        if let Some((l, rr)) = cols.modified {
-            g.text("수정한 날짜", R::new(l + 8.0, gm.header.t, rr - 8.0, gm.header.b), Font::Normal, t.dim);
-        }
-        if let Some((l, rr)) = cols.size {
-            g.text("크기", R::new(l + 8.0, gm.header.t, rr - 8.0, gm.header.b), Font::Right, t.dim);
-        }
-        g.fill(R::new(r.l + 8.0, gm.header.b - 1.0, r.r - 8.0, gm.header.b), alpha(t.text, 0.07));
+    fn thumbnail(&mut self, _: &mut Gfx, _: &Tab, _: &Entry, _: R, _: f32, _: f32) -> bool {
+        false
+    }
 
-        // 목록
-        let now = listing::now_filetime();
-        let list = gm.list;
-        let grid = Grid::of(list, ViewMode::Details);
-        g.clip(list);
-        for vi in grid.visible(list, tab.scroll, tab.view.len()) {
-            let e = &tab.entries[tab.view[vi] as usize];
-            let y = grid.item(vi, tab.scroll).t;
-            let row = R::new(list.l + 8.0, y + 1.0, list.r - SCROLL_W - 6.0, y + ROW_H - 1.0);
-            if e.selected {
-                g.fill_round(row, R_ROW, if active { t.sel } else { t.sel_inactive });
-            } else if hover == Hit::Row(p, vi) {
-                g.fill_round(row, R_ROW, t.hover);
-            }
-            if active && vi == tab.cursor {
-                g.stroke_round(row.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
-            }
-            if let Some(path) = tab.path_of(e) {
-                g.icon_for_path(&path, R::new(cols.name.0 + 4.0, y + (ROW_H - 16.0) / 2.0, cols.name.0 + 20.0, y + (ROW_H + 16.0) / 2.0));
-            }
-            let fg = if e.is_hidden() && !(e.selected && active) { t.faint } else { t.text };
-            g.text(&e.name_string(), R::new(cols.name.0 + 28.0, y, cols.name.1 - 8.0, y + ROW_H), Font::Normal, fg);
-            if let Some((l, rr)) = cols.modified {
-                g.text(&listing::format_time_short(e.modified, now), R::new(l + 8.0, y, rr - 8.0, y + ROW_H), Font::Normal, t.dim);
-            }
-            if let Some((l, rr)) = cols.size {
-                let s = if e.kind == Kind::File { listing::format_size(e.size) } else { String::new() };
-                g.text(&s, R::new(l + 8.0, y, rr - 8.0, y + ROW_H), Font::Right, t.dim);
-            }
+    /// 확장자가 같으면 같은 종류로 보고 한 번만 묻는다 (확장자 없는 파일은 파일마다 다를 수 있어 매번 묻는다)
+    fn type_name(&mut self, tab: &Tab, e: &Entry) -> String {
+        let name = e.name_string();
+        let ext = name.rsplit_once('.').map(|(_, x)| x.to_lowercase()).filter(|x| !x.is_empty());
+        let key = ext.as_ref().map(|x| if e.kind == Kind::Dir { format!("/{x}") } else { x.clone() });
+        let key = key.or_else(|| (e.kind == Kind::Dir).then(|| "/".to_string()));
+        if let Some(k) = &key
+            && let Some(v) = self.kinds.borrow().get(k)
+        {
+            return v.clone();
         }
-        g.unclip();
-
-        // 빈 목록 안내 (Windows와 같은 글)
-        let hint = match &tab.state {
-            LoadState::Loading if tab.entries.is_empty() => Some(format!("불러오는 중…\n{}", tab.loc.title())),
-            LoadState::Error(msg) => Some(format!("폴더를 열 수 없어요\n{msg}\n⌘R을 누르면 다시 시도해요")),
-            LoadState::Ready if tab.entries.is_empty() => Some("빈 폴더예요".to_string()),
-            LoadState::Ready if tab.view.is_empty() => Some("숨김 항목만 있어요".to_string()),
-            _ => None,
-        };
-        if let Some(h) = hint {
-            for (i, line) in h.lines().enumerate() {
-                let y = list.t + 24.0 + i as f32 * 20.0;
-                g.text(line, R::new(list.l + 24.0, y, list.r - 24.0, y + 20.0), Font::Hint, t.faint);
-            }
+        let v = tab.path_of(e).and_then(|p| Gfx::type_description(&p)).unwrap_or_default();
+        if let Some(k) = key {
+            self.kinds.borrow_mut().insert(k, v.clone());
         }
-
-        // 스크롤 막대: 넘칠 때만 (app.rs와 같은 자리)
-        if let Some((_, thumb)) = grid.bar(list, tab.view.len(), tab.scroll) {
-            let thumb = thumb.inset(1.0, 0.0);
-            g.fill_round(thumb, thumb.w() / 2.0, t.thumb);
-        }
-
-        if t.dark {
-            g.stroke_round(r.inset(0.5, 0.5), RADIUS, t.pane_border, 1.0);
-        }
+        v
     }
 }
 
@@ -1652,7 +1585,7 @@ mod tests {
         let (mut a, g) = app(&home);
         a.resize(3600.0, 800.0);
         let gm = geom(a.pane_rects()[1].1);
-        let last = a.crumbs(&g, gm.crumb, &home).last().unwrap().0;
+        let last = a.crumbs(&g, gm.crumbs, &home).last().unwrap().0;
         let (x, y) = (last.r + CHEV_W + 8.0, gm.crumb.t + 10.0);
         assert!(x < gm.crumb.r, "an empty spot after the last crumb");
         assert_eq!(a.hit(&g, x, y), Hit::CrumbEmpty(1));
@@ -1756,7 +1689,7 @@ mod tests {
         let (root, home) = demo();
         let (mut a, g) = app(&util::join(&util::join(&home, "업무"), "2026 4분기"));
         let gm = geom(a.pane_rects()[0].1);
-        let cs = a.crumbs(&g, gm.crumb, a.pane(0).tab().loc.dir().unwrap());
+        let cs = a.crumbs(&g, gm.crumbs, a.pane(0).tab().loc.dir().unwrap());
         let i = cs.iter().position(|(_, _, l)| l == "업무").unwrap();
         let (cr, _, _) = &cs[i];
         a.mouse_down(&g, cr.l + 4.0, cr.t + 8.0, Mods::default(), 1);

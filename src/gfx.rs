@@ -32,6 +32,9 @@ impl sakadu::ui::Canvas for Gfx {
     fn text(&self, s: &str, r: R, f: Font, c: Color) {
         Gfx::text(self, s, r, f, c)
     }
+    fn text_w(&self, s: &[u16], r: R, f: Font, c: Color) {
+        Gfx::text_w(self, s, r, f, c)
+    }
     fn measure(&self, s: &str, f: Font) -> f32 {
         Gfx::measure(self, s, f)
     }
@@ -40,6 +43,12 @@ impl sakadu::ui::Canvas for Gfx {
     }
     fn glyph_font(&self, code: u16, r: R, f: Font, c: Color) {
         Gfx::glyph_font(self, code, r, f, c)
+    }
+    fn clip(&self, r: R) {
+        Gfx::clip(self, r)
+    }
+    fn unclip(&self) {
+        Gfx::unclip(self)
     }
 }
 
