@@ -2,7 +2,7 @@
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인은 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다.
 //! 끝낼 때 화면 상태(세션)를 저장하고, 다음에 그대로 연다
 
-use crate::app::{App, Key, LIGHTS_BOTTOM, Mods};
+use crate::app::{App, Key, LIGHTS_BOTTOM, MenuKind, Mods};
 use sakadu::ui::ROW_H;
 use crate::gfx::Gfx;
 use dispatch2::DispatchQueue;
@@ -12,7 +12,7 @@ use objc2::runtime::{Bool, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
-    NSColorSpace, NSControl, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
+    NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
     NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
     NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
 };
@@ -159,6 +159,15 @@ define_class!(
             self.after_input();
         }
 
+        /// 도구 막대 메뉴에서 고른 줄. tag = 메뉴 종류 × 100 + 줄 번호
+        #[unsafe(method(pickMenu:))]
+        fn pick_menu(&self, sender: &NSMenuItem) {
+            let tag = sender.tag();
+            let kind = if tag >= 100 { MenuKind::View } else { MenuKind::Layout };
+            with_app(|a| a.pick_menu(kind, (tag % 100) as usize));
+            self.after_input();
+        }
+
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
         fn appearance_changed(&self) {
             let t = theme(self.mtm());
@@ -226,7 +235,7 @@ impl SakaduView {
         (p.x as f32, p.y as f32)
     }
 
-    /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다
+    /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다. 메뉴를 열어 달라고 했으면 연다
     fn after_input(&self) {
         pump();
         if let (Some(w), Some(title)) = (self.window(), with_app(|a| a.title())) {
@@ -234,6 +243,30 @@ impl SakaduView {
         }
         self.sync_field();
         self.setNeedsDisplay(true);
+        if let Some((kind, anchor)) = with_app(|a| a.take_menu()).flatten() {
+            self.pop_menu(kind, anchor);
+        }
+    }
+
+    /// 도구 막대 단추 아래에 맥 기본 메뉴를 연다: 이름, 지금 것에 체크. 고르면 pickMenu:로 온다.
+    /// 메뉴가 떠 있는 동안 이 함수는 돌아오지 않으므로 App을 빌린 채로 부르지 않는다
+    fn pop_menu(&self, kind: MenuKind, anchor: sakadu::draw::R) {
+        let mtm = self.mtm();
+        let Some(items) = with_app(|a| a.menu_items(kind)) else { return };
+        let menu = NSMenu::new(mtm);
+        let base = if kind == MenuKind::View { 100 } else { 0 };
+        for (i, (title, on)) in items.iter().enumerate() {
+            // 보기 방식 여섯 가지와 숨김 항목 보기 사이에 구분선
+            if kind == MenuKind::View && i == items.len() - 1 {
+                menu.addItem(&NSMenuItem::separatorItem(mtm));
+            }
+            let it = unsafe { menu.addItemWithTitle_action_keyEquivalent(&NSString::from_str(title), Some(sel!(pickMenu:)), &NSString::from_str("")) };
+            unsafe { it.setTarget(Some(self)) };
+            it.setTag(base + i as isize);
+            it.setState(if *on { NSControlStateValueOn } else { NSControlStateValueOff });
+        }
+        // 뷰는 위아래를 뒤집어 쓰므로(왼쪽 위가 0) 단추 아래 끝이 곧 메뉴의 위
+        menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(anchor.l as f64, anchor.b as f64 + 4.0), Some(self));
     }
 
     /// 경로 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 칸의 경로 자리에 보이고 키 입력을 받는다
@@ -328,6 +361,8 @@ fn key_of(code: u16) -> Option<Key> {
     Some(match code {
         0x7E => Key::Up,
         0x7D => Key::Down,
+        0x7B => Key::Left,
+        0x7C => Key::Right,
         0x73 => Key::Home,
         0x77 => Key::End,
         0x74 => Key::PageUp,

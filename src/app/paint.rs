@@ -106,39 +106,48 @@ impl App {
         }
     }
 
-    /// 칸 영역 위 작업 줄: 칸 나누기, 숨김 항목, 미리 보기. 창 단추는 paint_caption
+    /// 칸 영역 위 도구 막대: 뒤로·앞으로·위로, 폴더 이름, 작업 공간, 칸 나누기·보기 방식, 새 폴더, 미리 보기, `…`.
+    /// 창 단추는 paint_caption
     pub(super) fn paint_workbar(&self) {
-        self.paint_workspace_button();
-        let t = self.theme;
-        let g = &self.gfx;
-        // 판(well)과 같은 색이면 올려도 보이지 않으니 반투명으로 겹친다
-        let hover_bg = sidebar::hover_fill(&t);
-        // 칸 나누기: 한 덩어리 판 위에 지금 고른 것만 도드라지게
-        let pill = self.layout_pill();
-        g.fill_round(pill, pill.h() / 2.0, sidebar::seg_track(&t));
-        for (i, r) in self.layout_buttons().iter().enumerate() {
-            let layout = Layout::ALL[i];
-            let current = layout == self.layout;
-            if current {
-                sidebar::seg_on(g, *r, r.h() / 2.0, &t);
-            } else if self.hover == Hit::Layout(i) {
-                g.fill_round(*r, r.h() / 2.0, hover_bg);
-            }
-            draw_layout_icon(g, *r, layout, if current || self.hover == Hit::Layout(i) { t.text } else { t.dim });
-        }
-        // 글자 없는 버튼: 올려 두면 이름과 단축키를 말풍선으로 보여 준다.
-        // 쉴 때는 칸 나누기 그림과 같은 회색이라 아이콘마다 진하기가 달라 보이지 않는다
-        let icon_button = |r: R, glyph: u16, on: bool, hovered: bool| {
-            if on {
-                sidebar::seg_on(g, r, R_CTRL, &t);
-            } else if hovered {
-                g.fill_round(r, R_CTRL, hover_bg);
-            }
-            g.glyph(glyph, r, false, if on || hovered { t.text } else { t.dim });
+        let mut m = self.toolbar();
+        // 폴더 이름은 작업 공간 단추 앞까지
+        m.title.r = (self.workspace_button().l - 8.0).max(m.title.l);
+        let p = self.active;
+        let tab = self.panes[p].tab();
+        let start = tab.loc == Location::Start;
+        let title = self.toolbar_title();
+        let hover = match self.hover {
+            Hit::Back(_) => ToolbarHover::Back,
+            Hit::Fwd(_) => ToolbarHover::Fwd,
+            Hit::Up(_) => ToolbarHover::Up,
+            Hit::LayoutPick => ToolbarHover::Layout,
+            Hit::View(_) => ToolbarHover::View,
+            Hit::NewFolder(_) => ToolbarHover::NewFolder,
+            Hit::PreviewButton => ToolbarHover::Preview,
+            Hit::More => ToolbarHover::More,
+            _ => ToolbarHover::None,
         };
-        icon_button(self.hidden_button(), G_HIDDEN, self.show_hidden, self.hover == Hit::Hidden);
-        icon_button(self.preview_button(), G_PREVIEW, self.preview.is_some(), self.hover == Hit::PreviewButton);
-        icon_button(self.more_button(), G_MORE, false, self.hover == Hit::More);
+        let open = self.view_menu.map(|v| v.kind);
+        paint_toolbar(
+            &self.gfx,
+            &self.theme,
+            &ToolbarScene {
+                geom: &m,
+                title: &title,
+                layout: self.layout,
+                view: self.panes[p].view,
+                can_back: !tab.back.is_empty(),
+                can_fwd: !tab.fwd.is_empty(),
+                can_up: can_go_up(&tab.loc),
+                new_folder_ok: !start && tab.loc.dir().is_some(),
+                view_ok: !start,
+                preview_on: self.preview.is_some(),
+                layout_open: open == Some(view_menu::MenuKind::Layout),
+                view_open: open == Some(view_menu::MenuKind::View),
+                hover,
+            },
+        );
+        self.paint_workspace_button();
     }
 
     /// 단추에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
@@ -147,19 +156,18 @@ impl App {
             return None;
         }
         use crate::keys::Action;
-        const LAYOUTS: [Action; 5] = [Action::Layout1, Action::Layout2, Action::Layout3, Action::Layout4, Action::Layout5];
         // "이름 (단축키)". 단축키를 비워 두었으면 이름만
         let named = |a: Action, name: &str| match self.keys.get(a) {
             Some(c) => format!("{name} ({})", c.label()),
             None => name.to_string(),
         };
         Some(match self.hover {
-            Hit::Layout(i) => (self.layout_buttons()[i], named(LAYOUTS[i], crate::keys::name(LAYOUTS[i]))),
-            Hit::NewFolder(p) => (geom(self.pane_rect(p)?).new_folder, named(Action::NewFolder, "새 폴더")),
-            Hit::Back(p) => (geom(self.pane_rect(p)?).back, "뒤로 (Alt+←)".to_string()),
-            Hit::Fwd(p) => (geom(self.pane_rect(p)?).fwd, "앞으로 (Alt+→)".to_string()),
-            Hit::Up(p) => (geom(self.pane_rect(p)?).up, "위로 (Alt+↑)".to_string()),
-            Hit::Hidden => (self.hidden_button(), named(Action::Hidden, if self.show_hidden { "숨김 항목 감추기" } else { "숨김 항목 보기" })),
+            Hit::LayoutPick => (self.toolbar().layout, "칸 나누기".to_string()),
+            Hit::View(_) => (self.toolbar().view, "보기 방식".to_string()),
+            Hit::NewFolder(_) => (self.toolbar().new_folder, named(Action::NewFolder, "새 폴더")),
+            Hit::Back(_) => (self.toolbar().back, "뒤로 (Alt+←)".to_string()),
+            Hit::Fwd(_) => (self.toolbar().fwd, "앞으로 (Alt+→)".to_string()),
+            Hit::Up(_) => (self.toolbar().up, "위로 (Alt+↑)".to_string()),
             Hit::Side(s) => return self.side_tip(s),
             Hit::SearchButton => (
                 self.search_button(),
@@ -168,13 +176,13 @@ impl App {
                     None => named(Action::Search, "검색"),
                 },
             ),
-            Hit::PreviewButton => (self.preview_button(), named(Action::Preview, "미리 보기 창")),
+            Hit::PreviewButton => (self.toolbar().preview, named(Action::Preview, "미리 보기 창")),
             Hit::SettingsButton => (self.settings_button(), named(Action::Settings, "설정")),
             Hit::Bar(p) if self.side_panel() == Some(p) => return None,
             Hit::Bar(Panel::Favorites) => (self.bar_rect(Panel::Favorites), named(Action::Favorites, "즐겨찾기")),
             Hit::Bar(p) => (self.bar_rect(p), p.title().to_string()),
             Hit::SidePin => (self.side_pin_rect()?, (if self.side_floating() { "고정해 두기" } else { "고정 풀기" }).to_string()),
-            Hit::More => (self.more_button(), "도움말·설정".to_string()),
+            Hit::More => (self.toolbar().more, "도움말·설정".to_string()),
             Hit::PalClose => (self.pal_close_rect(), "검색 닫기".to_string()),
             Hit::Start(p, i) => return self.start_tip(p, i),
             Hit::PreviewPin | Hit::PreviewOpen => return self.preview_tip(),
@@ -263,8 +271,7 @@ impl App {
             Some((dp, Some(vi))) if dp == p => Some(vi),
             _ => None,
         };
-        // 경로 오른쪽 즐겨찾기 별: 폴더일 때만 (켜짐 여부)
-        let view_menu_open = self.view_menu.is_some_and(|m| m.pane == p);
+        // 경로 오른쪽 즐겨찾기 책갈피: 폴더일 때만 (켜짐 여부)
         let starred = self.panes[p].tab().loc.dir().map(|d| self.favs.find(&util::normalize(d)).is_some());
         // 네모 상자 고르기 (화면 좌표)
         let marquee = match self.drag {
@@ -328,10 +335,6 @@ impl App {
             root: Some("내 PC"),
             address: edit_mode == EditMode::Address(p),
             address_text: None,
-            tools: start.is_none(),
-            new_folder_ok: pane.tab().loc.dir().is_some(),
-            view_ok: true,
-            view_menu_open,
             renaming: edit_mode == EditMode::Rename(p),
             dragged_tab: dragged_tab.filter(|(q, _)| *q == p).map(|(_, i)| i),
             tab_drop: tab_drop.filter(|(q, _)| *q == p).map(|(_, at)| at),
@@ -384,11 +387,6 @@ fn pane_hover(h: Hit, p: usize) -> PaneHover {
         Hit::Tab(q, i) if q == p => PaneHover::Tab(i),
         Hit::TabClose(q, i) if q == p => PaneHover::TabClose(i),
         Hit::TabAdd(q) if q == p => PaneHover::TabAdd,
-        Hit::Back(q) if q == p => PaneHover::Back,
-        Hit::Fwd(q) if q == p => PaneHover::Fwd,
-        Hit::Up(q) if q == p => PaneHover::Up,
-        Hit::NewFolder(q) if q == p => PaneHover::NewFolder,
-        Hit::View(q) if q == p => PaneHover::View,
         Hit::Star(q) if q == p => PaneHover::Star,
         Hit::Crumb(q, i) if q == p => PaneHover::Crumb(i),
         Hit::CrumbEmpty(q) if q == p => PaneHover::CrumbEmpty,

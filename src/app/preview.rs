@@ -20,7 +20,6 @@ use windows::core::{GUID, Interface, PWSTR};
 
 pub(super) const PREVIEW_W: f32 = 340.0;
 pub(super) const TIMER_PREVIEW: usize = 30;
-pub(super) use sakadu::ui::glyph::G_PREVIEW;
 /// 머리: 이름표·단추 줄, 이름 줄, 고정 칩·종류 줄
 const HEAD_H: f32 = 108.0;
 const BAR_H: f32 = 44.0;

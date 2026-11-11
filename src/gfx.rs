@@ -421,6 +421,11 @@ impl Gfx {
 
     /// 크기를 직접 고른 아이콘 글리프 (Glyph·GlyphMid·GlyphSmall)
     pub fn glyph_font(&self, code: u16, r: R, f: Font, c: Color) {
+        use sakadu::ui::glyph::{G_BOOKMARK, G_BOOKMARK_FILL};
+        if code == G_BOOKMARK || code == G_BOOKMARK_FILL {
+            self.bookmark(r, f, code == G_BOOKMARK_FILL, c);
+            return;
+        }
         let rt = self.rt();
         unsafe {
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
@@ -430,6 +435,37 @@ impl Gfx {
         }
         self.draw(&[code], r, f, c, DWRITE_MEASURING_MODE_NATURAL);
         self.apply_text_look();
+    }
+
+    /// 책갈피: 세로로 긴 띠, 아래가 V로 파인 모양. Segoe 아이콘 글꼴에 없어서 도형으로 그린다 (r 가운데, 글리프와 같은 크기)
+    fn bookmark(&self, r: R, f: Font, filled: bool, c: Color) {
+        let size = match f {
+            Font::GlyphSmall => 10.0,
+            Font::GlyphMid => 12.0,
+            _ => 16.0,
+        };
+        let (w, h) = (size * 0.56, size * 0.78);
+        let (cx, cy) = ((r.l + r.r) / 2.0, (r.t + r.b) / 2.0);
+        let (l, t, rr, b) = (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
+        let pt = |x: f32, y: f32| windows_numerics::Vector2 { X: x, Y: y };
+        unsafe {
+            let Ok(geo) = self.factory.CreatePathGeometry() else { return };
+            let Ok(sink) = geo.Open() else { return };
+            sink.BeginFigure(pt(l, t), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLines(&[pt(rr, t), pt(rr, b), pt(cx, b - w * 0.42), pt(l, b)]);
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            if sink.Close().is_err() {
+                return;
+            }
+            // 모서리를 둥글게 이어 다른 아이콘의 선과 결을 맞춘다
+            let props = D2D1_STROKE_STYLE_PROPERTIES { lineJoin: D2D1_LINE_JOIN_ROUND, ..Default::default() };
+            let style = self.factory.CreateStrokeStyle(&props, None).ok();
+            let brush = self.brush(c);
+            if filled {
+                self.rt().FillGeometry(&geo, brush, None);
+            }
+            self.rt().DrawGeometry(&geo, brush, size * 0.085, style.as_ref());
+        }
     }
 
     /// 그릴 때와 같은 방식으로 배치한다. 너비 재기와 그리기가 어긋나지 않게

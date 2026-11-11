@@ -6,6 +6,7 @@
 use crate::gfx::{Font, Gfx, R};
 pub(crate) use sakadu::ui::glyph::*;
 pub(crate) use sakadu::ui::*;
+pub(crate) use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, draw_view_icon, paint_toolbar, toolbar_geom};
 use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time, list_dir};
 use crate::pane::*;
 use crate::shell::{self, FileOp, key_down, list_computer};
@@ -54,7 +55,7 @@ mod paint;
 mod modal;
 use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
 use sidebar::{BAR_W, Fold, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_ANIM, TIMER_SIDE_CLOSE};
-use preview::{G_PREVIEW, Preview, TIMER_PREVIEW, thumb_key};
+use preview::{Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
 pub use preview::{PreviewMsg, unload_handler};
 pub use modal::{edit_ctl_color, execute};
@@ -97,10 +98,10 @@ const TIMER_FAV_FLASH: usize = 45;
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Hit {
     None,
-    Layout(usize),
-    /// 경로 줄의 새 폴더 단추
+    /// 도구 막대의 칸 나누기 단추 (누르면 칸 나누기 메뉴)
+    LayoutPick,
+    /// 도구 막대의 새 폴더 단추 (지금 칸에)
     NewFolder(usize),
-    Hidden,
     SplitX,
     SplitY,
     Tab(usize, usize),
@@ -112,11 +113,11 @@ enum Hit {
     Up(usize),
     Crumb(usize, usize),
     CrumbEmpty(usize),
-    /// 보기 방식 버튼 (누르면 보기 메뉴)
+    /// 도구 막대의 보기 방식 단추 (누르면 보기 메뉴. 지금 칸의 보기를 바꾼다)
     View(usize),
-    /// 보기 메뉴의 줄 (ViewMode::ALL 순서)
+    /// 열린 메뉴(보기 방식·칸 나누기)의 줄
     ViewMenuItem(usize),
-    /// 보기 메뉴 안의 빈 곳
+    /// 열린 메뉴 안의 빈 곳
     ViewMenuPanel,
     /// 창 조절 버튼 (최소화·최대화·닫기). 비클라이언트 메시지로만 정해진다
     Caption(caption::CaptionButton),

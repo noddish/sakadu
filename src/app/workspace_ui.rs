@@ -21,8 +21,7 @@ impl App {
         }
     }
 
-    /// 작업 줄 맨 왼쪽(아이콘 막대 바로 오른쪽)의 작업 공간 단추. 칸 나누기 판은 그 오른쪽에 놓인다.
-    /// 패널을 고정해도 밀리지 않고 패널 위쪽 자리를 쓴다 (패널을 여닫을 때 작업 줄 단추가 움직이지 않게)
+    /// 도구 막대에서 폴더 이름 바로 뒤의 작업 공간 단추. 폴더 이름이 길면 이름을 줄이고 단추 자리를 남긴다
     pub(super) fn workspace_button(&self) -> R {
         // 이름을 고치는 동안은 넉넉하게 (긴 이름의 앞부분이 입력 상자 밖으로 밀리지 않게)
         let want = if self.edit_mode == EditMode::WorkspaceRename {
@@ -30,11 +29,13 @@ impl App {
         } else {
             (self.gfx.measure(&self.workspace_label(), Font::Normal) + 40.0).clamp(WS_MIN_W, 220.0)
         };
-        let l = BAR_W + MARGIN;
-        // 칸 나누기 판(166)과 오른쪽 `…` 단추 사이에 들어갈 만큼만 (좁은 창에서 겹치지 않게. 긴 이름은 말줄임)
-        let room = self.more_button().l - 8.0 - 166.0 - 8.0 - l;
-        let w = want.min(room).max(WS_MIN_W);
-        R::new(l, 6.0, l + w, 38.0)
+        let m = self.toolbar();
+        let title_w = self.gfx.measure(&self.toolbar_title(), Font::Strong);
+        let l = (m.title.l + title_w + 16.0).min(m.title.r - WS_MIN_W).max(m.title.l);
+        // 칸 나누기 단추 앞까지만 (좁은 창에서 겹치지 않게. 긴 이름은 말줄임)
+        let room = (m.title.r - l).max(0.0);
+        let w = want.min(room).max(WS_MIN_W.min(room));
+        R::new(l, m.nav.t, l + w, m.nav.b)
     }
 
     fn workspace_label(&self) -> String {

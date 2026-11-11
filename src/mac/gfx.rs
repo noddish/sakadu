@@ -48,6 +48,9 @@ fn symbol_name(code: u16) -> &'static str {
         0xE718 => "pin",
         0xE841 => "pin.fill",
         0xE8CB => "arrow.up.arrow.down",
+        // 책갈피 (ui::glyph::G_BOOKMARK, G_BOOKMARK_FILL)
+        0xFFF0 => "bookmark",
+        0xFFF1 => "bookmark.fill",
         _ => "questionmark.square.dashed",
     }
 }
