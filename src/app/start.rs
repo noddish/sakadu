@@ -1,4 +1,4 @@
-//! 새 탭 시작 화면 ("어디로 이동할까요?"): 즐겨찾기 폴더 카드, 최근 위치, 드라이브(내 PC 포함).
+//! 새 탭 시작 화면 ("어디로 이동할까요?"): 고정한 폴더(이 공간에 고정한 것과 즐겨찾기) 카드, 최근 위치, 드라이브(내 PC 포함).
 //! 칩 줄·경로 줄은 다른 위치와 같고, 그 아래(머리글·목록 자리)를 이 화면이 쓴다.
 //! 자리는 `start_layout` 한 곳에서 정해 그리기·누르기·키보드·스크롤이 같이 쓴다.
 //! 키보드 초점 테두리는 화살표·Enter·필터 글자로 키보드를 쓴 뒤에만 보인다 (탭을 열자마자 첫 카드에 테두리가 생기지 않게)
@@ -235,14 +235,19 @@ impl App {
         let mut heads = Vec::new();
         let mut items = Vec::new();
         let mut notes = Vec::new();
-        let fav_dirs = || self.favs.items.iter().chain(self.favs.groups.iter().flat_map(|g| g.items.iter())).filter(|f| f.is_dir);
+        // 이 공간에 고정한 폴더가 먼저, 그 뒤에 '모든 공간'(즐겨찾기)의 폴더. 둘 다에 있으면 한 번만
+        let pins = self.pins();
+        let fav_dirs = || {
+            let common = self.favs.items.iter().chain(self.favs.groups.iter().flat_map(|g| g.items.iter())).filter(|f| !pins.iter().any(|p| util::eq_path(&p.path, &f.path)));
+            pins.iter().chain(common).filter(|f| f.is_dir)
+        };
 
         let favs: Vec<StartItem> = fav_dirs().filter(|f| fits(&f.name)).map(|f| StartItem::Fav { name: f.name.clone(), path: f.path.clone() }).collect();
         if !favs.is_empty() || needle.is_empty() {
-            heads.push(("즐겨찾기", R::new(x0, y, x0 + w, y + SECTION_H)));
+            heads.push(("고정한 곳", R::new(x0, y, x0 + w, y + SECTION_H)));
             y += SECTION_H + 4.0;
             if favs.is_empty() {
-                notes.push(("경로 오른쪽 책갈피로 즐겨찾기에 넣은 폴더가 여기에 카드로 보여요".to_string(), R::new(x0, y, x0 + w, y + NOTE_H)));
+                notes.push(("경로 오른쪽 책갈피로 고정한 폴더가 여기에 카드로 보여요".to_string(), R::new(x0, y, x0 + w, y + NOTE_H)));
                 y += NOTE_H;
             }
             place_cards(favs, x0, &mut y, cols, card_w, &mut items);

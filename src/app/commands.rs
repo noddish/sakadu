@@ -1,4 +1,4 @@
-//! Ctrl+K 명령 메뉴: 열린 탭·즐겨찾기·최근 위치·작업 공간으로 가기와 명령 실행을 한 상자에서.
+//! Ctrl+K 명령 메뉴: 열린 탭·고정한 것·즐겨찾기·최근 위치·작업 공간으로 가기와 명령 실행을 한 상자에서.
 //! 디스크 전체에서 찾기는 검색 패널(Ctrl+F)이 맡고, 여기서는 마지막 줄로만 이어 준다
 
 use super::*;
@@ -19,6 +19,8 @@ const G_WORKSPACE: u16 = 0xE8FD;
 pub(super) enum CmdItem {
     Tab { pane: usize, tab: usize, title: String, path: Option<String> },
     Fav { group: Option<usize>, index: usize, name: String, path: String, is_dir: bool },
+    /// 지금 작업 공간에 고정한 것 (pins 번호)
+    Pin { index: usize, name: String, path: String, is_dir: bool },
     Recent(String),
     Workspace(usize, String),
     Command(Action),
@@ -136,6 +138,11 @@ impl App {
                 if let Some(s) = score(&title, &q) {
                     out.push((1, s, CmdItem::Tab { pane: p, tab: i, title, path: tab.loc.dir().map(str::to_string) }));
                 }
+            }
+        }
+        for (index, f) in self.pins().iter().enumerate() {
+            if let Some(s) = score(&f.name, &q).or_else(|| score(util::file_name(&f.path), &q)) {
+                out.push((2, s, CmdItem::Pin { index, name: f.name.clone(), path: f.path.clone(), is_dir: f.is_dir }));
             }
         }
         let sections = std::iter::once(None).chain((0..self.favs.groups.len()).map(Some));
@@ -300,6 +307,7 @@ impl App {
                 }
             }
             CmdItem::Fav { group, index, .. } => self.fav_open_entry(group, index, new_tab),
+            CmdItem::Pin { index, .. } => self.pin_open(index, new_tab),
             CmdItem::Recent(path) => {
                 let p = self.active;
                 let tab = self.panes[p].tab();
@@ -338,11 +346,11 @@ impl App {
         let icons: Vec<i32> = items
             .iter()
             .map(|it| match it {
-                CmdItem::Fav { path, is_dir: false, .. } => {
+                CmdItem::Fav { path, is_dir: false, .. } | CmdItem::Pin { path, is_dir: false, .. } => {
                     let ext = util::file_name(path).rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
                     self.type_icon(&ext, false)
                 }
-                CmdItem::Tab { .. } | CmdItem::Fav { .. } | CmdItem::Recent(_) | CmdItem::GoPath(_) => folder_icon,
+                CmdItem::Tab { .. } | CmdItem::Fav { .. } | CmdItem::Pin { .. } | CmdItem::Recent(_) | CmdItem::GoPath(_) => folder_icon,
                 _ => -1,
             })
             .collect();
@@ -392,7 +400,8 @@ impl App {
             // 이름, 그 뒤에 흐린 위치, 오른쪽에 종류(명령이면 단축키)
             let (name, detail, kind): (String, String, String) = match &c.items[i] {
                 CmdItem::Tab { pane, title, path, .. } => (title.clone(), path.clone().unwrap_or_default(), if multi { format!("{}번 칸 탭", pane + 1) } else { "열린 탭".to_string() }),
-                CmdItem::Fav { name, path, .. } => (name.clone(), util::parent(path).unwrap_or_default(), "즐겨찾기".to_string()),
+                CmdItem::Fav { name, path, .. } => (name.clone(), util::parent(path).unwrap_or_default(), "모든 공간".to_string()),
+                CmdItem::Pin { name, path, .. } => (name.clone(), util::parent(path).unwrap_or_default(), "이 공간에 고정".to_string()),
                 CmdItem::Recent(path) => {
                     let n = util::file_name(path);
                     (if n.is_empty() { path.clone() } else { n.to_string() }, util::parent(path).unwrap_or_default(), "최근 위치".to_string())

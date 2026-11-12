@@ -167,6 +167,8 @@ impl Theme {
         }
         // 활성 칸의 지금 탭 칩 글자도 강조 색을 따르되, 옅은 강조 색 바탕 위에서 또렷하게
         t.chip_text = chip_text(t.accent, t.accent_soft, t.text);
+        // 창 바탕에 강조 색(작업 공간 색)이 아주 옅게 묻는다: 어느 공간인지 색으로도 알아본다
+        t.window = mix(t.window, t.accent, WINDOW_TINT);
         t
     }
 }
@@ -182,6 +184,9 @@ pub fn apca(text: Color, bg: Color) -> f32 {
     let s = if yb > yt { (yb.powf(0.56) - yt.powf(0.57)) * 1.14 } else { (yb.powf(0.65) - yt.powf(0.62)) * 1.14 };
     if s.abs() < 0.1 { 0.0 } else { (s.abs() - 0.027) * 100.0 }
 }
+
+/// 창 바탕에 섞는 강조 색의 양
+const WINDOW_TINT: f32 = 0.06;
 
 /// 탭 칩 글자(13px 굵게)에 필요한 체감 대비
 const CHIP_LC: f32 = 68.0;
@@ -217,7 +222,8 @@ pub fn accent_color(key: &str, dark: bool, sys: &impl System) -> Option<Color> {
     ACCENTS.iter().find(|a| a.0 == key).map(|a| hex(if dark { a.3 } else { a.2 }))
 }
 
-fn mix(a: Color, b: Color, k: f32) -> Color {
+/// 두 색을 섞는다 (k=0이면 a, 1이면 b). 결과는 불투명
+pub fn mix(a: Color, b: Color, k: f32) -> Color {
     Color { r: a.r + (b.r - a.r) * k, g: a.g + (b.g - a.g) * k, b: a.b + (b.b - a.b) * k, a: 1.0 }
 }
 

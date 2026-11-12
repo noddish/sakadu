@@ -106,12 +106,10 @@ impl App {
         }
     }
 
-    /// 칸 영역 위 도구 막대: 뒤로·앞으로·위로, 폴더 이름, 작업 공간, 칸 나누기·보기 방식, 새 폴더, 미리 보기, `…`.
+    /// 칸 영역 위 도구 막대: 뒤로·앞으로·위로, 폴더 이름, 칸 나누기·보기 방식, 새 폴더, 미리 보기, 검색, `…`.
     /// 창 단추는 paint_caption
     pub(super) fn paint_workbar(&self) {
-        let mut m = self.toolbar();
-        // 폴더 이름은 작업 공간 단추 앞까지
-        m.title.r = (self.workspace_button().l - 8.0).max(m.title.l);
+        let m = self.toolbar();
         let p = self.active;
         let tab = self.panes[p].tab();
         let start = tab.loc == Location::Start;
@@ -124,6 +122,7 @@ impl App {
             Hit::View(_) => ToolbarHover::View,
             Hit::NewFolder(_) => ToolbarHover::NewFolder,
             Hit::PreviewButton => ToolbarHover::Preview,
+            Hit::SearchButton => ToolbarHover::Search,
             Hit::More => ToolbarHover::More,
             _ => ToolbarHover::None,
         };
@@ -142,12 +141,12 @@ impl App {
                 new_folder_ok: !start && tab.loc.dir().is_some(),
                 view_ok: !start,
                 preview_on: self.preview.is_some(),
+                search_on: self.pal_shown(),
                 layout_open: open == Some(view_menu::MenuKind::Layout),
                 view_open: open == Some(view_menu::MenuKind::View),
                 hover,
             },
         );
-        self.paint_workspace_button();
     }
 
     /// 단추에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
@@ -178,15 +177,15 @@ impl App {
             ),
             Hit::PreviewButton => (self.toolbar().preview, named(Action::Preview, "미리 보기 창")),
             Hit::SettingsButton => (self.settings_button(), named(Action::Settings, "설정")),
-            Hit::Bar(p) if self.side_panel() == Some(p) => return None,
-            Hit::Bar(Panel::Favorites) => (self.bar_rect(Panel::Favorites), named(Action::Favorites, "즐겨찾기")),
-            Hit::Bar(p) => (self.bar_rect(p), p.title().to_string()),
+            // 레일의 공간 아이콘: 이름. 패널이 열려 있는 지금 공간에는 붙이지 않는다 (이름이 패널 머리에 보인다)
+            Hit::Rail(i) if Some(i) == self.workspaces.current && self.side_panel() == Some(Panel::Main) => return None,
+            Hit::Rail(i) => (self.rail().spaces.iter().find(|(k, _)| *k == i)?.1, self.workspaces.list.get(i)?.name.clone()),
+            Hit::RailAdd => (self.rail().add, "새 작업 공간 (지금 화면으로)".to_string()),
             Hit::SidePin => (self.side_pin_rect()?, (if self.side_floating() { "고정해 두기" } else { "고정 풀기" }).to_string()),
             Hit::More => (self.toolbar().more, "도움말·설정".to_string()),
             Hit::PalClose => (self.pal_close_rect(), "검색 닫기".to_string()),
             Hit::Start(p, i) => return self.start_tip(p, i),
             Hit::PreviewPin | Hit::PreviewOpen => return self.preview_tip(),
-            Hit::Workspace => (self.workspace_button(), "작업 공간 · 지금 화면을 저장하고 바꾸기".to_string()),
             _ => return None,
         })
     }
@@ -271,8 +270,11 @@ impl App {
             Some((dp, Some(vi))) if dp == p => Some(vi),
             _ => None,
         };
-        // 경로 오른쪽 즐겨찾기 책갈피: 폴더일 때만 (켜짐 여부)
-        let starred = self.panes[p].tab().loc.dir().map(|d| self.favs.find(&util::normalize(d)).is_some());
+        // 경로 오른쪽 책갈피: 폴더일 때만. 이 공간에 고정했거나 '모든 공간'(즐겨찾기)에 있으면 켜진다
+        let starred = self.panes[p].tab().loc.dir().map(|d| {
+            let d = util::normalize(d);
+            self.workspaces.current().is_some_and(|w| w.pin_index(&d).is_some()) || self.favs.find(&d).is_some()
+        });
         // 네모 상자 고르기 (화면 좌표)
         let marquee = match self.drag {
             Drag::Marquee { pane, x0, y0, x, y } if pane == p => {

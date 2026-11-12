@@ -54,7 +54,7 @@ mod messages;
 mod paint;
 mod modal;
 use palette::{G_SEARCH, PalGate, PalStatus, TIMER_SEARCH, TIMER_SEARCH_READY};
-use sidebar::{BAR_W, Fold, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_ANIM, TIMER_SIDE_CLOSE};
+use sidebar::{BAR_W, Panel, Side, TIMER_BAR_HOVER, TIMER_SIDE_ANIM, TIMER_SIDE_CLOSE};
 use preview::{Preview, TIMER_PREVIEW, thumb_key};
 pub use palette::SearchDone;
 pub use preview::{PreviewMsg, unload_handler};
@@ -140,10 +140,12 @@ enum Hit {
     /// 알림의 되돌리기 단추
     ToastUndo(usize),
     Pane(usize),
-    /// 왼쪽 패널 안의 줄·단추 (즐겨찾기·드라이브·검색 폴더)
+    /// 왼쪽 패널 안의 줄·단추 (고정한 것·내 PC·즐겨찾기)
     Side(Side),
-    /// 아이콘 막대의 패널 아이콘
-    Bar(Panel),
+    /// 작업 공간 레일의 공간 아이콘 (작업 공간 번호)
+    Rail(usize),
+    /// 레일의 새 공간(+)
+    RailAdd,
     /// 패널 머리의 핀 (고정·풀기)
     SidePin,
     /// 패널 안의 빈 곳 (떠 있는 패널 아래 칸을 누르지 않게)
@@ -154,6 +156,7 @@ enum Hit {
     More,
     /// 검색 패널의 "이 폴더도 검색하기" 버튼
     PalAddFolder,
+    /// 도구 막대의 검색 단추
     SearchButton,
     PalRow(usize),
     PalInstall,
@@ -165,7 +168,7 @@ enum Hit {
     SettingsButton,
     /// 설정 창 안
     Set(settings_ui::SetHit),
-    /// 경로 오른쪽 끝의 즐겨찾기 별
+    /// 경로 오른쪽 끝의 책갈피 (이 공간에 고정)
     Star(usize),
     /// 새 탭 시작 화면의 카드·줄 (칸, 항목)
     Start(usize, usize),
@@ -175,8 +178,6 @@ enum Hit {
     PreviewOpen,
     /// 미리 보기의 고정 칩 (누르면 핀과 같다)
     PreviewChip,
-    /// 작업 줄 왼쪽의 작업 공간 단추 (메뉴)
-    Workspace,
 }
 
 impl Hit {
@@ -220,7 +221,7 @@ enum EditMode {
     Rename(usize),
     /// 즐겨찾기 표시 이름 바꾸기
     FavRename(crate::favorites::Row),
-    /// 작업 줄의 작업 공간 이름
+    /// 사이드바 패널 머리의 작업 공간 이름
     WorkspaceRename,
 }
 
@@ -276,8 +277,12 @@ pub enum Deferred {
     PrepareMenu { paths: Vec<String>, dir: Option<String> },
     FavMenu { row: crate::favorites::Row, pt: POINT },
     FavSortMenu { pt: POINT },
-    /// 사이드바의 내 PC·드라이브·검색 폴더 줄 메뉴
+    /// 사이드바의 내 PC 줄 메뉴
     SideMenu { side: Side, pt: POINT },
+    /// 사이드바에서 이 공간에 고정한 줄의 메뉴
+    PinMenu { index: usize, pt: POINT },
+    /// 레일의 작업 공간 아이콘 메뉴 (바꾸기·이름·색·지우기)
+    RailMenu { index: usize, pt: POINT },
     DragOut(Vec<String>),
     Verb { paths: Vec<String>, verb: &'static str },
     Paste { pane: usize, dest: String },
@@ -293,7 +298,7 @@ pub enum Deferred {
     MoreMenu { pt: POINT },
     /// 새 탭 시작 화면 항목의 메뉴. 위치는 메뉴를 열 때 정해 둔다
     StartMenu { pane: usize, item: start::StartItem, loc: Location, pt: POINT },
-    /// 작업 공간 메뉴 (저장한 작업 공간·새로 저장·이름 바꾸기·지우기)
+    /// 작업 공간 목록 메뉴 (레일의 + 를 우클릭: 모든 작업 공간·새로 만들기·이름 바꾸기·지우기)
     WorkspaceMenu { pt: POINT },
     /// 네트워크 공유에 Windows 로그인 창으로 연결한 뒤 그 탭을 다시 읽는다
     NetFix { tab: u64, share: String, ask: bool },
@@ -307,8 +312,10 @@ pub enum Deferred {
 pub enum DropAt {
     None,
     Dir(String),
-    /// 사이드바 즐겨찾기: 놓으면 즐겨찾기에 넣는다
+    /// 사이드바의 '모든 공간': 놓으면 즐겨찾기에 넣는다
     Favorites,
+    /// 사이드바의 고정 목록이나 레일의 지금 공간 아이콘: 놓으면 이 작업 공간에 고정한다
+    Pins,
 }
 
 pub struct Listed {
@@ -381,14 +388,12 @@ pub struct App {
     peek_leaving: bool,
     /// 패널·작업 줄에서 연 팝업 메뉴가 떠 있는 동안 (그 위로 간 마우스를 패널 밖으로 보지 않게)
     menu_open: bool,
-    /// 파일을 끌어 사이드바에 놓으려는 자리 (즐겨찾기 쪽이면 Side::FavEmpty)
+    /// 파일을 끌어 사이드바에 놓으려는 자리 (이 공간에 고정하는 쪽이면 Side::PinEmpty, '모든 공간' 쪽이면 Side::FavEmpty)
     side_drop: Option<Side>,
     /// 사이드바의 내 PC·드라이브 (뒤에서 읽어 온다)
     places: sidebar::Places,
     places_busy: bool,
     places_again: bool,
-    /// (폴더, 디스크 검색 밖인가): 드라이브 종류는 폴더가 바뀔 때만 묻는다
-    outside_cache: RefCell<(String, bool)>,
     /// 앞 누름이 팝업을 열거나 닫았다: 이어지는 두 번 클릭 누름은 무시한다
     swallow_dbl: bool,
     /// 필터 상자를 마지막으로 둔 자리 (픽셀 x, y, 너비, 높이)
@@ -455,8 +460,6 @@ pub struct App {
     start_keys: bool,
     /// 이름 붙여 저장해 둔 화면들과 지금 작업 공간
     workspaces: crate::workspaces::Workspaces,
-    /// 바로가기 패널에서 접어 둔 구역 (Fold 순서)
-    folded: [bool; 2],
     /// 시작할 때 세션 대신 지금 작업 공간의 화면으로 열지 (세션이 다른 작업 공간·예전 빌드의 것이면)
     ws_restore: bool,
     /// 닫은 탭 (칸, 위치, 뒤로 기록, 앞으로 기록). 마지막 것부터 Ctrl+Shift+T로 다시 연다
@@ -812,10 +815,10 @@ impl App {
             panes.push(Pane { tabs, active, sort, cols, view });
         }
         let layout = sess.as_ref().map(|s| Layout::ALL[(s.layout as usize).min(4)]).unwrap_or(Layout::TwoV);
-        // 처음 쓰면(세션 없음) 드라이브가 보이는 바로가기 패널을 고정해 둔다. 예전 세션은 session::parse가 즐겨찾기로 둔다
+        // 처음 쓰면(세션 없음) 작업 공간 패널을 고정해 둔다. 예전 세션의 바로가기·즐겨찾기 패널도 이 패널로 연다
         let (side_pinned, side_w) = match &sess {
             Some(s) => (Panel::from_key(&s.side), s.side_w),
-            None => (Some(Panel::Places), session::SIDE_W_DEFAULT),
+            None => (Some(Panel::Main), session::SIDE_W_DEFAULT),
         };
         let mut rc = RECT::default();
         unsafe {
@@ -841,10 +844,13 @@ impl App {
             )
             .unwrap_or_default()
         };
+        // 강조 색은 지금 작업 공간의 색을 따른다 (정하지 않았으면 설정의 강조 색)
+        let workspaces = crate::workspaces::load();
+        let accent = workspaces.current().map(|w| w.color.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| look.accent.clone());
         let mut app = App {
             hwnd,
             gfx,
-            theme: crate::theme::resolve(&look.theme, &look.accent),
+            theme: crate::theme::resolve(&look.theme, &accent),
             panes,
             layout,
             split: sess.as_ref().map(|s| (s.split.0.clamp(0.15, 0.85), s.split.1.clamp(0.15, 0.85))).unwrap_or((0.5, 0.5)),
@@ -885,7 +891,6 @@ impl App {
             places: sidebar::Places::default(),
             places_busy: false,
             places_again: false,
-            outside_cache: RefCell::new((String::new(), false)),
             swallow_dbl: false,
             filter_placed: Cell::new((0, 0, 0, 0)),
             fav_flash: None,
@@ -922,8 +927,7 @@ impl App {
             new_tab_home: sess.as_ref().map_or_else(|| session::NEW_TAB_START.to_string(), |s| s.new_tab.clone()),
             recent: sess.as_ref().map(|s| s.recent.clone()).unwrap_or_default(),
             start_keys: false,
-            workspaces: crate::workspaces::load(),
-            folded: Fold::ALL.map(|f| sess.as_ref().is_some_and(|s| s.folded.iter().any(|k| k == f.key()))),
+            workspaces,
             side_anim: None,
             toast_undo: None,
             undo_rev: 0,
@@ -970,6 +974,7 @@ impl App {
     /// 메인 창을 표시한 뒤에 할 초기화: 자동 완성, 드롭 대상, 첫 목록 불러오기, 변경 알림
     pub fn init(&mut self) {
         self.restore_workspace_if_needed();
+        self.ensure_workspace();
         unsafe {
             SetTimer(Some(self.hwnd), TIMER_DATES, 60_000, None);
         }

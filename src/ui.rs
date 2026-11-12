@@ -7,6 +7,7 @@ use crate::palette::Theme;
 use crate::util;
 
 pub mod paint;
+pub mod rail;
 pub mod toolbar;
 
 /// 공통 화면 코드가 쓰는 그리기 (각 OS의 Gfx가 같은 이름의 메서드로 구현한다)
@@ -78,14 +79,18 @@ pub const RADIUS: f32 = 14.0;
 pub const CHEV_W: f32 = 16.0;
 pub const CRUMB_PAD: f32 = 8.0;
 
-// app/sidebar.rs의 치수
-/// 아이콘 막대 너비. 패널이나 칸 영역은 그 오른쪽부터
+// 사이드바의 치수
+/// 작업 공간 레일 너비. 패널이나 칸 영역은 그 오른쪽부터
 pub const BAR_W: f32 = 44.0;
-pub const SIDE_ROW_H: f32 = 32.0;
+pub const SIDE_ROW_H: f32 = 28.0;
+/// 사이드바 줄의 모서리
+pub const R_SIDE_ROW: f32 = 8.0;
 /// 그룹 안 항목의 들여쓰기
 pub const INDENT: f32 = 20.0;
-/// 사이드바 패널 머리 줄 (제목, 작은 단추, 핀)
-pub const SIDE_HEADER_H: f32 = 44.0;
+/// 사이드바 패널 머리 줄 (작업 공간 이름, 핀). 이름 줄 28에 아래 여백 4
+pub const SIDE_HEADER_H: f32 = 32.0;
+/// 사이드바 구역 이름 줄 ("모든 공간")
+pub const SIDE_LABEL_H: f32 = 28.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layout {
@@ -605,6 +610,21 @@ pub fn seg_on(g: &impl Canvas, r: R, radius: f32, t: &Theme) {
         soft_shadow(g, r, radius, 3.0, 0.12, false);
         g.fill_round(r, radius, t.pane);
     }
+}
+
+/// 사이드바 줄의 바탕: 지금 위치는 떠 있는 카드(고르기 판의 고른 칸과 같은 모습), 마우스를 올리면 옅은 면
+pub fn side_row_bg(g: &impl Canvas, t: &Theme, r: R, current: bool, hovered: bool) {
+    if current {
+        seg_on(g, r, R_SIDE_ROW, t);
+    } else if hovered {
+        g.fill_round(r, R_SIDE_ROW, hover_fill(t));
+    }
+}
+
+/// 사이드바에서 '모든 공간' 구역이 시작하는 y (목록 좌표). 위쪽 고정 목록이 짧으면 구역을 목록 아래 끝에 붙이고,
+/// 길어서 넘치면 고정 목록 바로 아래(사이 간격 gap)에 이어 놓아 함께 스크롤한다
+pub fn side_common_top(pins_h: f32, common_h: f32, list_h: f32, gap: f32) -> f32 {
+    (pins_h + gap).max(list_h - common_h)
 }
 
 /// 줄의 마우스 올림 바탕: 창 바탕에서도 보이도록 반투명으로 겹친다

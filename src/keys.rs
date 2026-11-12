@@ -49,7 +49,7 @@ pub const ACTIONS: [(Action, &str, &str, &str); 27] = [
     (Action::Search, "search", "검색", "Ctrl+F"),
     (Action::Commands, "commands", "명령 메뉴", "Ctrl+K"),
     (Action::Favorites, "favorites", "즐겨찾기로 이동", "Ctrl+B"),
-    (Action::AddFavorite, "add-favorite", "즐겨찾기에 추가", "Ctrl+D"),
+    (Action::AddFavorite, "add-favorite", "이 공간에 고정", "Ctrl+D"),
     (Action::NewTab, "new-tab", "새 탭", "Ctrl+T"),
     (Action::CloseTab, "close-tab", "탭 닫기", "Ctrl+W"),
     (Action::ReopenTab, "reopen-tab", "닫은 탭 다시 열기", "Ctrl+Shift+T"),

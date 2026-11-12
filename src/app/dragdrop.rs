@@ -6,7 +6,7 @@ impl App {
     // ---------- 드래그 앤 드롭 ----------
 
     /// 드롭 위치의 대상. 폴더 행 위면 그 폴더, 패널 안 다른 곳이면 패널의 현재 폴더.
-    /// 사이드바는 즐겨찾기 쪽이면 즐겨찾기에 넣기, 드라이브·검색 폴더 줄이면 그 폴더
+    /// 사이드바는 위쪽(고정 목록)이면 이 작업 공간에 고정, '모든 공간' 구역이면 즐겨찾기에 넣기
     pub fn drop_dir_at(&mut self, pt: POINTL) -> DropAt {
         let mut cp = POINT { x: pt.x, y: pt.y };
         unsafe {
@@ -18,26 +18,25 @@ impl App {
             self.hover = Hit::None;
             self.invalidate();
         }
-        // 막대의 별 위에 놓으면 즐겨찾기에 넣는다 (패널이 닫혀 있어도)
+        // 레일의 지금 공간 아이콘 위에 놓으면 이 공간에 고정한다 (패널이 닫혀 있어도)
         if x < BAR_W && self.settings.is_none() {
-            let side = matches!(self.bar_hit(x, y), Hit::Bar(Panel::Favorites)).then_some(Side::FavEmpty);
+            let side = matches!(self.bar_hit(x, y), Hit::Rail(i) if Some(i) == self.workspaces.current).then_some(Side::PinEmpty);
             if self.drop_hover.take().is_some() || side != self.side_drop {
                 self.side_drop = side;
                 self.invalidate();
             }
-            return if side.is_some() { DropAt::Favorites } else { DropAt::None };
+            return if side.is_some() { DropAt::Pins } else { DropAt::None };
         }
         if self.settings.is_none() && self.side_panel_rect().is_some_and(|r| r.contains(x, y)) {
-            let (side, dir) = self.side_drop_at(x, y).map_or((None, None), |(s, d)| (Some(s), d));
-            let side = side.filter(|s| *s == Side::FavEmpty || dir.is_some());
+            let side = self.side_drop_at(x, y);
             if self.drop_hover.take().is_some() || side != self.side_drop {
                 self.side_drop = side;
                 self.invalidate();
             }
-            return match (side, dir) {
-                (Some(Side::FavEmpty), _) => DropAt::Favorites,
-                (_, Some(d)) => DropAt::Dir(d),
-                _ => DropAt::None,
+            return match side {
+                Some(Side::FavEmpty) => DropAt::Favorites,
+                Some(_) => DropAt::Pins,
+                None => DropAt::None,
             };
         }
         if self.side_drop.take().is_some() {

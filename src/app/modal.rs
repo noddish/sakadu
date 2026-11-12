@@ -63,6 +63,8 @@ pub fn execute(hwnd: HWND, act: Deferred) {
         Deferred::FavMenu { row, pt } => with_menu(|| fav_ui::show_fav_menu(hwnd, row, pt)),
         Deferred::FavSortMenu { pt } => with_menu(|| fav_ui::show_fav_sort_menu(hwnd, pt)),
         Deferred::SideMenu { side, pt } => with_menu(|| sidebar::show_side_menu(hwnd, side, pt)),
+        Deferred::PinMenu { index, pt } => with_menu(|| fav_ui::show_pin_menu(hwnd, index, pt)),
+        Deferred::RailMenu { index, pt } => with_menu(|| workspace_ui::show_rail_menu(hwnd, index, pt)),
         Deferred::PreviewSync => preview::sync_handler(),
         Deferred::Settings { ctl, index, pt } => settings_ui::run_deferred(hwnd, ctl, index, pt),
         Deferred::PalMenu { pt } => palette::show_pal_menu(hwnd, pt),
