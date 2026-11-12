@@ -85,8 +85,13 @@ pub enum MenuKind {
     Spaces,
 }
 
+/// 메뉴 한 개에 담을 수 있는 줄 수 (tag에서 줄 번호가 차지하는 범위)
+const TAG_ITEMS: usize = 1_000_000;
+
 impl MenuKind {
-    /// 메뉴 줄에 붙이는 번호 (맥 메뉴 항목의 tag): 메뉴 종류, 공간 번호, 줄 번호를 한 수에 담는다
+    /// 메뉴 줄에 붙이는 번호 (맥 메뉴 항목의 tag): 메뉴 종류, 공간 번호, 줄 번호를 한 수에 담는다.
+    /// 종류(0~3) + 4 × (줄 번호 + TAG_ITEMS × 공간 번호). 줄 번호와 공간 번호는 자르지 않는다:
+    /// 모든 작업 공간 메뉴는 줄 번호가 곧 공간 번호라, 잘리면 뒤쪽 공간들이 같은 번호가 된다
     pub fn tag(self, item: usize) -> isize {
         let (kind, index) = match self {
             MenuKind::Layout => (0, 0),
@@ -94,19 +99,19 @@ impl MenuKind {
             MenuKind::Space(i) => (2, i),
             MenuKind::Spaces => (3, 0),
         };
-        (kind * 100_000 + index.min(999) * 100 + item.min(99)) as isize
+        (kind + 4 * (item.min(TAG_ITEMS - 1) + TAG_ITEMS * index)) as isize
     }
 
     /// tag에서 메뉴와 줄 번호를 되찾는다
     pub fn from_tag(tag: isize) -> Option<(MenuKind, usize)> {
         let tag = usize::try_from(tag).ok()?;
-        let (index, item) = (tag % 100_000 / 100, tag % 100);
-        let kind = match tag / 100_000 {
+        let (kind, rest) = (tag % 4, tag / 4);
+        let (index, item) = (rest / TAG_ITEMS, rest % TAG_ITEMS);
+        let kind = match kind {
             0 => MenuKind::Layout,
             1 => MenuKind::View,
             2 => MenuKind::Space(index),
-            3 => MenuKind::Spaces,
-            _ => return None,
+            _ => MenuKind::Spaces,
         };
         Some((kind, item))
     }
@@ -2317,7 +2322,8 @@ mod tests {
         a.pick_menu(MenuKind::Space(0), workspaces::COLORS.len());
         assert_eq!((a.workspaces().list.len(), a.workspaces().current, a.layout()), (1, Some(0), Layout::Four));
         // 메뉴 줄 번호(tag)에서 메뉴와 줄을 되찾는다
-        for (kind, item) in [(MenuKind::Layout, 4), (MenuKind::View, 6), (MenuKind::Space(0), 0), (MenuKind::Space(12), 7)] {
+        // 공간이 아주 많아도(100개, 1000개를 넘어도) 줄 번호와 공간 번호가 잘리지 않는다
+        for (kind, item) in [(MenuKind::Layout, 4), (MenuKind::View, 6), (MenuKind::Space(0), 0), (MenuKind::Space(12), 7), (MenuKind::Space(1500), 7), (MenuKind::Spaces, 0), (MenuKind::Spaces, 99), (MenuKind::Spaces, 100), (MenuKind::Spaces, 2500)] {
             assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
         }
         assert_eq!(MenuKind::from_tag(-1), None);
