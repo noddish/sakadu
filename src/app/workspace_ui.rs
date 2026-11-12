@@ -43,6 +43,16 @@ impl App {
         self.apply_window_theme();
     }
 
+    /// 지금 작업 공간이 바뀐 뒤: 사이드바 목록을 맨 위로. 고정한 것이 다른 목록이라,
+    /// 앞 공간에서 내려 둔 스크롤이 남으면 새 공간의 줄이 보이는 곳 위로 밀려 올라간다
+    fn reset_side_scroll(&mut self) {
+        self.side_scroll_memo[Panel::Main as usize] = 0.0;
+        if self.side_panel() == Some(Panel::Main) {
+            self.side_scroll = 0.0;
+        }
+        self.refresh_hover();
+    }
+
     /// 그 작업 공간의 색 (레일 아이콘에 쓴다). 색을 정하지 않았으면 설정의 강조 색
     pub(super) fn space_color(&self, w: &Workspace) -> Color {
         let key = if w.color.is_empty() { self.look.accent.as_str() } else { w.color.as_str() };
@@ -129,6 +139,7 @@ impl App {
         ws.color = self.workspaces.next_color(&self.look.accent).to_string();
         self.workspaces.list.push(ws);
         self.workspaces.current = Some(self.workspaces.list.len() - 1);
+        self.reset_side_scroll();
         self.save_workspaces();
         self.apply_space_color();
         self.begin_workspace_rename();
@@ -175,6 +186,7 @@ impl App {
         }
         self.save_workspaces();
         self.workspaces.current = Some(i);
+        self.reset_side_scroll();
         self.apply_space_color();
         let state = self.workspaces.list[i].state.clone();
         self.apply_screen(&state);
@@ -192,6 +204,7 @@ impl App {
             self.save_workspaces();
         }
         if self.workspaces.remove(i) {
+            self.reset_side_scroll();
             self.apply_space_color();
             if let Some(state) = self.workspaces.current().map(|w| w.state.clone()) {
                 self.apply_screen(&state);
