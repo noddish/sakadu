@@ -391,26 +391,42 @@ impl App {
         self.pins_changed();
     }
 
-    /// 고정한 것을 '모든 공간'(즐겨찾기)으로 옮긴다: 어느 작업 공간에서나 보이게
+    /// 고정한 것을 '모든 공간'(즐겨찾기)으로 옮긴다: 어느 작업 공간에서나 보이게.
+    /// 즐겨찾기 파일에 먼저 저장하고, 저장됐을 때만 이 공간에서 뺀다 (저장하지 못했는데 빼면 다음에 열 때 양쪽 모두에서 사라진다)
     pub(super) fn pin_to_common(&mut self, i: usize) {
-        let Some(f) = self.workspaces.current_mut().filter(|ws| i < ws.pins.len()).map(|ws| ws.pins.remove(i)) else { return };
+        let Some(f) = self.pins().get(i).cloned() else { return };
         if self.favs.find(&f.path).is_none() {
+            let before = self.favs.clone();
             self.favs.push(None, f);
-            self.save_favorites();
+            if let Err(e) = favorites::save(&self.favs) {
+                self.favs = before;
+                let p = self.active;
+                return self.flash(p, format!("즐겨찾기를 저장하지 못해 옮기지 않았어요: {e}"));
+            }
         }
-        self.pins_changed();
+        self.unpin(i);
     }
 
-    /// 즐겨찾기 항목을 '모든 공간'에서 빼서 지금 작업 공간에만 고정한다
+    /// 즐겨찾기 항목을 '모든 공간'에서 빼서 지금 작업 공간에만 고정한다.
+    /// 작업 공간 파일에 먼저 저장하고, 저장됐을 때만 즐겨찾기에서 뺀다 (pin_to_common과 같은 이유)
     pub(super) fn fav_move_to_pins(&mut self, row: Row) {
         let Row::Item { group, index } = row else { return };
+        let Some(f) = self.favs.item(group, index).cloned() else { return };
         if let EditMode::FavRename(_) = self.edit_mode {
             self.cancel_edit();
         }
-        let Some(f) = self.favs.remove_item(group, index) else { return };
-        if let Some(ws) = self.workspaces.current_mut().filter(|ws| ws.pin_index(&f.path).is_none()) {
+        let Some(ws) = self.workspaces.current_mut() else { return };
+        if ws.pin_index(&f.path).is_none() {
             ws.pins.push(f);
+            if let Err(e) = self.try_save_workspaces() {
+                if let Some(ws) = self.workspaces.current_mut() {
+                    ws.pins.pop();
+                }
+                let p = self.active;
+                return self.flash(p, format!("작업 공간을 저장하지 못해 옮기지 않았어요: {e}"));
+            }
         }
+        self.favs.remove_item(group, index);
         self.fav_changed(None);
         self.pins_changed();
     }

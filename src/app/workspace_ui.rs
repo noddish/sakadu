@@ -96,15 +96,20 @@ impl App {
         }
     }
 
-    /// 지금 작업 공간에 지금 화면을 적어 두고 파일로 저장한다
-    pub(super) fn save_workspaces(&mut self) {
+    /// 지금 작업 공간에 지금 화면을 적어 두고 파일로 저장한다. 저장하지 못했으면 그 오류
+    pub(super) fn try_save_workspaces(&mut self) -> std::io::Result<()> {
         if let Some(c) = self.workspaces.current {
             let state = self.screen_state();
             if let Some(w) = self.workspaces.list.get_mut(c) {
                 w.state = state;
             }
         }
-        if let Err(e) = workspaces::save(&self.workspaces) {
+        workspaces::save(&self.workspaces)
+    }
+
+    /// 지금 작업 공간에 지금 화면을 적어 두고 파일로 저장한다 (저장하지 못하면 기록만 남긴다)
+    pub(super) fn save_workspaces(&mut self) {
+        if let Err(e) = self.try_save_workspaces() {
             crate::diag::log(|| format!("workspaces: save failed: {e}"));
         }
     }

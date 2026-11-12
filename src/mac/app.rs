@@ -81,6 +81,8 @@ pub enum MenuKind {
     View,
     /// 레일의 공간 아이콘을 오른쪽 단추로 눌렀을 때 (공간 번호): 색 여섯 가지, 이름 바꾸기, 지우기
     Space(usize),
+    /// 레일의 + 를 오른쪽 단추로 눌렀을 때: 모든 작업 공간 (창이 낮아 레일에 다 보이지 않는 공간도 여기서 고른다)
+    Spaces,
 }
 
 impl MenuKind {
@@ -90,6 +92,7 @@ impl MenuKind {
             MenuKind::Layout => (0, 0),
             MenuKind::View => (1, 0),
             MenuKind::Space(i) => (2, i),
+            MenuKind::Spaces => (3, 0),
         };
         (kind * 100_000 + index.min(999) * 100 + item.min(99)) as isize
     }
@@ -102,6 +105,7 @@ impl MenuKind {
             0 => MenuKind::Layout,
             1 => MenuKind::View,
             2 => MenuKind::Space(index),
+            3 => MenuKind::Spaces,
             _ => return None,
         };
         Some((kind, item))
@@ -935,12 +939,14 @@ impl App {
             MenuKind::Layout => self.toolbar().layout,
             MenuKind::View => self.toolbar().view,
             MenuKind::Space(i) => self.rail().spaces.iter().find(|(s, _)| *s == i)?.1,
+            MenuKind::Spaces => self.rail().add,
         };
         Some((kind, anchor))
     }
 
     /// 메뉴의 줄: (이름, 지금 것인지). 보기 방식 메뉴의 맨 아래 줄은 숨김 항목 보기.
-    /// 공간 메뉴는 색 여섯 가지 다음에 이름 바꾸기(지금 공간만), 지우기(공간이 둘 이상일 때만)
+    /// 공간 메뉴는 색 여섯 가지 다음에 이름 바꾸기(지금 공간만), 지우기(공간이 둘 이상일 때만).
+    /// 모든 작업 공간 메뉴는 공간 이름들
     pub fn menu_items(&self, kind: MenuKind) -> Vec<(String, bool)> {
         use sakadu::keys::{Action, name};
         match kind {
@@ -967,13 +973,14 @@ impl App {
                 }
                 v
             }
+            MenuKind::Spaces => self.workspaces.list.iter().enumerate().map(|(i, w)| (w.name.clone(), self.workspaces.current == Some(i))).collect(),
         }
     }
 
     /// 메뉴에서 이 번호의 줄 앞에 구분선을 둔다 (보기 방식과 숨김 항목 보기 사이, 색과 그 밖의 줄 사이)
     pub fn menu_break(&self, kind: MenuKind) -> Option<usize> {
         match kind {
-            MenuKind::Layout => None,
+            MenuKind::Layout | MenuKind::Spaces => None,
             MenuKind::View => Some(ViewMode::ALL.len()),
             MenuKind::Space(_) => Some(workspaces::COLORS.len()),
         }
@@ -1003,18 +1010,23 @@ impl App {
                     _ => {}
                 }
             }
+            MenuKind::Spaces => self.switch_workspace(i),
         }
     }
 
-    /// 오른쪽 단추로 누른 곳이 레일의 공간 아이콘이면 그 공간의 메뉴를 열어 달라고 한다. 그랬으면 true
+    /// 오른쪽 단추로 누른 곳이 레일의 공간 아이콘이면 그 공간의 메뉴를, + 면 모든 작업 공간 목록을 열어 달라고 한다. 그랬으면 true
     pub fn right_down(&mut self, g: &Gfx, x: f32, y: f32) -> bool {
         let hit = self.hit(g, x, y);
         self.ask_space_menu(hit)
     }
 
     fn ask_space_menu(&mut self, hit: Hit) -> bool {
-        let Hit::Space(i) = hit else { return false };
-        self.menu = Some(MenuKind::Space(i));
+        self.menu = match hit {
+            Hit::Space(i) => Some(MenuKind::Space(i)),
+            // 창이 낮으면 레일에 공간이 다 보이지 않는다: 안 보이는 공간은 이 목록에서 고른다
+            Hit::SpaceAdd => Some(MenuKind::Spaces),
+            _ => return false,
+        };
         true
     }
 
@@ -2309,6 +2321,38 @@ mod tests {
             assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
         }
         assert_eq!(MenuKind::from_tag(-1), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// + 를 오른쪽 단추로 누르면 모든 작업 공간이 나온다: 창이 낮아 레일에 다 보이지 않는 공간도 고를 수 있다
+    #[test]
+    fn add_menu_lists_every_workspace_even_those_the_rail_hides() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        for _ in 0..7 {
+            a.new_workspace();
+            a.cancel_address();
+        }
+        // 낮은 창: 레일에 여덟 개가 다 들어가지 않는다
+        a.resize(900.0, 300.0);
+        a.switch_workspace(0);
+        a.settle();
+        let rail = a.rail();
+        assert!(rail.spaces.len() < 8, "{} tiles fit", rail.spaces.len());
+        let hidden = (0..8).find(|i| !rail.spaces.iter().any(|(s, _)| s == i)).unwrap();
+        // + 를 오른쪽 단추로: 메뉴를 + 자리에 열어 달라고 한다. 모든 공간의 이름이 있고 지금 것에 체크
+        let (x, y) = mid(rail.add);
+        assert!(a.right_down(&g, x, y));
+        assert_eq!(a.take_menu().map(|(k, r)| (k, r.t)), Some((MenuKind::Spaces, rail.add.t)));
+        let items = a.menu_items(MenuKind::Spaces);
+        assert_eq!((items.len(), items.iter().position(|(_, on)| *on)), (8, Some(0)));
+        assert_eq!(a.menu_break(MenuKind::Spaces), None);
+        assert_eq!(MenuKind::from_tag(MenuKind::Spaces.tag(5)), Some((MenuKind::Spaces, 5)));
+        // 안 보이던 공간을 고르면 그 공간으로 바뀌고, 레일도 그 공간이 보이는 범위로 옮겨진다
+        a.pick_menu(MenuKind::Spaces, hidden);
+        a.settle();
+        assert_eq!(a.workspaces().current, Some(hidden));
+        assert!(a.rail().spaces.iter().any(|(s, _)| *s == hidden));
         std::fs::remove_dir_all(root).unwrap();
     }
 
