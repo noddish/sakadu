@@ -4,11 +4,12 @@
 //! 화면 계산·그리기 도우미·치수와 칸·도구 막대·레일 그리기는 Windows와 함께 쓰는 sakadu::ui를 쓴다
 //! (이 앱의 상태로 장면을 채워 넘긴다).
 //! 그림·글 파일을 하나 고르면 다른 칸의 오른쪽 아래에 미리 보기 카드가 저절로 뜬다 (도구 막대의 눈으로 끄고 켠다).
+//! 아이콘 보기에서는 그림 파일이 썸네일로 보인다 (뒷줄에서 읽어 둔 것을 그린다).
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
 use crate::gfx::{Gfx, MONO_LINE_H, Picture};
 use sakadu::draw::{Color, Font, R};
-use sakadu::favorites::{self, Favorites, Row};
+use sakadu::favorites::{self, Favorite, Favorites, Row};
 use sakadu::listing::{self, Entry, Kind};
 use sakadu::palette::{self, R_ROW, System, Theme, alpha};
 use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab, ViewMode, child_toward};
@@ -22,7 +23,7 @@ use sakadu::ui::*;
 use sakadu::util;
 use sakadu::workspaces::{self, Workspace, Workspaces};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 /// 사이드바 폭: 작업 공간 레일과 그 옆 패널(220)을 합친 폭
@@ -53,6 +54,15 @@ const PX_LARGE: u32 = 2048;
 const PICS_MAX: usize = 6;
 /// 그림이 이보다 늦게 오면 카드에 '불러오는 중…'을 보인다 (곧 오면 글자가 깜빡이지 않게)
 pub const LOADING_NOTE_MS: u64 = 300;
+
+/// 아이콘 보기의 썸네일을 읽는 픽셀 수의 단계: 그림 자리(pt)에 화면 배율을 곱한 값을 이 가운데 하나로 올려 읽는다
+/// (아이콘 크기나 화면 배율이 조금 다를 때마다 다시 읽지 않게). 가장 큰 단계는 레티나 화면의 아주 큰 아이콘(256pt)
+const THUMB_PX: [u32; 4] = [64, 128, 256, 512];
+/// 썸네일을 한 번에 몇 개까지 뒷줄에서 읽나
+const THUMB_JOBS: usize = 2;
+/// 읽어 둔 썸네일을 몇 개, 몇 바이트까지 남겨 두나 (넘으면 오래 안 쓴 것부터 버린다)
+const THUMBS_MAX: usize = 400;
+const THUMB_BYTES: usize = 64 * 1024 * 1024;
 
 /// 마우스가 가리키는 것 (칸 번호 p, 탭·줄 번호 i)
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -112,14 +122,20 @@ pub enum MenuKind {
     Space(usize),
     /// 레일의 + 를 오른쪽 단추로 눌렀을 때: 모든 작업 공간 (창이 낮아 레일에 다 보이지 않는 공간도 여기서 고른다)
     Spaces,
+    /// 사이드바의 고정한 줄을 오른쪽 단추로 눌렀을 때 (이 공간에 고정한 것 가운데 번호): 위·아래로 옮기기, 모든 공간에 두기, 고정 풀기
+    Pin(usize),
+    /// 사이드바 '모든 공간'의 즐겨찾기 항목을 오른쪽 단추로 눌렀을 때 (Favorites::rows의 줄 번호): 이 작업 공간에만 두기, 모든 공간에서 빼기
+    Fav(usize),
 }
 
 /// 메뉴 한 개에 담을 수 있는 줄 수 (tag에서 줄 번호가 차지하는 범위)
 const TAG_ITEMS: usize = 1_000_000;
+/// tag에서 메뉴 종류가 차지하는 범위 (종류는 여섯 가지)
+const TAG_KINDS: usize = 8;
 
 impl MenuKind {
-    /// 메뉴 줄에 붙이는 번호 (맥 메뉴 항목의 tag): 메뉴 종류, 공간 번호, 줄 번호를 한 수에 담는다.
-    /// 종류(0~3) + 4 × (줄 번호 + TAG_ITEMS × 공간 번호). 줄 번호와 공간 번호는 자르지 않는다:
+    /// 메뉴 줄에 붙이는 번호 (맥 메뉴 항목의 tag): 메뉴 종류, 그 메뉴를 연 것의 번호(공간, 고정한 줄, 즐겨찾기 줄), 줄 번호를 한 수에 담는다.
+    /// 종류(0~5) + TAG_KINDS × (줄 번호 + TAG_ITEMS × 연 것의 번호). 줄 번호와 연 것의 번호는 자르지 않는다:
     /// 모든 작업 공간 메뉴는 줄 번호가 곧 공간 번호라, 잘리면 뒤쪽 공간들이 같은 번호가 된다
     pub fn tag(self, item: usize) -> isize {
         let (kind, index) = match self {
@@ -127,22 +143,47 @@ impl MenuKind {
             MenuKind::View => (1, 0),
             MenuKind::Space(i) => (2, i),
             MenuKind::Spaces => (3, 0),
+            MenuKind::Pin(i) => (4, i),
+            MenuKind::Fav(i) => (5, i),
         };
-        (kind + 4 * (item.min(TAG_ITEMS - 1) + TAG_ITEMS * index)) as isize
+        (kind + TAG_KINDS * (item.min(TAG_ITEMS - 1) + TAG_ITEMS * index)) as isize
     }
 
-    /// tag에서 메뉴와 줄 번호를 되찾는다
+    /// tag에서 메뉴와 줄 번호를 되찾는다 (모르는 종류면 None)
     pub fn from_tag(tag: isize) -> Option<(MenuKind, usize)> {
         let tag = usize::try_from(tag).ok()?;
-        let (kind, rest) = (tag % 4, tag / 4);
+        let (kind, rest) = (tag % TAG_KINDS, tag / TAG_KINDS);
         let (index, item) = (rest / TAG_ITEMS, rest % TAG_ITEMS);
         let kind = match kind {
             0 => MenuKind::Layout,
             1 => MenuKind::View,
             2 => MenuKind::Space(index),
-            _ => MenuKind::Spaces,
+            3 => MenuKind::Spaces,
+            4 => MenuKind::Pin(index),
+            5 => MenuKind::Fav(index),
+            _ => return None,
         };
         Some((kind, item))
+    }
+}
+
+/// 고정한 줄 메뉴의 줄
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PinAct {
+    Up,
+    Down,
+    ToCommon,
+    Unpin,
+}
+
+impl PinAct {
+    fn label(self) -> &'static str {
+        match self {
+            PinAct::Up => "위로 이동",
+            PinAct::Down => "아래로 이동",
+            PinAct::ToCommon => "모든 공간에 두기",
+            PinAct::Unpin => "고정 풀기",
+        }
     }
 }
 
@@ -215,8 +256,8 @@ pub fn resolve_input(text: &str, home: &str) -> Result<(String, Option<String>),
     }
 }
 
-/// 미리 보기 카드에 띄우는 파일을 가리는 값: 경로와 수정한 때·크기 (같은 경로라도 파일이 바뀌면 다시 읽는다)
-#[derive(Clone, PartialEq, Debug)]
+/// 미리 보기 카드에 띄우는 파일(과 썸네일의 파일)을 가리는 값: 경로와 수정한 때·크기 (같은 경로라도 파일이 바뀌면 다시 읽는다)
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct CardKey {
     path: String,
     modified: u64,
@@ -364,6 +405,117 @@ impl CachedPic {
     }
 }
 
+/// 썸네일을 가리는 값: 파일과 읽은 픽셀 수의 단계 (THUMB_PX 가운데 하나)
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct ThumbKey {
+    file: CardKey,
+    px: u32,
+}
+
+/// 썸네일 읽기 요청: 창 쪽이 뒷줄에서 load_thumb를 돌려 on_thumb로 돌려준다
+pub struct ThumbRequest {
+    key: ThumbKey,
+}
+
+/// 요청한 썸네일을 읽는다 (창에서는 뒷줄에서 부른다). 읽지 못하면 None
+pub fn load_thumb(req: &ThumbRequest) -> Option<Picture> {
+    Gfx::load_picture(&req.key.file.path, req.key.px)
+}
+
+/// 그림 자리(한 변 size pt)를 scale배 화면에 채울 픽셀 수를 단계로 올린 값. 가장 큰 단계보다 크면 가장 큰 단계
+fn thumb_px(size: f32, scale: f32) -> u32 {
+    let need = (size * scale).ceil() as u32;
+    THUMB_PX.into_iter().find(|px| *px >= need).unwrap_or(THUMB_PX[THUMB_PX.len() - 1])
+}
+
+/// 그 항목의 썸네일을 가리는 값. 썸네일은 그림 파일(미리 보기 카드와 같은 확장자)에만 있다: 폴더와 그 밖의 파일은 None
+fn thumb_key(tab: &Tab, e: &Entry, size: f32, scale: f32) -> Option<ThumbKey> {
+    if e.kind != Kind::File || card_kind(&e.name_string()) != Some(false) {
+        return None;
+    }
+    Some(ThumbKey { file: CardKey { path: tab.path_of(e)?, modified: e.modified, size: e.size }, px: thumb_px(size, scale) })
+}
+
+/// 그림이 차지하는 메모리 (픽셀마다 4바이트)
+fn pic_bytes(pic: &Picture) -> usize {
+    let (w, h) = pic.size();
+    w * h * 4
+}
+
+/// 읽어 둔 썸네일 하나
+struct Thumb {
+    /// 읽지 못한 그림은 None (그릴 때마다 다시 읽지 않게 그것도 적어 둔다)
+    pic: Option<Picture>,
+    /// 마지막으로 화면에 보인 때 (Thumbs::clock의 값)
+    used: u64,
+}
+
+/// 아이콘 보기의 썸네일: 읽어 둔 것, 읽으려고 기다리는 것, 뒷줄에서 읽는 중인 것.
+/// 기다리는 것은 화면에 맞출 때마다(sync) 지금 보이는 것으로 새로 채운다: 스크롤로 지나갔거나 떠난 폴더·탭의 것은 읽기 전에 빠진다
+#[derive(Default)]
+struct Thumbs {
+    cache: HashMap<ThumbKey, Thumb>,
+    /// 읽어 둔 썸네일이 차지하는 메모리 (바이트)
+    bytes: usize,
+    /// 기다리는 것 (보이는 순서)
+    queue: VecDeque<ThumbKey>,
+    /// 읽는 중인 것 (THUMB_JOBS개까지)
+    loading: Vec<ThumbKey>,
+    /// 화면에 맞춘 횟수. used가 이 값인 썸네일은 지금 보이는 것이다
+    clock: u64,
+}
+
+impl Thumbs {
+    /// 읽어 둔 썸네일 (아직 없거나 읽지 못한 그림이면 None)
+    fn get(&self, key: &ThumbKey) -> Option<&Picture> {
+        self.cache.get(key)?.pic.as_ref()
+    }
+
+    /// 지금 보이는 썸네일(보이는 순서)에 맞춘다: 읽어 둔 것은 방금 쓴 것으로 적고,
+    /// 기다리는 것은 지금 보이는데 아직 없는 것으로 새로 채운다
+    fn sync(&mut self, visible: Vec<ThumbKey>) {
+        self.clock += 1;
+        self.queue.clear();
+        for key in visible {
+            if let Some(t) = self.cache.get_mut(&key) {
+                t.used = self.clock;
+            } else if !self.loading.contains(&key) {
+                self.queue.push_back(key);
+            }
+        }
+    }
+
+    /// 기다리는 것 가운데 지금 읽기 시작할 것을 꺼낸다. 읽는 중인 것은 THUMB_JOBS개를 넘지 않는다
+    fn start(&mut self) -> Vec<ThumbRequest> {
+        let mut out = Vec::new();
+        while self.loading.len() < THUMB_JOBS {
+            let Some(key) = self.queue.pop_front() else { break };
+            // 같은 폴더를 두 칸에서 보고 있으면 같은 그림이 두 번 기다린다
+            if !self.loading.contains(&key) {
+                self.loading.push(key.clone());
+                out.push(ThumbRequest { key });
+            }
+        }
+        out
+    }
+
+    /// 다 읽은 썸네일을 넣는다 (읽지 못했으면 None). 남겨 둘 한도를 넘으면 가장 오래 안 쓴 것부터 버린다
+    fn finish(&mut self, key: &ThumbKey, pic: Option<Picture>) {
+        self.loading.retain(|k| k != key);
+        self.bytes += pic.as_ref().map_or(0, pic_bytes);
+        if let Some(old) = self.cache.insert(key.clone(), Thumb { pic, used: self.clock }) {
+            self.bytes -= old.pic.as_ref().map_or(0, pic_bytes);
+        }
+        while self.cache.len() > THUMBS_MAX || self.bytes > THUMB_BYTES {
+            // 지금 보이는 것은 버리지 않는다 (버리면 곧바로 다시 읽게 된다). 보이는 것만으로 한도를 넘으면 넘긴 채로 둔다
+            let Some(oldest) = self.cache.iter().filter(|(_, t)| t.used < self.clock).min_by_key(|(_, t)| t.used).map(|(k, _)| k.clone()) else { break };
+            if let Some(t) = self.cache.remove(&oldest) {
+                self.bytes -= t.pic.as_ref().map_or(0, pic_bytes);
+            }
+        }
+    }
+}
+
 /// 사이드바 줄의 종류
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SideKind {
@@ -390,6 +542,17 @@ struct SideRow {
     indent: bool,
     y: f32,
     h: f32,
+}
+
+/// 사이드바 줄 i를 오른쪽 단추로 눌렀을 때 여는 메뉴: 고정한 줄이면 고정한 것 가운데 번호로, 즐겨찾기 항목이면 즐겨찾기 줄
+/// (Favorites::rows) 번호로 가리킨다. 바로가기와 그룹 머리, 안내, 구역 이름에는 메뉴가 없다
+fn side_menu(rows: &[SideRow], i: usize) -> Option<MenuKind> {
+    let before = |same: fn(SideKind) -> bool| rows[..i].iter().filter(|r| same(r.kind)).count();
+    match rows.get(i)?.kind {
+        SideKind::Pin => Some(MenuKind::Pin(before(|k| k == SideKind::Pin))),
+        SideKind::Fav => Some(MenuKind::Fav(before(|k| matches!(k, SideKind::Group(..) | SideKind::Fav)))),
+        _ => None,
+    }
 }
 
 /// 테마를 정할 때 쓰는 맥 설정 (창 쪽이 읽어 set_system으로 넣어 준 값)
@@ -473,6 +636,10 @@ pub struct App {
     previews: Vec<PreviewRequest>,
     /// 마지막으로 낸 카드 내용 요청의 번호
     preview_seq: u64,
+    /// 아이콘 보기의 썸네일 (그림 파일만)
+    thumbs: Thumbs,
+    /// 화면 배율 (레티나는 2. 창 쪽이 창에서 읽어 넣는다). 썸네일을 몇 픽셀로 읽을지 정한다
+    pub scale: f32,
 }
 
 impl App {
@@ -517,6 +684,8 @@ impl App {
             pics: Vec::new(),
             previews: Vec::new(),
             preview_seq: 0,
+            thumbs: Thumbs::default(),
+            scale: 2.0,
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
@@ -632,8 +801,8 @@ impl App {
     pub fn settle(&mut self) {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         loop {
-            let (reqs, probes, previews) = (self.take_requests(), self.take_probes(), self.take_previews());
-            if reqs.is_empty() && probes.is_empty() && previews.is_empty() {
+            let (reqs, probes, previews, thumbs) = (self.take_requests(), self.take_probes(), self.take_previews(), self.take_thumbs());
+            if reqs.is_empty() && probes.is_empty() && previews.is_empty() && thumbs.is_empty() {
                 break;
             }
             for r in reqs {
@@ -647,6 +816,11 @@ impl App {
             for r in previews {
                 let result = load_preview(&r);
                 self.on_previewed(&r, result);
+            }
+            // 썸네일은 한 번에 THUMB_JOBS개씩 나온다: 보이는 것을 다 읽을 때까지 돈다
+            for r in thumbs {
+                let pic = load_thumb(&r);
+                self.on_thumb(&r, pic);
             }
         }
     }
@@ -778,6 +952,37 @@ impl App {
     /// 카드를 크게(놓인 칸을 채운다)·작게
     pub fn toggle_card_large(&mut self) {
         self.card.large = !self.card.large;
+    }
+
+    // ---------- 아이콘 보기의 썸네일 ----------
+
+    /// 지금 화면에 보이는 그림 파일들의 썸네일 (보이는 순서): 아이콘 보기인 칸마다 지금 탭의 보이는 줄.
+    /// 칸 그리기(ui::paint_pane_list)가 썸네일을 그리는 항목과 같다
+    fn visible_thumbs(&self) -> Vec<ThumbKey> {
+        let mut out = Vec::new();
+        for (p, r) in self.pane_rects() {
+            let list = geom(r).list;
+            let tab = self.panes[p].tab();
+            let grid = Grid::of(list, self.panes[p].view);
+            let CellKind::Tile(size) = grid.cell else { continue };
+            out.extend(grid.visible(list, tab.scroll, tab.view.len()).filter_map(|vi| thumb_key(tab, tab.entry_at(vi)?, size, self.scale)));
+        }
+        out
+    }
+
+    /// 썸네일을 지금 화면에 맞추고(지금 보이는데 아직 없는 것만 기다린다), 지금 읽기 시작할 요청을 내준다.
+    /// 읽는 중인 것은 THUMB_JOBS개를 넘지 않는다. 창 쪽이 그린 뒤와 썸네일 하나를 다 읽은 뒤마다 불러,
+    /// 뒷줄에서 load_thumb로 읽고 on_thumb로 돌려준다 (메인 줄에서는 그림 파일을 읽지 않는다)
+    pub fn take_thumbs(&mut self) -> Vec<ThumbRequest> {
+        let visible = self.visible_thumbs();
+        self.thumbs.sync(visible);
+        self.thumbs.start()
+    }
+
+    /// 뒷줄에서 읽은 썸네일 (읽지 못했으면 None: 그것도 적어 두고 다시 요청하지 않는다).
+    /// 그 사이 스크롤했거나 다른 폴더로 옮겨 지금은 보이지 않는 것이어도 남겨 둔다
+    pub fn on_thumb(&mut self, req: &ThumbRequest, pic: Option<Picture>) {
+        self.thumbs.finish(&req.key, pic);
     }
 
     // ---------- 경로 입력 ----------
@@ -1017,12 +1222,15 @@ impl App {
         }
     }
 
-    /// 지금 공간에 지금 화면을 적고 작업 공간을 파일에 저장한다 (시험·그림에서는 저장하지 않는다)
-    pub fn save_workspaces(&mut self) {
+    /// 지금 공간에 지금 화면을 적고 작업 공간을 파일에 저장한다 (시험·그림에서는 저장하지 않는다). 저장하지 못했으면 그 오류
+    fn try_save_workspaces(&mut self) -> std::io::Result<()> {
         self.sync_workspace();
-        if self.persist
-            && let Err(e) = workspaces::save(&self.workspaces)
-        {
+        if self.persist { workspaces::save(&self.workspaces) } else { Ok(()) }
+    }
+
+    /// 지금 공간에 지금 화면을 적고 작업 공간을 파일에 저장한다 (저장하지 못하면 기록만 남긴다)
+    pub fn save_workspaces(&mut self) {
+        if let Err(e) = self.try_save_workspaces() {
             sakadu::diag::log(|| format!("workspaces: {e}"));
         }
     }
@@ -1276,13 +1484,21 @@ impl App {
             MenuKind::View => self.toolbar().view,
             MenuKind::Space(i) => self.rail().spaces.iter().find(|(s, _)| *s == i)?.1,
             MenuKind::Spaces => self.rail().add,
+            // 사이드바 줄의 메뉴는 그 줄에 붙인다
+            MenuKind::Pin(_) | MenuKind::Fav(_) => {
+                let rows = self.side_rows();
+                let i = (0..rows.len()).find(|i| side_menu(&rows, *i) == Some(kind))?;
+                self.side_rect(&rows[i])
+            }
         };
         Some((kind, anchor))
     }
 
     /// 메뉴의 줄: (이름, 지금 것인지). 보기 방식 메뉴의 맨 아래 줄은 숨김 항목 보기.
     /// 공간 메뉴는 색 여섯 가지 다음에 이름 바꾸기(지금 공간만), 지우기(공간이 둘 이상일 때만).
-    /// 모든 작업 공간 메뉴는 공간 이름들
+    /// 모든 작업 공간 메뉴는 공간 이름들.
+    /// 고정한 줄의 메뉴는 위로·아래로 이동(갈 수 있는 쪽만), 모든 공간에 두기, 고정 풀기.
+    /// 즐겨찾기 항목의 메뉴는 이 작업 공간에만 두기, 모든 공간에서 빼기
     pub fn menu_items(&self, kind: MenuKind) -> Vec<(String, bool)> {
         use sakadu::keys::{Action, name};
         match kind {
@@ -1310,15 +1526,40 @@ impl App {
                 v
             }
             MenuKind::Spaces => self.workspaces.list.iter().enumerate().map(|(i, w)| (w.name.clone(), self.workspaces.current == Some(i))).collect(),
+            MenuKind::Pin(p) => self.pin_menu(p).into_iter().map(|act| (act.label().to_string(), false)).collect(),
+            MenuKind::Fav(row) => match self.favs.rows().get(row) {
+                Some(Row::Item { .. }) => vec![("이 작업 공간에만 두기".to_string(), false), ("모든 공간에서 빼기".to_string(), false)],
+                _ => Vec::new(),
+            },
         }
     }
 
-    /// 메뉴에서 이 번호의 줄 앞에 구분선을 둔다 (보기 방식과 숨김 항목 보기 사이, 색과 그 밖의 줄 사이)
+    /// 고정한 줄 p의 메뉴에 넣을 줄: 맨 위 줄에는 위로, 맨 아래 줄에는 아래로가 없다. 그런 줄이 없으면 비어 있다
+    fn pin_menu(&self, p: usize) -> Vec<PinAct> {
+        let n = self.pins().len();
+        if p >= n {
+            return Vec::new();
+        }
+        let mut v = Vec::new();
+        if p > 0 {
+            v.push(PinAct::Up);
+        }
+        if p + 1 < n {
+            v.push(PinAct::Down);
+        }
+        v.extend([PinAct::ToCommon, PinAct::Unpin]);
+        v
+    }
+
+    /// 메뉴에서 이 번호의 줄 앞에 구분선을 둔다 (보기 방식과 숨김 항목 보기 사이, 색과 그 밖의 줄 사이,
+    /// 고정한 줄을 옮기는 줄과 그 밖의 줄 사이)
     pub fn menu_break(&self, kind: MenuKind) -> Option<usize> {
         match kind {
-            MenuKind::Layout | MenuKind::Spaces => None,
+            MenuKind::Layout | MenuKind::Spaces | MenuKind::Fav(_) => None,
             MenuKind::View => Some(ViewMode::ALL.len()),
             MenuKind::Space(_) => Some(workspaces::COLORS.len()),
+            // 옮길 곳이 없는 줄(고정한 것이 하나뿐)은 구분선 없이 나머지 줄만
+            MenuKind::Pin(p) => Some(self.pin_menu(p).iter().filter(|act| matches!(act, PinAct::Up | PinAct::Down)).count()).filter(|n| *n > 0),
         }
     }
 
@@ -1347,23 +1588,46 @@ impl App {
                 }
             }
             MenuKind::Spaces => self.switch_workspace(i),
+            MenuKind::Pin(p) => match self.pin_menu(p).get(i) {
+                Some(PinAct::Up) => self.pin_nudge(p, true),
+                Some(PinAct::Down) => self.pin_nudge(p, false),
+                Some(PinAct::ToCommon) => self.pin_to_common(p),
+                Some(PinAct::Unpin) => self.unpin(p),
+                None => {}
+            },
+            MenuKind::Fav(row) => {
+                let Some(Row::Item { group, index }) = self.favs.rows().get(row).copied() else { return };
+                match i {
+                    0 => self.fav_to_pins(group, index),
+                    1 => {
+                        self.favs.remove_item(group, index);
+                        self.save_favorites();
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
-    /// 오른쪽 단추로 누른 곳이 레일의 공간 아이콘이면 그 공간의 메뉴를, + 면 모든 작업 공간 목록을 열어 달라고 한다. 그랬으면 true
+    /// 오른쪽 단추로 누른 곳의 메뉴를 열어 달라고 한다: 레일의 공간 아이콘이면 그 공간의 메뉴, + 면 모든 작업 공간 목록,
+    /// 사이드바의 고정한 줄이나 즐겨찾기 항목이면 그 줄의 메뉴. 그랬으면 true
     pub fn right_down(&mut self, g: &Gfx, x: f32, y: f32) -> bool {
         let hit = self.hit(g, x, y);
-        self.ask_space_menu(hit)
+        self.ask_menu(hit)
     }
 
-    fn ask_space_menu(&mut self, hit: Hit) -> bool {
-        self.menu = match hit {
+    fn ask_menu(&mut self, hit: Hit) -> bool {
+        let kind = match hit {
             Hit::Space(i) => Some(MenuKind::Space(i)),
             // 창이 낮으면 레일에 공간이 다 보이지 않는다: 안 보이는 공간은 이 목록에서 고른다
             Hit::SpaceAdd => Some(MenuKind::Spaces),
-            _ => return false,
+            Hit::SideRow(i) => side_menu(&self.side_rows(), i),
+            _ => None,
         };
-        true
+        if kind.is_some() {
+            self.menu = kind;
+        }
+        kind.is_some()
     }
 
     // ---------- 고르기 ----------
@@ -1465,13 +1729,71 @@ impl App {
         }
     }
 
+    /// 이 공간에 고정한 것
+    fn pins(&self) -> &[Favorite] {
+        self.workspaces.current().map(|w| w.pins.as_slice()).unwrap_or_default()
+    }
+
+    /// 고정한 것을 한 줄 위·아래로
+    fn pin_nudge(&mut self, i: usize, up: bool) {
+        let j = if up { i.wrapping_sub(1) } else { i + 1 };
+        let Some(ws) = self.workspaces.current_mut().filter(|ws| i < ws.pins.len() && j < ws.pins.len()) else { return };
+        ws.pins.swap(i, j);
+        self.save_workspaces();
+    }
+
+    /// 고정한 것 i를 푼다
+    fn unpin(&mut self, i: usize) {
+        let Some(ws) = self.workspaces.current_mut().filter(|ws| i < ws.pins.len()) else { return };
+        ws.pins.remove(i);
+        self.clamp_side_scroll();
+        self.save_workspaces();
+    }
+
+    /// 고정한 것을 '모든 공간'(즐겨찾기)으로 옮긴다: 어느 작업 공간에서나 보이게.
+    /// 즐겨찾기 파일에 먼저 저장하고, 저장됐을 때만 이 공간에서 뺀다 (저장하지 못했는데 빼면 다음에 열 때 양쪽 모두에서 사라진다)
+    fn pin_to_common(&mut self, i: usize) {
+        let Some(f) = self.pins().get(i).cloned() else { return };
+        if self.favs.find(&f.path).is_none() {
+            let before = self.favs.clone();
+            self.favs.push(None, f);
+            if self.persist
+                && let Err(e) = favorites::save(&self.favs)
+            {
+                self.favs = before;
+                self.flash = Some((self.active, format!("즐겨찾기를 저장하지 못해 옮기지 않았어요: {e}")));
+                return;
+            }
+        }
+        self.unpin(i);
+    }
+
+    /// 즐겨찾기 항목을 '모든 공간'에서 빼서 지금 작업 공간에만 고정한다.
+    /// 작업 공간 파일에 먼저 저장하고, 저장됐을 때만 즐겨찾기에서 뺀다 (pin_to_common과 같은 이유)
+    fn fav_to_pins(&mut self, group: Option<usize>, index: usize) {
+        let Some(f) = self.favs.item(group, index).cloned() else { return };
+        let Some(ws) = self.workspaces.current_mut() else { return };
+        if ws.pin_index(&f.path).is_none() {
+            ws.pins.push(f);
+            if let Err(e) = self.try_save_workspaces() {
+                if let Some(ws) = self.workspaces.current_mut() {
+                    ws.pins.pop();
+                }
+                self.flash = Some((self.active, format!("작업 공간을 저장하지 못해 옮기지 않았어요: {e}")));
+                return;
+            }
+        }
+        self.favs.remove_item(group, index);
+        self.save_favorites();
+    }
+
     /// 사이드바 목록의 줄. 위에는 이 공간에 고정한 것(없으면 안내), 아래에는 '모든 공간': 구역 이름, 바로가기, 즐겨찾기.
     /// '모든 공간'은 줄이 적으면 목록 아래 끝에 붙고, 많아서 넘치면 고정한 것 바로 아래에 이어져 함께 스크롤된다
     fn side_rows(&self) -> Vec<SideRow> {
         let row = |kind, label: &str, path: Option<&str>, is_dir, indent, y, h| SideRow { kind, label: label.to_string(), path: path.map(str::to_string), is_dir, indent, y, h };
         let mut rows = Vec::new();
         let mut y = 0.0;
-        let pins = self.workspaces.current().map(|w| w.pins.as_slice()).unwrap_or_default();
+        let pins = self.pins();
         for f in pins {
             rows.push(row(SideKind::Pin, &f.name, Some(&f.path), f.is_dir, false, y, SIDE_ROW_H));
             y += SIDE_ROW_H;
@@ -1732,7 +2054,7 @@ impl App {
         self.renaming = false;
         self.flash = None;
         // ⌃-누르기는 오른쪽 단추와 같다
-        if mods.ctrl && self.ask_space_menu(hit) {
+        if mods.ctrl && self.ask_menu(hit) {
             return;
         }
         match hit {
@@ -1904,7 +2226,7 @@ impl App {
         let tab = self.panes[self.active].tab();
         let Some(e) = tab.cursor_entry() else { return };
         let name = e.name_string();
-        let detail = card_detail(&MacArt { kinds: &self.kinds }.type_name(tab, e), e.size);
+        let detail = card_detail(&self.art().type_name(tab, e), e.size);
         // 글은 카드에 보이는 줄까지만 넘긴다 (그릴 때마다 80줄을 다 배치하지 않게)
         let body = match &self.card.text {
             Some(s) if target.text => CardBody::Text(first_lines(s, (m.body.h() / MONO_LINE_H).ceil() as usize)),
@@ -2083,8 +2405,12 @@ impl App {
             now: listing::now_filetime(),
         };
         paint_pane_head(g, t, &scene);
-        paint_pane_list(g, &mut MacArt { kinds: &self.kinds }, t, &scene);
+        paint_pane_list(g, &mut self.art(), t, &scene);
         paint_pane_border(g, t, &scene);
+    }
+
+    fn art(&self) -> MacArt<'_> {
+        MacArt { kinds: &self.kinds, thumbs: &self.thumbs, scale: self.scale }
     }
 }
 
@@ -2113,9 +2439,11 @@ fn list_hint(tab: &Tab) -> Option<String> {
     }
 }
 
-/// 칸 그리기의 맥 갈고리: Finder 아이콘과 '종류' 이름 (썸네일은 아직 없다)
+/// 칸 그리기의 맥 갈고리: Finder 아이콘, 읽어 둔 썸네일, '종류' 이름
 struct MacArt<'a> {
     kinds: &'a RefCell<HashMap<String, String>>,
+    thumbs: &'a Thumbs,
+    scale: f32,
 }
 
 impl EntryArt<Gfx> for MacArt<'_> {
@@ -2125,8 +2453,12 @@ impl EntryArt<Gfx> for MacArt<'_> {
         }
     }
 
-    fn thumbnail(&mut self, _: &mut Gfx, _: &Tab, _: &Entry, _: R, _: f32, _: f32) -> bool {
-        false
+    /// 그림 파일이면 읽어 둔 썸네일을 그린다. 아직 없으면(읽는 중이거나 읽지 못한 그림이면) false: 파일 아이콘이 대신 보인다.
+    /// 여기서는 파일을 읽지 않는다: 없는 것은 App::take_thumbs가 지금 보이는 것 가운데서 찾아 뒷줄에 맡긴다
+    fn thumbnail(&mut self, g: &mut Gfx, tab: &Tab, e: &Entry, bx: R, size: f32, opacity: f32) -> bool {
+        let Some(pic) = thumb_key(tab, e, size, self.scale).and_then(|k| self.thumbs.get(&k)) else { return false };
+        g.picture_alpha(pic, bx, opacity);
+        true
     }
 
     /// 확장자가 같으면 같은 종류로 보고 한 번만 묻는다 (확장자 없는 파일은 파일마다 다를 수 있어 매번 묻는다)
@@ -2206,7 +2538,7 @@ fn traffic_lights(g: &Gfx, cy: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sakadu::favorites::Favorite;
+    use sakadu::favorites::Group;
 
     /// 시험용 폴더: 하위 폴더 둘, 파일 셋, 숨김 파일 하나
     fn demo() -> (std::path::PathBuf, String) {
@@ -2700,7 +3032,7 @@ mod tests {
         assert_eq!(a.take_menu().map(|(k, r)| (k, r.t)), Some((MenuKind::Space(0), tile.t)));
         a.mouse_down(&g, x, y, Mods { ctrl: true, ..Default::default() }, 1);
         assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Space(0)));
-        assert!(!a.right_down(&g, a.list_rect(0).unwrap().l + 60.0, 300.0), "only workspace tiles have a menu");
+        assert!(!a.right_down(&g, a.list_rect(0).unwrap().l + 60.0, 300.0), "the file list has no menu yet");
         // 색: 고르면 그 공간의 색이 되고, 지금 공간이면 강조 색도 바뀐다
         let before = a.theme.accent;
         a.pick_menu(MenuKind::Space(0), 2);
@@ -2737,7 +3069,12 @@ mod tests {
         for (kind, item) in [(MenuKind::Layout, 4), (MenuKind::View, 6), (MenuKind::Space(0), 0), (MenuKind::Space(12), 7), (MenuKind::Space(1500), 7), (MenuKind::Spaces, 0), (MenuKind::Spaces, 99), (MenuKind::Spaces, 100), (MenuKind::Spaces, 2500)] {
             assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
         }
+        // 사이드바 줄의 메뉴: 고정한 줄 번호, 즐겨찾기 줄 번호도 그대로 돌아온다
+        for (kind, item) in [(MenuKind::Pin(0), 0), (MenuKind::Pin(0), 3), (MenuKind::Pin(41), 2), (MenuKind::Fav(0), 0), (MenuKind::Fav(0), 1), (MenuKind::Fav(2500), 1)] {
+            assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
+        }
         assert_eq!(MenuKind::from_tag(-1), None);
+        assert_eq!((MenuKind::from_tag(6), MenuKind::from_tag(7)), (None, None), "kinds that do not exist");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2815,6 +3152,119 @@ mod tests {
         a.toggle_star(0);
         assert!(a.favorites().items.is_empty() && !a.is_marked(&downloads));
         assert_eq!(pin_names(&a), ["업무"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 메뉴의 줄 이름들
+    fn menu_labels(a: &App, kind: MenuKind) -> Vec<String> {
+        a.menu_items(kind).into_iter().map(|(label, _)| label).collect()
+    }
+
+    /// 고정한 줄의 메뉴(오른쪽 단추, ⌃-누르기): 위·아래로 옮기고 푼다. 맨 위 줄에는 위로가, 맨 아래 줄에는 아래로가 없다
+    #[test]
+    fn pin_row_menu_moves_and_unpins() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        for (path, is_dir) in [(work.clone(), true), (downloads.clone(), true), (util::join(&work, "예산.csv"), false)] {
+            a.toggle_pin(&path, is_dir);
+        }
+        assert_eq!(pin_names(&a), ["업무", "다운로드", "예산.csv"]);
+        // 첫 줄·가운데 줄·마지막 줄: 갈 수 있는 쪽만 있고, 옮기는 줄과 나머지 줄 사이에 구분선이 온다
+        assert_eq!(menu_labels(&a, MenuKind::Pin(0)), ["아래로 이동", "모든 공간에 두기", "고정 풀기"]);
+        assert_eq!(menu_labels(&a, MenuKind::Pin(1)), ["위로 이동", "아래로 이동", "모든 공간에 두기", "고정 풀기"]);
+        assert_eq!(menu_labels(&a, MenuKind::Pin(2)), ["위로 이동", "모든 공간에 두기", "고정 풀기"]);
+        assert_eq!([0, 1, 2].map(|p| a.menu_break(MenuKind::Pin(p))), [Some(1), Some(2), Some(1)]);
+        assert!(a.menu_items(MenuKind::Pin(1)).iter().all(|(_, on)| !on), "nothing is checked");
+        assert!(a.menu_items(MenuKind::Pin(3)).is_empty(), "there is no fourth pin");
+        // 오른쪽 단추: 메뉴를 그 줄에 열어 달라고 한다. ⌃-누르기도 같고, 그 줄을 열지는 않는다
+        let row = side_row(&a, "다운로드");
+        let (x, y) = mid(row);
+        assert_eq!(a.hit(&g, x, y), Hit::SideRow(1));
+        assert!(a.right_down(&g, x, y));
+        assert_eq!(a.take_menu(), Some((MenuKind::Pin(1), row)));
+        assert!(a.take_menu().is_none(), "the request is handed over once");
+        a.mouse_down(&g, x, y, Mods { ctrl: true, ..Default::default() }, 1);
+        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Pin(1)));
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(home.clone()), "the control-click did not open the row");
+        // 위로, 아래로 (첫 줄의 메뉴는 '아래로 이동'이 첫 줄이다)
+        a.pick_menu(MenuKind::Pin(1), 0);
+        assert_eq!(pin_names(&a), ["다운로드", "업무", "예산.csv"]);
+        a.pick_menu(MenuKind::Pin(0), 0);
+        assert_eq!(pin_names(&a), ["업무", "다운로드", "예산.csv"]);
+        a.pick_menu(MenuKind::Pin(1), 1);
+        assert_eq!(pin_names(&a), ["업무", "예산.csv", "다운로드"]);
+        // 고정 풀기: 마지막 줄 메뉴의 셋째 줄
+        a.pick_menu(MenuKind::Pin(2), 2);
+        assert_eq!(pin_names(&a), ["업무", "예산.csv"]);
+        // 없는 줄을 고르면 아무 일도 없다
+        a.pick_menu(MenuKind::Pin(1), 9);
+        a.pick_menu(MenuKind::Pin(7), 0);
+        assert_eq!(pin_names(&a), ["업무", "예산.csv"]);
+        // 하나만 남으면 옮기는 줄도 구분선도 없다
+        a.pick_menu(MenuKind::Pin(0), 2);
+        assert_eq!(pin_names(&a), ["예산.csv"]);
+        assert_eq!(menu_labels(&a, MenuKind::Pin(0)), ["모든 공간에 두기", "고정 풀기"]);
+        assert_eq!(a.menu_break(MenuKind::Pin(0)), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 고정한 줄은 '모든 공간'에 둘 수 있고, '모든 공간'의 즐겨찾기 항목은 이 작업 공간에만 두거나 뺄 수 있다.
+    /// 바로가기와 그룹 머리에는 메뉴가 없다
+    #[test]
+    fn rows_move_between_the_workspace_and_the_common_block() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        a.places = vec![("홈".to_string(), home.clone())];
+        a.toggle_pin(&work, true);
+        a.toggle_pin(&downloads, true);
+        // 모든 공간에 두기 (첫 줄 메뉴의 둘째 줄): 이 공간에서 빠지고 즐겨찾기의 그룹 없는 항목 끝으로 간다
+        a.pick_menu(MenuKind::Pin(0), 1);
+        assert_eq!(pin_names(&a), ["다운로드"]);
+        assert_eq!(a.favorites().items, [Favorite { name: "업무".into(), path: work.clone(), is_dir: true }]);
+        assert!(a.is_marked(&work) && a.flash.is_none());
+        // 그 줄을 오른쪽 단추로 누르면 즐겨찾기 항목의 메뉴를 그 줄에 열어 달라고 한다
+        let row = side_row(&a, "업무");
+        let (x, y) = mid(row);
+        assert!(a.right_down(&g, x, y));
+        assert_eq!(a.take_menu(), Some((MenuKind::Fav(0), row)));
+        assert_eq!(menu_labels(&a, MenuKind::Fav(0)), ["이 작업 공간에만 두기", "모든 공간에서 빼기"]);
+        assert_eq!(a.menu_break(MenuKind::Fav(0)), None);
+        // 이 작업 공간에만 두기: 즐겨찾기에서 빠지고 이 공간에 고정한 것의 끝으로 돌아온다
+        a.pick_menu(MenuKind::Fav(0), 0);
+        assert!(a.favorites().items.is_empty() && a.flash.is_none());
+        assert_eq!(pin_names(&a), ["다운로드", "업무"]);
+        // 이미 양쪽에 있는 것은 한쪽에서 빠지기만 한다 (겹쳐 들어가지 않는다)
+        a.favs.push(None, Favorite { name: "업무".into(), path: work.clone(), is_dir: true });
+        a.pick_menu(MenuKind::Pin(1), 1);
+        assert_eq!((pin_names(&a), a.favorites().items.len()), (vec!["다운로드".to_string()], 1));
+        a.workspaces.current_mut().unwrap().pin(&work, true);
+        a.pick_menu(MenuKind::Fav(0), 0);
+        assert_eq!((pin_names(&a), a.favorites().items.len()), (vec!["다운로드".to_string(), "업무".to_string()], 0));
+        // 그룹 안의 항목: 번호는 즐겨찾기 줄(그룹 머리도 한 줄)로 센다. 바로가기와 그룹 머리에는 메뉴가 없다
+        let budget = Favorite { name: "예산".into(), path: util::join(&work, "예산.csv"), is_dir: false };
+        a.favs.groups.push(Group { name: "묶음".into(), collapsed: false, items: vec![budget] });
+        for label in ["홈", "묶음"] {
+            let (x, y) = mid(side_row(&a, label));
+            assert!(matches!(a.hit(&g, x, y), Hit::SideRow(_)), "{label}");
+            assert!(!a.right_down(&g, x, y), "{label}");
+            assert!(a.take_menu().is_none(), "{label}");
+        }
+        assert!(a.menu_items(MenuKind::Fav(0)).is_empty(), "the group header has no menu");
+        let item = side_row(&a, "예산");
+        let (x, y) = mid(item);
+        assert!(a.right_down(&g, x, y));
+        assert_eq!(a.take_menu(), Some((MenuKind::Fav(1), item)));
+        // 모든 공간에서 빼기: 즐겨찾기에서만 없어진다
+        a.pick_menu(MenuKind::Fav(1), 1);
+        assert!(a.favorites().groups[0].items.is_empty());
+        assert_eq!(pin_names(&a), ["다운로드", "업무"]);
+        // 없는 줄을 고르면 아무 일도 없다 (그룹 머리의 번호, 없는 번호)
+        a.pick_menu(MenuKind::Fav(0), 1);
+        a.pick_menu(MenuKind::Fav(9), 0);
+        assert_eq!((a.favorites().groups.len(), pin_names(&a).len()), (1, 2));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3253,6 +3703,255 @@ mod tests {
         click_name(&mut a, &g, 0, "사진 6.png", none);
         assert!(a.take_previews().is_empty());
         assert_eq!(a.pics.last().unwrap().key.path, util::join(&dir, "사진 6.png"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 썸네일 시험용 폴더 '사진첩': 그림 파일 n개(내용은 그림이 아니다. 시험이 읽은 결과를 직접 넣는다),
+    /// 이름이 그림 같은 하위 폴더, 그림이 아닌 파일 둘
+    fn thumbs_demo(n: usize) -> (std::path::PathBuf, String) {
+        let (root, home) = demo();
+        let dir = root.join("사진첩");
+        std::fs::create_dir_all(dir.join("폴더.png")).unwrap();
+        for i in 0..n {
+            std::fs::write(dir.join(format!("사진 {i:03}.jpg")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("메모.txt"), "글").unwrap();
+        std::fs::write(dir.join("보고서.docx"), b"x").unwrap();
+        (root, util::join(&home, "사진첩"))
+    }
+
+    /// 쌓인 폴더 읽기만 바로 처리한다 (settle과 달리 썸네일은 읽지 않는다)
+    fn list_now(a: &mut App) {
+        for r in a.take_requests() {
+            let result = listing::list_dir(&r.dir);
+            a.on_listed(r.tab, r.generation, result);
+        }
+    }
+
+    /// 아이콘 보기의 썸네일: 보이는 그림 파일만, 한 번에 THUMB_JOBS개까지만 읽는다. 폴더와 그림이 아닌 파일은 요청하지 않는다
+    #[test]
+    fn thumbnails_are_read_a_few_at_a_time_for_visible_pictures_only() {
+        let (root, dir) = thumbs_demo(7);
+        let (mut a, _g) = app(&dir);
+        assert!(a.take_thumbs().is_empty(), "the details view shows no thumbnails");
+        a.set_view(0, ViewMode::Large);
+        // 보이는 그림 파일은 일곱인데 둘만 읽기 시작하고, 나머지는 기다린다
+        let mut running = a.take_thumbs();
+        assert_eq!((running.len(), a.thumbs.queue.len()), (THUMB_JOBS, 7 - THUMB_JOBS));
+        assert!(a.take_thumbs().is_empty(), "nothing more starts while two are being read");
+        // 하나를 다 읽을 때마다 다음 하나가 시작된다. 읽는 중인 것은 한도를 넘지 않는다
+        let mut asked: Vec<String> = Vec::new();
+        while let Some(r) = running.pop() {
+            asked.push(r.key.file.path.clone());
+            a.on_thumb(&r, Picture::blank(8, 8));
+            running.extend(a.take_thumbs());
+            assert!(running.len() <= THUMB_JOBS, "{} at once", running.len());
+            assert_eq!(a.thumbs.loading.len(), running.len());
+        }
+        // 요청한 것은 그림 파일 일곱뿐이다: 폴더(이름이 그림 같아도), 글 파일, 문서는 요청하지 않는다
+        asked.sort();
+        let pictures: Vec<String> = (0..7).map(|i| util::join(&dir, &format!("사진 {i:03}.jpg"))).collect();
+        assert_eq!(asked, pictures);
+        let t = a.pane(0).tab();
+        for name in ["폴더.png", "메모.txt", "보고서.docx"] {
+            let e = t.entries.iter().find(|e| e.name_string() == name).unwrap_or_else(|| panic!("no entry named {name}"));
+            assert!(thumb_key(t, e, THUMB, a.scale).is_none(), "{name}");
+        }
+        // 다 읽은 뒤에는 요청이 없다
+        assert!(a.take_thumbs().is_empty() && a.thumbs.queue.is_empty());
+        assert_eq!(a.thumbs.cache.len(), 7);
+        // 같은 폴더를 두 칸에서 아이콘으로 봐도 그림마다 한 번만 읽는다
+        let (mut b, _g) = app(&dir);
+        b.set_view(0, ViewMode::Large);
+        b.set_view(1, ViewMode::Large);
+        let mut read = 0;
+        loop {
+            let reqs = b.take_thumbs();
+            if reqs.is_empty() {
+                break;
+            }
+            assert!(reqs.len() <= THUMB_JOBS);
+            for r in reqs {
+                read += 1;
+                b.on_thumb(&r, Picture::blank(8, 8));
+            }
+        }
+        assert_eq!(read, 7);
+        // 읽을 픽셀 수의 단계: 그림 자리 × 화면 배율을 올린 값. 가장 큰 단계를 넘지 않는다
+        let px = [(48.0, 1.0), (48.0, 2.0), (96.0, 1.0), (96.0, 2.0), (256.0, 1.0), (256.0, 2.0), (256.0, 3.0)].map(|(size, scale)| thumb_px(size, scale));
+        assert_eq!(px, [64, 128, 128, 256, 256, 512, 512]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 기다리는 썸네일은 지금 보이는 것을 따른다: 스크롤로 지나간 것, 떠난 폴더와 가려진 탭의 것은 읽기 전에 빠진다.
+    /// 이미 읽기 시작한 것은 늦게 와도 남겨 둔다
+    #[test]
+    fn queued_thumbnails_follow_what_is_visible_now() {
+        let (root, dir) = thumbs_demo(200);
+        let (mut a, g) = app(&dir);
+        a.set_view(0, ViewMode::Medium);
+        let first = a.take_thumbs();
+        assert_eq!(first.len(), THUMB_JOBS);
+        let waiting: Vec<ThumbKey> = a.thumbs.queue.iter().cloned().collect();
+        assert!(!waiting.is_empty() && waiting.len() < 100, "only the visible part of the folder waits: {}", waiting.len());
+        // 맨 아래로 스크롤: 위쪽에서 기다리던 것은 빠지고, 지금 보이는 아래쪽 것이 기다린다
+        let l = a.list_rect(0).unwrap();
+        a.scroll(&g, l.l + 60.0, l.t + 60.0, 1.0e6);
+        assert!(a.pane(0).tab().scroll > 0.0);
+        assert!(a.take_thumbs().is_empty(), "two are still being read");
+        assert!(!a.thumbs.queue.is_empty() && a.thumbs.queue.iter().all(|k| !waiting.contains(k)), "nothing that scrolled away still waits");
+        assert!(a.thumbs.queue.iter().any(|k| k.file.path.ends_with("사진 199.jpg")));
+        // 읽던 것이 끝나면 지금 보이는 것을 읽기 시작한다. 지나간 것의 결과도 남겨 둔다
+        for r in &first {
+            a.on_thumb(r, Picture::blank(8, 8));
+        }
+        let next = a.take_thumbs();
+        assert_eq!(next.len(), THUMB_JOBS);
+        assert!(next.iter().all(|r| !waiting.contains(&r.key) && first.iter().all(|f| f.key != r.key)));
+        assert!(first.iter().all(|r| a.thumbs.get(&r.key).is_some()), "a result that came late is kept");
+        // 다른 폴더로 옮기면 기다리던 것이 모두 빠진다 (폴더를 읽기 전에도, 읽은 뒤에도)
+        assert!(!a.thumbs.queue.is_empty());
+        a.navigate(0, Location::Dir(util::join(&dir, "폴더.png")), None);
+        assert!(a.take_thumbs().is_empty() && a.thumbs.queue.is_empty());
+        list_now(&mut a);
+        for r in &next {
+            a.on_thumb(r, Picture::blank(8, 8));
+        }
+        assert!(a.take_thumbs().is_empty() && a.thumbs.queue.is_empty() && a.thumbs.loading.is_empty());
+        // 돌아오면 읽어 둔 것은 다시 읽지 않고 나머지만 읽는다
+        a.go_back(0);
+        list_now(&mut a);
+        let again = a.take_thumbs();
+        assert_eq!(again.len(), THUMB_JOBS);
+        assert!(again.iter().all(|r| first.iter().all(|f| f.key != r.key)), "what was read is not read again");
+        // 다른 탭이 앞에 오면 가려진 탭의 것은 기다리지 않고, 그 탭으로 돌아오면 다시 기다린다
+        assert!(!a.thumbs.queue.is_empty());
+        a.new_tab(0);
+        assert!(a.take_thumbs().is_empty() && a.thumbs.queue.is_empty());
+        a.activate_tab(0, 0);
+        assert!(a.take_thumbs().is_empty() && !a.thumbs.queue.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 읽어 둔 썸네일은 한도(개수, 바이트)까지만 남기고, 넘으면 가장 오래 안 쓴 것부터 버린다. 지금 보이는 것은 버리지 않는다
+    #[test]
+    fn thumbnail_cache_drops_the_least_recently_used() {
+        let key = |i: usize| ThumbKey { file: CardKey { path: format!("/사진/{i}.jpg"), modified: 1, size: 1 }, px: 128 };
+        // i번째 그림 하나만 보이는 화면: 한 변이 side 픽셀인 썸네일을 읽어 넣는다 (그 앞의 것들은 화면에 없다)
+        let show = |t: &mut Thumbs, i: usize, side: usize| {
+            t.sync(vec![key(i)]);
+            for r in t.start() {
+                t.finish(&r.key, Picture::blank(side, side));
+            }
+        };
+        let mut t = Thumbs::default();
+        for i in 0..THUMBS_MAX {
+            show(&mut t, i, 4);
+        }
+        assert_eq!((t.cache.len(), t.bytes), (THUMBS_MAX, THUMBS_MAX * 4 * 4 * 4));
+        // 0번을 다시 본다 (읽어 둔 것이라 다시 읽지 않는다): 가장 최근에 쓴 것이 된다
+        t.sync(vec![key(0)]);
+        assert!(t.start().is_empty());
+        // 새 것 둘이 들어오면 가장 오래 안 쓴 1번과 2번이 빠지고, 0번과 3번은 남는다
+        show(&mut t, THUMBS_MAX, 4);
+        show(&mut t, THUMBS_MAX + 1, 4);
+        assert_eq!((t.cache.len(), t.bytes), (THUMBS_MAX, THUMBS_MAX * 4 * 4 * 4));
+        assert!(t.get(&key(0)).is_some() && t.get(&key(1)).is_none() && t.get(&key(2)).is_none() && t.get(&key(3)).is_some());
+        assert!(t.get(&key(THUMBS_MAX)).is_some() && t.get(&key(THUMBS_MAX + 1)).is_some());
+        // 읽지 못한 그림도 한 자리를 차지하지만 메모리는 쓰지 않는다
+        t.sync(vec![key(9000)]);
+        for r in t.start() {
+            t.finish(&r.key, None);
+        }
+        assert_eq!((t.cache.len(), t.bytes), (THUMBS_MAX, (THUMBS_MAX - 1) * 4 * 4 * 4));
+        // 바이트 한도: 큰 썸네일은 개수가 한도에 못 미쳐도 오래 안 쓴 것부터 빠진다
+        let mut t = Thumbs::default();
+        let fit = THUMB_BYTES / (1024 * 1024 * 4);
+        assert!(fit < THUMBS_MAX);
+        for i in 0..fit + 3 {
+            show(&mut t, i, 1024);
+        }
+        assert_eq!((t.cache.len(), t.bytes), (fit, fit * 1024 * 1024 * 4));
+        assert!(t.bytes <= THUMB_BYTES && t.get(&key(2)).is_none() && t.get(&key(3)).is_some());
+        // 지금 보이는 것이 한도보다 많으면 한도를 넘겨 둔다: 보이는 것을 버리면 곧바로 다시 읽게 되어 끝나지 않는다
+        let mut t = Thumbs::default();
+        let all: Vec<ThumbKey> = (0..THUMBS_MAX + 5).map(key).collect();
+        let mut read = 0;
+        loop {
+            t.sync(all.clone());
+            let reqs = t.start();
+            if reqs.is_empty() {
+                break;
+            }
+            assert!(reqs.len() <= THUMB_JOBS);
+            for r in reqs {
+                read += 1;
+                t.finish(&r.key, Picture::blank(4, 4));
+            }
+        }
+        assert_eq!((read, t.cache.len()), (THUMBS_MAX + 5, THUMBS_MAX + 5));
+        // 화면이 바뀌면 다음 것을 넣을 때 한도 안으로 돌아온다
+        show(&mut t, 9000, 4);
+        assert_eq!(t.cache.len(), THUMBS_MAX);
+        assert!(t.get(&key(9000)).is_some());
+    }
+
+    /// 읽지 못한 그림은 적어 두고 다시 요청하지 않는다. 파일이 바뀌면(크기, 수정한 때) 다른 그림으로 보고 다시 읽는다
+    #[test]
+    fn a_picture_that_could_not_be_read_is_not_asked_for_again() {
+        let (root, dir) = thumbs_demo(1);
+        let (mut a, _g) = app(&dir);
+        a.set_view(0, ViewMode::Large);
+        let reqs = a.take_thumbs();
+        assert_eq!(reqs.len(), 1);
+        a.on_thumb(&reqs[0], None);
+        assert!(a.take_thumbs().is_empty() && a.thumbs.queue.is_empty(), "not asked for again");
+        assert!(a.take_thumbs().is_empty(), "nor on the paint after that");
+        assert!(a.thumbs.get(&reqs[0].key).is_none() && a.thumbs.cache.len() == 1, "the failure is remembered, there is no picture");
+        // 파일이 바뀌었다: 다시 읽은 목록의 그 파일은 다른 그림이다.
+        // settle은 실제로 읽는다. 내용이 그림이 아니라 이번에도 읽지 못하고, 그 뒤로는 요청이 없다
+        std::fs::write(root.join("사진첩").join("사진 000.jpg"), b"not a picture either").unwrap();
+        a.refresh(0);
+        list_now(&mut a);
+        a.settle();
+        assert_eq!(a.thumbs.cache.len(), 2, "the changed file was tried once more");
+        assert!(a.thumbs.cache.values().all(|t| t.pic.is_none()));
+        assert!(a.take_thumbs().is_empty() && a.thumbs.loading.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// settle(시험·그림)은 보이는 썸네일을 바로 읽는다: 그림은 그 아이콘 크기에 맞게 줄여 읽고, 읽지 못한 것은 그렇게 적어 둔다
+    #[test]
+    fn settle_reads_the_visible_thumbnails() {
+        let (root, dir) = preview_demo();
+        let (mut a, _g) = app(&dir);
+        assert!(a.thumbs.cache.is_empty(), "nothing is read for the details view");
+        a.set_view(0, ViewMode::Large);
+        a.settle();
+        assert!(a.take_thumbs().is_empty(), "everything visible was read");
+        let key = |name: &str| {
+            let t = a.pane(0).tab();
+            let e = t.entries.iter().find(|e| e.name_string() == name).unwrap_or_else(|| panic!("no entry named {name}"));
+            thumb_key(t, e, THUMB, a.scale)
+        };
+        // 큰 아이콘(96pt)을 2배 화면에 그릴 192픽셀을 단계로 올린 256픽셀까지 줄여 읽는다 (원본은 480×320)
+        for name in ["노을.bmp", "바다.bmp"] {
+            let k = key(name).unwrap_or_else(|| panic!("{name} is a picture"));
+            assert_eq!(k.px, 256);
+            let pic = a.thumbs.get(&k).unwrap_or_else(|| panic!("{name} was not read"));
+            assert!((129..=256).contains(&pic.longest()), "{name}: {:?}", pic.size());
+        }
+        assert!(a.thumbs.get(&key("깨진 그림.jpg").unwrap()).is_none());
+        assert!(key("폴더").is_none() && key("메모.txt").is_none() && key("보고서.docx").is_none());
+        assert_eq!(a.thumbs.cache.len(), 3, "two pictures and one that could not be read");
+        // 아이콘 크기를 바꾸면 그 크기의 단계로 다시 읽는다 (보통 아이콘 48pt는 128픽셀)
+        a.set_view(0, ViewMode::Medium);
+        let reqs = a.take_thumbs();
+        assert_eq!(reqs.len(), THUMB_JOBS);
+        assert!(reqs.iter().all(|r| r.key.px == 128));
+        // 자세히 보기로 돌아가면 기다리는 것이 없다
+        a.set_view(0, ViewMode::Details);
+        assert!(a.take_thumbs().is_empty() && a.thumbs.queue.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 

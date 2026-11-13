@@ -50,6 +50,7 @@ impl App {
         let lost = match self.edit_mode {
             EditMode::Rename(p) => self.rename_rect(p).is_none(),
             EditMode::FavRename(row) => self.fav_rename_rect(row).is_none(),
+            EditMode::PinRename(i) => self.pin_rename_rect(i).is_none(),
             _ => false,
         };
         if lost {
@@ -95,6 +96,7 @@ impl App {
         let ren = match self.edit_mode {
             EditMode::Rename(p) => self.rename_rect(p).map(|r| center(r, 4.0, 4.0)),
             EditMode::FavRename(row) => self.fav_rename_rect(row).map(|r| center(r, 4.0, 4.0)),
+            EditMode::PinRename(i) => self.pin_rename_rect(i).map(|r| center(r, 4.0, 4.0)),
             EditMode::WorkspaceRename => Some(center(self.workspace_rename_rect(), 4.0, 4.0)),
             _ => None,
         };
@@ -222,6 +224,10 @@ impl App {
     pub(super) fn commit_rename_with(&mut self, enter: bool) {
         if let EditMode::FavRename(row) = self.edit_mode {
             self.commit_fav_rename(row);
+            return;
+        }
+        if let EditMode::PinRename(i) = self.edit_mode {
+            self.commit_pin_rename(i);
             return;
         }
         if self.edit_mode == EditMode::WorkspaceRename {
@@ -474,7 +480,7 @@ impl App {
     /// 목록을 클릭하면 이름 바꾸기는 확정, 주소 입력은 취소 (탐색기와 같음)
     pub(super) fn end_edits_for_click(&mut self) {
         match self.edit_mode {
-            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename => self.commit_rename(),
+            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::PinRename(_) | EditMode::WorkspaceRename => self.commit_rename(),
             EditMode::Address(_) => self.cancel_edit(),
             EditMode::None => {}
         }

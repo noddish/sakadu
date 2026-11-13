@@ -311,7 +311,7 @@ impl App {
     pub(super) fn side_wheel(&mut self, dy: f32) {
         self.side_scroll += dy;
         self.side_clamp_scroll();
-        if matches!(self.edit_mode, EditMode::FavRename(_)) {
+        if matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::PinRename(_)) {
             self.layout_edits();
         }
         // 줄이 밀렸으니 강조·말풍선은 마우스 아래 새 줄로
@@ -329,6 +329,23 @@ impl App {
         }
         let l = r.l + label_x(row);
         Some(R::new(l - 4.0, r.t + 3.0, r.r - 6.0, r.b - 3.0))
+    }
+
+    /// 고정한 줄의 이름 바꾸기 입력 상자 자리 (그 줄의 이름 칸). 줄이 목록 밖이면 None
+    pub(super) fn pin_rename_rect(&self, i: usize) -> Option<R> {
+        let r = self.side_item_rect(Side::Pin(i))?;
+        let list = self.side_list();
+        if r.t < list.t - 1.0 || r.b > list.b + 1.0 {
+            return None;
+        }
+        Some(R::new(r.l + 32.0, r.t + 3.0, r.r - 6.0, r.b - 3.0))
+    }
+
+    /// 고정한 줄을 끌어 놓을 자리: 그 앞에 끼워 넣을 줄 번호 (0 ~ 줄 수). 줄의 위쪽 절반이면 그 줄 앞, 아래쪽 절반이면 그 줄 뒤
+    pub(super) fn pin_drop_slot(&self, y: f32) -> Option<usize> {
+        let (slots, _) = self.side_slots();
+        let rows: Vec<R> = slots.into_iter().filter(|(_, s)| matches!(s, Slot::Item(Side::Pin(_)))).map(|(r, _)| self.side_at(r)).collect();
+        (!rows.is_empty()).then(|| rows.iter().position(|r| y < (r.t + r.b) / 2.0).unwrap_or(rows.len()))
     }
 
     /// 끄는 위치 y 아래 즐겨찾기 줄과 그 줄의 아래쪽 절반인지. 첫 줄 위면 첫 줄 위쪽, 마지막 줄 아래면 마지막 줄 아래쪽
@@ -432,7 +449,7 @@ impl App {
         }
         if self.side_panel() != Some(Panel::Main) {
             // 즐겨찾기 줄과 작업 공간 이름이 사라지면 그 이름 입력은 확정하고 키보드는 칸으로
-            if matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::WorkspaceRename) {
+            if matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::PinRename(_) | EditMode::WorkspaceRename) {
                 self.commit_rename();
             }
             self.fav_blur();
@@ -516,7 +533,7 @@ impl App {
         }
         self.peek_leaving = false;
         // 끌거나 이름을 바꾸는 중, 키보드가 즐겨찾기에 있을 때, 패널의 메뉴가 떠 있을 때는 닫지 않는다
-        if !self.side_floating() || !matches!(self.drag, Drag::None) || matches!(self.edit_mode, EditMode::FavRename(_)) || self.fav_focus || self.menu_open {
+        if !self.side_floating() || !matches!(self.drag, Drag::None) || matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::PinRename(_)) || self.fav_focus || self.menu_open {
             return;
         }
         // 그 사이 돌아왔으면 그대로 둔다
@@ -608,6 +625,8 @@ impl App {
             _ => {}
         }
         let Some(loc) = self.side_path(s) else { return };
+        // 키보드가 사이드바에 있었으면 칸으로 돌려준다: 연 곳의 목록을 바로 다닐 수 있게 (고정한 곳·즐겨찾기를 열 때와 같다)
+        self.fav_blur();
         let p = self.active;
         if new_tab {
             self.new_tab(p, Some(loc), true);
@@ -635,12 +654,13 @@ impl App {
             }
             Side::Fav(row) => self.fav_mouse_down(row, y, dbl),
             Side::FavEmpty | Side::PinEmpty | Side::CommonHead => {}
-            Side::Pin(_) | Side::Computer => self.side_open(s, key_down(VK_CONTROL)),
+            Side::Pin(i) => self.pin_mouse_down(i, y),
+            Side::Computer => self.side_open(s, key_down(VK_CONTROL)),
         }
     }
 
     /// 그 줄·단추의 화면 자리
-    fn side_item_rect(&self, s: Side) -> Option<R> {
+    pub(super) fn side_item_rect(&self, s: Side) -> Option<R> {
         if let Some(i) = self.side_minis().iter().position(|m| *m == s) {
             return self.side_mini_rect(i);
         }
@@ -792,7 +812,7 @@ impl App {
         // 드라이브 수가 바뀌면 아래 줄들이 밀린다: 이름 바꾸기 상자와 마우스 아래 줄을 다시 맞춘다 (시작 화면의 드라이브 카드도)
         self.side_clamp_scroll();
         self.start_changed();
-        if matches!(self.edit_mode, EditMode::FavRename(_)) {
+        if matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::PinRename(_)) {
             self.layout_edits();
         }
         self.invalidate();
@@ -871,16 +891,27 @@ impl App {
         let is_current = |path: &str| cur_dir.as_deref().is_some_and(|d| util::eq_path(d, path));
         let hover = self.hover;
         let fav_rows = self.favs.rows();
-        let sel_row = self.fav_focus.then(|| fav_rows.get(self.fav_sel).copied()).flatten();
+        // 키보드 포커스: 위쪽 줄(고정한 곳·내 PC)에 있으면 그 줄, 아니면 즐겨찾기 줄
+        let sel_top = self.fav_focus.then(|| self.top_sel_now()).flatten();
+        let sel_row = (self.fav_focus && sel_top.is_none()).then(|| fav_rows.get(self.fav_sel).copied()).flatten();
         let flash_row = self.fav_flash;
         let editing = match self.edit_mode {
             EditMode::FavRename(r) => Some(r),
+            _ => None,
+        };
+        let editing_pin = match self.edit_mode {
+            EditMode::PinRename(i) => Some(i),
             _ => None,
         };
         let renaming_space = self.edit_mode == EditMode::WorkspaceRename;
         // 끌어서 옮기는 중: (끄는 줄, 놓을 줄, 아래쪽 절반)
         let moving = match self.drag {
             Drag::FavMove { from, y } => self.fav_drop_row(y).map(|(at, below)| (from, at, below)),
+            _ => None,
+        };
+        // 고정한 줄을 끌어서 옮기는 중: (끄는 줄, 끼워 넣을 자리). 제자리(그 줄의 바로 앞뒤)면 선을 그리지 않는다
+        let pin_moving = match self.drag {
+            Drag::PinMove { from, y } => self.pin_drop_slot(y).map(|slot| (from, slot)),
             _ => None,
         };
         let side_drop = self.side_drop;
@@ -959,7 +990,18 @@ impl App {
                     let Some(f) = pins.get(i) else { continue };
                     side_row_bg(g, &t, r, f.is_dir && is_current(&f.path), hover == Hit::Side(s));
                     g.icon(pin_icons[i], icon_at(r, r.l + 10.0));
-                    g.text(&f.name, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                    if editing_pin == Some(i) {
+                        // 이름을 바꾸는 중: 입력 상자 테두리만 (글자는 입력 상자가 그린다)
+                        let er = R::new(r.l + 32.0, r.t + 3.0, r.r - 6.0, r.b - 3.0);
+                        g.fill_round(er, R_ROW, t.pane);
+                        g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
+                    } else {
+                        let dragged = pin_moving.is_some_and(|(from, _)| from == i);
+                        g.text(&f.name, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, if dragged { t.faint } else { t.text });
+                        if sel_top == Some(fav_ui::TopSel::Pin(i)) {
+                            g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
+                        }
+                    }
                 }
                 Side::PinEmpty => {
                     let how = add_key.as_deref().map(|k| format!("책갈피나 {k}로 고정해 보세요")).unwrap_or_else(|| "책갈피로 고정해 보세요".to_string());
@@ -1036,6 +1078,9 @@ impl App {
                         g.glyph(0xEC4E, R::new(ir.l, r.t, ir.r, r.b), false, t.dim);
                     }
                     g.text("내 PC", R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                    if sel_top == Some(fav_ui::TopSel::Computer) {
+                        g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
+                    }
                 }
             }
         }
@@ -1054,6 +1099,15 @@ impl App {
                 }
             };
             if let Some(ly) = line_y {
+                let ly = ly + dy;
+                g.fill_round(R::new(dx + ROW_L + 8.0, ly - 1.5, dx + rr - 8.0, ly + 1.5), 1.5, t.accent);
+            }
+        }
+        // 고정한 줄을 끌어서 옮길 자리: 줄 사이 선
+        if let Some((from, slot)) = pin_moving.filter(|(from, slot)| *slot != *from && *slot != *from + 1) {
+            let rows: Vec<R> = slots.iter().filter(|(_, s)| matches!(s, Slot::Item(Side::Pin(_)))).map(|(r, _)| *r).collect();
+            let ly = rows.get(slot).map(|r| r.t).or_else(|| rows.last().map(|r| r.b));
+            if let Some(ly) = ly.filter(|_| from < rows.len()) {
                 let ly = ly + dy;
                 g.fill_round(R::new(dx + ROW_L + 8.0, ly - 1.5, dx + rr - 8.0, ly + 1.5), 1.5, t.accent);
             }

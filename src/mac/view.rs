@@ -1,6 +1,6 @@
 //! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름).
-//! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인·미리 보기 카드의 그림과 글 읽기는 뒷줄에서 하고
-//! 메인 줄(dispatch)로 돌려받는다.
+//! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인·미리 보기 카드의 그림과 글 읽기·아이콘 보기의 썸네일 읽기는
+//! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods};
@@ -100,11 +100,16 @@ define_class!(
             let Some(ns) = NSGraphicsContext::currentContext() else { return };
             let mut g = Gfx::for_context(&ns.CGContext());
             let size = self.bounds().size;
+            // 화면 배율 (레티나는 2): 썸네일을 몇 픽셀로 읽을지 정한다
+            let scale = self.window().map_or(2.0, |w| w.backingScaleFactor() as f32);
             with_app(|a| {
+                a.scale = scale;
                 a.resize(size.width as f32, size.height as f32);
                 a.paint(&mut g);
             });
             self.sync_field();
+            // 방금 그린 화면에 보이는데 아직 없는 썸네일을 읽기 시작한다
+            pump_thumbs();
         }
 
         /// 제목 표시줄 자리까지 이 뷰가 덮고 있다. 기본값(true)이면 그 자리의 클릭이 창 끌기로만 쓰여 도구 막대 단추가 눌리지 않는다
@@ -133,7 +138,8 @@ define_class!(
             self.after_input();
         }
 
-        /// 오른쪽 단추: 작업 공간 아이콘이면 그 공간의 메뉴 (색, 이름 바꾸기, 지우기)
+        /// 오른쪽 단추: 작업 공간 아이콘이면 그 공간의 메뉴 (색, 이름 바꾸기, 지우기),
+        /// 사이드바의 고정한 줄이나 즐겨찾기 항목이면 그 줄의 메뉴 (옮기기, '모든 공간'에 두고 빼기, 고정 풀기)
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, e: &NSEvent) {
             let (x, y) = self.point(e);
@@ -196,7 +202,7 @@ define_class!(
             self.after_input();
         }
 
-        /// 메뉴(도구 막대 단추, 작업 공간 아이콘)에서 고른 줄. tag에 메뉴 종류와 줄 번호가 들어 있다 (MenuKind::tag)
+        /// 메뉴(도구 막대 단추, 작업 공간 아이콘, 사이드바 줄)에서 고른 줄. tag에 메뉴 종류와 줄 번호가 들어 있다 (MenuKind::tag)
         #[unsafe(method(pickMenu:))]
         fn pick_menu(&self, sender: &NSMenuItem) {
             let Some((kind, item)) = MenuKind::from_tag(sender.tag()) else { return };
@@ -284,14 +290,14 @@ impl SakaduView {
         }
     }
 
-    /// 단추(도구 막대 단추, 작업 공간 아이콘) 아래에 맥 기본 메뉴를 연다: 이름, 지금 것에 체크. 고르면 pickMenu:로 온다.
+    /// 단추(도구 막대 단추, 작업 공간 아이콘)나 사이드바 줄 아래에 맥 기본 메뉴를 연다: 이름, 지금 것에 체크. 고르면 pickMenu:로 온다.
     /// 메뉴가 떠 있는 동안 이 함수는 돌아오지 않으므로 App을 빌린 채로 부르지 않는다
     fn pop_menu(&self, kind: MenuKind, anchor: sakadu::draw::R) {
         let mtm = self.mtm();
         let Some((items, brk)) = with_app(|a| (a.menu_items(kind), a.menu_break(kind))) else { return };
         let menu = NSMenu::new(mtm);
         for (i, (title, on)) in items.iter().enumerate() {
-            // 구분선: 보기 방식과 숨김 항목 보기 사이, 공간 색과 그 밖의 줄 사이
+            // 구분선: 보기 방식과 숨김 항목 보기 사이, 공간 색과 그 밖의 줄 사이, 고정한 줄을 옮기는 줄과 그 밖의 줄 사이
             if brk == Some(i) {
                 menu.addItem(&NSMenuItem::separatorItem(mtm));
             }
@@ -300,7 +306,7 @@ impl SakaduView {
             it.setTag(kind.tag(i));
             it.setState(if *on { NSControlStateValueOn } else { NSControlStateValueOff });
         }
-        // 뷰는 위아래를 뒤집어 쓰므로(왼쪽 위가 0) 단추 아래 끝이 곧 메뉴의 위
+        // 뷰는 위아래를 뒤집어 쓰므로(왼쪽 위가 0) 단추(줄) 아래 끝이 곧 메뉴의 위
         menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(anchor.l as f64, anchor.b as f64 + 4.0), Some(self));
     }
 
@@ -410,6 +416,23 @@ fn pump() {
         if !NSWorkspace::sharedWorkspace().openURL(&url) {
             sakadu::diag::log(|| format!("open failed: {f}"));
         }
+    }
+}
+
+/// 아이콘 보기의 썸네일을 뒷줄에서 읽어 메인 줄로 돌려받는다. App::take_thumbs가 지금 보이는데 아직 없는 것만,
+/// 읽는 중인 것이 둘을 넘지 않게 내준다. 그린 뒤(drawRect)마다 부르므로 스크롤하거나 폴더를 옮기면 그때 보이는 것을 읽는다.
+/// 하나를 다 읽으면 다음 것을 이어서 읽고 다시 그린다
+fn pump_thumbs() {
+    let Some(reqs) = with_app(|a| a.take_thumbs()) else { return };
+    for r in reqs {
+        std::thread::spawn(move || {
+            let pic = crate::app::load_thumb(&r);
+            DispatchQueue::main().exec_async(move || {
+                with_app(|a| a.on_thumb(&r, pic));
+                pump_thumbs();
+                redraw();
+            });
+        });
     }
 }
 

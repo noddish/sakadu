@@ -1,11 +1,18 @@
 //! 사이드바 목록의 동작. 즐겨찾기('모든 공간'): 열기·추가·이름 바꾸기·그룹·정렬·메뉴·키보드·끌어서 옮기기.
 //! 이 공간에 고정한 것(작업 공간마다 따로): 책갈피·Ctrl+D·끌어 놓기로 고정, 열기, 순서, '모든 공간'으로 옮기기.
 //! 줄 배치와 그리기는 sidebar.rs. 그룹은 그 자리에서 접고 펼치고, 표시 이름·순서·그룹은 사용자가 정한다.
-//! Ctrl+B는 키보드를 즐겨찾기 목록으로 옮긴다(다시 누르거나 Esc면 칸으로)
+//! Ctrl+B는 키보드를 사이드바 목록으로 옮긴다(다시 누르거나 Esc면 칸으로). ↑↓는 화면 순서대로 고정한 곳 → 내 PC → 즐겨찾기를 오간다
 
 use super::sidebar::SIDE_ROW_H;
 use super::*;
 use crate::favorites::{self, Favorite, Row, SortBy};
+
+/// 키보드가 즐겨찾기 줄이 아니라 그 위의 줄에 있을 때 그 줄 (지금 작업 공간에 고정한 곳의 번호, 또는 내 PC)
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum TopSel {
+    Pin(usize),
+    Computer,
+}
 
 /// 네이티브 팝업 메뉴. id 0은 구분선. 고른 id(없으면 0)
 pub(super) fn popup_menu(hwnd: HWND, pt: POINT, items: &[(u32, &str)]) -> u32 {
@@ -136,7 +143,7 @@ pub(super) fn show_fav_sort_menu(hwnd: HWND, pt: POINT) {
 /// 이 공간에 고정한 줄의 오른쪽 버튼 메뉴
 pub(super) fn show_pin_menu(hwnd: HWND, index: usize, pt: POINT) {
     let Some((is_dir, count)) = with_app(|a| a.pins().get(index).map(|f| (f.is_dir, a.pins().len()))).flatten() else { return };
-    let mut items: Vec<(u32, &str)> = vec![(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, "")];
+    let mut items: Vec<(u32, &str)> = vec![(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, ""), (7, "이름 바꾸기\tF2")];
     if index > 0 {
         items.push((3, "위로 이동"));
     }
@@ -151,6 +158,7 @@ pub(super) fn show_pin_menu(hwnd: HWND, index: usize, pt: POINT) {
         4 => a.pin_nudge(index, false),
         5 => a.pin_to_common(index),
         6 => a.unpin(index),
+        7 => a.begin_pin_rename(index),
         _ => {}
     });
 }
@@ -179,9 +187,114 @@ impl App {
         }
         self.fav_focus = true;
         self.fav_sel = self.fav_sel.min(self.favs.rows().len().saturating_sub(1));
-        self.fav_ensure_visible();
+        // 이 작업 공간에서 처음 들어오면 맨 위 줄(고정한 곳이 있으면 그 첫 줄)에서 시작한다. 그 뒤로는 있던 자리로 돌아온다
+        if !std::mem::replace(&mut self.side_kb_seen, true) && !self.pins().is_empty() {
+            self.top_sel = Some(TopSel::Pin(0));
+        }
+        match self.top_sel_now() {
+            Some(top) => self.set_top(top),
+            None => self.fav_ensure_visible(),
+        }
         self.focus();
         self.invalidate();
+    }
+
+    /// 키보드가 위쪽 줄(고정한 곳·내 PC)에 있으면 그 줄. 고정한 것이 줄었으면 남은 줄로 맞추고,
+    /// 즐겨찾기가 하나도 없으면 고를 줄은 위쪽뿐이라 내 PC로 본다
+    pub(super) fn top_sel_now(&self) -> Option<TopSel> {
+        let pins = self.pins().len();
+        match self.top_sel {
+            Some(TopSel::Pin(_)) if pins == 0 => Some(TopSel::Computer),
+            Some(TopSel::Pin(i)) => Some(TopSel::Pin(i.min(pins - 1))),
+            Some(TopSel::Computer) => Some(TopSel::Computer),
+            None => self.favs.rows().is_empty().then_some(TopSel::Computer),
+        }
+    }
+
+    /// 키보드를 위쪽 줄로 옮기고 그 줄이 보이게 한다
+    fn set_top(&mut self, top: TopSel) {
+        self.top_sel = Some(top);
+        let side = match top {
+            TopSel::Pin(i) => Side::Pin(i),
+            TopSel::Computer => Side::Computer,
+        };
+        if let Some(r) = self.side_item_rect(side) {
+            self.side_reveal(r);
+        }
+        self.invalidate();
+    }
+
+    /// 키보드가 위쪽 줄(고정한 곳·내 PC)에 있을 때의 키. 아래로 내려가면 즐겨찾기 첫 줄로 넘어간다
+    fn top_key(&mut self, top: TopSel, vk: VIRTUAL_KEY) -> bool {
+        let ctrl = key_down(VK_CONTROL);
+        let shift = key_down(VK_SHIFT);
+        let pins = self.pins().len();
+        let first = if pins > 0 { TopSel::Pin(0) } else { TopSel::Computer };
+        // 즐겨찾기 쪽으로 넘어간다 (즐겨찾기가 없으면 그대로)
+        let to_favs = |a: &mut App, last: bool| {
+            let rows = a.favs.rows();
+            if let Some(row) = if last { rows.last() } else { rows.first() } {
+                a.fav_select(*row);
+            }
+        };
+        let menu = vk == VK_APPS || (vk == VK_F10 && shift);
+        match (vk, top) {
+            (VK_ESCAPE | VK_TAB, _) => self.fav_blur(),
+            // Ctrl+↑↓: 고정한 곳의 순서를 바꾼다
+            (VK_UP, TopSel::Pin(i)) if ctrl => {
+                if i > 0 {
+                    self.pin_nudge(i, true);
+                    self.set_top(TopSel::Pin(i - 1));
+                }
+            }
+            (VK_DOWN, TopSel::Pin(i)) if ctrl => {
+                if i + 1 < pins {
+                    self.pin_nudge(i, false);
+                    self.set_top(TopSel::Pin(i + 1));
+                }
+            }
+            (VK_UP | VK_DOWN, _) if ctrl => {}
+            (VK_UP, TopSel::Pin(i)) => self.set_top(TopSel::Pin(i.saturating_sub(1))),
+            (VK_UP, TopSel::Computer) => {
+                if pins > 0 {
+                    self.set_top(TopSel::Pin(pins - 1));
+                }
+            }
+            (VK_DOWN, TopSel::Pin(i)) => self.set_top(if i + 1 < pins { TopSel::Pin(i + 1) } else { TopSel::Computer }),
+            (VK_DOWN | VK_NEXT, TopSel::Computer) => to_favs(self, false),
+            (VK_NEXT, TopSel::Pin(_)) => self.set_top(TopSel::Computer),
+            (VK_HOME | VK_PRIOR, _) => self.set_top(first),
+            (VK_END, _) => to_favs(self, true),
+            (VK_RETURN, _) => {
+                let side = match top {
+                    TopSel::Pin(i) => Side::Pin(i),
+                    TopSel::Computer => Side::Computer,
+                };
+                self.side_open(side, ctrl);
+                return true;
+            }
+            (VK_F2, TopSel::Pin(i)) => {
+                self.begin_pin_rename(i);
+                return true;
+            }
+            // Del: 고정을 푼다 (내 PC는 늘 있다)
+            (VK_DELETE, TopSel::Pin(i)) => self.unpin(i),
+            (_, TopSel::Pin(i)) if menu => {
+                if let Some(r) = self.side_item_rect(Side::Pin(i)) {
+                    let pt = self.to_screen(r.l + 24.0, r.b);
+                    self.pending.push(Deferred::PinMenu { index: i, pt });
+                }
+            }
+            (_, TopSel::Computer) if menu => {
+                if let Some(r) = self.side_item_rect(Side::Computer) {
+                    let pt = self.to_screen(r.l + 24.0, r.b);
+                    self.pending.push(Deferred::SideMenu { side: Side::Computer, pt });
+                }
+            }
+            _ => return self.fav_shared_key(vk),
+        }
+        self.invalidate();
+        true
     }
 
     /// 키보드를 칸으로 돌려준다
@@ -196,6 +309,7 @@ impl App {
 
     /// 그 줄을 고르고 보이게 한다. 접힌 그룹 안 항목이면 그 그룹을 펼친다
     pub(super) fn fav_select(&mut self, row: Row) {
+        self.top_sel = None;
         if let Row::Item { group: Some(g), .. } = row {
             if self.favs.set_collapsed(g, false) {
                 self.save_favorites();
@@ -377,14 +491,69 @@ impl App {
         self.flash(p, format!("이 공간에 {added}개를 고정했어요"));
     }
 
+    /// 고정한 줄의 표시 이름을 그 자리에서 고친다 (즐겨찾기 줄과 같다. 폴더·파일의 이름은 바뀌지 않는다)
+    pub(super) fn begin_pin_rename(&mut self, i: usize) {
+        let Some(name) = self.pins().get(i).map(|f| f.name.clone()) else { return };
+        if self.edit_mode != EditMode::None {
+            self.cancel_edit();
+        }
+        self.close_palette();
+        // 입력 상자는 작업 공간 패널이 고정돼 있어야 자리가 있다 (떠 있는 패널은 마우스가 떠나면 닫힌다)
+        if self.side_panel() != Some(Panel::Main) || self.side_floating() {
+            self.show_side(Panel::Main, true);
+            self.side_anim = None;
+        }
+        self.set_top(TopSel::Pin(i));
+        self.edit_mode = EditMode::PinRename(i);
+        unsafe {
+            let _ = SetWindowTextW(self.rename_edit, &HSTRING::from(name));
+            SendMessageW(self.rename_edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        }
+        self.layout_edits();
+        self.focus();
+        self.invalidate();
+    }
+
+    pub(super) fn commit_pin_rename(&mut self, i: usize) {
+        let text = favorites::clean_name(&edit_text(self.rename_edit));
+        self.close_edit();
+        let Some(f) = self.workspaces.current_mut().and_then(|ws| ws.pins.get_mut(i)).filter(|f| !text.is_empty() && f.name != text) else { return };
+        f.name = text;
+        self.pins_changed();
+    }
+
+    /// 고정한 줄이 바뀌기 전에: 그 줄의 이름을 고치는 중이면 그만둔다 (줄 번호가 달라진다)
+    fn end_pin_rename(&mut self) {
+        if let EditMode::PinRename(_) = self.edit_mode {
+            self.cancel_edit();
+        }
+    }
+
     pub(super) fn unpin(&mut self, i: usize) {
+        self.end_pin_rename();
         let Some(ws) = self.workspaces.current_mut().filter(|ws| i < ws.pins.len()) else { return };
         ws.pins.remove(i);
         self.pins_changed();
     }
 
+    /// 고정한 줄을 눌렀다. 떼면 열고, 끌면 순서를 바꾼다 (즐겨찾기 줄과 같다)
+    pub(super) fn pin_mouse_down(&mut self, index: usize, y: f32) {
+        self.drag = Drag::PinPress { index, y };
+        unsafe { SetCapture(self.hwnd) };
+    }
+
+    /// 고정한 줄 from을 slot 번째 줄 앞에 끼워 넣는다 (slot이 줄 수와 같으면 맨 끝). 제자리면 그대로
+    pub(super) fn pin_move(&mut self, from: usize, slot: usize) {
+        self.end_pin_rename();
+        let Some(ws) = self.workspaces.current_mut().filter(|ws| from < ws.pins.len() && slot <= ws.pins.len() && slot != from && slot != from + 1) else { return };
+        let f = ws.pins.remove(from);
+        ws.pins.insert(if slot > from { slot - 1 } else { slot }, f);
+        self.pins_changed();
+    }
+
     /// 고정한 것을 한 줄 위·아래로
     pub(super) fn pin_nudge(&mut self, i: usize, up: bool) {
+        self.end_pin_rename();
         let j = if up { i.wrapping_sub(1) } else { i + 1 };
         let Some(ws) = self.workspaces.current_mut().filter(|ws| i < ws.pins.len() && j < ws.pins.len()) else { return };
         ws.pins.swap(i, j);
@@ -394,6 +563,7 @@ impl App {
     /// 고정한 것을 '모든 공간'(즐겨찾기)으로 옮긴다: 어느 작업 공간에서나 보이게.
     /// 즐겨찾기 파일에 먼저 저장하고, 저장됐을 때만 이 공간에서 뺀다 (저장하지 못했는데 빼면 다음에 열 때 양쪽 모두에서 사라진다)
     pub(super) fn pin_to_common(&mut self, i: usize) {
+        self.end_pin_rename();
         let Some(f) = self.pins().get(i).cloned() else { return };
         if self.favs.find(&f.path).is_none() {
             let before = self.favs.clone();
@@ -631,6 +801,10 @@ impl App {
     /// 키보드가 즐겨찾기에 있을 때의 키. 처리했으면 true.
     /// ↑↓로 고르고, Enter는 항목을 열거나 그룹을 접고 펼친다. →·←는 그룹 펼치기·접기, Esc·Tab은 칸으로
     pub(super) fn fav_key(&mut self, vk: VIRTUAL_KEY) -> bool {
+        // 키보드가 위쪽 줄(고정한 곳·내 PC)에 있으면 그쪽 키로
+        if let Some(top) = self.top_sel_now() {
+            return self.top_key(top, vk);
+        }
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
         let rows = self.favs.rows();
@@ -646,11 +820,13 @@ impl App {
             VK_ESCAPE | VK_TAB => self.fav_blur(),
             VK_UP if ctrl => self.fav_nudge_at(s, true),
             VK_DOWN if ctrl => self.fav_nudge_at(s, false),
+            // 첫 즐겨찾기 줄에서 위로 가면 그 위의 내 PC, 고정한 곳으로 이어진다
+            VK_UP | VK_PRIOR if s == 0 => self.set_top(TopSel::Computer),
             VK_UP => go(self, s.saturating_sub(1)),
             VK_DOWN => go(self, (s + 1).min(n.saturating_sub(1))),
             VK_PRIOR => go(self, s.saturating_sub(page)),
             VK_NEXT => go(self, (s + page).min(n.saturating_sub(1))),
-            VK_HOME => go(self, 0),
+            VK_HOME => self.set_top(if self.pins().is_empty() { TopSel::Computer } else { TopSel::Pin(0) }),
             VK_END => go(self, n.saturating_sub(1)),
             // →: 접힌 그룹은 펼치고, 펼친 그룹은 첫 항목으로
             VK_RIGHT => {
@@ -707,11 +883,13 @@ impl App {
         self.pending.push(Deferred::FavMenu { row, pt });
     }
 
-    /// 단축키: 즐겨찾기 단축키는 칸으로 돌아가고, 추가는 고른 그룹에 넣고, 그 밖의 동작은 칸으로 돌아가 실행한다
+    /// 단축키: 즐겨찾기 단축키는 칸으로 돌아가고, 추가는 키보드가 있는 쪽에 넣고(고정한 곳이면 이 공간에 고정, 즐겨찾기면 고른 그룹에),
+    /// 그 밖의 동작은 칸으로 돌아가 실행한다
     fn fav_shared_key(&mut self, vk: VIRTUAL_KEY) -> bool {
         use crate::keys::Action;
         match self.keys.find(crate::keys::Combo::now(vk.0)) {
             Some(Action::Favorites) => self.fav_blur(),
+            Some(Action::AddFavorite) if matches!(self.top_sel_now(), Some(TopSel::Pin(_))) => self.add_pin(),
             Some(Action::AddFavorite) => self.add_favorite(),
             Some(a) => {
                 self.fav_blur();
@@ -746,6 +924,7 @@ impl App {
     pub(super) fn fav_mouse_down(&mut self, row: Row, y: f32, dbl: bool) {
         if let Some(i) = self.favs.row_index(row) {
             self.fav_sel = i;
+            self.top_sel = None;
         }
         // 두 번째 누름은 무시한다 (첫 누름에서 이미 열었다: 파일을 두 번 실행하지 않게)
         if dbl {
@@ -759,6 +938,8 @@ impl App {
         self.drag = match self.drag {
             Drag::FavPress { row, y: y0 } if (y - y0).abs() > 4.0 => Drag::FavMove { from: row, y },
             Drag::FavMove { from, .. } => Drag::FavMove { from, y },
+            Drag::PinPress { index, y: y0 } if (y - y0).abs() > 4.0 => Drag::PinMove { from: index, y },
+            Drag::PinMove { from, .. } => Drag::PinMove { from, y },
             _ => return,
         };
         // 목록 끝에 가까이 끌면 자동 스크롤
@@ -779,6 +960,20 @@ impl App {
                 self.drag = Drag::None;
                 self.release_capture();
                 self.fav_open_row(row, ctrl);
+            }
+            // 고정한 줄: 그대로 떼면 열고, 끌었으면 놓은 자리로 옮긴다
+            Drag::PinPress { index, .. } => {
+                self.drag = Drag::None;
+                self.release_capture();
+                self.pin_open(index, ctrl);
+            }
+            Drag::PinMove { from, y } => {
+                self.drag = Drag::None;
+                self.release_capture();
+                if let Some(slot) = self.pin_drop_slot(y) {
+                    self.pin_move(from, slot);
+                }
+                self.invalidate();
             }
             Drag::FavMove { from, y } => {
                 self.drag = Drag::None;

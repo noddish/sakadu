@@ -207,6 +207,10 @@ enum Drag {
     /// 사이드바 즐겨찾기 줄을 눌렀다. 조금 움직이면 FavMove
     FavPress { row: crate::favorites::Row, y: f32 },
     FavMove { from: crate::favorites::Row, y: f32 },
+    /// 사이드바의 고정한 줄을 눌렀다 (pins 번호). 조금 움직이면 PinMove, 그대로 떼면 연다
+    PinPress { index: usize, y: f32 },
+    /// 고정한 줄을 끌어 순서를 바꾸는 중
+    PinMove { from: usize, y: f32 },
     /// 고정한 패널의 오른쪽 가장자리를 끌어 너비를 바꾸는 중
     SideW { start_x: f32, start_w: f32 },
     /// 탭을 눌렀다. 조금 움직이면 TabMove
@@ -226,6 +230,8 @@ enum EditMode {
     Rename(usize),
     /// 즐겨찾기 표시 이름 바꾸기
     FavRename(crate::favorites::Row),
+    /// 이 공간에 고정한 줄의 표시 이름 바꾸기 (pins 번호)
+    PinRename(usize),
     /// 사이드바 패널 머리의 작업 공간 이름
     WorkspaceRename,
 }
@@ -377,6 +383,10 @@ pub struct App {
     fav_focus: bool,
     /// 사이드바 즐겨찾기에서 고른 줄 (favs.rows() 번호)
     fav_sel: usize,
+    /// 키보드가 즐겨찾기 줄이 아니라 그 위의 줄(고정한 곳, 내 PC)에 있으면 그 줄. None이면 fav_sel의 즐겨찾기 줄
+    top_sel: Option<fav_ui::TopSel>,
+    /// 이 작업 공간에서 키보드가 사이드바에 들어온 적이 있는가 (처음에는 맨 위 줄에서 시작한다)
+    side_kb_seen: bool,
     /// 보이는 패널 가운데 목록의 스크롤
     side_scroll: f32,
     /// 패널마다 기억해 둔 스크롤 (Panel 순서). 다른 패널이 떴다 닫혀도 자리를 잃지 않게
@@ -890,6 +900,8 @@ impl App {
             view_menu: None,
             fav_focus: false,
             fav_sel: 0,
+            top_sel: None,
+            side_kb_seen: false,
             side_scroll: 0.0,
             side_scroll_memo: [0.0; Panel::ALL.len()],
             side_pinned,
@@ -1092,7 +1104,7 @@ impl App {
         }
         match self.edit_mode {
             EditMode::Address(_) => self.addr_edit,
-            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename => self.rename_edit,
+            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::PinRename(_) | EditMode::WorkspaceRename => self.rename_edit,
             EditMode::None if self.pal_focus && self.pal_shown() => self.search_edit,
             // 즐겨찾기에 키보드가 있으면 메인 창이 키를 받는다 (필터 상자에 커서가 깜박이지 않게)
             EditMode::None if self.fav_focus => self.hwnd,

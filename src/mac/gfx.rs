@@ -327,6 +327,11 @@ impl Gfx {
 
     /// 그림을 r 안에 비율을 지켜 가운데에 그린다. 자리가 그림보다 크면 늘리지 않고 제 크기(1픽셀 = 1pt)로 둔다
     pub fn picture(&self, pic: &Picture, r: R) {
+        self.picture_alpha(pic, r, 1.0);
+    }
+
+    /// picture와 같되 opacity(0~1)만큼 비치게 그린다 (숨김 파일의 썸네일은 흐리게)
+    pub fn picture_alpha(&self, pic: &Picture, r: R, opacity: f32) {
         let (w, h) = pic.size();
         let (w, h) = (w as f32, h as f32);
         if w <= 0.0 || h <= 0.0 || r.w() <= 0.0 || r.h() <= 0.0 {
@@ -339,6 +344,7 @@ impl Gfx {
         CGContext::save_g_state(self.c());
         CGContext::translate_ctm(self.c(), x as CGFloat, (y + dh) as CGFloat);
         CGContext::scale_ctm(self.c(), 1.0, -1.0);
+        CGContext::set_alpha(self.c(), opacity as CGFloat);
         CGContext::set_interpolation_quality(self.c(), CGInterpolationQuality::High);
         CGContext::draw_image(self.c(), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(dw as CGFloat, dh as CGFloat)), Some(&pic.img));
         CGContext::restore_g_state(self.c());

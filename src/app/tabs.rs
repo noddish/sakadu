@@ -158,7 +158,7 @@ impl App {
         match self.edit_mode {
             EditMode::None => {}
             // 이름(파일·즐겨찾기·작업 공간)은 확정하고, 경로 입력은 취소한다 (탐색기와 같음)
-            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename => self.commit_rename(),
+            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::PinRename(_) | EditMode::WorkspaceRename => self.commit_rename(),
             EditMode::Address(_) => self.cancel_edit(),
         }
         self.active = p;
