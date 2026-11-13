@@ -143,7 +143,7 @@ pub(super) fn show_fav_sort_menu(hwnd: HWND, pt: POINT) {
 /// 이 공간에 고정한 줄의 오른쪽 버튼 메뉴
 pub(super) fn show_pin_menu(hwnd: HWND, index: usize, pt: POINT) {
     let Some((is_dir, count)) = with_app(|a| a.pins().get(index).map(|f| (f.is_dir, a.pins().len()))).flatten() else { return };
-    let mut items: Vec<(u32, &str)> = vec![(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, "")];
+    let mut items: Vec<(u32, &str)> = vec![(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, ""), (7, "이름 바꾸기\tF2")];
     if index > 0 {
         items.push((3, "위로 이동"));
     }
@@ -158,6 +158,7 @@ pub(super) fn show_pin_menu(hwnd: HWND, index: usize, pt: POINT) {
         4 => a.pin_nudge(index, false),
         5 => a.pin_to_common(index),
         6 => a.unpin(index),
+        7 => a.begin_pin_rename(index),
         _ => {}
     });
 }
@@ -270,6 +271,10 @@ impl App {
                     TopSel::Computer => Side::Computer,
                 };
                 self.side_open(side, ctrl);
+                return true;
+            }
+            (VK_F2, TopSel::Pin(i)) => {
+                self.begin_pin_rename(i);
                 return true;
             }
             // Del: 고정을 푼다 (내 PC는 늘 있다)
@@ -486,7 +491,46 @@ impl App {
         self.flash(p, format!("이 공간에 {added}개를 고정했어요"));
     }
 
+    /// 고정한 줄의 표시 이름을 그 자리에서 고친다 (즐겨찾기 줄과 같다. 폴더·파일의 이름은 바뀌지 않는다)
+    pub(super) fn begin_pin_rename(&mut self, i: usize) {
+        let Some(name) = self.pins().get(i).map(|f| f.name.clone()) else { return };
+        if self.edit_mode != EditMode::None {
+            self.cancel_edit();
+        }
+        self.close_palette();
+        // 입력 상자는 작업 공간 패널이 고정돼 있어야 자리가 있다 (떠 있는 패널은 마우스가 떠나면 닫힌다)
+        if self.side_panel() != Some(Panel::Main) || self.side_floating() {
+            self.show_side(Panel::Main, true);
+            self.side_anim = None;
+        }
+        self.set_top(TopSel::Pin(i));
+        self.edit_mode = EditMode::PinRename(i);
+        unsafe {
+            let _ = SetWindowTextW(self.rename_edit, &HSTRING::from(name));
+            SendMessageW(self.rename_edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        }
+        self.layout_edits();
+        self.focus();
+        self.invalidate();
+    }
+
+    pub(super) fn commit_pin_rename(&mut self, i: usize) {
+        let text = favorites::clean_name(&edit_text(self.rename_edit));
+        self.close_edit();
+        let Some(f) = self.workspaces.current_mut().and_then(|ws| ws.pins.get_mut(i)).filter(|f| !text.is_empty() && f.name != text) else { return };
+        f.name = text;
+        self.pins_changed();
+    }
+
+    /// 고정한 줄이 바뀌기 전에: 그 줄의 이름을 고치는 중이면 그만둔다 (줄 번호가 달라진다)
+    fn end_pin_rename(&mut self) {
+        if let EditMode::PinRename(_) = self.edit_mode {
+            self.cancel_edit();
+        }
+    }
+
     pub(super) fn unpin(&mut self, i: usize) {
+        self.end_pin_rename();
         let Some(ws) = self.workspaces.current_mut().filter(|ws| i < ws.pins.len()) else { return };
         ws.pins.remove(i);
         self.pins_changed();
@@ -494,6 +538,7 @@ impl App {
 
     /// 고정한 것을 한 줄 위·아래로
     pub(super) fn pin_nudge(&mut self, i: usize, up: bool) {
+        self.end_pin_rename();
         let j = if up { i.wrapping_sub(1) } else { i + 1 };
         let Some(ws) = self.workspaces.current_mut().filter(|ws| i < ws.pins.len() && j < ws.pins.len()) else { return };
         ws.pins.swap(i, j);
@@ -503,6 +548,7 @@ impl App {
     /// 고정한 것을 '모든 공간'(즐겨찾기)으로 옮긴다: 어느 작업 공간에서나 보이게.
     /// 즐겨찾기 파일에 먼저 저장하고, 저장됐을 때만 이 공간에서 뺀다 (저장하지 못했는데 빼면 다음에 열 때 양쪽 모두에서 사라진다)
     pub(super) fn pin_to_common(&mut self, i: usize) {
+        self.end_pin_rename();
         let Some(f) = self.pins().get(i).cloned() else { return };
         if self.favs.find(&f.path).is_none() {
             let before = self.favs.clone();

@@ -226,6 +226,8 @@ enum EditMode {
     Rename(usize),
     /// 즐겨찾기 표시 이름 바꾸기
     FavRename(crate::favorites::Row),
+    /// 이 공간에 고정한 줄의 표시 이름 바꾸기 (pins 번호)
+    PinRename(usize),
     /// 사이드바 패널 머리의 작업 공간 이름
     WorkspaceRename,
 }
@@ -1098,7 +1100,7 @@ impl App {
         }
         match self.edit_mode {
             EditMode::Address(_) => self.addr_edit,
-            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename => self.rename_edit,
+            EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::PinRename(_) | EditMode::WorkspaceRename => self.rename_edit,
             EditMode::None if self.pal_focus && self.pal_shown() => self.search_edit,
             // 즐겨찾기에 키보드가 있으면 메인 창이 키를 받는다 (필터 상자에 커서가 깜박이지 않게)
             EditMode::None if self.fav_focus => self.hwnd,

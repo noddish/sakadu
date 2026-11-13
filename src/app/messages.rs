@@ -1151,7 +1151,7 @@ impl App {
     /// 입력 상자가 포커스를 잃으면: 이름 바꾸기는 확정, 주소 입력은 취소
     pub fn on_edit_blur(&mut self, id: i32) {
         match (id, self.edit_mode) {
-            (ID_RENAME, EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::WorkspaceRename) => self.commit_rename(),
+            (ID_RENAME, EditMode::Rename(_) | EditMode::FavRename(_) | EditMode::PinRename(_) | EditMode::WorkspaceRename) => self.commit_rename(),
             (ID_ADDR, EditMode::Address(_)) => self.cancel_edit(),
             _ => {}
         }

@@ -311,7 +311,7 @@ impl App {
     pub(super) fn side_wheel(&mut self, dy: f32) {
         self.side_scroll += dy;
         self.side_clamp_scroll();
-        if matches!(self.edit_mode, EditMode::FavRename(_)) {
+        if matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::PinRename(_)) {
             self.layout_edits();
         }
         // 줄이 밀렸으니 강조·말풍선은 마우스 아래 새 줄로
@@ -329,6 +329,16 @@ impl App {
         }
         let l = r.l + label_x(row);
         Some(R::new(l - 4.0, r.t + 3.0, r.r - 6.0, r.b - 3.0))
+    }
+
+    /// 고정한 줄의 이름 바꾸기 입력 상자 자리 (그 줄의 이름 칸). 줄이 목록 밖이면 None
+    pub(super) fn pin_rename_rect(&self, i: usize) -> Option<R> {
+        let r = self.side_item_rect(Side::Pin(i))?;
+        let list = self.side_list();
+        if r.t < list.t - 1.0 || r.b > list.b + 1.0 {
+            return None;
+        }
+        Some(R::new(r.l + 32.0, r.t + 3.0, r.r - 6.0, r.b - 3.0))
     }
 
     /// 끄는 위치 y 아래 즐겨찾기 줄과 그 줄의 아래쪽 절반인지. 첫 줄 위면 첫 줄 위쪽, 마지막 줄 아래면 마지막 줄 아래쪽
@@ -432,7 +442,7 @@ impl App {
         }
         if self.side_panel() != Some(Panel::Main) {
             // 즐겨찾기 줄과 작업 공간 이름이 사라지면 그 이름 입력은 확정하고 키보드는 칸으로
-            if matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::WorkspaceRename) {
+            if matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::PinRename(_) | EditMode::WorkspaceRename) {
                 self.commit_rename();
             }
             self.fav_blur();
@@ -516,7 +526,7 @@ impl App {
         }
         self.peek_leaving = false;
         // 끌거나 이름을 바꾸는 중, 키보드가 즐겨찾기에 있을 때, 패널의 메뉴가 떠 있을 때는 닫지 않는다
-        if !self.side_floating() || !matches!(self.drag, Drag::None) || matches!(self.edit_mode, EditMode::FavRename(_)) || self.fav_focus || self.menu_open {
+        if !self.side_floating() || !matches!(self.drag, Drag::None) || matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::PinRename(_)) || self.fav_focus || self.menu_open {
             return;
         }
         // 그 사이 돌아왔으면 그대로 둔다
@@ -792,7 +802,7 @@ impl App {
         // 드라이브 수가 바뀌면 아래 줄들이 밀린다: 이름 바꾸기 상자와 마우스 아래 줄을 다시 맞춘다 (시작 화면의 드라이브 카드도)
         self.side_clamp_scroll();
         self.start_changed();
-        if matches!(self.edit_mode, EditMode::FavRename(_)) {
+        if matches!(self.edit_mode, EditMode::FavRename(_) | EditMode::PinRename(_)) {
             self.layout_edits();
         }
         self.invalidate();
@@ -879,6 +889,10 @@ impl App {
             EditMode::FavRename(r) => Some(r),
             _ => None,
         };
+        let editing_pin = match self.edit_mode {
+            EditMode::PinRename(i) => Some(i),
+            _ => None,
+        };
         let renaming_space = self.edit_mode == EditMode::WorkspaceRename;
         // 끌어서 옮기는 중: (끄는 줄, 놓을 줄, 아래쪽 절반)
         let moving = match self.drag {
@@ -961,9 +975,16 @@ impl App {
                     let Some(f) = pins.get(i) else { continue };
                     side_row_bg(g, &t, r, f.is_dir && is_current(&f.path), hover == Hit::Side(s));
                     g.icon(pin_icons[i], icon_at(r, r.l + 10.0));
-                    g.text(&f.name, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
-                    if sel_top == Some(fav_ui::TopSel::Pin(i)) {
-                        g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
+                    if editing_pin == Some(i) {
+                        // 이름을 바꾸는 중: 입력 상자 테두리만 (글자는 입력 상자가 그린다)
+                        let er = R::new(r.l + 32.0, r.t + 3.0, r.r - 6.0, r.b - 3.0);
+                        g.fill_round(er, R_ROW, t.pane);
+                        g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
+                    } else {
+                        g.text(&f.name, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                        if sel_top == Some(fav_ui::TopSel::Pin(i)) {
+                            g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
+                        }
                     }
                 }
                 Side::PinEmpty => {
