@@ -176,6 +176,10 @@ impl App {
             ];
             return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);
         }
+        // 자동 미리 보기 카드는 칸 위에 떠 있다
+        if let Some(h) = self.card_hit(x, y) {
+            return h;
+        }
         if let Some(h) = self.preview_hit(x, y) {
             return h;
         }

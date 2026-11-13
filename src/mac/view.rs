@@ -1,11 +1,12 @@
 //! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름).
-//! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인은 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다.
+//! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인·미리 보기 카드의 그림과 글 읽기는 뒷줄에서 하고
+//! 메인 줄(dispatch)로 돌려받는다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
 
-use crate::app::{App, Key, LIGHTS_BOTTOM, MenuKind, Mods};
+use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods};
 use sakadu::ui::ROW_H;
 use crate::gfx::Gfx;
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::runtime::{Bool, Sel};
@@ -20,11 +21,18 @@ use objc2_foundation::{NSArray, NSDictionary, NSNotification, NSObject, NSObject
 use sakadu::draw::Color;
 use sakadu::palette::{System, Theme};
 use std::cell::{OnceCell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
     static VIEW: OnceCell<Retained<SakaduView>> = const { OnceCell::new() };
 }
+
+/// 가장 나중에 낸 미리 보기 카드 요청의 번호. 뒷줄이 그림을 읽기 직전에 보고, 그 사이 다른 요청이 나왔으면 읽지 않는다
+static LATEST_PREVIEW: AtomicU64 = AtomicU64::new(0);
+/// 그림을 읽기 전에 잠깐 기다리는 시간 (화살표 키를 누르고 있을 때 지나가는 사진을 하나하나 읽지 않게)
+const PREVIEW_SETTLE: Duration = Duration::from_millis(60);
 
 fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> Option<T> {
     APP.with(|a| a.borrow_mut().as_mut().map(f))
@@ -330,10 +338,42 @@ impl SakaduView {
     }
 }
 
+/// 다시 그려 달라고 한다 (메인 줄에서)
+fn redraw() {
+    VIEW.with(|v| {
+        if let Some(v) = v.get() {
+            v.setNeedsDisplay(true);
+        }
+    });
+}
+
 /// 쌓인 폴더 읽기 요청은 뒷줄에서 읽어 메인 줄로 돌려받고, 열어 달라는 파일은 macOS '열기'로 연다
-/// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다)
+/// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다). 미리 보기 카드의 그림과 글도 뒷줄에서 읽는다
 fn pump() {
-    let Some((reqs, probes, files)) = with_app(|a| (a.take_requests(), a.take_probes(), std::mem::take(&mut a.open_files))) else { return };
+    let Some((reqs, probes, previews, files)) = with_app(|a| (a.take_requests(), a.take_probes(), a.take_previews(), std::mem::take(&mut a.open_files))) else { return };
+    let mut picture = false;
+    for r in previews {
+        LATEST_PREVIEW.store(r.seq, Ordering::Relaxed);
+        picture |= r.px > 0;
+        std::thread::spawn(move || {
+            // 그림은 잠깐 기다렸다가, 그 사이 다른 요청이 나왔으면(다른 파일을 골랐으면) 읽지 않는다
+            if r.px > 0 {
+                std::thread::sleep(PREVIEW_SETTLE);
+                if LATEST_PREVIEW.load(Ordering::Relaxed) != r.seq {
+                    return;
+                }
+            }
+            let result = crate::app::load_preview(&r);
+            DispatchQueue::main().exec_async(move || {
+                with_app(|a| a.on_previewed(&r, result));
+                redraw();
+            });
+        });
+    }
+    // 그림이 늦으면 카드에 '불러오는 중…'이 보이게, 그때 한 번 더 그린다
+    if picture && let Ok(when) = DispatchTime::try_from(Duration::from_millis(LOADING_NOTE_MS + 20)) {
+        let _ = DispatchQueue::main().after(when, redraw);
+    }
     for p in probes {
         std::thread::spawn(move || {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
@@ -396,6 +436,7 @@ fn key_of(code: u16) -> Option<Key> {
         0x79 => Key::PageDown,
         0x30 => Key::Tab,
         0x35 => Key::Esc,
+        0x31 => Key::Char(' '),
         0x00 => Key::Char('a'),
         0x25 => Key::Char('l'),
         0x05 => Key::Char('g'),

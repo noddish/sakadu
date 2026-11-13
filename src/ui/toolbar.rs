@@ -24,6 +24,7 @@ pub struct ToolbarSpec {
     /// 위로 단추 (Windows)
     pub up: bool,
     pub new_folder: bool,
+    /// 자동 미리 보기 켜고 끄기 (눈)
     pub preview: bool,
     /// 검색 (누르면 검색 패널이 열린다)
     pub search: bool,
@@ -42,7 +43,7 @@ pub struct ToolbarGeom {
     pub title: R,
     pub layout: R,
     pub view: R,
-    /// 새 폴더·미리 보기를 담는 판
+    /// 새 폴더·자동 미리 보기를 담는 판
     pub tools: R,
     pub new_folder: R,
     pub preview: R,
@@ -129,6 +130,7 @@ pub struct ToolbarScene<'a> {
     pub new_folder_ok: bool,
     /// 보기 방식을 고를 수 있는지 (시작 화면에는 없다)
     pub view_ok: bool,
+    /// 자동 미리 보기가 켜져 있다
     pub preview_on: bool,
     /// 검색 패널이 열려 있다
     pub search_on: bool,
@@ -189,7 +191,7 @@ pub fn paint_toolbar(g: &impl Canvas, t: &Theme, s: &ToolbarScene) {
     let c = pick(m.view, s.view_open, s.view_ok, s.hover == ToolbarHover::View);
     draw_view_icon(g, R::new(m.view.l + 8.0, m.view.t, m.view.l + 32.0, m.view.b), s.view, c);
 
-    // 새 폴더·미리 보기
+    // 새 폴더·자동 미리 보기(눈)
     if m.tools.w() > 0.0 {
         g.fill_round(m.tools, TOOL_R, track);
     }
@@ -201,10 +203,10 @@ pub fn paint_toolbar(g: &impl Canvas, t: &Theme, s: &ToolbarScene) {
         // 켜져 있으면 옅은 강조 색 바탕
         if s.preview_on {
             g.fill_round(m.preview.inset(3.0, 3.0), TOOL_R - 3.0, t.accent_soft);
-            g.glyph(G_PREVIEW, m.preview, false, t.chip_text);
+            g.glyph(G_EYE, m.preview, false, t.chip_text);
         } else {
             let c = button(m.preview, true, s.hover == ToolbarHover::Preview);
-            g.glyph(G_PREVIEW, m.preview, false, c);
+            g.glyph(G_EYE, m.preview, false, c);
         }
     }
     if m.search.w() > 0.0 {

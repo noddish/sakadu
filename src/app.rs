@@ -34,6 +34,7 @@ use windows::core::{BOOL, HSTRING, PCWSTR, w};
 mod fav_ui;
 mod palette;
 mod preview;
+mod preview_card;
 mod settings_ui;
 mod view_menu;
 mod caption;
@@ -178,6 +179,10 @@ enum Hit {
     PreviewOpen,
     /// 미리 보기의 고정 칩 (누르면 핀과 같다)
     PreviewChip,
+    /// 자동 미리 보기 카드: 크게 보기 단추, 닫기 단추, 카드의 그 밖의 곳 (아래 칸을 누르지 않게 잡는다. 누르면 크게·작게)
+    CardExpand,
+    CardClose,
+    Card,
 }
 
 impl Hit {
@@ -444,6 +449,10 @@ pub struct App {
     thumb_failed: HashSet<String>,
     /// 미리 보기 창. 닫혀 있으면 None
     preview: Option<Preview>,
+    /// 자동 미리 보기 카드 (그림·글 파일을 고르면 저절로 뜬다)
+    card: preview_card::Card,
+    /// 자동 미리 보기가 켜져 있는가 (도구 막대의 눈). 세션에 저장
+    auto_preview: bool,
     /// 미리 보기 처리기(PDF 등)가 그려 넣을 자식 창
     preview_host: HWND,
     /// 트레이 대기 중이면 알림 영역 아이콘. 이때 창을 닫으면 끝내지 않고 숨긴다
@@ -920,6 +929,8 @@ impl App {
             thumb_wanted: HashSet::new(),
             thumb_failed: HashSet::new(),
             preview: sess.as_ref().is_some_and(|s| s.preview).then(Preview::new),
+            card: preview_card::Card::new(),
+            auto_preview: sess.as_ref().is_none_or(|s| s.auto_preview),
             preview_host,
             tray: None,
             stale: [false; 4],

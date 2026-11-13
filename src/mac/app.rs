@@ -3,9 +3,10 @@
 //! 그 공간에 고정한 것, 아래에는 어느 공간에서나 같은 '모든 공간'이 온다.
 //! 화면 계산·그리기 도우미·치수와 칸·도구 막대·레일 그리기는 Windows와 함께 쓰는 sakadu::ui를 쓴다
 //! (이 앱의 상태로 장면을 채워 넘긴다).
+//! 그림·글 파일을 하나 고르면 다른 칸의 오른쪽 아래에 미리 보기 카드가 저절로 뜬다 (도구 막대의 눈으로 끄고 켠다).
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
-use crate::gfx::Gfx;
+use crate::gfx::{Gfx, MONO_LINE_H, Picture};
 use sakadu::draw::{Color, Font, R};
 use sakadu::favorites::{self, Favorites, Row};
 use sakadu::listing::{self, Entry, Kind};
@@ -14,6 +15,7 @@ use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab, ViewMo
 use sakadu::session::{self, Look, PaneState, Session};
 use sakadu::ui::glyph::*;
 use sakadu::ui::paint::{EntryArt, PaneHover, PaneScene, paint_pane_border, paint_pane_head, paint_pane_list};
+use sakadu::ui::preview_card::{CardArt, CardBody, CardGeom, CardHover, CardScene, card_geom, paint_preview_card};
 use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, rail_geom};
 use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, paint_toolbar, toolbar_geom};
 use sakadu::ui::*;
@@ -21,6 +23,7 @@ use sakadu::util;
 use sakadu::workspaces::{self, Workspace, Workspaces};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// 사이드바 폭: 작업 공간 레일과 그 옆 패널(220)을 합친 폭
 const SIDE_W: f32 = BAR_W + 220.0;
@@ -30,6 +33,26 @@ pub const LIGHTS_BOTTOM: f32 = 28.0;
 const HINT_H: f32 = 44.0;
 /// 고정한 것과 '모든 공간' 사이 간격 (줄이 많아 둘이 이어질 때)
 const COMMON_GAP: f32 = 12.0;
+
+/// 미리 보기 카드에 띄우는 파일의 확장자 (Windows app/preview.rs의 IMAGE_EXTS·TEXT_EXTS와 같은 목록)
+const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jfif", "png", "gif", "bmp", "dib", "webp", "heic", "heif", "avif", "tif", "tiff", "ico"];
+const TEXT_EXTS: &[&str] = &[
+    "txt", "log", "md", "markdown", "csv", "tsv", "json", "jsonc", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "config", "env",
+    "gitignore", "editorconfig", "properties", "rs", "c", "h", "cpp", "hpp", "cc", "cs", "java", "kt", "kts", "go", "py", "rb", "php",
+    "js", "mjs", "cjs", "ts", "tsx", "jsx", "css", "scss", "less", "html", "htm", "vue", "svelte", "sql", "sh", "bash", "zsh", "ps1",
+    "psm1", "bat", "cmd", "lua", "r", "swift", "dart", "gradle", "cmake", "srt", "vtt", "nfo", "reg", "lock",
+];
+/// 카드의 글: 파일 앞쪽 64KB에서 앞 80줄, 한 줄은 200자까지 (그릴 때마다 긴 글을 배치하지 않게 앞부분만 둔다)
+const TEXT_READ: u64 = 64 * 1024;
+const TEXT_LINES: usize = 80;
+const TEXT_COLS: usize = 200;
+/// 카드의 그림: 긴 쪽을 이 픽셀 수까지 줄여 읽는다 (작은 카드, 크게 보기)
+const PX_SMALL: u32 = 1024;
+const PX_LARGE: u32 = 2048;
+/// 읽어 둔 그림을 몇 개까지 남겨 두나 (방금 본 그림으로 돌아가면 다시 읽지 않는다)
+const PICS_MAX: usize = 6;
+/// 그림이 이보다 늦게 오면 카드에 '불러오는 중…'을 보인다 (곧 오면 글자가 깜빡이지 않게)
+pub const LOADING_NOTE_MS: u64 = 300;
 
 /// 마우스가 가리키는 것 (칸 번호 p, 탭·줄 번호 i)
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -46,6 +69,12 @@ pub enum Hit {
     /// 도구 막대의 칸 나누기·보기 방식 단추 (누르면 메뉴가 열린다)
     LayoutPick,
     ViewPick,
+    /// 도구 막대의 눈 (자동 미리 보기를 끄고 켠다)
+    PreviewToggle,
+    /// 미리 보기 카드의 크게 보기 단추, 닫기 단추, 카드의 그 밖의 곳 (카드 아래 칸을 누르지 않게 카드가 받는다)
+    CardExpand,
+    CardClose,
+    Card,
     Tab(usize, usize),
     TabClose(usize, usize),
     TabAdd(usize),
@@ -117,7 +146,7 @@ impl MenuKind {
     }
 }
 
-/// 맥 키 (글자 키는 소문자 그대로)
+/// 맥 키 (글자 키는 소문자 그대로, 스페이스는 ' ')
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Key {
     Up,
@@ -183,6 +212,155 @@ pub fn resolve_input(text: &str, home: &str) -> Result<(String, Option<String>),
         Ok(m) if m.is_dir() => Ok((path, None)),
         Ok(_) => util::parent(&path).map(|p| (p, Some(util::file_name(&path).to_string()))).ok_or_else(missing),
         Err(_) => Err(missing()),
+    }
+}
+
+/// 미리 보기 카드에 띄우는 파일을 가리는 값: 경로와 수정한 때·크기 (같은 경로라도 파일이 바뀌면 다시 읽는다)
+#[derive(Clone, PartialEq, Debug)]
+struct CardKey {
+    path: String,
+    modified: u64,
+    size: u64,
+}
+
+/// 카드 내용 읽기 요청: 창 쪽이 뒷줄에서 load_preview를 돌려 on_previewed로 돌려준다
+pub struct PreviewRequest {
+    /// 요청 번호 (나중에 낸 요청일수록 크다). 창 쪽이 밀린 그림 읽기를 건너뛸 때 쓴다
+    pub seq: u64,
+    key: CardKey,
+    /// 그림이면 긴 쪽을 이 픽셀 수까지 줄여 읽는다. 글 파일이면 0
+    pub px: u32,
+}
+
+/// 뒷줄에서 읽은 카드 내용
+pub enum Preview {
+    Image(Picture),
+    /// 글 파일의 앞부분 (decode_text가 다듬은 것)
+    Text(String),
+}
+
+/// 요청한 카드 내용을 읽는다 (창에서는 뒷줄에서 부른다). 읽지 못하면 None
+pub fn load_preview(req: &PreviewRequest) -> Option<Preview> {
+    if req.px > 0 {
+        return Gfx::load_picture(&req.key.path, req.px).map(Preview::Image);
+    }
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(&req.key.path).ok()?.take(TEXT_READ).read_to_end(&mut buf).ok()?;
+    decode_text(&buf).map(Preview::Text)
+}
+
+/// 글 파일의 앞부분(바이트)을 카드에 보일 글로 바꾼다. UTF-8(BOM이 있어도 된다)과 BOM이 있는 UTF-16만 읽는다.
+/// 글이 아니면(NUL이 있거나 그 형식의 글자로 읽히지 않으면) None. 앞 80줄만, 긴 줄은 잘라서, 줄마다 '\n'으로 끝낸다
+fn decode_text(b: &[u8]) -> Option<String> {
+    let utf8 = |b: &[u8]| match std::str::from_utf8(b) {
+        Ok(s) => Some(s.to_string()),
+        // 읽기를 자른 자리가 글자 중간이면 그 앞까지
+        Err(e) if e.error_len().is_none() => std::str::from_utf8(&b[..e.valid_up_to()]).ok().map(str::to_string),
+        Err(_) => None,
+    };
+    let utf16 = |b: &[u8], big_endian: bool| {
+        let mut units: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| if big_endian { u16::from_be_bytes(*c) } else { u16::from_le_bytes(*c) }).collect();
+        // 읽기를 자른 자리가 두 칸짜리 글자의 앞 칸이면 그 앞까지
+        if units.last().is_some_and(|u| (0xD800..0xDC00).contains(u)) {
+            units.pop();
+        }
+        String::from_utf16(&units).ok()
+    };
+    let s = if let Some(rest) = b.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        utf8(rest)?
+    } else if let Some(rest) = b.strip_prefix(&[0xFF, 0xFE]) {
+        utf16(rest, false)?
+    } else if let Some(rest) = b.strip_prefix(&[0xFE, 0xFF]) {
+        utf16(rest, true)?
+    } else {
+        utf8(b)?
+    };
+    if s.contains('\0') {
+        return None;
+    }
+    let mut out = String::new();
+    for line in s.lines().take(TEXT_LINES) {
+        out.extend(line.replace('\t', "    ").chars().take(TEXT_COLS));
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// 글의 앞 n줄 (줄 끝 '\n'까지)
+fn first_lines(s: &str, n: usize) -> &str {
+    match s.match_indices('\n').nth(n.saturating_sub(1)) {
+        Some((i, _)) => &s[..=i],
+        None => s,
+    }
+}
+
+/// 이름으로 본 카드 종류: 글 파일이면 Some(true), 그림이면 Some(false), 카드에 띄우지 않는 파일이면 None.
+/// 확장자는 Windows와 같게 가린다: 점으로 시작하는 이름(.gitignore)은 점 뒤 전체가 확장자다
+fn card_kind(name: &str) -> Option<bool> {
+    let ext = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() || name.starts_with('.') => ext.to_ascii_lowercase(),
+        _ => return None,
+    };
+    if TEXT_EXTS.contains(&ext.as_str()) {
+        Some(true)
+    } else if IMAGE_EXTS.contains(&ext.as_str()) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// 카드의 이름 아래 글: 종류와 크기 ("PNG 이미지 · 248 KB"). 크기는 목록과 같은 모양으로 적는다
+fn card_detail(kind: &str, size: u64) -> String {
+    let size = listing::format_size(size);
+    if kind.is_empty() { size } else { format!("{kind} · {size}") }
+}
+
+/// 지금 고른 파일 가운데 카드에 띄울 것 (App::card_target이 지금 칸에서 찾는다)
+struct CardTarget {
+    key: CardKey,
+    /// 글 파일이면 true, 그림이면 false
+    text: bool,
+}
+
+/// 미리 보기 카드의 상태. 어느 파일의 카드인지는 그때그때 지금 칸에서 고른 파일로 정하고(card_target),
+/// 여기에는 마지막으로 맞춘 파일(key)에 대해 읽은 것과 사용자가 정한 것(닫기, 크게 보기)을 둔다
+struct Card {
+    /// 마지막으로 맞춘 파일 (sync_card). 고른 파일이 이것과 달라지면 그 파일에 맞춰 새로 읽는다
+    key: Option<CardKey>,
+    /// 글 파일의 앞부분 (읽는 중이면 None)
+    text: Option<String>,
+    /// 읽지 못했다: 글 파일이면 카드를 띄우지 않고, 그림이면 카드에 '미리 볼 수 없어요'를 보인다
+    failed: bool,
+    /// 이 파일에 대해 이미 요청한 것: 그림은 그 픽셀 수, 글은 1, 아직이면 0
+    asked: u32,
+    /// 이 파일에 맞춘 때 (그림이 늦으면 '불러오는 중…'을 보일 때를 잰다)
+    since: Instant,
+    /// 닫기로 닫은 파일. 다른 파일을 고를 때까지 다시 띄우지 않는다
+    closed: Option<String>,
+    /// 크게 보기. 카드가 사라질 때까지 이어진다 (파일을 옮겨 다니며 크게 볼 수 있게)
+    large: bool,
+}
+
+impl Card {
+    fn new() -> Card {
+        Card { key: None, text: None, failed: false, asked: 0, since: Instant::now(), closed: None, large: false }
+    }
+}
+
+/// 읽어 둔 그림과 그 그림을 읽을 때 요청한 픽셀 수
+struct CachedPic {
+    key: CardKey,
+    px: u32,
+    pic: Picture,
+}
+
+impl CachedPic {
+    /// 원본을 줄이지 않고 읽었는지: 긴 쪽이 요청한 크기에 못 미치면 원본 그대로라 더 크게 읽을 것이 없다
+    /// (요청한 크기에 거의 닿았으면 줄여 읽은 것으로 본다)
+    fn full(&self) -> bool {
+        self.pic.longest() + 8 < self.px
     }
 }
 
@@ -285,6 +463,14 @@ pub struct App {
     system_accent: Option<Color>,
     /// 지금 공간의 이름을 고치는 중 (창 쪽 입력 상자가 이름 자리에 뜬다)
     pub renaming: bool,
+    /// 자동 미리 보기: 그림·글 파일을 고르면 카드가 저절로 뜬다 (도구 막대의 눈으로 끄고 켠다. 숨김 항목 보기처럼 작업 공간과 상관없다)
+    auto_preview: bool,
+    card: Card,
+    /// 읽어 둔 그림: 최근에 본 몇 개만 남긴다 (맨 뒤가 가장 최근)
+    pics: Vec<CachedPic>,
+    previews: Vec<PreviewRequest>,
+    /// 마지막으로 낸 카드 내용 요청의 번호
+    preview_seq: u64,
 }
 
 impl App {
@@ -323,6 +509,11 @@ impl App {
             dark: theme.dark,
             system_accent: None,
             renaming: false,
+            auto_preview: true,
+            card: Card::new(),
+            pics: Vec::new(),
+            previews: Vec::new(),
+            preview_seq: 0,
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
@@ -438,8 +629,8 @@ impl App {
     pub fn settle(&mut self) {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         loop {
-            let (reqs, probes) = (self.take_requests(), self.take_probes());
-            if reqs.is_empty() && probes.is_empty() {
+            let (reqs, probes, previews) = (self.take_requests(), self.take_probes(), self.take_previews());
+            if reqs.is_empty() && probes.is_empty() && previews.is_empty() {
                 break;
             }
             for r in reqs {
@@ -450,7 +641,140 @@ impl App {
                 let result = resolve_input(&p.text, &home);
                 self.on_probed(&p, result);
             }
+            for r in previews {
+                let result = load_preview(&r);
+                self.on_previewed(&r, result);
+            }
         }
+    }
+
+    // ---------- 자동 미리 보기 카드 ----------
+
+    /// 카드에 띄울 파일: 지금 칸에서 하나만 고른 그림·글 파일 (커서가 그 파일에 있다). 자동 미리 보기를 껐으면 없다
+    fn card_target(&self) -> Option<CardTarget> {
+        if !self.auto_preview {
+            return None;
+        }
+        let tab = self.panes[self.active].tab();
+        let e = tab.cursor_entry().filter(|e| e.selected && e.kind == Kind::File)?;
+        let text = card_kind(&e.name_string())?;
+        if tab.selection_stats().0 != 1 {
+            return None;
+        }
+        Some(CardTarget { key: CardKey { path: tab.path_of(e)?, modified: e.modified, size: e.size }, text })
+    }
+
+    /// 카드가 보이면 그 파일과 카드 자리. 닫은 파일이면 없고, 글 파일은 다 읽은 뒤에 보인다 (글로 읽지 못하면 뜨지 않는다).
+    /// 놓을 만한 칸이 없어도 없다
+    fn card_shown(&self) -> Option<(CardTarget, CardGeom)> {
+        let t = self.card_target()?;
+        if self.card.closed.as_deref() == Some(t.key.path.as_str()) {
+            return None;
+        }
+        if t.text && !(self.card.key.as_ref() == Some(&t.key) && self.card.text.is_some()) {
+            return None;
+        }
+        let m = card_geom(&self.pane_rects(), self.active, self.card.large)?;
+        Some((t, m))
+    }
+
+    fn card(&self) -> Option<CardGeom> {
+        self.card_shown().map(|(_, m)| m)
+    }
+
+    /// 읽어 둔 그림
+    fn pic(&self, key: &CardKey) -> Option<&CachedPic> {
+        self.pics.iter().find(|c| c.key == *key)
+    }
+
+    /// 지금 고른 파일에 카드를 맞춘다: 고른 파일이 바뀌었으면 읽은 것을 비우고, 카드에 필요한 읽기를 요청에 쌓는다.
+    /// 고른 것이 바뀔 수 있는 입력 뒤마다 take_previews가 이것을 거친다
+    fn sync_card(&mut self) {
+        let target = self.card_target();
+        let key = target.as_ref().map(|t| &t.key);
+        if key != self.card.key.as_ref() {
+            // 닫아 둔 파일이 아닌 것을 고르면(고른 것이 없어져도) 다음에는 다시 띄운다
+            if key.map(|k| k.path.as_str()) != self.card.closed.as_deref() {
+                self.card.closed = None;
+            }
+            self.card.key = key.cloned();
+            self.card.text = None;
+            self.card.failed = false;
+            self.card.asked = 0;
+            self.card.since = Instant::now();
+        }
+        let Some(t) = target else {
+            // 카드가 사라지면(띄울 파일이 없거나 자동 미리 보기를 껐으면) 크게 보기도 끝난다
+            self.card.large = false;
+            return;
+        };
+        if self.card.failed || self.card.closed.as_deref() == Some(t.key.path.as_str()) {
+            return;
+        }
+        // 방금 본 그림은 남겨 둘 것들 가운데 맨 뒤로
+        if let Some(i) = self.pics.iter().position(|c| c.key == t.key) {
+            let c = self.pics.remove(i);
+            self.pics.push(c);
+        }
+        // 필요한 것과 이미 가진 것: 글은 1, 그림은 긴 쪽 픽셀 수 (원본 그대로 읽어 둔 그림은 더 읽을 것이 없다)
+        let (want, have) = if t.text {
+            (1, self.card.text.is_some() as u32)
+        } else {
+            (if self.card.large { PX_LARGE } else { PX_SMALL }, self.pic(&t.key).map_or(0, |c| if c.full() { u32::MAX } else { c.px }))
+        };
+        if have < want && self.card.asked < want {
+            self.card.asked = want;
+            self.preview_seq += 1;
+            self.previews.push(PreviewRequest { seq: self.preview_seq, key: t.key, px: if t.text { 0 } else { want } });
+        }
+    }
+
+    /// 지금 고른 파일에 카드를 맞추고, 쌓인 카드 내용 읽기 요청을 내준다.
+    /// 창 쪽이 입력 뒤와 폴더를 읽은 뒤마다 불러(pump) 뒷줄에서 읽고 on_previewed로 돌려준다
+    pub fn take_previews(&mut self) -> Vec<PreviewRequest> {
+        self.sync_card();
+        std::mem::take(&mut self.previews)
+    }
+
+    /// 뒷줄에서 읽은 카드 내용. 그 사이 다른 파일을 골랐으면(지금 카드의 파일이 아니면) 버린다
+    pub fn on_previewed(&mut self, req: &PreviewRequest, result: Option<Preview>) {
+        if self.card.key.as_ref() != Some(&req.key) {
+            return;
+        }
+        match result {
+            Some(Preview::Image(pic)) => {
+                // 같은 파일을 더 크게 읽은 것이 이미 있으면 그대로 둔다 (작게 읽은 것이 늦게 온 경우)
+                if self.pic(&req.key).is_some_and(|c| c.px >= req.px) {
+                    return;
+                }
+                self.pics.retain(|c| c.key != req.key);
+                self.pics.push(CachedPic { key: req.key.clone(), px: req.px, pic });
+                if self.pics.len() > PICS_MAX {
+                    self.pics.remove(0);
+                }
+            }
+            Some(Preview::Text(text)) => self.card.text = Some(text),
+            // 크게 읽는 것만 실패했으면 읽어 둔 작은 그림을 그대로 보인다
+            None => self.card.failed = self.pic(&req.key).is_none(),
+        }
+    }
+
+    /// 도구 막대의 눈: 자동 미리 보기를 끄고 켠다 (무엇이 바뀌었는지 지금 칸의 칩 줄에 잠깐 알린다)
+    pub fn toggle_auto_preview(&mut self) {
+        self.auto_preview = !self.auto_preview;
+        let note = if self.auto_preview { "자동 미리 보기를 켰어요 · 그림이나 글 파일을 고르면 보여요" } else { "자동 미리 보기를 껐어요" };
+        self.flash = Some((self.active, note.to_string()));
+    }
+
+    /// 카드의 닫기: 다른 파일을 고를 때까지 다시 띄우지 않는다
+    fn close_card(&mut self) {
+        self.card.closed = self.card_target().map(|t| t.key.path);
+        self.card.large = false;
+    }
+
+    /// 카드를 크게(놓인 칸을 채운다)·작게
+    pub fn toggle_card_large(&mut self) {
+        self.card.large = !self.card.large;
     }
 
     // ---------- 경로 입력 ----------
@@ -558,6 +882,7 @@ impl App {
             active: self.active,
             show_hidden: self.show_hidden,
             preview: false,
+            auto_preview: self.auto_preview,
             new_tab: session::NEW_TAB_SAME.to_string(),
             recent: Vec::new(),
             side: "main".to_string(),
@@ -590,6 +915,7 @@ impl App {
         self.layout = Layout::ALL[(s.layout as usize).min(4)];
         self.split = (s.split.0.clamp(0.15, 0.85), s.split.1.clamp(0.15, 0.85));
         self.show_hidden = s.show_hidden;
+        self.auto_preview = s.auto_preview;
         self.home = home.to_string();
         for (p, ps) in s.panes.iter().take(self.panes.len()).enumerate() {
             let mut tabs = Vec::new();
@@ -649,9 +975,10 @@ impl App {
                 if let Some(state) = self.workspaces.current().map(|w| w.state.clone()) {
                     self.restore(&state, home);
                 }
-                // 숨김 항목 보기는 작업 공간과 상관없다
+                // 숨김 항목 보기와 자동 미리 보기는 작업 공간과 상관없다
                 if let Some(s) = session {
                     self.show_hidden = s.show_hidden;
+                    self.auto_preview = s.auto_preview;
                 }
             }
         }
@@ -698,14 +1025,15 @@ impl App {
     }
 
     /// 지금 공간에 저장된 화면(칸 나누기·칸·탭)을 열고, 색을 그 공간 색으로 바꾼다.
-    /// 숨김 항목 보기는 작업 공간과 상관없어 그대로 둔다
+    /// 숨김 항목 보기와 자동 미리 보기는 작업 공간과 상관없어 그대로 둔다
     fn open_current_workspace(&mut self) {
         let Some(state) = self.workspaces.current().map(|w| w.state.clone()) else { return };
-        let (home, hidden) = (self.home.clone(), self.show_hidden);
+        let (home, hidden, auto_preview) = (self.home.clone(), self.show_hidden, self.auto_preview);
         // 떠나는 화면의 탭은 없어진다: 그 탭들에 걸어 둔 표시와 하던 입력·메뉴·끌기를 그만둔다
         self.restored.clear();
         self.restore(&state, &home);
         self.show_hidden = hidden;
+        self.auto_preview = auto_preview;
         self.editing = None;
         self.renaming = false;
         self.flash = None;
@@ -1263,11 +1591,11 @@ impl App {
         self.side_scroll = self.side_scroll.clamp(0.0, if max < 0.5 { 0.0 } else { max });
     }
 
-    /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다.
-    /// 새 폴더·미리 보기·검색은 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
+    /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다. 오른쪽 끝은 자동 미리 보기의 눈.
+    /// 새 폴더·검색은 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
     fn toolbar(&self) -> ToolbarGeom {
         let a = self.area();
-        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: false, search: false, more: false })
+        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: true, search: false, more: false })
     }
 
     /// 탭 칩 자리와 새 탭(+) 자리 (app.rs chips와 같다: 오른쪽 항목 수 자리 앞까지, 넘치면 지금 탭을 지킨다)
@@ -1319,8 +1647,18 @@ impl App {
             // 도구 막대: 뒤로·앞으로는 지금 칸에 대해 움직인다
             let m = self.toolbar();
             let p = self.active;
-            let hits = [(m.back, Hit::Back(p)), (m.fwd, Hit::Fwd(p)), (m.layout, Hit::LayoutPick), (m.view, Hit::ViewPick)];
+            let hits = [(m.back, Hit::Back(p)), (m.fwd, Hit::Fwd(p)), (m.layout, Hit::LayoutPick), (m.view, Hit::ViewPick), (m.preview, Hit::PreviewToggle)];
             return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);
+        }
+        // 미리 보기 카드는 칸 위에 떠 있다: 카드 안은 어디든 카드가 받는다 (아래 칸을 누르지 않게)
+        if let Some(m) = self.card().filter(|m| m.card.contains(x, y)) {
+            return if m.close.contains(x, y) {
+                Hit::CardClose
+            } else if m.expand.contains(x, y) {
+                Hit::CardExpand
+            } else {
+                Hit::Card
+            };
         }
         let (sx, sy) = self.splitters();
         if sx.is_some_and(|r| r.contains(x, y)) {
@@ -1396,6 +1734,10 @@ impl App {
             Hit::SideRow(i) => self.open_side_row(i),
             Hit::LayoutPick => self.menu = Some(MenuKind::Layout),
             Hit::ViewPick => self.menu = Some(MenuKind::View),
+            Hit::PreviewToggle => self.toggle_auto_preview(),
+            // 카드는 단추가 아닌 곳을 눌러도 커지고 작아진다
+            Hit::CardExpand | Hit::Card => self.toggle_card_large(),
+            Hit::CardClose => self.close_card(),
             Hit::Tab(p, i) => self.activate_tab(p, i),
             Hit::TabClose(p, i) => self.close_tab(p, i),
             Hit::TabAdd(p) => self.new_tab(p),
@@ -1505,6 +1847,8 @@ impl App {
             (Key::Tab, false, true, false) => self.cycle_tab(p, m.shift),
             (Key::Tab, false, false, false) => self.cycle_pane(),
             (Key::Char('a'), true, false, false) => self.select_all(),
+            // 스페이스: 미리 보기 카드가 떠 있으면 크게·작게
+            (Key::Char(' '), false, false, false) if self.card().is_some() => self.toggle_card_large(),
             (Key::Esc, false, false, false) => self.clear_selection(),
             (Key::Char('.'), true, false, false) if m.shift => self.toggle_hidden(),
             (Key::Char('r'), true, false, false) => self.refresh(p),
@@ -1531,6 +1875,42 @@ impl App {
                 let line = if s.w() < s.h() { R::new(s.l + GAP / 2.0 - 1.0, s.t + 12.0, s.l + GAP / 2.0 + 1.0, s.b - 12.0) } else { R::new(s.l + 12.0, s.t + GAP / 2.0 - 1.0, s.r - 12.0, s.t + GAP / 2.0 + 1.0) };
                 g.fill_round(line, 1.0, alpha(t.accent, 0.6));
             }
+        }
+        self.paint_card(g, t);
+    }
+
+    /// 미리 보기 카드: 칸들 위에 그린다. 자리와 그리기는 공통 코드, 그림과 글은 이 앱이 읽어 둔 것
+    fn paint_card(&self, g: &mut Gfx, t: &Theme) {
+        let Some((target, m)) = self.card_shown() else { return };
+        let tab = self.panes[self.active].tab();
+        let Some(e) = tab.cursor_entry() else { return };
+        let name = e.name_string();
+        let detail = card_detail(&MacArt { kinds: &self.kinds }.type_name(tab, e), e.size);
+        // 글은 카드에 보이는 줄까지만 넘긴다 (그릴 때마다 80줄을 다 배치하지 않게)
+        let body = match &self.card.text {
+            Some(s) if target.text => CardBody::Text(first_lines(s, (m.body.h() / MONO_LINE_H).ceil() as usize)),
+            _ => CardBody::Image,
+        };
+        let hover = match self.hover {
+            Hit::CardExpand => CardHover::Expand,
+            Hit::CardClose => CardHover::Close,
+            _ => CardHover::None,
+        };
+        let pic = self.pic(&target.key).map(|c| &c.pic);
+        paint_preview_card(g, &mut CardPic(pic), t, &CardScene { geom: &m, name: &name, detail: &detail, body, note: self.card_note(&target), large: self.card.large, hover });
+    }
+
+    /// 그림이 아직 없을 때 카드에 보일 글: 읽지 못했으면 그렇다고 알리고, 읽는 중이면 0.3초가 지난 뒤부터 알린다
+    /// (그림이 곧 오면 글자를 보이지 않는다)
+    fn card_note(&self, target: &CardTarget) -> Option<&'static str> {
+        if target.text || self.card.key.as_ref() != Some(&target.key) || self.pic(&target.key).is_some() {
+            None
+        } else if self.card.failed {
+            Some("미리 볼 수 없어요")
+        } else if self.card.since.elapsed().as_millis() >= LOADING_NOTE_MS as u128 {
+            Some("불러오는 중…")
+        } else {
+            None
         }
     }
 
@@ -1597,7 +1977,7 @@ impl App {
         g.unclip();
     }
 
-    /// 칸 영역 위 도구 막대: 뒤로·앞으로, 지금 폴더 이름, 칸 나누기·보기 방식 단추 (공통 그리기)
+    /// 칸 영역 위 도구 막대: 뒤로·앞으로, 지금 폴더 이름, 칸 나누기·보기 방식 단추, 자동 미리 보기의 눈 (공통 그리기)
     fn paint_workbar(&self, g: &Gfx, t: &Theme) {
         let m = self.toolbar();
         let p = self.active;
@@ -1608,6 +1988,7 @@ impl App {
             Hit::Fwd(_) => ToolbarHover::Fwd,
             Hit::LayoutPick => ToolbarHover::Layout,
             Hit::ViewPick => ToolbarHover::View,
+            Hit::PreviewToggle => ToolbarHover::Preview,
             _ => ToolbarHover::None,
         };
         paint_toolbar(
@@ -1623,7 +2004,7 @@ impl App {
                 can_up: can_go_up(&tab.loc),
                 new_folder_ok: false,
                 view_ok: true,
-                preview_on: false,
+                preview_on: self.auto_preview,
                 search_on: false,
                 layout_open: self.menu == Some(MenuKind::Layout),
                 view_open: self.menu == Some(MenuKind::View),
@@ -1745,6 +2126,17 @@ impl EntryArt<Gfx> for MacArt<'_> {
             self.kinds.borrow_mut().insert(k, v.clone());
         }
         v
+    }
+}
+
+/// 카드 그리기의 맥 갈고리: 읽어 둔 그림을 그린다 (아직 없으면 그리지 않는다)
+struct CardPic<'a>(Option<&'a Picture>);
+
+impl CardArt<Gfx> for CardPic<'_> {
+    fn image(&mut self, g: &mut Gfx, r: R) -> bool {
+        let Some(pic) = self.0 else { return false };
+        g.picture(pic, r);
+        true
     }
 }
 
@@ -2495,5 +2887,336 @@ mod tests {
         assert_eq!((d.workspaces().list.len(), d.workspaces().current_name(), d.layout()), (1, Some("기본"), Layout::Four));
         assert_eq!(d.workspaces().list[0].state.layout, 4, "the new workspace starts from that screen");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 미리 보기 시험용 폴더: 하위 폴더, 읽히는 그림 둘, 그림이 아닌 .jpg, 글 파일, 글이 아닌 .txt, 카드에 띄우지 않는 파일
+    fn preview_demo() -> (std::path::PathBuf, String) {
+        let (root, home) = demo();
+        let dir = root.join("미리 보기");
+        std::fs::create_dir_all(dir.join("폴더")).unwrap();
+        for name in ["노을.bmp", "바다.bmp"] {
+            std::fs::write(dir.join(name), crate::render::demo_picture()).unwrap();
+        }
+        std::fs::write(dir.join("깨진 그림.jpg"), b"x").unwrap();
+        std::fs::write(dir.join("메모.txt"), "첫 줄\n\t둘째 줄\n").unwrap();
+        std::fs::write(dir.join("글 아님.txt"), [b'a', 0, 0xFF, b'b']).unwrap();
+        std::fs::write(dir.join("보고서.docx"), b"x").unwrap();
+        (root, util::join(&home, "미리 보기"))
+    }
+
+    /// 칸 p에서 그 이름의 줄을 누른다 (자세히 보기)
+    fn click_name(a: &mut App, g: &Gfx, p: usize, name: &str, m: Mods) {
+        let vi = names(a, p).iter().position(|n| n == name).unwrap_or_else(|| panic!("no row named {name}"));
+        let (x, y) = row_point(a, p, vi);
+        a.mouse_down(g, x, y, m, 1);
+    }
+
+    fn pane_rect(a: &App, p: usize) -> R {
+        a.pane_rects().into_iter().find(|(i, _)| *i == p).unwrap().1
+    }
+
+    /// 그림이나 글 파일을 하나 고르면 카드가 뜬다. 폴더, 그 밖의 파일, 여러 개를 고른 때에는 뜨지 않는다
+    #[test]
+    fn card_shows_for_one_selected_image_or_text_file() {
+        let (root, dir) = preview_demo();
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        assert!(a.card().is_none(), "nothing is selected");
+        // 그림: 카드는 바로 뜨고 그림은 읽은 뒤에 들어온다
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        assert!(a.card().is_some() && a.pics.is_empty());
+        a.settle();
+        assert!(a.card().is_some() && !a.card.failed);
+        assert_eq!(a.pics.len(), 1, "the picture was read");
+        assert_eq!(a.pics[0].pic.size(), (480, 320), "a picture smaller than the limit is read as it is");
+        let (target, _) = a.card_shown().unwrap();
+        assert_eq!(a.card_note(&target), None, "no note over a picture that was read");
+        // 글 파일: 다 읽은 뒤에 뜬다
+        click_name(&mut a, &g, 0, "메모.txt", none);
+        assert!(a.card().is_none(), "the text card waits for the text");
+        a.settle();
+        assert!(a.card().is_some());
+        assert_eq!(a.card.text.as_deref(), Some("첫 줄\n    둘째 줄\n"));
+        // 글로 읽히지 않는 파일은 카드를 띄우지 않는다
+        click_name(&mut a, &g, 0, "글 아님.txt", none);
+        a.settle();
+        assert!(a.card().is_none() && a.card.failed);
+        // 읽히지 않는 그림: 카드는 뜨고, 미리 볼 수 없다고 알린다
+        click_name(&mut a, &g, 0, "깨진 그림.jpg", none);
+        a.settle();
+        let (target, _) = a.card_shown().expect("the card of an unreadable picture still shows");
+        assert_eq!(a.card_note(&target), Some("미리 볼 수 없어요"));
+        // 폴더와 카드에 띄우지 않는 파일
+        for name in ["폴더", "보고서.docx"] {
+            click_name(&mut a, &g, 0, name, none);
+            a.settle();
+            assert!(a.card().is_none(), "{name}");
+        }
+        // 여러 개를 고르면 뜨지 않고, 하나만 고르면 다시 뜬다
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        click_name(&mut a, &g, 0, "바다.bmp", Mods { cmd: true, ..Default::default() });
+        a.settle();
+        assert!(a.card().is_none());
+        click_name(&mut a, &g, 0, "바다.bmp", none);
+        a.settle();
+        assert!(a.card().is_some());
+        // 이름으로 가리는 종류와 이름 아래 글
+        assert_eq!((card_kind("사진.JPG"), card_kind("메모.md"), card_kind(".gitignore")), (Some(false), Some(true), Some(true)));
+        assert_eq!((card_kind("보고서.docx"), card_kind("txt"), card_kind("이름.")), (None, None, None));
+        assert_eq!(card_detail("PNG 이미지", 248 * 1024), "PNG 이미지 · 248 KB");
+        assert_eq!(card_detail("", 512), "512 B");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 카드는 지금 칸이 아닌 칸의 오른쪽 아래에 놓이고, 지금 칸이 바뀌면 자리를 옮긴다.
+    /// 한 칸뿐이면 그 칸에 놓이고, 좁은 창에서는 뜨지 않는다
+    #[test]
+    fn card_sits_in_another_pane_and_follows_the_active_pane() {
+        use sakadu::ui::preview_card::{CARD_MARGIN, CARD_W};
+        let (root, dir) = preview_demo();
+        let (mut a, g) = app(&dir);
+        click_name(&mut a, &g, 0, "노을.bmp", Mods::default());
+        a.settle();
+        let (m, host) = (a.card().unwrap(), pane_rect(&a, 1));
+        assert_eq!(m.host, 1);
+        assert_eq!((m.card.r, m.card.b, m.card.w()), (host.r - CARD_MARGIN, host.b - CARD_MARGIN, CARD_W));
+        // 오른쪽 칸에서 고르면 그 칸이 지금 칸이 되고, 카드는 왼쪽 칸으로 간다
+        click_name(&mut a, &g, 1, "바다.bmp", Mods::default());
+        a.settle();
+        assert_eq!((a.active(), a.card().unwrap().host), (1, 0));
+        // Tab으로 지금 칸을 바꾸면 그 칸에서 고른 파일의 카드가 다른 칸에 뜬다
+        a.key(Key::Tab, Mods::default());
+        a.settle();
+        assert_eq!((a.active(), a.card().unwrap().host), (0, 1));
+        assert_eq!(a.card_shown().unwrap().0.key.path, util::join(&dir, "노을.bmp"));
+        // 고른 것이 없는 칸으로 가면 카드가 없다
+        a.set_layout(Layout::Three);
+        a.settle();
+        a.activate_pane(2);
+        a.settle();
+        assert!(a.card().is_none());
+        // 한 칸: 그 칸의 오른쪽 아래에 놓이고 왼쪽에 이름이 보일 자리가 남는다. 좁은 창에서는 뜨지 않는다
+        a.activate_pane(0);
+        a.set_layout(Layout::One);
+        a.settle();
+        let (m, only) = (a.card().unwrap(), pane_rect(&a, 0));
+        assert_eq!((m.host, m.card.r), (0, only.r - CARD_MARGIN));
+        assert!(m.card.l - only.l >= 200.0);
+        a.resize(700.0, 420.0);
+        assert!(a.card().is_none(), "too narrow to keep the names visible");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 카드의 단추: 크게 보기는 단추·카드·스페이스로 켜고 끄며, 파일을 옮겨 다녀도 이어지다가 카드가 사라지면 끝난다.
+    /// 닫으면 다른 파일을 고를 때까지 뜨지 않는다. 카드를 누른 것은 아래 칸으로 가지 않는다
+    #[test]
+    fn card_buttons_enlarge_and_close() {
+        use sakadu::ui::preview_card::CARD_MARGIN;
+        let (root, dir) = preview_demo();
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.settle();
+        let small = a.card().unwrap();
+        // 크게 보기 단추: 카드가 놓인 칸을 여백만 남기고 채운다
+        let (x, y) = mid(small.expand);
+        assert_eq!(a.hit(&g, x, y), Hit::CardExpand);
+        a.mouse_down(&g, x, y, none, 1);
+        a.settle();
+        let large = a.card().unwrap();
+        assert_eq!(large.card, pane_rect(&a, 1).inset(CARD_MARGIN, CARD_MARGIN));
+        assert_eq!(a.active(), 0, "a click on the card does not reach the pane under it");
+        // 카드의 그림 자리를 눌러도, 스페이스를 눌러도 바뀐다
+        let (x, y) = mid(large.body);
+        assert_eq!(a.hit(&g, x, y), Hit::Card);
+        a.mouse_down(&g, x, y, none, 1);
+        assert_eq!((a.card().unwrap().card, a.active()), (small.card, 0));
+        assert!(a.key(Key::Char(' '), none));
+        assert_eq!(a.card().unwrap().card, large.card);
+        // 크게 본 채로 다른 그림·글 파일로 옮겨도 그대로 크다
+        click_name(&mut a, &g, 0, "바다.bmp", none);
+        a.settle();
+        assert_eq!(a.card().unwrap().card, large.card);
+        click_name(&mut a, &g, 0, "메모.txt", none);
+        a.settle();
+        assert_eq!(a.card().unwrap().card, large.card);
+        // 카드가 사라지면(폴더를 골랐다) 크게 보기도 끝난다. 카드가 없으면 스페이스는 하는 일이 없다
+        click_name(&mut a, &g, 0, "폴더", none);
+        a.settle();
+        assert!(a.card().is_none() && !a.key(Key::Char(' '), none));
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.settle();
+        assert_eq!(a.card().unwrap().card, small.card);
+        // 닫기: 카드가 사라지고 크게 보기도 끝난다. 같은 파일을 다시 눌러도 뜨지 않는다
+        a.key(Key::Char(' '), none);
+        let (x, y) = mid(a.card().unwrap().close);
+        assert_eq!(a.hit(&g, x, y), Hit::CardClose);
+        a.mouse_down(&g, x, y, none, 1);
+        a.settle();
+        assert!(a.card().is_none());
+        assert_eq!(a.hit(&g, x, y), Hit::List(1), "nothing floats over the pane any more");
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.settle();
+        assert!(a.card().is_none(), "the same file stays closed");
+        // 다른 파일을 고르면 그 파일의 카드가 작게 뜨고, 닫았던 파일로 돌아와도 다시 뜬다
+        click_name(&mut a, &g, 0, "바다.bmp", none);
+        a.settle();
+        assert_eq!(a.card().unwrap().card, small.card);
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.settle();
+        assert!(a.card().is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 도구 막대의 눈: 자동 미리 보기를 끄면 카드가 뜨지 않는다. 세션에 남고, 작업 공간을 바꿔도 그대로다
+    #[test]
+    fn eye_button_turns_the_card_off_and_the_setting_is_kept() {
+        let (root, dir) = preview_demo();
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.settle();
+        a.key(Key::Char(' '), none);
+        assert!(a.card().is_some() && a.card.large);
+        // 눈을 누르면 꺼진다: 카드가 사라지고 크게 보기도 끝난다. 고른 것은 그대로다
+        let (x, y) = mid(a.toolbar().preview);
+        assert_eq!(a.hit(&g, x, y), Hit::PreviewToggle);
+        assert!(!a.drag_zone(&g, x, y), "the button does not drag the window");
+        a.mouse_down(&g, x, y, none, 1);
+        a.settle();
+        assert!(!a.auto_preview && a.card().is_none() && !a.card.large);
+        assert!(a.flash.as_ref().is_some_and(|(_, m)| m.contains("껐어요")));
+        assert_eq!(a.pane(0).tab().selection_stats().0, 1);
+        click_name(&mut a, &g, 0, "바다.bmp", none);
+        assert!(a.card().is_none() && a.take_previews().is_empty(), "nothing is read while it is off");
+        // 세션(파일 형식까지)에 남아 다음에도 꺼진 채로 열린다
+        let s = session::parse(&session::serialize(&a.to_session())).expect("session");
+        assert!(!s.auto_preview);
+        let (mut b, _g) = app(&dir);
+        assert!(b.auto_preview, "on unless it was turned off");
+        b.restore(&s, &dir);
+        assert!(!b.auto_preview);
+        // 작업 공간을 바꿔도 그대로다: 그 공간에 저장된 화면의 값이 아니라 지금 값을 따른다
+        a.new_workspace();
+        a.cancel_address();
+        a.mouse_down(&g, x, y, none, 1);
+        assert!(a.auto_preview);
+        a.switch_workspace(0);
+        a.settle();
+        assert!(a.auto_preview, "workspace 0 was left with the preview off, but the setting is not per workspace");
+        a.mouse_down(&g, x, y, none, 1);
+        a.switch_workspace(1);
+        a.settle();
+        assert!(!a.auto_preview);
+        // 다시 켜면 고른 파일의 카드가 뜬다
+        a.mouse_down(&g, x, y, none, 1);
+        assert!(a.flash.as_ref().is_some_and(|(_, m)| m.contains("켰어요")));
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.settle();
+        assert!(a.auto_preview && a.card().is_some());
+        // 지난번 화면이 다른 공간의 것이어도 자동 미리 보기는 지난번 값으로 연다
+        let mut last = a.to_session();
+        last.ws = Some("없는 공간".to_string());
+        last.auto_preview = false;
+        let (mut c, _g) = app(&dir);
+        c.open_saved(a.workspaces().clone(), Some(&last), &dir);
+        assert!(!c.auto_preview);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 읽기 요청과 결과: 그 사이 다른 파일을 골랐으면 늦게 온 결과는 버린다. 크게 보면 더 큰 그림을 한 번 더 읽고,
+    /// 읽어 둔 그림은 몇 개만 남긴다 (읽은 결과를 직접 넣어 본다)
+    #[test]
+    fn card_requests_follow_the_selected_file() {
+        let (root, dir) = preview_demo();
+        for i in 0..8 {
+            std::fs::write(root.join("미리 보기").join(format!("사진 {i}.png")), b"x").unwrap();
+        }
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        let blank = |w, h| Some(Preview::Image(Picture::blank(w, h).unwrap()));
+        click_name(&mut a, &g, 0, "사진 0.png", none);
+        let first = a.take_previews();
+        assert_eq!((first.len(), first[0].px), (1, PX_SMALL));
+        assert!(a.take_previews().is_empty(), "asked once");
+        // 그 사이 다른 파일을 골랐다: 늦게 온 결과는 버린다
+        click_name(&mut a, &g, 0, "사진 1.png", none);
+        let second = a.take_previews();
+        assert!(second[0].seq > first[0].seq);
+        a.on_previewed(&first[0], blank(1024, 600));
+        assert!(a.pics.is_empty());
+        a.on_previewed(&second[0], blank(1024, 600));
+        assert_eq!(a.pics.len(), 1);
+        assert!(a.take_previews().is_empty());
+        // 크게 보기: 줄여 읽은 그림이면 더 크게 한 번 더 읽는다. 그것이 실패해도 읽어 둔 그림은 남는다
+        a.key(Key::Char(' '), none);
+        let larger = a.take_previews();
+        assert_eq!((larger.len(), larger[0].px), (1, PX_LARGE));
+        a.on_previewed(&larger[0], None);
+        assert!(!a.card.failed && a.pics.len() == 1);
+        a.on_previewed(&larger[0], blank(2048, 1200));
+        assert_eq!((a.pics.len(), a.pics[0].px), (1, PX_LARGE));
+        // 작게 읽은 것이 늦게 와도 큰 그림을 덮지 않는다
+        a.on_previewed(&second[0], blank(1024, 600));
+        assert_eq!(a.pics[0].pic.longest(), 2048);
+        a.key(Key::Char(' '), none);
+        // 원본이 작아 줄이지 않고 읽은 그림은 크게 봐도 다시 읽지 않는다
+        click_name(&mut a, &g, 0, "사진 2.png", none);
+        let small = a.take_previews();
+        a.on_previewed(&small[0], blank(300, 200));
+        a.key(Key::Char(' '), none);
+        assert!(a.card.large && a.take_previews().is_empty());
+        a.key(Key::Char(' '), none);
+        // 읽지 못한 그림은 다시 요청하지 않는다
+        click_name(&mut a, &g, 0, "사진 3.png", none);
+        let bad = a.take_previews();
+        a.on_previewed(&bad[0], None);
+        assert!(a.card.failed && a.take_previews().is_empty());
+        // 읽어 둔 그림은 PICS_MAX개까지만 남는다
+        for i in 0..8 {
+            click_name(&mut a, &g, 0, &format!("사진 {i}.png"), none);
+            for r in a.take_previews() {
+                a.on_previewed(&r, blank(64, 64));
+            }
+        }
+        assert_eq!(a.pics.len(), PICS_MAX);
+        assert_eq!(a.pics.last().unwrap().key.path, util::join(&dir, "사진 7.png"));
+        // 읽어 둔 그림으로 돌아가면 다시 읽지 않고, 방금 본 그림이 가장 늦게까지 남는다
+        click_name(&mut a, &g, 0, "사진 6.png", none);
+        assert!(a.take_previews().is_empty());
+        assert_eq!(a.pics.last().unwrap().key.path, util::join(&dir, "사진 6.png"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 글 파일 앞부분 읽기: UTF-8과 BOM이 있는 UTF-16은 읽고, 글이 아닌 것은 버린다. 앞 80줄만, 긴 줄은 자른다
+    #[test]
+    fn decode_text_reads_utf8_and_utf16_with_a_bom() {
+        assert_eq!(decode_text("가나\r\n\t다".as_bytes()).as_deref(), Some("가나\n    다\n"));
+        assert_eq!(decode_text(b"\xEF\xBB\xBFabc").as_deref(), Some("abc\n"));
+        assert_eq!(decode_text(b"").as_deref(), Some(""));
+        let utf16 = |big_endian: bool| -> Vec<u8> {
+            let bom: [u8; 2] = if big_endian { [0xFE, 0xFF] } else { [0xFF, 0xFE] };
+            bom.into_iter().chain("한글 😀\nok".encode_utf16().flat_map(|u| if big_endian { u.to_be_bytes() } else { u.to_le_bytes() })).collect()
+        };
+        assert_eq!(decode_text(&utf16(false)).as_deref(), Some("한글 😀\nok\n"));
+        assert_eq!(decode_text(&utf16(true)).as_deref(), Some("한글 😀\nok\n"));
+        // 글이 아닌 것: NUL이 있는 것, UTF-8이 아닌 바이트, BOM 없는 UTF-16
+        assert_eq!(decode_text(b"ab\0cd"), None);
+        assert_eq!(decode_text(&[b'a', 0xFF, b'b']), None);
+        assert_eq!(decode_text(&"abc".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>()), None);
+        // 읽기를 자른 자리가 글자 중간이면 그 앞까지 읽는다 (UTF-16은 두 칸짜리 글자의 앞 칸까지 읽은 경우)
+        let cut = "가나다".as_bytes();
+        assert_eq!(decode_text(&cut[..cut.len() - 1]).as_deref(), Some("가나\n"));
+        assert_eq!(decode_text(&utf16(false)[..2 + 3 * 2 + 2]).as_deref(), Some("한글 \n"));
+        // 앞 80줄만, 긴 줄은 200자까지. 줄마다 '\n'으로 끝난다
+        let long: String = (0..TEXT_LINES + 20).map(|i| if i == 1 { "가".repeat(TEXT_COLS + 50) + "\n" } else { format!("줄 {i}\n") }).collect();
+        let s = decode_text(long.as_bytes()).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!((lines.len(), lines[1].chars().count(), lines[TEXT_LINES - 1]), (TEXT_LINES, TEXT_COLS, format!("줄 {}", TEXT_LINES - 1).as_str()));
+        assert!(s.ends_with('\n'));
+        // 카드에는 보이는 줄까지만 넘긴다
+        assert_eq!(first_lines("a\nb\nc\n", 2), "a\nb\n");
+        assert_eq!(first_lines("a\nb\n", 5), "a\nb\n");
+        assert_eq!(first_lines("", 3), "");
     }
 }

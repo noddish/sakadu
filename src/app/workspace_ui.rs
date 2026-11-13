@@ -79,6 +79,7 @@ impl App {
             active: self.active,
             show_hidden: self.show_hidden,
             preview: self.preview.is_some(),
+            auto_preview: self.auto_preview,
             new_tab: self.new_tab_home.clone(),
             recent: self.recent.clone(),
             side: self.side_pinned.map_or("none", Panel::key).to_string(),

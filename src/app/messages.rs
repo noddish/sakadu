@@ -120,6 +120,8 @@ impl App {
                         self.pal_run_query();
                     } else if id == TIMER_PREVIEW {
                         self.start_preview();
+                    } else if id == preview_card::TIMER_CARD {
+                        self.start_card();
                     } else if id == TIMER_PROBE {
                         self.on_probe_timer();
                     } else if id == TIMER_REDRAW {
@@ -450,7 +452,7 @@ impl App {
             && matches!(
                 hit,
                 Hit::Rail(_) | Hit::RailAdd | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder
-                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen
+                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen | Hit::PreviewButton | Hit::CardExpand | Hit::CardClose | Hit::Card
             )
         {
             return;
@@ -499,7 +501,9 @@ impl App {
             Hit::PalRow(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalScope(_) => self.pal_mouse_down(hit, dbl),
             Hit::PalClose => self.close_palette(),
             Hit::NewFolder(p) => self.new_folder(p),
-            Hit::PreviewButton => self.toggle_preview(),
+            Hit::PreviewButton => self.toggle_auto_preview(),
+            Hit::CardExpand | Hit::Card => self.toggle_card_large(),
+            Hit::CardClose => self.close_card(),
             Hit::PreviewPin | Hit::PreviewChip => self.toggle_preview_pin(),
             Hit::PreviewOpen => self.preview_open(),
             Hit::SettingsButton => self.toggle_settings(settings_ui::Page::General),

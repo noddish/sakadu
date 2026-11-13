@@ -7,6 +7,7 @@ use crate::palette::Theme;
 use crate::util;
 
 pub mod paint;
+pub mod preview_card;
 pub mod rail;
 pub mod toolbar;
 
@@ -59,6 +60,11 @@ pub mod glyph {
     /// Windows는 이 번호를 받으면 직접 그리고, 맥은 SF Symbols로 그린다
     pub const G_BOOKMARK: u16 = 0xFFF0;
     pub const G_BOOKMARK_FILL: u16 = 0xFFF1;
+    /// 눈 (자동 미리 보기)
+    pub const G_EYE: u16 = 0xE890;
+    /// 크게 보기·작게 보기 (미리 보기 카드)
+    pub const G_EXPAND: u16 = 0xE740;
+    pub const G_SHRINK: u16 = 0xE73F;
 }
 use glyph::*;
 
