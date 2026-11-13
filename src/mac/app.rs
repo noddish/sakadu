@@ -466,7 +466,7 @@ pub struct App {
     /// 자동 미리 보기: 그림·글 파일을 고르면 카드가 저절로 뜬다 (도구 막대의 눈으로 끄고 켠다. 숨김 항목 보기처럼 작업 공간과 상관없다)
     auto_preview: bool,
     card: Card,
-    /// 마지막 누름(두 번 누르기의 첫 누름)이 미리 보기 카드 위였는가. 아니었으면 이어지는 둘째 누름은 카드 아래 것이 받는다
+    /// 마지막 누름(두 번 누르기의 첫 누름)이 미리 보기 카드 위였는가. 그랬으면 이어지는 둘째 누름은 버리고, 아니었으면 카드 아래 것이 받는다
     press_on_card: bool,
     /// 읽어 둔 그림: 최근에 본 몇 개만 남긴다 (맨 뒤가 가장 최근)
     pics: Vec<CachedPic>,
@@ -1716,12 +1716,15 @@ impl App {
     /// 누름. clicks는 연속으로 누른 횟수 (2면 두 번 누르기)
     pub fn mouse_down(&mut self, g: &Gfx, x: f32, y: f32, mods: Mods, clicks: usize) {
         let mut hit = self.hit(g, x, y);
-        // 파일을 두 번 누를 때 첫 누름으로 뜬 미리 보기 카드가 그 자리를 덮을 수 있다 (칸이 하나뿐일 때 카드는 같은 칸에 놓인다).
-        // 첫 누름이 카드가 아니었으면 둘째 누름은 카드 아래 것이 받는다: 카드가 가로채면 파일이 열리지 않는다
+        // 두 번 누르기는 첫 누름이 닿은 쪽의 것이다 (미리 보기 카드는 누름 한 번에 뜨고, 작아지고, 닫혀서 둘째 누름 때는 그 자리에 다른 것이 있다).
+        // - 첫 누름이 카드였으면 둘째 누름은 버린다: 카드가 작아지거나 닫혀 드러난 줄을 열지 않는다
+        // - 첫 누름이 카드가 아니었으면 둘째 누름은 카드 아래 것이 받는다: 그 누름으로 뜬 카드가 가로채면 파일이 열리지 않는다
         let on_card = matches!(hit, Hit::Card | Hit::CardExpand | Hit::CardClose);
         if clicks < 2 {
             self.press_on_card = on_card;
-        } else if on_card && !self.press_on_card {
+        } else if self.press_on_card {
+            return;
+        } else if on_card {
             hit = self.hit_with(g, x, y, false);
         }
         // 입력 상자 밖을 누르면 입력(경로, 공간 이름)을 그만둔다. 알림은 다음 입력 때 지운다
@@ -3049,13 +3052,26 @@ mod tests {
         a.settle();
         assert!(a.open_files.iter().any(|p| p.ends_with("노을.bmp")), "{:?}", a.open_files);
         assert!(!a.card.large, "the card was not enlarged");
-        // 카드를 따로 두 번 누르면(첫 누름도 카드 위) 둘 다 카드가 받는다
+        // 카드를 두 번 누르면(첫 누름이 카드 위) 첫 누름만 듣는다: 카드가 커지고, 둘째 누름은 버린다
         let opened = a.open_files.len();
         a.mouse_down(&g, x, y, none, 1);
         assert!(a.card.large);
         a.mouse_down(&g, x, y, none, 2);
+        assert!(a.card.large, "the second click of a double-click on the card is dropped");
+        // 큰 카드의 왼쪽(작은 카드 밖)을 두 번 누른다: 첫 누름으로 카드가 작아져 그 자리에 다른 파일의 줄이 드러나도,
+        // 둘째 누름은 그 줄을 고르거나 열지 않는다
+        let big = a.card().unwrap().card;
+        let other = (1..names(&a, 0).len()).find(|i| *i != vi).unwrap();
+        let (_, y2) = row_point(&a, 0, other);
+        let x2 = big.l + 20.0;
+        assert!(big.contains(x2, y2));
+        a.mouse_down(&g, x2, y2, none, 1);
         assert!(!a.card.large);
-        assert_eq!(a.open_files.len(), opened, "clicks on the card open nothing");
+        assert_eq!(a.hit(&g, x2, y2), Hit::Row(0, other), "the small card no longer covers the spot");
+        a.mouse_down(&g, x2, y2, none, 2);
+        a.settle();
+        assert_eq!(a.open_files.len(), opened, "clicks that began on the card open nothing");
+        assert_eq!(a.pane(0).tab().cursor, vi, "and select nothing");
         std::fs::remove_dir_all(root).unwrap();
     }
 

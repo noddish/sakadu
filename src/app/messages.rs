@@ -423,12 +423,15 @@ impl App {
 
     pub(super) fn press(&mut self, x: f32, y: f32, dbl: bool) {
         let mut hit = self.hit(x, y);
-        // 파일을 두 번 클릭할 때 첫 누름으로 뜬 미리 보기 카드가 그 자리를 덮을 수 있다 (칸이 하나뿐일 때 카드는 같은 칸에 놓인다).
-        // 첫 누름이 카드가 아니었으면 둘째 누름은 카드 아래 것이 받는다: 카드가 가로채면 파일이 열리지 않는다
+        // 두 번 클릭은 첫 누름이 닿은 쪽의 것이다 (미리 보기 카드는 누름 한 번에 뜨고, 작아지고, 닫혀서 둘째 누름 때는 그 자리에 다른 것이 있다).
+        // - 첫 누름이 카드였으면 둘째 누름은 버린다: 카드가 작아지거나 닫혀 드러난 줄을 열지 않는다
+        // - 첫 누름이 카드가 아니었으면 둘째 누름은 카드 아래 것이 받는다: 그 누름으로 뜬 카드가 가로채면 파일이 열리지 않는다
         let on_card = matches!(hit, Hit::Card | Hit::CardExpand | Hit::CardClose);
         if !dbl {
             self.press_on_card = on_card;
-        } else if on_card && !self.press_on_card {
+        } else if self.press_on_card {
+            return;
+        } else if on_card {
             hit = self.hit_with(x, y, false);
         }
         if self.cmd.is_some() {
