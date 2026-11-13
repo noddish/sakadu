@@ -308,7 +308,7 @@ impl App {
                     }
                 }
             }
-            Drag::FavPress { .. } | Drag::FavMove { .. } => self.fav_drag_move(y),
+            Drag::FavPress { .. } | Drag::FavMove { .. } | Drag::PinPress { .. } | Drag::PinMove { .. } => self.fav_drag_move(y),
             Drag::SideW { start_x, start_w } => {
                 let lo = session::SIDE_W_RANGE.0;
                 self.side_w = (start_w + x - start_x).clamp(lo, self.side_w_max());

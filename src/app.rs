@@ -207,6 +207,10 @@ enum Drag {
     /// 사이드바 즐겨찾기 줄을 눌렀다. 조금 움직이면 FavMove
     FavPress { row: crate::favorites::Row, y: f32 },
     FavMove { from: crate::favorites::Row, y: f32 },
+    /// 사이드바의 고정한 줄을 눌렀다 (pins 번호). 조금 움직이면 PinMove, 그대로 떼면 연다
+    PinPress { index: usize, y: f32 },
+    /// 고정한 줄을 끌어 순서를 바꾸는 중
+    PinMove { from: usize, y: f32 },
     /// 고정한 패널의 오른쪽 가장자리를 끌어 너비를 바꾸는 중
     SideW { start_x: f32, start_w: f32 },
     /// 탭을 눌렀다. 조금 움직이면 TabMove

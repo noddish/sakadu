@@ -536,6 +536,21 @@ impl App {
         self.pins_changed();
     }
 
+    /// 고정한 줄을 눌렀다. 떼면 열고, 끌면 순서를 바꾼다 (즐겨찾기 줄과 같다)
+    pub(super) fn pin_mouse_down(&mut self, index: usize, y: f32) {
+        self.drag = Drag::PinPress { index, y };
+        unsafe { SetCapture(self.hwnd) };
+    }
+
+    /// 고정한 줄 from을 slot 번째 줄 앞에 끼워 넣는다 (slot이 줄 수와 같으면 맨 끝). 제자리면 그대로
+    pub(super) fn pin_move(&mut self, from: usize, slot: usize) {
+        self.end_pin_rename();
+        let Some(ws) = self.workspaces.current_mut().filter(|ws| from < ws.pins.len() && slot <= ws.pins.len() && slot != from && slot != from + 1) else { return };
+        let f = ws.pins.remove(from);
+        ws.pins.insert(if slot > from { slot - 1 } else { slot }, f);
+        self.pins_changed();
+    }
+
     /// 고정한 것을 한 줄 위·아래로
     pub(super) fn pin_nudge(&mut self, i: usize, up: bool) {
         self.end_pin_rename();
@@ -923,6 +938,8 @@ impl App {
         self.drag = match self.drag {
             Drag::FavPress { row, y: y0 } if (y - y0).abs() > 4.0 => Drag::FavMove { from: row, y },
             Drag::FavMove { from, .. } => Drag::FavMove { from, y },
+            Drag::PinPress { index, y: y0 } if (y - y0).abs() > 4.0 => Drag::PinMove { from: index, y },
+            Drag::PinMove { from, .. } => Drag::PinMove { from, y },
             _ => return,
         };
         // 목록 끝에 가까이 끌면 자동 스크롤
@@ -943,6 +960,20 @@ impl App {
                 self.drag = Drag::None;
                 self.release_capture();
                 self.fav_open_row(row, ctrl);
+            }
+            // 고정한 줄: 그대로 떼면 열고, 끌었으면 놓은 자리로 옮긴다
+            Drag::PinPress { index, .. } => {
+                self.drag = Drag::None;
+                self.release_capture();
+                self.pin_open(index, ctrl);
+            }
+            Drag::PinMove { from, y } => {
+                self.drag = Drag::None;
+                self.release_capture();
+                if let Some(slot) = self.pin_drop_slot(y) {
+                    self.pin_move(from, slot);
+                }
+                self.invalidate();
             }
             Drag::FavMove { from, y } => {
                 self.drag = Drag::None;
