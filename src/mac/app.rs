@@ -466,6 +466,8 @@ pub struct App {
     /// 자동 미리 보기: 그림·글 파일을 고르면 카드가 저절로 뜬다 (도구 막대의 눈으로 끄고 켠다. 숨김 항목 보기처럼 작업 공간과 상관없다)
     auto_preview: bool,
     card: Card,
+    /// 마지막 누름(두 번 누르기의 첫 누름)이 미리 보기 카드 위였는가. 아니었으면 이어지는 둘째 누름은 카드 아래 것이 받는다
+    press_on_card: bool,
     /// 읽어 둔 그림: 최근에 본 몇 개만 남긴다 (맨 뒤가 가장 최근)
     pics: Vec<CachedPic>,
     previews: Vec<PreviewRequest>,
@@ -511,6 +513,7 @@ impl App {
             renaming: false,
             auto_preview: true,
             card: Card::new(),
+            press_on_card: false,
             pics: Vec::new(),
             previews: Vec::new(),
             preview_seq: 0,
@@ -1625,6 +1628,11 @@ impl App {
     }
 
     pub fn hit(&self, g: &Gfx, x: f32, y: f32) -> Hit {
+        self.hit_with(g, x, y, true)
+    }
+
+    /// card가 false면 미리 보기 카드는 없는 것으로 보고 그 아래 것을 찾는다 (두 번 누르기의 둘째 누름: mouse_down)
+    fn hit_with(&self, g: &Gfx, x: f32, y: f32, card: bool) -> Hit {
         if x < BAR_W {
             let rail = self.rail();
             if let Some((i, _)) = rail.spaces.iter().find(|(_, r)| r.contains(x, y)) {
@@ -1651,7 +1659,7 @@ impl App {
             return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);
         }
         // 미리 보기 카드는 칸 위에 떠 있다: 카드 안은 어디든 카드가 받는다 (아래 칸을 누르지 않게)
-        if let Some(m) = self.card().filter(|m| m.card.contains(x, y)) {
+        if let Some(m) = self.card().filter(|m| card && m.card.contains(x, y)) {
             return if m.close.contains(x, y) {
                 Hit::CardClose
             } else if m.expand.contains(x, y) {
@@ -1707,7 +1715,15 @@ impl App {
 
     /// 누름. clicks는 연속으로 누른 횟수 (2면 두 번 누르기)
     pub fn mouse_down(&mut self, g: &Gfx, x: f32, y: f32, mods: Mods, clicks: usize) {
-        let hit = self.hit(g, x, y);
+        let mut hit = self.hit(g, x, y);
+        // 파일을 두 번 누를 때 첫 누름으로 뜬 미리 보기 카드가 그 자리를 덮을 수 있다 (칸이 하나뿐일 때 카드는 같은 칸에 놓인다).
+        // 첫 누름이 카드가 아니었으면 둘째 누름은 카드 아래 것이 받는다: 카드가 가로채면 파일이 열리지 않는다
+        let on_card = matches!(hit, Hit::Card | Hit::CardExpand | Hit::CardClose);
+        if clicks < 2 {
+            self.press_on_card = on_card;
+        } else if on_card && !self.press_on_card {
+            hit = self.hit_with(g, x, y, false);
+        }
         // 입력 상자 밖을 누르면 입력(경로, 공간 이름)을 그만둔다. 알림은 다음 입력 때 지운다
         self.editing = None;
         self.renaming = false;
@@ -3004,6 +3020,42 @@ mod tests {
         assert!(m.card.l - only.l >= 200.0);
         a.resize(700.0, 420.0);
         assert!(a.card().is_none(), "too narrow to keep the names visible");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 한 칸: 파일을 두 번 누르면, 첫 누름으로 뜬 카드가 그 자리를 덮어도 파일이 열린다 (카드가 둘째 누름을 가로채지 않는다)
+    #[test]
+    fn double_click_opens_the_file_even_when_its_card_covers_the_spot() {
+        let (root, dir) = preview_demo();
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        a.set_layout(Layout::One);
+        // 낮은 창: 카드(칸의 오른쪽 아래)가 목록의 위쪽 줄들을 덮는다
+        a.resize(1100.0, 360.0);
+        a.settle();
+        let vi = names(&a, 0).iter().position(|n| n == "노을.bmp").unwrap();
+        let (_, y) = row_point(&a, 0, vi);
+        let x = pane_rect(&a, 0).r - 100.0;
+        assert_eq!(a.hit(&g, x, y), Hit::Row(0, vi));
+        a.mouse_down(&g, x, y, none, 1);
+        a.mouse_up();
+        a.settle();
+        let m = a.card().expect("the card shows in the only pane");
+        assert!(m.card.contains(x, y), "the card covers the clicked spot: {:?}", m.card);
+        assert_eq!(a.hit(&g, x, y), Hit::Card);
+        // 둘째 누름(두 번 누르기): 카드가 아니라 그 아래 파일이 받아 파일이 열린다
+        a.mouse_down(&g, x, y, none, 2);
+        a.mouse_up();
+        a.settle();
+        assert!(a.open_files.iter().any(|p| p.ends_with("노을.bmp")), "{:?}", a.open_files);
+        assert!(!a.card.large, "the card was not enlarged");
+        // 카드를 따로 두 번 누르면(첫 누름도 카드 위) 둘 다 카드가 받는다
+        let opened = a.open_files.len();
+        a.mouse_down(&g, x, y, none, 1);
+        assert!(a.card.large);
+        a.mouse_down(&g, x, y, none, 2);
+        assert!(!a.card.large);
+        assert_eq!(a.open_files.len(), opened, "clicks on the card open nothing");
         std::fs::remove_dir_all(root).unwrap();
     }
 
