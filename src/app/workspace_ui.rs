@@ -50,6 +50,9 @@ impl App {
         if self.side_panel() == Some(Panel::Main) {
             self.side_scroll = 0.0;
         }
+        // 키보드 자리도 처음부터: 다음에 사이드바로 오면 이 공간의 맨 위 줄에서 시작한다
+        self.top_sel = None;
+        self.side_kb_seen = false;
         self.refresh_hover();
     }
 

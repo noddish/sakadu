@@ -1,11 +1,18 @@
 //! 사이드바 목록의 동작. 즐겨찾기('모든 공간'): 열기·추가·이름 바꾸기·그룹·정렬·메뉴·키보드·끌어서 옮기기.
 //! 이 공간에 고정한 것(작업 공간마다 따로): 책갈피·Ctrl+D·끌어 놓기로 고정, 열기, 순서, '모든 공간'으로 옮기기.
 //! 줄 배치와 그리기는 sidebar.rs. 그룹은 그 자리에서 접고 펼치고, 표시 이름·순서·그룹은 사용자가 정한다.
-//! Ctrl+B는 키보드를 즐겨찾기 목록으로 옮긴다(다시 누르거나 Esc면 칸으로)
+//! Ctrl+B는 키보드를 사이드바 목록으로 옮긴다(다시 누르거나 Esc면 칸으로). ↑↓는 화면 순서대로 고정한 곳 → 내 PC → 즐겨찾기를 오간다
 
 use super::sidebar::SIDE_ROW_H;
 use super::*;
 use crate::favorites::{self, Favorite, Row, SortBy};
+
+/// 키보드가 즐겨찾기 줄이 아니라 그 위의 줄에 있을 때 그 줄 (지금 작업 공간에 고정한 곳의 번호, 또는 내 PC)
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum TopSel {
+    Pin(usize),
+    Computer,
+}
 
 /// 네이티브 팝업 메뉴. id 0은 구분선. 고른 id(없으면 0)
 pub(super) fn popup_menu(hwnd: HWND, pt: POINT, items: &[(u32, &str)]) -> u32 {
@@ -179,9 +186,110 @@ impl App {
         }
         self.fav_focus = true;
         self.fav_sel = self.fav_sel.min(self.favs.rows().len().saturating_sub(1));
-        self.fav_ensure_visible();
+        // 이 작업 공간에서 처음 들어오면 맨 위 줄(고정한 곳이 있으면 그 첫 줄)에서 시작한다. 그 뒤로는 있던 자리로 돌아온다
+        if !std::mem::replace(&mut self.side_kb_seen, true) && !self.pins().is_empty() {
+            self.top_sel = Some(TopSel::Pin(0));
+        }
+        match self.top_sel_now() {
+            Some(top) => self.set_top(top),
+            None => self.fav_ensure_visible(),
+        }
         self.focus();
         self.invalidate();
+    }
+
+    /// 키보드가 위쪽 줄(고정한 곳·내 PC)에 있으면 그 줄. 고정한 것이 줄었으면 남은 줄로 맞추고,
+    /// 즐겨찾기가 하나도 없으면 고를 줄은 위쪽뿐이라 내 PC로 본다
+    pub(super) fn top_sel_now(&self) -> Option<TopSel> {
+        let pins = self.pins().len();
+        match self.top_sel {
+            Some(TopSel::Pin(_)) if pins == 0 => Some(TopSel::Computer),
+            Some(TopSel::Pin(i)) => Some(TopSel::Pin(i.min(pins - 1))),
+            Some(TopSel::Computer) => Some(TopSel::Computer),
+            None => self.favs.rows().is_empty().then_some(TopSel::Computer),
+        }
+    }
+
+    /// 키보드를 위쪽 줄로 옮기고 그 줄이 보이게 한다
+    fn set_top(&mut self, top: TopSel) {
+        self.top_sel = Some(top);
+        let side = match top {
+            TopSel::Pin(i) => Side::Pin(i),
+            TopSel::Computer => Side::Computer,
+        };
+        if let Some(r) = self.side_item_rect(side) {
+            self.side_reveal(r);
+        }
+        self.invalidate();
+    }
+
+    /// 키보드가 위쪽 줄(고정한 곳·내 PC)에 있을 때의 키. 아래로 내려가면 즐겨찾기 첫 줄로 넘어간다
+    fn top_key(&mut self, top: TopSel, vk: VIRTUAL_KEY) -> bool {
+        let ctrl = key_down(VK_CONTROL);
+        let shift = key_down(VK_SHIFT);
+        let pins = self.pins().len();
+        let first = if pins > 0 { TopSel::Pin(0) } else { TopSel::Computer };
+        // 즐겨찾기 쪽으로 넘어간다 (즐겨찾기가 없으면 그대로)
+        let to_favs = |a: &mut App, last: bool| {
+            let rows = a.favs.rows();
+            if let Some(row) = if last { rows.last() } else { rows.first() } {
+                a.fav_select(*row);
+            }
+        };
+        let menu = vk == VK_APPS || (vk == VK_F10 && shift);
+        match (vk, top) {
+            (VK_ESCAPE | VK_TAB, _) => self.fav_blur(),
+            // Ctrl+↑↓: 고정한 곳의 순서를 바꾼다
+            (VK_UP, TopSel::Pin(i)) if ctrl => {
+                if i > 0 {
+                    self.pin_nudge(i, true);
+                    self.set_top(TopSel::Pin(i - 1));
+                }
+            }
+            (VK_DOWN, TopSel::Pin(i)) if ctrl => {
+                if i + 1 < pins {
+                    self.pin_nudge(i, false);
+                    self.set_top(TopSel::Pin(i + 1));
+                }
+            }
+            (VK_UP | VK_DOWN, _) if ctrl => {}
+            (VK_UP, TopSel::Pin(i)) => self.set_top(TopSel::Pin(i.saturating_sub(1))),
+            (VK_UP, TopSel::Computer) => {
+                if pins > 0 {
+                    self.set_top(TopSel::Pin(pins - 1));
+                }
+            }
+            (VK_DOWN, TopSel::Pin(i)) => self.set_top(if i + 1 < pins { TopSel::Pin(i + 1) } else { TopSel::Computer }),
+            (VK_DOWN | VK_NEXT, TopSel::Computer) => to_favs(self, false),
+            (VK_NEXT, TopSel::Pin(_)) => self.set_top(TopSel::Computer),
+            (VK_HOME | VK_PRIOR, _) => self.set_top(first),
+            (VK_END, _) => to_favs(self, true),
+            (VK_RETURN, _) => {
+                let side = match top {
+                    TopSel::Pin(i) => Side::Pin(i),
+                    TopSel::Computer => Side::Computer,
+                };
+                self.side_open(side, ctrl);
+                return true;
+            }
+            // Del: 고정을 푼다 (내 PC는 늘 있다)
+            (VK_DELETE, TopSel::Pin(i)) => self.unpin(i),
+            (_, TopSel::Pin(i)) if menu => {
+                if let Some(r) = self.side_item_rect(Side::Pin(i)) {
+                    let pt = self.to_screen(r.l + 24.0, r.b);
+                    self.pending.push(Deferred::PinMenu { index: i, pt });
+                }
+            }
+            (_, TopSel::Computer) if menu => {
+                if let Some(r) = self.side_item_rect(Side::Computer) {
+                    let pt = self.to_screen(r.l + 24.0, r.b);
+                    self.pending.push(Deferred::SideMenu { side: Side::Computer, pt });
+                }
+            }
+            _ => return self.fav_shared_key(vk),
+        }
+        self.invalidate();
+        true
     }
 
     /// 키보드를 칸으로 돌려준다
@@ -196,6 +304,7 @@ impl App {
 
     /// 그 줄을 고르고 보이게 한다. 접힌 그룹 안 항목이면 그 그룹을 펼친다
     pub(super) fn fav_select(&mut self, row: Row) {
+        self.top_sel = None;
         if let Row::Item { group: Some(g), .. } = row {
             if self.favs.set_collapsed(g, false) {
                 self.save_favorites();
@@ -631,6 +740,10 @@ impl App {
     /// 키보드가 즐겨찾기에 있을 때의 키. 처리했으면 true.
     /// ↑↓로 고르고, Enter는 항목을 열거나 그룹을 접고 펼친다. →·←는 그룹 펼치기·접기, Esc·Tab은 칸으로
     pub(super) fn fav_key(&mut self, vk: VIRTUAL_KEY) -> bool {
+        // 키보드가 위쪽 줄(고정한 곳·내 PC)에 있으면 그쪽 키로
+        if let Some(top) = self.top_sel_now() {
+            return self.top_key(top, vk);
+        }
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
         let rows = self.favs.rows();
@@ -646,11 +759,13 @@ impl App {
             VK_ESCAPE | VK_TAB => self.fav_blur(),
             VK_UP if ctrl => self.fav_nudge_at(s, true),
             VK_DOWN if ctrl => self.fav_nudge_at(s, false),
+            // 첫 즐겨찾기 줄에서 위로 가면 그 위의 내 PC, 고정한 곳으로 이어진다
+            VK_UP | VK_PRIOR if s == 0 => self.set_top(TopSel::Computer),
             VK_UP => go(self, s.saturating_sub(1)),
             VK_DOWN => go(self, (s + 1).min(n.saturating_sub(1))),
             VK_PRIOR => go(self, s.saturating_sub(page)),
             VK_NEXT => go(self, (s + page).min(n.saturating_sub(1))),
-            VK_HOME => go(self, 0),
+            VK_HOME => self.set_top(if self.pins().is_empty() { TopSel::Computer } else { TopSel::Pin(0) }),
             VK_END => go(self, n.saturating_sub(1)),
             // →: 접힌 그룹은 펼치고, 펼친 그룹은 첫 항목으로
             VK_RIGHT => {
@@ -707,11 +822,13 @@ impl App {
         self.pending.push(Deferred::FavMenu { row, pt });
     }
 
-    /// 단축키: 즐겨찾기 단축키는 칸으로 돌아가고, 추가는 고른 그룹에 넣고, 그 밖의 동작은 칸으로 돌아가 실행한다
+    /// 단축키: 즐겨찾기 단축키는 칸으로 돌아가고, 추가는 키보드가 있는 쪽에 넣고(고정한 곳이면 이 공간에 고정, 즐겨찾기면 고른 그룹에),
+    /// 그 밖의 동작은 칸으로 돌아가 실행한다
     fn fav_shared_key(&mut self, vk: VIRTUAL_KEY) -> bool {
         use crate::keys::Action;
         match self.keys.find(crate::keys::Combo::now(vk.0)) {
             Some(Action::Favorites) => self.fav_blur(),
+            Some(Action::AddFavorite) if matches!(self.top_sel_now(), Some(TopSel::Pin(_))) => self.add_pin(),
             Some(Action::AddFavorite) => self.add_favorite(),
             Some(a) => {
                 self.fav_blur();
@@ -746,6 +863,7 @@ impl App {
     pub(super) fn fav_mouse_down(&mut self, row: Row, y: f32, dbl: bool) {
         if let Some(i) = self.favs.row_index(row) {
             self.fav_sel = i;
+            self.top_sel = None;
         }
         // 두 번째 누름은 무시한다 (첫 누름에서 이미 열었다: 파일을 두 번 실행하지 않게)
         if dbl {

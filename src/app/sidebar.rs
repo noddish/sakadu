@@ -640,7 +640,7 @@ impl App {
     }
 
     /// 그 줄·단추의 화면 자리
-    fn side_item_rect(&self, s: Side) -> Option<R> {
+    pub(super) fn side_item_rect(&self, s: Side) -> Option<R> {
         if let Some(i) = self.side_minis().iter().position(|m| *m == s) {
             return self.side_mini_rect(i);
         }
@@ -871,7 +871,9 @@ impl App {
         let is_current = |path: &str| cur_dir.as_deref().is_some_and(|d| util::eq_path(d, path));
         let hover = self.hover;
         let fav_rows = self.favs.rows();
-        let sel_row = self.fav_focus.then(|| fav_rows.get(self.fav_sel).copied()).flatten();
+        // 키보드 포커스: 위쪽 줄(고정한 곳·내 PC)에 있으면 그 줄, 아니면 즐겨찾기 줄
+        let sel_top = self.fav_focus.then(|| self.top_sel_now()).flatten();
+        let sel_row = (self.fav_focus && sel_top.is_none()).then(|| fav_rows.get(self.fav_sel).copied()).flatten();
         let flash_row = self.fav_flash;
         let editing = match self.edit_mode {
             EditMode::FavRename(r) => Some(r),
@@ -960,6 +962,9 @@ impl App {
                     side_row_bg(g, &t, r, f.is_dir && is_current(&f.path), hover == Hit::Side(s));
                     g.icon(pin_icons[i], icon_at(r, r.l + 10.0));
                     g.text(&f.name, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                    if sel_top == Some(fav_ui::TopSel::Pin(i)) {
+                        g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
+                    }
                 }
                 Side::PinEmpty => {
                     let how = add_key.as_deref().map(|k| format!("책갈피나 {k}로 고정해 보세요")).unwrap_or_else(|| "책갈피로 고정해 보세요".to_string());
@@ -1036,6 +1041,9 @@ impl App {
                         g.glyph(0xEC4E, R::new(ir.l, r.t, ir.r, r.b), false, t.dim);
                     }
                     g.text("내 PC", R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                    if sel_top == Some(fav_ui::TopSel::Computer) {
+                        g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
+                    }
                 }
             }
         }

@@ -377,6 +377,10 @@ pub struct App {
     fav_focus: bool,
     /// 사이드바 즐겨찾기에서 고른 줄 (favs.rows() 번호)
     fav_sel: usize,
+    /// 키보드가 즐겨찾기 줄이 아니라 그 위의 줄(고정한 곳, 내 PC)에 있으면 그 줄. None이면 fav_sel의 즐겨찾기 줄
+    top_sel: Option<fav_ui::TopSel>,
+    /// 이 작업 공간에서 키보드가 사이드바에 들어온 적이 있는가 (처음에는 맨 위 줄에서 시작한다)
+    side_kb_seen: bool,
     /// 보이는 패널 가운데 목록의 스크롤
     side_scroll: f32,
     /// 패널마다 기억해 둔 스크롤 (Panel 순서). 다른 패널이 떴다 닫혀도 자리를 잃지 않게
@@ -890,6 +894,8 @@ impl App {
             view_menu: None,
             fav_focus: false,
             fav_sel: 0,
+            top_sel: None,
+            side_kb_seen: false,
             side_scroll: 0.0,
             side_scroll_memo: [0.0; Panel::ALL.len()],
             side_pinned,
