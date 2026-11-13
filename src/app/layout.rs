@@ -5,17 +5,17 @@ use super::*;
 impl App {
     // ---------- 레이아웃 ----------
 
-    /// 칸이 놓이는 곳: 아이콘 막대(고정한 패널이 있으면 그 패널) 오른쪽, 작업 줄 아래 (미리 보기가 열려 있으면 그만큼 비운다)
+    /// 칸이 놓이는 곳: 작업 공간 레일(고정한 패널이 있으면 그 패널) 오른쪽, 도구 막대 아래 (미리 보기가 열려 있으면 그만큼 비운다)
     pub(super) fn area(&self) -> R {
         let l = self.panes_left();
         let right = self.w - MARGIN - if self.preview.is_some() { self.preview_w() + GAP } else { 0.0 };
         R::new(l, WORKBAR_H, right.max(l + 100.0), (self.h - MARGIN).max(WORKBAR_H + 100.0))
     }
 
-    /// 도구 막대 단추 자리: 아이콘 막대 오른쪽부터 창 단추 앞까지.
+    /// 도구 막대 단추 자리: 작업 공간 레일 오른쪽부터 창 단추 앞까지.
     /// 패널을 고정해도 밀리지 않는다 (패널을 여닫을 때 단추가 움직이지 않게)
     pub(super) fn toolbar(&self) -> ToolbarGeom {
-        toolbar_geom(&ToolbarSpec { left: BAR_W + MARGIN, right: self.caption_left() - 8.0, up: true, new_folder: true, preview: true, more: true })
+        toolbar_geom(&ToolbarSpec { left: BAR_W + MARGIN, right: self.caption_left() - 8.0, up: true, new_folder: true, preview: true, search: true, more: true })
     }
 
     /// 도구 막대에 보일 이름: 지금 칸의 폴더
@@ -167,11 +167,11 @@ impl App {
                 (m.back, Hit::Back(p)),
                 (m.fwd, Hit::Fwd(p)),
                 (m.up, Hit::Up(p)),
-                (self.workspace_button(), Hit::Workspace),
                 (m.layout, Hit::LayoutPick),
                 (m.view, if start { Hit::None } else { Hit::View(p) }),
                 (m.new_folder, if start { Hit::None } else { Hit::NewFolder(p) }),
                 (m.preview, Hit::PreviewButton),
+                (m.search, Hit::SearchButton),
                 (m.more, Hit::More),
             ];
             return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);

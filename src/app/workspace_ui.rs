@@ -1,13 +1,10 @@
-//! 작업 줄 왼쪽의 작업 공간 단추와 메뉴: 지금 화면을 이름 붙여 저장하고, 저장한 화면으로 바꾼다.
+//! 작업 공간: 왼쪽 레일의 공간 아이콘으로 바꾸고, 새로 만들고, 이름과 색을 바꾸고, 지운다.
 //! 바꿀 때 지금 작업 공간은 그 순간의 화면으로 저장해 두고(save_session도 늘 지금 작업 공간을 함께 저장한다),
-//! 고른 작업 공간의 칸 나누기·칸·탭, 사이드 패널, 미리 보기와 고정한 파일, 검색어를 되살린다.
-//! 저장 형식은 workspaces.rs
+//! 고른 작업 공간의 칸 나누기·칸·탭, 사이드 패널, 미리 보기와 고정한 파일, 검색어를 되살린다. 강조 색도 그 공간의 색으로 바뀐다.
+//! 레일의 자리와 그리기는 sidebar.rs, 고정한 것의 동작은 fav_ui.rs, 저장 형식은 workspaces.rs
 
 use super::*;
 use crate::workspaces::{self, Workspace};
-
-/// 작업 공간 단추의 가장 좁은 폭
-const WS_MIN_W: f32 = 96.0;
 
 impl App {
     /// 시작할 때: 세션이 다른 작업 공간(또는 작업 공간 없는 예전 빌드)의 화면이면 지금 작업 공간의 화면으로 연다.
@@ -21,49 +18,50 @@ impl App {
         }
     }
 
-    /// 도구 막대에서 폴더 이름 바로 뒤의 작업 공간 단추. 폴더 이름이 길면 이름을 줄이고 단추 자리를 남긴다
-    pub(super) fn workspace_button(&self) -> R {
-        // 이름을 고치는 동안은 넉넉하게 (긴 이름의 앞부분이 입력 상자 밖으로 밀리지 않게)
-        let want = if self.edit_mode == EditMode::WorkspaceRename {
-            220.0
-        } else {
-            (self.gfx.measure(&self.workspace_label(), Font::Normal) + 40.0).clamp(WS_MIN_W, 220.0)
-        };
-        let m = self.toolbar();
-        let title_w = self.gfx.measure(&self.toolbar_title(), Font::Strong);
-        let l = (m.title.l + title_w + 16.0).min(m.title.r - WS_MIN_W).max(m.title.l);
-        // 칸 나누기 단추 앞까지만 (좁은 창에서 겹치지 않게. 긴 이름은 말줄임)
-        let room = (m.title.r - l).max(0.0);
-        let w = want.min(room).max(WS_MIN_W.min(room));
-        R::new(l, m.nav.t, l + w, m.nav.b)
-    }
-
-    fn workspace_label(&self) -> String {
-        self.workspaces.current_name().unwrap_or("작업 공간").to_string()
-    }
-
-    pub(super) fn paint_workspace_button(&self) {
-        let t = self.theme;
-        let g = &self.gfx;
-        let r = self.workspace_button();
-        if self.edit_mode == EditMode::WorkspaceRename {
-            let er = r.inset(2.0, 3.0);
-            g.fill_round(er, R_ROW, t.pane);
-            g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
-            return;
+    /// 작업 공간이 하나도 없으면 지금 화면으로 '기본' 공간을 만든다 (레일에는 늘 지금 공간이 있다)
+    pub(super) fn ensure_workspace(&mut self) {
+        if self.workspaces.list.is_empty() {
+            let state = self.screen_state();
+            self.workspaces.ensure_one(|| state);
+            self.save_workspaces();
         }
-        if self.hover == Hit::Workspace {
-            g.fill_round(r, R_CTRL, super::sidebar::hover_fill(&t));
-        }
-        // 작업 공간이 없으면 이름 대신 흐린 "작업 공간"
-        let named = self.workspaces.current.is_some();
-        g.text(&self.workspace_label(), R::new(r.l + 10.0, r.t, r.r - 24.0, r.b), Font::Normal, if named { t.text } else { t.dim });
-        g.glyph(G_CHEVRON_DOWN, R::new(r.r - 22.0, r.t + 1.0, r.r - 8.0, r.b + 1.0), true, t.faint);
     }
 
-    /// 이름 입력 상자 자리 (단추 안)
+    /// 지금 쓸 강조 색의 키: 지금 작업 공간의 색, 정하지 않았으면 설정의 강조 색
+    fn accent_key(&self) -> &str {
+        self.workspaces.current().map(|w| w.color.as_str()).filter(|c| !c.is_empty()).unwrap_or(&self.look.accent)
+    }
+
+    /// 지금 설정과 작업 공간 색에 맞춘 테마 (설정·시스템 색·작업 공간이 바뀐 뒤 다시 정한다)
+    pub(super) fn resolve_theme(&self) -> crate::theme::Theme {
+        crate::theme::resolve(&self.look.theme, self.accent_key())
+    }
+
+    /// 작업 공간이나 그 색이 바뀐 뒤: 강조 색을 그 공간의 색으로
+    fn apply_space_color(&mut self) {
+        self.theme = self.resolve_theme();
+        self.apply_window_theme();
+    }
+
+    /// 지금 작업 공간이 바뀐 뒤: 사이드바 목록을 맨 위로. 고정한 것이 다른 목록이라,
+    /// 앞 공간에서 내려 둔 스크롤이 남으면 새 공간의 줄이 보이는 곳 위로 밀려 올라간다
+    fn reset_side_scroll(&mut self) {
+        self.side_scroll_memo[Panel::Main as usize] = 0.0;
+        if self.side_panel() == Some(Panel::Main) {
+            self.side_scroll = 0.0;
+        }
+        self.refresh_hover();
+    }
+
+    /// 그 작업 공간의 색 (레일 아이콘에 쓴다). 색을 정하지 않았으면 설정의 강조 색
+    pub(super) fn space_color(&self, w: &Workspace) -> Color {
+        let key = if w.color.is_empty() { self.look.accent.as_str() } else { w.color.as_str() };
+        crate::theme::accent_color(key, self.theme.dark).unwrap_or(self.theme.accent)
+    }
+
+    /// 이름 입력 상자의 테두리 자리 (사이드바 패널 머리의 이름 줄)
     pub(super) fn workspace_rename_rect(&self) -> R {
-        self.workspace_button().inset(8.0, 0.0)
+        self.side_title_rect().map_or(R::new(0.0, 0.0, 0.0, 0.0), |r| R::new(r.l - 4.0, r.t + 3.0, r.r, r.b - 3.0))
     }
 
     /// 지금 화면 (창 위치·화면 설정까지. 작업 공간으로 쓸 때는 바꿀 때 그 부분을 쓰지 않는다)
@@ -90,7 +88,8 @@ impl App {
             ws: self.workspaces.current_name().map(str::to_string),
             query: edit_text(self.search_edit),
             scope_here: self.pal_here,
-            folded: Fold::ALL.into_iter().filter(|f| self.folded[*f as usize]).map(|f| f.key().to_string()).collect(),
+            // 접는 구역이 있던 바로가기 패널은 없어졌다 (예전 빌드가 읽는 값이라 자리만 남긴다)
+            folded: Vec::new(),
             look: self.look.clone(),
             panes: self
                 .panes
@@ -107,20 +106,26 @@ impl App {
         }
     }
 
-    /// 지금 작업 공간에 지금 화면을 적어 두고 파일로 저장한다
-    pub(super) fn save_workspaces(&mut self) {
+    /// 지금 작업 공간에 지금 화면을 적어 두고 파일로 저장한다. 저장하지 못했으면 그 오류
+    pub(super) fn try_save_workspaces(&mut self) -> std::io::Result<()> {
         if let Some(c) = self.workspaces.current {
             let state = self.screen_state();
             if let Some(w) = self.workspaces.list.get_mut(c) {
                 w.state = state;
             }
         }
-        if let Err(e) = workspaces::save(&self.workspaces) {
+        workspaces::save(&self.workspaces)
+    }
+
+    /// 지금 작업 공간에 지금 화면을 적어 두고 파일로 저장한다 (저장하지 못하면 기록만 남긴다)
+    pub(super) fn save_workspaces(&mut self) {
+        if let Err(e) = self.try_save_workspaces() {
             crate::diag::log(|| format!("workspaces: save failed: {e}"));
         }
     }
 
-    /// 지금 화면을 새 작업 공간으로 저장하고, 단추에서 이름을 바로 고칠 수 있게 한다
+    /// 지금 화면을 새 작업 공간으로 저장하고, 패널 머리에서 이름을 바로 고칠 수 있게 한다.
+    /// 색은 다른 공간이 쓰지 않는 것을 주고, 고정한 것은 비운 채로 시작한다
     pub(super) fn new_workspace(&mut self) {
         // 지금 작업 공간은 지금 화면으로 저장해 둔다 (새 작업 공간도 같은 화면에서 시작한다)
         self.save_workspaces();
@@ -130,9 +135,13 @@ impl App {
             _ => format!("작업 공간 {}", self.workspaces.list.len() + 1),
         };
         let name = self.workspaces.unique_name(&workspaces::clean_name(&base), None);
-        self.workspaces.list.push(Workspace { name, state: self.screen_state() });
+        let mut ws = Workspace::new(name, self.screen_state());
+        ws.color = self.workspaces.next_color(&self.look.accent).to_string();
+        self.workspaces.list.push(ws);
         self.workspaces.current = Some(self.workspaces.list.len() - 1);
+        self.reset_side_scroll();
         self.save_workspaces();
+        self.apply_space_color();
         self.begin_workspace_rename();
     }
 
@@ -141,8 +150,14 @@ impl App {
         if self.edit_mode != EditMode::None {
             self.cancel_edit();
         }
+        // 이름은 패널 머리에 있다: 패널이 닫혀 있거나 떠 있거나 검색 패널이면 작업 공간 패널을 고정해 연다
+        if self.side_panel() != Some(Panel::Main) || self.side_floating() {
+            self.show_side(Panel::Main, true);
+            // 입력 상자는 곧바로 제자리에 놓이니 패널은 펼치지 않고 바로 연다
+            self.side_anim = None;
+        }
         self.edit_mode = EditMode::WorkspaceRename;
-        // 넓힌 자리에 먼저 놓고 글자를 넣는다 (좁은 상자에서 통째로 고르면 앞부분이 밀린 채 남는다)
+        // 자리에 먼저 놓고 글자를 넣는다 (좁은 상자에서 통째로 고르면 앞부분이 밀린 채 남는다)
         self.layout_edits();
         unsafe {
             let _ = SetWindowTextW(self.rename_edit, &HSTRING::from(name));
@@ -171,31 +186,45 @@ impl App {
         }
         self.save_workspaces();
         self.workspaces.current = Some(i);
+        self.reset_side_scroll();
+        self.apply_space_color();
         let state = self.workspaces.list[i].state.clone();
         self.apply_screen(&state);
         self.save_workspaces();
         self.save_session();
     }
 
-    /// 지금 작업 공간을 지운다. 다른 작업 공간이 있으면 그리로 바꾸고, 없으면 지금 화면은 그대로 둔다
-    pub(super) fn delete_workspace(&mut self) {
-        let Some(c) = self.workspaces.current else { return };
+    /// 작업 공간 i를 지운다 (마지막 하나는 지우지 않는다). 지금 공간을 지웠으면 그 자리의 다음 공간으로 바꾼다
+    pub(super) fn delete_workspace_at(&mut self, i: usize) {
         if self.edit_mode == EditMode::WorkspaceRename {
             self.cancel_edit();
         }
-        self.workspaces.list.remove(c);
-        self.workspaces.current = None;
-        if self.workspaces.list.is_empty() {
+        // 다른 공간을 지울 때는 지금 화면을 지금 공간에 먼저 적어 둔다
+        if self.workspaces.current != Some(i) {
             self.save_workspaces();
-            self.invalidate();
-            return;
         }
-        let next = c.min(self.workspaces.list.len() - 1);
-        self.workspaces.current = Some(next);
-        let state = self.workspaces.list[next].state.clone();
-        self.apply_screen(&state);
+        if self.workspaces.remove(i) {
+            self.reset_side_scroll();
+            self.apply_space_color();
+            if let Some(state) = self.workspaces.current().map(|w| w.state.clone()) {
+                self.apply_screen(&state);
+            }
+        }
+        self.side_clamp_scroll();
         self.save_workspaces();
         self.save_session();
+        self.invalidate();
+    }
+
+    /// 작업 공간 i의 색을 바꾼다 (빈 글자면 설정의 강조 색을 따른다)
+    pub(super) fn set_workspace_color(&mut self, i: usize, color: &str) {
+        let Some(w) = self.workspaces.list.get_mut(i) else { return };
+        w.color = color.to_string();
+        if self.workspaces.current == Some(i) {
+            self.apply_space_color();
+        }
+        self.save_workspaces();
+        self.invalidate();
     }
 
     /// 저장해 둔 화면으로 바꾼다: 칸 나누기·칸·탭, 사이드 패널(너비 포함), 미리 보기와 고정한 파일, 검색어·범위.
@@ -268,7 +297,78 @@ impl App {
     }
 }
 
-/// 작업 공간 메뉴: 저장한 작업 공간(지금 것에 체크, 이름 옆에 한 줄 요약), 새로 저장, 이름 바꾸기, 지우기
+/// '이 작업 공간을 지울까요?' 확인. 지우면 어디로 바뀌는지도 알린다 (지금 공간을 지울 때)
+fn confirm_delete_workspace(hwnd: HWND, index: usize) -> bool {
+    let Some((name, next)) = with_app(|a| {
+        let list = &a.workspaces.list;
+        let name = list.get(index)?.name.clone();
+        let next = (a.workspaces.current == Some(index) && list.len() > 1).then(|| list[if index + 1 < list.len() { index + 1 } else { index - 1 }].name.clone());
+        Some((name, next))
+    })
+    .flatten() else {
+        return false;
+    };
+    let after = next.map_or(String::new(), |n| format!("\n지우면 ‘{n}’ 작업 공간으로 바뀌어요."));
+    let text = format!("‘{name}’ 작업 공간을 지울까요?\n이 공간에 고정한 것도 함께 지워져요.{after}");
+    unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), w!("Sakadu"), MB_YESNO | MB_ICONQUESTION) == IDYES }
+}
+
+/// 레일의 작업 공간 아이콘 메뉴: (다른 공간이면) 이 공간으로 바꾸기, (지금 공간이면) 이름 바꾸기, 색, 지우기
+pub(super) fn show_rail_menu(hwnd: HWND, index: usize, pt: POINT) {
+    const SWITCH: u32 = 1;
+    const RENAME: u32 = 2;
+    const DELETE: u32 = 3;
+    const COLOR_NONE: u32 = 10;
+    const COLOR: u32 = 11;
+    let Some((color, is_current, count)) = with_app(|a| a.workspaces.list.get(index).map(|w| (w.color.clone(), a.workspaces.current == Some(index), a.workspaces.list.len()))).flatten() else {
+        return;
+    };
+    let cmd = unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let Ok(sub) = CreatePopupMenu() else {
+            let _ = DestroyMenu(menu);
+            return;
+        };
+        let check = |on: bool| MF_STRING | if on { MF_CHECKED } else { MF_UNCHECKED };
+        for (k, key) in workspaces::COLORS.iter().enumerate() {
+            let label = crate::theme::ACCENTS.iter().find(|a| a.0 == *key).map_or(*key, |a| a.1);
+            let _ = AppendMenuW(sub, check(color == *key), COLOR as usize + k, &HSTRING::from(label));
+        }
+        let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(sub, check(color.is_empty()), COLOR_NONE as usize, w!("설정의 강조 색 따르기"));
+        fav_ui::append_items(menu, &[if is_current { (RENAME, "이름 바꾸기") } else { (SWITCH, "이 공간으로 바꾸기") }]);
+        let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("색"));
+        if count > 1 {
+            fav_ui::append_items(menu, &[(0, ""), (DELETE, "이 작업 공간 지우기…")]);
+        }
+        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
+        let _ = DestroyMenu(menu);
+        cmd
+    };
+    match cmd {
+        SWITCH => {
+            with_app(|a| a.switch_workspace(index));
+        }
+        RENAME => {
+            with_app(|a| a.begin_workspace_rename());
+        }
+        DELETE => {
+            if confirm_delete_workspace(hwnd, index) {
+                with_app(|a| a.delete_workspace_at(index));
+            }
+        }
+        COLOR_NONE => {
+            with_app(|a| a.set_workspace_color(index, ""));
+        }
+        c if c >= COLOR && ((c - COLOR) as usize) < workspaces::COLORS.len() => {
+            with_app(|a| a.set_workspace_color(index, workspaces::COLORS[(c - COLOR) as usize]));
+        }
+        _ => {}
+    }
+}
+
+/// 작업 공간 목록 메뉴 (레일의 + 를 우클릭): 모든 작업 공간(지금 것에 체크, 이름 옆에 한 줄 요약), 새로 만들기, 이름 바꾸기, 지우기.
+/// 창이 낮아 레일에 다 보이지 않는 공간도 여기서 고른다
 pub(super) fn show_workspace_menu(hwnd: HWND, pt: POINT) {
     let Some((items, count, current)) = with_app(|a| {
         let list = &a.workspaces.list;
@@ -288,8 +388,9 @@ pub(super) fn show_workspace_menu(hwnd: HWND, pt: POINT) {
         }
         // 지금 작업 공간은 화면을 따라가니 "다른 이름으로 저장"이 아니라 지금 화면에서 새로 시작하는 것
         items.push(("새 작업 공간 만들기 (지금 화면으로)".to_string(), false));
-        if a.workspaces.current.is_some() {
-            items.push(("이름 바꾸기".to_string(), false));
+        items.push(("이름 바꾸기".to_string(), false));
+        // 마지막 하나는 지우지 않는다
+        if list.len() > 1 {
             items.push(("이 작업 공간 지우기…".to_string(), false));
         }
         (items, list.len(), a.workspaces.current)
@@ -312,20 +413,8 @@ pub(super) fn show_workspace_menu(hwnd: HWND, pt: POINT) {
         }
         n if n == first_action + 2 => {
             let Some(c) = current else { return };
-            let Some((name, next)) = with_app(|a| {
-                let list = &a.workspaces.list;
-                let next = (list.len() > 1).then(|| list[if c + 1 < list.len() { c + 1 } else { c - 1 }].name.clone());
-                (list[c].name.clone(), next)
-            }) else {
-                return;
-            };
-            let after = match next {
-                Some(n) => format!("지우면 ‘{n}’ 작업 공간으로 바뀌어요."),
-                None => "지금 화면은 그대로 남아요.".to_string(),
-            };
-            let text = format!("‘{name}’ 작업 공간을 지울까요?\n{after}");
-            if unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), w!("Sakadu"), MB_YESNO | MB_ICONQUESTION) } == IDYES {
-                with_app(|a| a.delete_workspace());
+            if confirm_delete_workspace(hwnd, c) {
+                with_app(|a| a.delete_workspace_at(c));
             }
         }
         _ => {}

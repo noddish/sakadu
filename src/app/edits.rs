@@ -95,7 +95,7 @@ impl App {
         let ren = match self.edit_mode {
             EditMode::Rename(p) => self.rename_rect(p).map(|r| center(r, 4.0, 4.0)),
             EditMode::FavRename(row) => self.fav_rename_rect(row).map(|r| center(r, 4.0, 4.0)),
-            EditMode::WorkspaceRename => Some(center(self.workspace_rename_rect(), 0.0, 0.0)),
+            EditMode::WorkspaceRename => Some(center(self.workspace_rename_rect(), 4.0, 4.0)),
             _ => None,
         };
         place(self.rename_edit, ren);

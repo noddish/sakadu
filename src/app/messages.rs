@@ -201,7 +201,7 @@ impl App {
                 }
                 // 고대비 모드를 켜고 끄면 시스템 색이 바뀐다
                 WM_SYSCOLORCHANGE => {
-                    self.theme = crate::theme::resolve(&self.look.theme, &self.look.accent);
+                    self.theme = self.resolve_theme();
                     self.apply_window_theme();
                     return None;
                 }
@@ -211,7 +211,7 @@ impl App {
                     }
                     let colors = wp.0 == SPI_SETHIGHCONTRAST.0 as usize;
                     if colors || lp.0 != 0 && PCWSTR(lp.0 as *const u16).to_string().is_ok_and(|s| s == "ImmersiveColorSet") {
-                        self.theme = crate::theme::resolve(&self.look.theme, &self.look.accent);
+                        self.theme = self.resolve_theme();
                         self.apply_window_theme();
                         let tip = self.tray_tip();
                         if let Some(t) = &mut self.tray {
@@ -445,18 +445,18 @@ impl App {
         if dbl && matches!(hit, Hit::Side(s) if !matches!(s, Side::Fav(_))) {
             return;
         }
-        // 막대 아이콘·핀·`…`·검색 패널 단추도 두 번째 누름은 무시한다 (첫 누름이 연 것을 바로 닫지 않게)
+        // 레일 아이콘·핀·`…`·검색 패널 단추도 두 번째 누름은 무시한다 (첫 누름이 연 것을 바로 닫지 않게)
         if dbl
             && matches!(
                 hit,
-                Hit::Bar(_) | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder
-                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen | Hit::Workspace
+                Hit::Rail(_) | Hit::RailAdd | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder
+                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen
             )
         {
             return;
         }
         // 떠 있는 패널 밖을 누르면 패널은 닫고, 누른 것은 그대로 처리한다
-        if self.side_floating() && !matches!(hit, Hit::Side(_) | Hit::SidePin | Hit::SidePanel | Hit::Bar(_) | Hit::SearchButton | Hit::SettingsButton) {
+        if self.side_floating() && !matches!(hit, Hit::Side(_) | Hit::SidePin | Hit::SidePanel | Hit::Rail(_) | Hit::RailAdd | Hit::SearchButton | Hit::SettingsButton) {
             self.close_peek();
         }
         let ctrl = key_down(VK_CONTROL);
@@ -488,7 +488,7 @@ impl App {
         match hit {
             Hit::LayoutPick => self.toggle_layout_menu(),
             Hit::Side(s) => self.side_mouse_down(s, y, dbl),
-            // 막대의 검색 아이콘: 패널이 보이면 닫고, 아니면 연다
+            // 도구 막대의 검색 단추: 패널이 보이면 닫고, 아니면 연다
             Hit::SearchButton => {
                 if self.pal_shown() {
                     self.close_palette();
@@ -502,13 +502,9 @@ impl App {
             Hit::PreviewButton => self.toggle_preview(),
             Hit::PreviewPin | Hit::PreviewChip => self.toggle_preview_pin(),
             Hit::PreviewOpen => self.preview_open(),
-            Hit::Workspace => {
-                let r = self.workspace_button();
-                let pt = self.to_screen(r.l, r.b + 2.0);
-                self.pending.push(Deferred::WorkspaceMenu { pt });
-            }
             Hit::SettingsButton => self.toggle_settings(settings_ui::Page::General),
-            Hit::Bar(panel) => self.bar_click(panel),
+            Hit::Rail(i) => self.rail_click(i),
+            Hit::RailAdd => self.new_workspace(),
             Hit::SidePin => self.side_toggle_pin(),
             Hit::SidePanel => {}
             Hit::SideResize => capture(self, Drag::SideW { start_x: x, start_w: self.side_w }),
@@ -717,9 +713,23 @@ impl App {
             self.close_view_menu();
             return true;
         }
-        if let Hit::Side(s) = self.hit(x, y) {
-            self.side_context_menu(s, x, y);
-            return true;
+        match self.hit(x, y) {
+            Hit::Side(s) => {
+                self.side_context_menu(s, x, y);
+                return true;
+            }
+            // 레일: 공간 아이콘은 그 공간의 메뉴, + 는 모든 작업 공간 목록
+            Hit::Rail(index) => {
+                let pt = self.to_screen(x, y);
+                self.pending.push(Deferred::RailMenu { index, pt });
+                return true;
+            }
+            Hit::RailAdd => {
+                let pt = self.to_screen(x, y);
+                self.pending.push(Deferred::WorkspaceMenu { pt });
+                return true;
+            }
+            _ => {}
         }
         if let Hit::Start(p, i) = self.hit(x, y) {
             self.start_context_menu(p, i, x, y);
@@ -751,7 +761,7 @@ impl App {
             return;
         }
         match self.hit(x, y) {
-            Hit::Side(s @ (Side::Fav(crate::favorites::Row::Item { .. }) | Side::Computer | Side::Drive(_) | Side::Folder(_))) => self.side_open(s, true),
+            Hit::Side(s @ (Side::Fav(crate::favorites::Row::Item { .. }) | Side::Computer | Side::Pin(_))) => self.side_open(s, true),
             Hit::Tab(p, t) | Hit::TabClose(p, t) => self.close_tab(p, t),
             Hit::Start(..) => {
                 if let Some((p, loc)) = start_target {
@@ -949,7 +959,7 @@ impl App {
             Action::Search => self.toggle_palette(),
             Action::Commands => self.toggle_commands(),
             Action::Favorites => self.toggle_fav_focus(),
-            Action::AddFavorite => self.add_favorite(),
+            Action::AddFavorite => self.add_pin(),
             Action::NewTab => self.new_tab(p, None, true),
             Action::CloseTab => {
                 let t = self.panes[p].active;

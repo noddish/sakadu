@@ -138,7 +138,7 @@ impl App {
     /// 화면 설정을 바꾼 뒤: 바뀐 것만 다시 적용하고 저장한다.
     /// 색(테마·강조 색)만 바뀌면 글꼴을 다시 만들거나 아이콘·썸네일을 비우지 않는다
     pub(super) fn apply_look(&mut self, changed: LookPart) {
-        self.theme = crate::theme::resolve(&self.look.theme, &self.look.accent);
+        self.theme = self.resolve_theme();
         if changed == LookPart::Font {
             if let Err(e) = self.gfx.set_font(&self.look.font) {
                 crate::diag::log(|| format!("font: {e}"));

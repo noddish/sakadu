@@ -27,8 +27,10 @@ struct State {
     /// 끌어온 파일 경로 (파일이 아닌 데이터면 None)
     files: Option<Vec<String>>,
     dir: Option<String>,
-    /// 사이드바 즐겨찾기 위: 놓으면 즐겨찾기에 넣는다 (파일은 그대로)
+    /// 사이드바 목록 위: 놓으면 즐겨찾기에 넣거나 이 작업 공간에 고정한다 (파일은 그대로)
     favorites: bool,
+    /// 그 가운데 고정 목록 쪽 (놓으면 이 작업 공간에 고정)
+    pins: bool,
     /// 마지막으로 정한 처리 방식: true면 앱이 직접, false면 셸 드롭 대상
     own: bool,
     target: Option<IDropTarget>,
@@ -106,14 +108,16 @@ impl DropTarget {
         if found.is_none() {
             crate::diag::log(|| "drop: app busy, cannot resolve folder".to_string());
         }
+        let pins = matches!(found, Some(DropAt::Pins));
         let (dir, favorites) = match found {
             Some(DropAt::Dir(d)) => (Some(d), false),
-            Some(DropAt::Favorites) => (None, true),
+            Some(DropAt::Favorites | DropAt::Pins) => (None, true),
             _ => (None, false),
         };
         let mut st = self.state.borrow_mut();
         st.own = handle_ourselves(&st.files, keys);
         st.favorites = favorites;
+        st.pins = pins;
         unsafe {
             if st.own {
                 if let Some(t) = st.target.take() {
@@ -165,6 +169,7 @@ impl DropTarget {
             st.files = None;
             st.dir = None;
             st.favorites = false;
+            st.pins = false;
             st.target = None;
         }
         with_app(|app| app.clear_drop_hover());
@@ -225,9 +230,9 @@ impl IDropTarget_Impl for DropTarget_Impl {
     /// 놓을 때는 버튼이 이미 떼어져 키 상태로 방식을 다시 정할 수 없으므로 마지막 DragOver의 결정을 따른다
     fn Drop(&self, pdataobj: Ref<IDataObject>, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let data = pdataobj.ok()?.clone();
-        let (own, target, helper, dir, files, favorites) = {
+        let (own, target, helper, dir, files, favorites, pins) = {
             let mut st = self.state.borrow_mut();
-            (st.own, st.target.take(), st.helper.clone(), st.dir.clone(), st.files.take(), st.favorites)
+            (st.own, st.target.take(), st.helper.clone(), st.dir.clone(), st.files.take(), st.favorites, st.pins)
         };
         unsafe {
             if own {
@@ -252,10 +257,10 @@ impl IDropTarget_Impl for DropTarget_Impl {
                         *effect = DROPEFFECT_NONE;
                     }
                 }
-                // 즐겨찾기에 넣기만 하고 파일은 건드리지 않는다
+                // 즐겨찾기에 넣거나 이 작업 공간에 고정하기만 하고 파일은 건드리지 않는다
                 (true, None, Some(paths), _) if favorites && *effect != DROPEFFECT_NONE => {
-                    crate::diag::log(|| format!("drop: add {} item(s) to favorites", paths.len()));
-                    with_app(|app| app.add_favorite_paths(&paths));
+                    crate::diag::log(|| format!("drop: add {} item(s) to {}", paths.len(), if pins { "pins" } else { "favorites" }));
+                    with_app(|app| if pins { app.pin_paths(&paths) } else { app.add_favorite_paths(&paths) });
                 }
                 (false, _, _, Some(t)) => {
                     let r = t.Drop(&data, keys, *pt, effect);

@@ -1,62 +1,47 @@
-//! 맥 시제품 앱: 칸·탭·사이드바 상태, 그리기(paint), 누르기 판정(hit), 동작.
-//! 화면 모양은 '모양 2(맥 관례)': 사이드바가 창 위까지 올라가고 신호등은 그 안, 아이콘 막대 대신 고르기 단추,
-//! 설정은 작업 줄 오른쪽 끝. 화면 계산·그리기 도우미·치수와 칸 그리기는 Windows와 함께 쓰는 sakadu::ui를 쓴다
-//! (칸은 이 앱의 상태로 장면을 채워 sakadu::ui::paint가 그린다).
+//! 맥 시제품 앱: 칸·탭·사이드바·작업 공간 상태, 그리기(paint), 누르기 판정(hit), 동작.
+//! 사이드바가 창 위까지 올라가고 신호등은 그 안에 있다. 사이드바 왼쪽에는 작업 공간 레일, 그 옆에는 지금 공간의 이름과
+//! 그 공간에 고정한 것, 아래에는 어느 공간에서나 같은 '모든 공간'이 온다.
+//! 화면 계산·그리기 도우미·치수와 칸·도구 막대·레일 그리기는 Windows와 함께 쓰는 sakadu::ui를 쓴다
+//! (이 앱의 상태로 장면을 채워 넘긴다).
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
 use crate::gfx::Gfx;
 use sakadu::draw::{Color, Font, R};
-use sakadu::favorites::{self, Favorite, Favorites, Row};
+use sakadu::favorites::{self, Favorites, Row};
 use sakadu::listing::{self, Entry, Kind};
-use sakadu::palette::{R_ROW, Theme, alpha};
+use sakadu::palette::{self, R_ROW, System, Theme, alpha};
 use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab, ViewMode, child_toward};
 use sakadu::session::{self, Look, PaneState, Session};
 use sakadu::ui::glyph::*;
 use sakadu::ui::paint::{EntryArt, PaneHover, PaneScene, paint_pane_border, paint_pane_head, paint_pane_list};
+use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, rail_geom};
 use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, paint_toolbar, toolbar_geom};
 use sakadu::ui::*;
 use sakadu::util;
+use sakadu::workspaces::{self, Workspace, Workspaces};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// 모양 2의 사이드바 폭: 아이콘 막대와 패널(기본 220)을 합친 폭
+/// 사이드바 폭: 작업 공간 레일과 그 옆 패널(220)을 합친 폭
 const SIDE_W: f32 = BAR_W + 220.0;
 /// 맥 창의 신호등 아래 끝 (창에서 읽기 전 기본값, 그림 시험에서도 쓴다)
 pub const LIGHTS_BOTTOM: f32 = 28.0;
-
-/// 사이드바 고르기: 바로가기, 즐겨찾기, 검색
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Side {
-    Places,
-    Favorites,
-    Search,
-}
-
-impl Side {
-    const ALL: [Side; 3] = [Side::Places, Side::Favorites, Side::Search];
-
-    fn title(self) -> &'static str {
-        match self {
-            Side::Places => "바로가기",
-            Side::Favorites => "즐겨찾기",
-            Side::Search => "검색",
-        }
-    }
-
-    fn glyph(self) -> u16 {
-        match self {
-            Side::Places => G_PLACES,
-            Side::Favorites => G_STAR,
-            Side::Search => G_SEARCH,
-        }
-    }
-}
+/// 고정한 것이 없을 때 보이는 안내(두 줄)의 높이
+const HINT_H: f32 = 44.0;
+/// 고정한 것과 '모든 공간' 사이 간격 (줄이 많아 둘이 이어질 때)
+const COMMON_GAP: f32 = 12.0;
 
 /// 마우스가 가리키는 것 (칸 번호 p, 탭·줄 번호 i)
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Hit {
     None,
-    Seg(Side),
+    /// 레일의 작업 공간 아이콘 (공간 번호)
+    Space(usize),
+    /// 레일의 새 공간(+)
+    SpaceAdd,
+    /// 사이드바 맨 위, 지금 공간의 이름 (두 번 누르면 이름을 고친다)
+    SideTitle,
+    /// 사이드바 목록의 줄 (side_rows의 번호)
     SideRow(usize),
     /// 도구 막대의 칸 나누기·보기 방식 단추 (누르면 메뉴가 열린다)
     LayoutPick,
@@ -87,13 +72,49 @@ pub struct Mods {
     pub ctrl: bool,
 }
 
-/// 도구 막대 단추가 여는 메뉴
+/// 창 쪽이 맥 기본 메뉴로 여는 메뉴
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuKind {
     /// 칸 나누기 다섯 가지
     Layout,
     /// 보기 방식 여섯 가지와 맨 아래 '숨김 항목 보기'
     View,
+    /// 레일의 공간 아이콘을 오른쪽 단추로 눌렀을 때 (공간 번호): 색 여섯 가지, 이름 바꾸기, 지우기
+    Space(usize),
+    /// 레일의 + 를 오른쪽 단추로 눌렀을 때: 모든 작업 공간 (창이 낮아 레일에 다 보이지 않는 공간도 여기서 고른다)
+    Spaces,
+}
+
+/// 메뉴 한 개에 담을 수 있는 줄 수 (tag에서 줄 번호가 차지하는 범위)
+const TAG_ITEMS: usize = 1_000_000;
+
+impl MenuKind {
+    /// 메뉴 줄에 붙이는 번호 (맥 메뉴 항목의 tag): 메뉴 종류, 공간 번호, 줄 번호를 한 수에 담는다.
+    /// 종류(0~3) + 4 × (줄 번호 + TAG_ITEMS × 공간 번호). 줄 번호와 공간 번호는 자르지 않는다:
+    /// 모든 작업 공간 메뉴는 줄 번호가 곧 공간 번호라, 잘리면 뒤쪽 공간들이 같은 번호가 된다
+    pub fn tag(self, item: usize) -> isize {
+        let (kind, index) = match self {
+            MenuKind::Layout => (0, 0),
+            MenuKind::View => (1, 0),
+            MenuKind::Space(i) => (2, i),
+            MenuKind::Spaces => (3, 0),
+        };
+        (kind + 4 * (item.min(TAG_ITEMS - 1) + TAG_ITEMS * index)) as isize
+    }
+
+    /// tag에서 메뉴와 줄 번호를 되찾는다
+    pub fn from_tag(tag: isize) -> Option<(MenuKind, usize)> {
+        let tag = usize::try_from(tag).ok()?;
+        let (kind, rest) = (tag % 4, tag / 4);
+        let (index, item) = (rest / TAG_ITEMS, rest % TAG_ITEMS);
+        let kind = match kind {
+            0 => MenuKind::Layout,
+            1 => MenuKind::View,
+            2 => MenuKind::Space(index),
+            _ => MenuKind::Spaces,
+        };
+        Some((kind, item))
+    }
 }
 
 /// 맥 키 (글자 키는 소문자 그대로)
@@ -165,14 +186,50 @@ pub fn resolve_input(text: &str, home: &str) -> Result<(String, Option<String>),
     }
 }
 
-/// 사이드바 한 줄
+/// 사이드바 줄의 종류
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SideKind {
+    /// 이 공간에 고정한 것
+    Pin,
+    /// 고정한 것이 없을 때의 안내 (누를 수 없다)
+    Hint,
+    /// '모든 공간' 구역 이름 (누를 수 없다)
+    Label,
+    /// 어느 공간에나 있는 바로가기 (홈·문서·다운로드·디스크)
+    Place,
+    /// 즐겨찾기 그룹 머리 (그룹 번호, 접힘)
+    Group(usize, bool),
+    /// 즐겨찾기 항목
+    Fav,
+}
+
+/// 사이드바 한 줄. y는 목록 맨 위를 0으로 본 위치 (스크롤 전)
 struct SideRow {
+    kind: SideKind,
     label: String,
     path: Option<String>,
     is_dir: bool,
     indent: bool,
-    /// 즐겨찾기 그룹 머리 (그룹 번호, 접힘)
-    group: Option<(usize, bool)>,
+    y: f32,
+    h: f32,
+}
+
+/// 테마를 정할 때 쓰는 맥 설정 (창 쪽이 읽어 set_system으로 넣어 준 값)
+struct Sys {
+    dark: bool,
+    accent: Option<Color>,
+}
+
+impl System for Sys {
+    fn prefers_dark(&self) -> bool {
+        self.dark
+    }
+    fn high_contrast(&self) -> Option<[Color; 7]> {
+        None
+    }
+    fn accent(&self, _dark: bool) -> Option<Color> {
+        self.accent
+    }
 }
 
 pub struct App {
@@ -183,7 +240,7 @@ pub struct App {
     layout: Layout,
     active: usize,
     split: (f32, f32),
-    side: Side,
+    /// 즐겨찾기: 사이드바 아래 '모든 공간'에 보인다 (어느 공간에서나 같다)
     favs: Favorites,
     show_hidden: bool,
     pub hover: Hit,
@@ -191,10 +248,10 @@ pub struct App {
     sort: Sort,
     /// 끌고 있는 칸 경계
     drag: Option<Hit>,
-    /// 바로가기 줄 (이름, 경로)
+    /// '모든 공간'에 늘 있는 줄 (이름, 경로): 홈·문서·다운로드·디스크
     places: Vec<(String, String)>,
     requests: Vec<Request>,
-    /// 신호등 아래 끝 (창에서 읽는다). 사이드바 고르기 단추를 그 아래에 둔다
+    /// 신호등 아래 끝 (창에서 읽는다). 사이드바(레일과 공간 이름)는 그 아래에서 시작한다
     pub lights_bottom: f32,
     /// 창 없이 그림만 그릴 때 (그림 시험): 신호등과 경로 입력 글자도 직접 그린다 (창에서는 시스템·입력 상자가 그린다)
     pub standalone: bool,
@@ -220,10 +277,18 @@ pub struct App {
     menu: Option<MenuKind>,
     /// Finder '종류' 이름: 확장자별로 한 번만 묻는다 (폴더는 앞에 '/')
     kinds: RefCell<HashMap<String, String>>,
+    /// 작업 공간. 늘 하나 이상이고 그중 하나가 지금 것이다.
+    /// 지금 공간에 저장된 화면은 다른 공간으로 바꾸거나 파일에 저장할 때 지금 화면으로 맞춘다
+    workspaces: Workspaces,
+    /// 맥 설정에서 읽은 모양과 강조 색 (창 쪽이 넣어 준다). 색을 정하지 않은 공간은 이 강조 색을 따른다
+    dark: bool,
+    system_accent: Option<Color>,
+    /// 지금 공간의 이름을 고치는 중 (창 쪽 입력 상자가 이름 자리에 뜬다)
+    pub renaming: bool,
 }
 
 impl App {
-    /// home: 처음 여는 폴더, places: 바로가기 줄
+    /// home: 처음 여는 폴더, places: '모든 공간'에 늘 있는 줄
     pub fn new(w: f32, h: f32, theme: Theme, home: &str, favs: Favorites, places: Vec<(String, String)>) -> App {
         let mut app = App {
             w,
@@ -233,7 +298,6 @@ impl App {
             layout: Layout::TwoV,
             active: 0,
             split: (0.5, 0.5),
-            side: Side::Favorites,
             favs,
             show_hidden: false,
             hover: Hit::None,
@@ -255,6 +319,10 @@ impl App {
             persist: false,
             menu: None,
             kinds: RefCell::new(HashMap::new()),
+            workspaces: Workspaces::default(),
+            dark: theme.dark,
+            system_accent: None,
+            renaming: false,
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
@@ -263,6 +331,8 @@ impl App {
         for p in 0..app.layout.count() {
             app.load(p);
         }
+        // 레일에는 늘 지금 공간이 있다: 저장해 둔 공간을 넣기 전에는 지금 화면이 '기본' 공간이다
+        app.set_workspaces(Workspaces::default());
         app
     }
 
@@ -299,6 +369,11 @@ impl App {
     #[cfg(test)]
     pub fn favorites(&self) -> &Favorites {
         &self.favs
+    }
+
+    #[cfg(test)]
+    pub fn workspaces(&self) -> &Workspaces {
+        &self.workspaces
     }
 
     // ---------- 폴더 읽기 ----------
@@ -384,16 +459,23 @@ impl App {
     pub fn begin_address(&mut self, p: usize) {
         if self.panes[p].tab().loc.dir().is_some() {
             self.activate_pane(p);
+            self.renaming = false;
             self.editing = Some(p);
         }
     }
 
+    /// 입력을 그만둔다 (경로 입력, 공간 이름 고치기)
     pub fn cancel_address(&mut self) {
         self.editing = None;
+        self.renaming = false;
     }
 
-    /// 입력한 경로로 간다. 확인은 뒷줄에서 하고 결과는 on_probed로 받는다
+    /// 입력 상자의 글을 확정한다. 공간 이름을 고치는 중이면 그 이름으로, 아니면 입력한 경로로 간다.
+    /// 경로 확인은 뒷줄에서 하고 결과는 on_probed로 받는다
     pub fn commit_address(&mut self, text: &str) {
+        if std::mem::take(&mut self.renaming) {
+            return self.commit_rename(text);
+        }
         let Some(p) = self.editing.take() else { return };
         let (tab, generation) = (self.panes[p].tab().id, self.panes[p].tab().generation);
         self.probe_seq[p] += 1;
@@ -433,16 +515,34 @@ impl App {
         }
     }
 
-    /// 경로 입력 상자 자리: 칸의 경로 자리, 너무 좁으면 새 폴더·보기 단추 자리까지 (app.rs addr_rect)
+    /// 입력 상자 자리: 공간 이름을 고치는 중이면 사이드바의 이름 자리, 아니면 칸의 경로 자리 (app.rs addr_rect)
     pub fn address_rect(&self) -> Option<R> {
+        if self.renaming {
+            return Some(self.rename_rect());
+        }
         let p = self.editing?;
         let r = self.pane_rects().into_iter().find(|(q, _)| *q == p)?.1;
         Some(addr_rect(&geom(r)))
     }
 
-    /// 경로 입력 상자에 처음 넣을 글자 (지금 폴더)
+    /// 입력 상자에 처음 넣을 글자: 지금 공간의 이름, 또는 지금 폴더
     pub fn address_text(&self) -> String {
+        if self.renaming {
+            return self.workspaces.current_name().unwrap_or_default().to_string();
+        }
         self.editing.and_then(|p| self.panes[p].tab().loc.dir().map(str::to_string)).unwrap_or_default()
+    }
+
+    /// 입력 상자가 지금 무엇을 담는지: 경로를 입력하는 칸 번호, 공간 이름이면 usize::MAX (바뀌면 창 쪽이 글자를 다시 채운다)
+    pub fn edit_key(&self) -> Option<usize> {
+        if self.renaming { Some(usize::MAX) } else { self.editing }
+    }
+
+    /// 입력 상자가 키 입력을 잃었다 (다른 곳을 눌렀다): 입력을 그만둔다. 입력 중이었으면 true
+    pub fn end_editing(&mut self) -> bool {
+        let was = self.renaming || self.editing.is_some();
+        self.cancel_address();
+        was
     }
 
     // ---------- 세션 ----------
@@ -450,11 +550,6 @@ impl App {
     /// 끝낼 때 저장할 화면 상태 (맥이 쓰지 않는 값은 기본값)
     pub fn to_session(&self) -> Session {
         let layout = Layout::ALL.iter().position(|l| *l == self.layout).unwrap_or(1) as u8;
-        let side = match self.side {
-            Side::Places => "places",
-            Side::Favorites => "favorites",
-            Side::Search => "search",
-        };
         Session {
             window: None,
             maximized: false,
@@ -465,11 +560,11 @@ impl App {
             preview: false,
             new_tab: session::NEW_TAB_SAME.to_string(),
             recent: Vec::new(),
-            side: side.to_string(),
+            side: "main".to_string(),
             side_w: session::SIDE_W_DEFAULT,
             pin: None,
             pin_id: None,
-            ws: None,
+            ws: self.workspaces.current_name().map(str::to_string),
             query: String::new(),
             scope_here: false,
             folded: Vec::new(),
@@ -495,11 +590,6 @@ impl App {
         self.layout = Layout::ALL[(s.layout as usize).min(4)];
         self.split = (s.split.0.clamp(0.15, 0.85), s.split.1.clamp(0.15, 0.85));
         self.show_hidden = s.show_hidden;
-        self.side = match s.side.as_str() {
-            "places" => Side::Places,
-            "search" => Side::Search,
-            _ => Side::Favorites,
-        };
         self.home = home.to_string();
         for (p, ps) in s.panes.iter().take(self.panes.len()).enumerate() {
             let mut tabs = Vec::new();
@@ -523,6 +613,172 @@ impl App {
         for p in 0..self.layout.count() {
             self.load_if_new(p);
         }
+    }
+
+    // ---------- 작업 공간 ----------
+
+    /// 저장해 둔 작업 공간을 넣는다 (화면은 바꾸지 않는다). 하나도 없으면 지금 화면으로 '기본' 공간을 만든다
+    pub fn set_workspaces(&mut self, ws: Workspaces) {
+        self.workspaces = ws;
+        if self.workspaces.list.is_empty() {
+            let state = self.to_session();
+            self.workspaces.ensure_one(|| state);
+        }
+        if self.workspaces.current.is_none_or(|c| c >= self.workspaces.list.len()) {
+            self.workspaces.current = Some(0);
+        }
+        self.renaming = false;
+        self.side_scroll = 0.0;
+        self.retheme();
+    }
+
+    /// 시작할 때: 저장해 둔 작업 공간과 지난번 화면(세션)으로 연다.
+    /// 세션이 지금 공간의 화면이면 그 화면(마지막으로 본 모습)으로, 아니면 그 공간에 저장된 화면으로 연다.
+    /// 작업 공간이 없으면(처음 실행했거나 작업 공간이 없던 시제품을 쓰던 경우) 지난번 화면이 '기본' 공간이 된다
+    pub fn open_saved(&mut self, ws: Workspaces, session: Option<&Session>, home: &str) {
+        if ws.list.is_empty() {
+            if let Some(s) = session {
+                self.restore(s, home);
+            }
+            return self.set_workspaces(Workspaces::default());
+        }
+        self.set_workspaces(ws);
+        match session {
+            Some(s) if s.ws.as_deref() == self.workspaces.current_name() => self.restore(s, home),
+            _ => {
+                if let Some(state) = self.workspaces.current().map(|w| w.state.clone()) {
+                    self.restore(&state, home);
+                }
+                // 숨김 항목 보기는 작업 공간과 상관없다
+                if let Some(s) = session {
+                    self.show_hidden = s.show_hidden;
+                }
+            }
+        }
+    }
+
+    /// 맥 설정이 바뀌었다 (밝은·어두운 모양, 강조 색): 테마를 다시 정한다
+    pub fn set_system(&mut self, dark: bool, accent: Option<Color>) {
+        self.dark = dark;
+        self.system_accent = accent;
+        self.retheme();
+    }
+
+    /// 테마를 정한다: 강조 색은 지금 공간의 색, 색을 정하지 않은 공간은 맥 설정의 강조 색
+    fn retheme(&mut self) {
+        let sys = Sys { dark: self.dark, accent: self.system_accent };
+        let key = self.workspaces.current().map(|w| w.color.as_str()).filter(|c| !c.is_empty()).unwrap_or("system");
+        self.theme = Theme::resolve(if self.dark { "dark" } else { "light" }, key, &sys);
+    }
+
+    /// 레일에 보일 공간의 색: 그 공간의 색. 정하지 않았으면 맥 설정의 강조 색 (읽지 못했으면 기본 파랑)
+    fn space_color(&self, w: &Workspace) -> Color {
+        let dark = self.theme.dark;
+        let sys = Sys { dark, accent: self.system_accent };
+        let key = if w.color.is_empty() { "system" } else { w.color.as_str() };
+        palette::accent_color(key, dark, &sys).unwrap_or(if dark { Theme::DARK.accent } else { Theme::LIGHT.accent })
+    }
+
+    /// 지금 화면을 지금 공간에 적어 둔다
+    fn sync_workspace(&mut self) {
+        let state = self.to_session();
+        if let Some(w) = self.workspaces.current_mut() {
+            w.state = state;
+        }
+    }
+
+    /// 지금 공간에 지금 화면을 적고 작업 공간을 파일에 저장한다 (시험·그림에서는 저장하지 않는다)
+    pub fn save_workspaces(&mut self) {
+        self.sync_workspace();
+        if self.persist
+            && let Err(e) = workspaces::save(&self.workspaces)
+        {
+            sakadu::diag::log(|| format!("workspaces: {e}"));
+        }
+    }
+
+    /// 지금 공간에 저장된 화면(칸 나누기·칸·탭)을 열고, 색을 그 공간 색으로 바꾼다.
+    /// 숨김 항목 보기는 작업 공간과 상관없어 그대로 둔다
+    fn open_current_workspace(&mut self) {
+        let Some(state) = self.workspaces.current().map(|w| w.state.clone()) else { return };
+        let (home, hidden) = (self.home.clone(), self.show_hidden);
+        // 떠나는 화면의 탭은 없어진다: 그 탭들에 걸어 둔 표시와 하던 입력·메뉴·끌기를 그만둔다
+        self.restored.clear();
+        self.restore(&state, &home);
+        self.show_hidden = hidden;
+        self.editing = None;
+        self.renaming = false;
+        self.flash = None;
+        self.menu = None;
+        self.drag = None;
+        self.side_scroll = 0.0;
+        self.retheme();
+    }
+
+    /// 공간 i로 바꾼다. 지금 공간에는 지금 화면을 적어 두고, 고른 공간의 화면을 연다
+    pub fn switch_workspace(&mut self, i: usize) {
+        if self.workspaces.current == Some(i) || i >= self.workspaces.list.len() {
+            return;
+        }
+        self.sync_workspace();
+        self.workspaces.current = Some(i);
+        self.open_current_workspace();
+        self.save_workspaces();
+    }
+
+    /// 지금 화면으로 새 공간을 만들어 그리로 옮기고, 이름을 바로 고칠 수 있게 한다.
+    /// 이름은 지금 폴더 이름(겹치면 번호를 붙인다), 색은 아직 쓰지 않은 색
+    pub fn new_workspace(&mut self) {
+        self.sync_workspace();
+        let title = workspaces::clean_name(&self.panes[self.active].tab().loc.title());
+        let base = if title.is_empty() { format!("작업 공간 {}", self.workspaces.list.len() + 1) } else { title };
+        let mut ws = Workspace::new(self.workspaces.unique_name(&base, None), self.to_session());
+        // 색을 정하지 않은 공간은 맥 설정의 강조 색을 쓴다
+        ws.color = self.workspaces.next_color("system").to_string();
+        self.workspaces.list.push(ws);
+        self.workspaces.current = Some(self.workspaces.list.len() - 1);
+        self.side_scroll = 0.0;
+        self.retheme();
+        self.save_workspaces();
+        self.begin_rename();
+    }
+
+    /// 공간 i를 지운다 (마지막 하나는 지우지 않는다). 지금 공간을 지웠으면 그 자리의 다음 공간을 연다
+    pub fn delete_workspace(&mut self, i: usize) {
+        if self.workspaces.remove(i) {
+            self.open_current_workspace();
+        }
+        self.renaming = false;
+        self.save_workspaces();
+    }
+
+    /// 공간 i의 색을 바꾼다 (workspaces::COLORS의 이름). 지금 공간이면 화면 색도 따라 바뀐다
+    pub fn set_workspace_color(&mut self, i: usize, color: &str) {
+        if !workspaces::COLORS.contains(&color) {
+            return;
+        }
+        let Some(w) = self.workspaces.list.get_mut(i) else { return };
+        w.color = color.to_string();
+        self.retheme();
+        self.save_workspaces();
+    }
+
+    /// 지금 공간의 이름을 고치기 시작한다 (창 쪽 입력 상자가 이름 자리에 뜬다. 확정은 commit_address, 취소는 cancel_address)
+    pub fn begin_rename(&mut self) {
+        self.editing = None;
+        self.renaming = true;
+    }
+
+    /// 고친 이름을 지금 공간에 적는다. 비었거나 그대로면 두고, 다른 공간과 겹치면 번호를 붙인다
+    fn commit_rename(&mut self, text: &str) {
+        self.renaming = false;
+        let name = workspaces::clean_name(text);
+        let Some(c) = self.workspaces.current else { return };
+        if name.is_empty() || self.workspaces.list[c].name == name {
+            return;
+        }
+        self.workspaces.list[c].name = self.workspaces.unique_name(&name, Some(c));
+        self.save_workspaces();
     }
 
     // ---------- 이동 ----------
@@ -681,14 +937,21 @@ impl App {
         self.ensure_visible(p);
     }
 
-    /// 열어 달라는 메뉴와 그 단추 자리 (창 쪽이 가져가서 맥 기본 메뉴로 연다)
+    /// 열어 달라는 메뉴와 그 메뉴를 붙일 자리 (창 쪽이 가져가서 맥 기본 메뉴로 연다)
     pub fn take_menu(&mut self) -> Option<(MenuKind, R)> {
         let kind = self.menu.take()?;
-        let m = self.toolbar();
-        Some((kind, if kind == MenuKind::Layout { m.layout } else { m.view }))
+        let anchor = match kind {
+            MenuKind::Layout => self.toolbar().layout,
+            MenuKind::View => self.toolbar().view,
+            MenuKind::Space(i) => self.rail().spaces.iter().find(|(s, _)| *s == i)?.1,
+            MenuKind::Spaces => self.rail().add,
+        };
+        Some((kind, anchor))
     }
 
-    /// 메뉴의 줄: (이름, 지금 것인지). 보기 방식 메뉴의 맨 아래 줄은 숨김 항목 보기
+    /// 메뉴의 줄: (이름, 지금 것인지). 보기 방식 메뉴의 맨 아래 줄은 숨김 항목 보기.
+    /// 공간 메뉴는 색 여섯 가지 다음에 이름 바꾸기(지금 공간만), 지우기(공간이 둘 이상일 때만).
+    /// 모든 작업 공간 메뉴는 공간 이름들
     pub fn menu_items(&self, kind: MenuKind) -> Vec<(String, bool)> {
         use sakadu::keys::{Action, name};
         match kind {
@@ -702,6 +965,29 @@ impl App {
                 v.push(("숨김 항목 보기".to_string(), self.show_hidden));
                 v
             }
+            MenuKind::Space(i) => {
+                let Some(w) = self.workspaces.list.get(i) else { return Vec::new() };
+                let color_name = |key: &str| palette::ACCENTS.iter().find(|a| a.0 == key).map_or(key, |a| a.1).to_string();
+                let mut v: Vec<_> = workspaces::COLORS.iter().map(|key| (color_name(key), w.color == *key)).collect();
+                // 이름은 사이드바 맨 위(지금 공간의 이름 자리)에서 고친다
+                if self.workspaces.current == Some(i) {
+                    v.push(("이름 바꾸기".to_string(), false));
+                }
+                if self.workspaces.list.len() > 1 {
+                    v.push(("이 작업 공간 지우기".to_string(), false));
+                }
+                v
+            }
+            MenuKind::Spaces => self.workspaces.list.iter().enumerate().map(|(i, w)| (w.name.clone(), self.workspaces.current == Some(i))).collect(),
+        }
+    }
+
+    /// 메뉴에서 이 번호의 줄 앞에 구분선을 둔다 (보기 방식과 숨김 항목 보기 사이, 색과 그 밖의 줄 사이)
+    pub fn menu_break(&self, kind: MenuKind) -> Option<usize> {
+        match kind {
+            MenuKind::Layout | MenuKind::Spaces => None,
+            MenuKind::View => Some(ViewMode::ALL.len()),
+            MenuKind::Space(_) => Some(workspaces::COLORS.len()),
         }
     }
 
@@ -717,14 +1003,36 @@ impl App {
                 Some(v) => self.set_view(self.active, *v),
                 None => self.toggle_hidden(),
             },
+            MenuKind::Space(w) => {
+                if let Some(color) = workspaces::COLORS.get(i) {
+                    return self.set_workspace_color(w, color);
+                }
+                // 색 다음 줄: 이름 바꾸기(지금 공간만 있다), 지우기
+                let rename = self.workspaces.current == Some(w);
+                match (i - workspaces::COLORS.len(), rename) {
+                    (0, true) => self.begin_rename(),
+                    (0, false) | (1, true) => self.delete_workspace(w),
+                    _ => {}
+                }
+            }
+            MenuKind::Spaces => self.switch_workspace(i),
         }
     }
 
-    pub fn set_side(&mut self, side: Side) {
-        if self.side != side {
-            self.side = side;
-            self.side_scroll = 0.0;
-        }
+    /// 오른쪽 단추로 누른 곳이 레일의 공간 아이콘이면 그 공간의 메뉴를, + 면 모든 작업 공간 목록을 열어 달라고 한다. 그랬으면 true
+    pub fn right_down(&mut self, g: &Gfx, x: f32, y: f32) -> bool {
+        let hit = self.hit(g, x, y);
+        self.ask_space_menu(hit)
+    }
+
+    fn ask_space_menu(&mut self, hit: Hit) -> bool {
+        self.menu = match hit {
+            Hit::Space(i) => Some(MenuKind::Space(i)),
+            // 창이 낮으면 레일에 공간이 다 보이지 않는다: 안 보이는 공간은 이 목록에서 고른다
+            Hit::SpaceAdd => Some(MenuKind::Spaces),
+            _ => return false,
+        };
+        true
     }
 
     // ---------- 고르기 ----------
@@ -779,33 +1087,42 @@ impl App {
         self.ensure_visible(p);
     }
 
-    // ---------- 즐겨찾기 ----------
+    // ---------- 고정한 것과 즐겨찾기 ----------
 
-    /// 칸 p의 폴더를 즐겨찾기에 넣거나 뺀다 (경로 줄의 별)
-    pub fn toggle_star(&mut self, p: usize) {
-        let Some(dir) = self.panes[p].tab().loc.dir().map(str::to_string) else { return };
-        match self.favs.find(&dir) {
-            Some((g, i)) => {
-                self.favs.remove_item(g, i);
-            }
-            None => {
-                self.favs.push(None, Favorite { name: favorites::default_name(&dir), path: dir, is_dir: true });
-            }
-        }
-        self.save_favorites();
+    /// 책갈피가 채워져 보이는 폴더인지: 이 공간에 고정했거나 '모든 공간'(즐겨찾기)에 있다
+    fn is_marked(&self, dir: &str) -> bool {
+        self.workspaces.current().is_some_and(|w| w.pin_index(dir).is_some()) || self.favs.find(dir).is_some()
     }
 
-    /// 사이드바에 넣기(⌃⌘T): 커서 항목, 없으면 지금 폴더
-    pub fn add_favorite(&mut self) {
+    /// 경로 줄의 책갈피: 칸 p의 폴더를 이 공간에 고정하거나 푼다
+    pub fn toggle_star(&mut self, p: usize) {
+        let Some(dir) = self.panes[p].tab().loc.dir().map(str::to_string) else { return };
+        self.toggle_pin(&dir, true);
+    }
+
+    /// ⌃⌘T: 커서 항목(없으면 지금 폴더)을 이 공간에 고정하거나 푼다
+    pub fn toggle_pin_selected(&mut self) {
         let p = self.active;
         let tab = self.panes[p].tab();
         let target = tab.cursor_entry().and_then(|e| tab.path_of(e).map(|path| (path, e.is_dir()))).or_else(|| tab.loc.dir().map(|d| (d.to_string(), true)));
         let Some((path, is_dir)) = target else { return };
-        if self.favs.find(&path).is_none() {
-            self.favs.push(None, Favorite { name: favorites::default_name(&path), path, is_dir });
-            self.save_favorites();
+        self.toggle_pin(&path, is_dir);
+    }
+
+    /// 이 공간에 고정한 것이면 풀고, 아니면 고정한다.
+    /// 이 공간에는 없고 '모든 공간'(즐겨찾기)에만 있는 것이면 거기서 뺀다 (채워진 책갈피를 누르면 늘 비워진다)
+    fn toggle_pin(&mut self, path: &str, is_dir: bool) {
+        let Some(ws) = self.workspaces.current_mut() else { return };
+        if let Some(i) = ws.pin_index(path) {
+            ws.pins.remove(i);
+        } else if let Some((g, i)) = self.favs.find(path) {
+            self.favs.remove_item(g, i);
+            return self.save_favorites();
+        } else {
+            ws.pin(path, is_dir);
         }
-        self.side = Side::Favorites;
+        self.clamp_side_scroll();
+        self.save_workspaces();
     }
 
     fn save_favorites(&mut self) {
@@ -817,26 +1134,47 @@ impl App {
         }
     }
 
+    /// 사이드바 목록의 줄. 위에는 이 공간에 고정한 것(없으면 안내), 아래에는 '모든 공간': 구역 이름, 바로가기, 즐겨찾기.
+    /// '모든 공간'은 줄이 적으면 목록 아래 끝에 붙고, 많아서 넘치면 고정한 것 바로 아래에 이어져 함께 스크롤된다
     fn side_rows(&self) -> Vec<SideRow> {
-        match self.side {
-            Side::Places => self.places.iter().map(|(l, p)| SideRow { label: l.clone(), path: Some(p.clone()), is_dir: true, indent: false, group: None }).collect(),
-            Side::Favorites => self
-                .favs
-                .rows()
-                .into_iter()
-                .filter_map(|row| match row {
-                    Row::Group(g) => self.favs.groups.get(g).map(|grp| SideRow { label: grp.name.clone(), path: None, is_dir: false, indent: false, group: Some((g, grp.collapsed)) }),
-                    Row::Item { group, index } => self.favs.item(group, index).map(|f| SideRow { label: f.name.clone(), path: Some(f.path.clone()), is_dir: f.is_dir, indent: group.is_some(), group: None }),
-                })
-                .collect(),
-            Side::Search => Vec::new(),
+        let row = |kind, label: &str, path: Option<&str>, is_dir, indent, y, h| SideRow { kind, label: label.to_string(), path: path.map(str::to_string), is_dir, indent, y, h };
+        let mut rows = Vec::new();
+        let mut y = 0.0;
+        let pins = self.workspaces.current().map(|w| w.pins.as_slice()).unwrap_or_default();
+        for f in pins {
+            rows.push(row(SideKind::Pin, &f.name, Some(&f.path), f.is_dir, false, y, SIDE_ROW_H));
+            y += SIDE_ROW_H;
         }
+        if pins.is_empty() {
+            rows.push(row(SideKind::Hint, "", None, false, false, y, HINT_H));
+            y += HINT_H;
+        }
+        let favs = self.favs.rows();
+        let common_h = SIDE_LABEL_H + (self.places.len() + favs.len()) as f32 * SIDE_ROW_H;
+        let mut y = side_common_top(y, common_h, self.side_list().h(), COMMON_GAP);
+        rows.push(row(SideKind::Label, "모든 공간", None, false, false, y, SIDE_LABEL_H));
+        y += SIDE_LABEL_H;
+        for (label, path) in &self.places {
+            rows.push(row(SideKind::Place, label, Some(path), true, false, y, SIDE_ROW_H));
+            y += SIDE_ROW_H;
+        }
+        for fav in favs {
+            let r = match fav {
+                Row::Group(g) => self.favs.groups.get(g).map(|grp| row(SideKind::Group(g, grp.collapsed), &grp.name, None, false, false, y, SIDE_ROW_H)),
+                Row::Item { group, index } => self.favs.item(group, index).map(|f| row(SideKind::Fav, &f.name, Some(&f.path), f.is_dir, group.is_some(), y, SIDE_ROW_H)),
+            };
+            if let Some(r) = r {
+                rows.push(r);
+                y += SIDE_ROW_H;
+            }
+        }
+        rows
     }
 
     fn open_side_row(&mut self, i: usize) {
         let rows = self.side_rows();
         let Some(row) = rows.get(i) else { return };
-        if let Some((g, collapsed)) = row.group {
+        if let SideKind::Group(g, collapsed) = row.kind {
             self.favs.set_collapsed(g, !collapsed);
             self.save_favorites();
             return;
@@ -882,45 +1220,54 @@ impl App {
         reveal(self.panes[p].tab_mut(), list, view);
     }
 
-    /// 사이드바 고르기 단추 판
-    fn seg_track(&self) -> R {
-        let t = WORKBAR_H.max(self.lights_bottom + 8.0) + 4.0;
-        R::new(12.0, t, SIDE_W - 12.0, t + 32.0)
+    /// 사이드바(레일, 공간 이름)가 시작하는 높이: 도구 막대 아래. 신호등이 더 아래까지 오면 그 아래
+    fn side_top(&self) -> f32 {
+        WORKBAR_H.max(self.lights_bottom + 8.0)
     }
 
-    fn seg_rect(&self, i: usize) -> R {
-        let track = self.seg_track();
-        let w = (track.w() - 6.0) / 3.0;
-        R::new(track.l + 3.0 + i as f32 * w, track.t + 3.0, track.l + 3.0 + (i + 1) as f32 * w, track.b - 3.0)
+    /// 작업 공간 레일의 자리 (공간 아이콘들과 새 공간 +)
+    fn rail(&self) -> RailGeom {
+        rail_geom(self.side_top(), self.h, self.workspaces.list.len(), self.workspaces.current.unwrap_or(0), false)
     }
 
-    fn side_panel(&self) -> R {
-        R::new(0.0, self.seg_track().b + 8.0, SIDE_W, self.h - MARGIN)
+    /// 레일 옆 맨 위, 지금 공간의 이름 자리
+    fn side_title(&self) -> R {
+        let t = self.side_top();
+        R::new(BAR_W + 8.0, t, SIDE_W - 8.0, t + SIDE_HEADER_H - 4.0)
     }
 
-    /// 사이드바 목록이 보이는 곳 (머리 줄 아래)
+    /// 이름 입력 상자 자리 (이름 줄 안. 글자가 이름을 그리던 자리에서 시작한다)
+    fn rename_rect(&self) -> R {
+        let t = self.side_title();
+        R::new(t.l + 4.0, t.t + 3.0, t.r, t.b - 3.0)
+    }
+
+    /// 사이드바 목록이 보이는 곳 (이름 줄 아래부터 창 아래 여백 앞까지)
     fn side_list(&self) -> R {
-        let pr = self.side_panel();
-        R::new(pr.l, pr.t + SIDE_HEADER_H + 2.0, pr.r, pr.b.max(pr.t + SIDE_HEADER_H + 2.0))
+        let t = self.side_top() + SIDE_HEADER_H;
+        R::new(BAR_W, t, SIDE_W, (self.h - MARGIN).max(t))
     }
 
-    fn side_row_rect(&self, i: usize) -> R {
+    /// 그 줄이 지금 보이는 자리 (스크롤한 만큼 옮긴다)
+    fn side_rect(&self, row: &SideRow) -> R {
         let list = self.side_list();
-        let y = list.t + i as f32 * SIDE_ROW_H - self.side_scroll;
-        R::new(list.l + 8.0, y, list.r - 8.0, y + SIDE_ROW_H)
+        let t = list.t + row.y - self.side_scroll;
+        R::new(list.l + 8.0, t, list.r - 8.0, t + row.h)
     }
 
     /// 사이드바 스크롤을 줄 수 안으로 (줄이 바뀌거나 창 크기가 바뀐 뒤)
     fn clamp_side_scroll(&mut self) {
-        let max = (self.side_rows().len() as f32 * SIDE_ROW_H - self.side_list().h()).max(0.0);
-        self.side_scroll = self.side_scroll.clamp(0.0, max);
+        let content = self.side_rows().last().map_or(0.0, |r| r.y + r.h);
+        // '모든 공간'을 아래 끝에 붙인 목록은 내용 높이가 목록 높이와 같다 (계산 오차만큼의 스크롤은 없는 것으로 본다)
+        let max = content - self.side_list().h();
+        self.side_scroll = self.side_scroll.clamp(0.0, if max < 0.5 { 0.0 } else { max });
     }
 
     /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다.
-    /// 새 폴더·미리 보기는 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
+    /// 새 폴더·미리 보기·검색은 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
     fn toolbar(&self) -> ToolbarGeom {
         let a = self.area();
-        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: false, more: false })
+        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: false, search: false, more: false })
     }
 
     /// 탭 칩 자리와 새 탭(+) 자리 (app.rs chips와 같다: 오른쪽 항목 수 자리 앞까지, 넘치면 지금 탭을 지킨다)
@@ -950,17 +1297,23 @@ impl App {
     }
 
     pub fn hit(&self, g: &Gfx, x: f32, y: f32) -> Hit {
-        if x < SIDE_W {
-            for (i, side) in Side::ALL.iter().enumerate() {
-                if self.seg_rect(i).contains(x, y) {
-                    return Hit::Seg(*side);
-                }
+        if x < BAR_W {
+            let rail = self.rail();
+            if let Some((i, _)) = rail.spaces.iter().find(|(_, r)| r.contains(x, y)) {
+                return Hit::Space(*i);
             }
-            let n = self.side_rows().len();
+            return if rail.add.contains(x, y) { Hit::SpaceAdd } else { Hit::None };
+        }
+        if x < SIDE_W {
+            if self.side_title().contains(x, y) {
+                return Hit::SideTitle;
+            }
             if !self.side_list().contains(x, y) {
                 return Hit::None;
             }
-            return (0..n).find(|&i| self.side_row_rect(i).contains(x, y)).map_or(Hit::None, Hit::SideRow);
+            // 안내와 구역 이름은 누를 수 없다
+            let rows = self.side_rows();
+            return rows.iter().position(|r| !matches!(r.kind, SideKind::Hint | SideKind::Label) && self.side_rect(r).contains(x, y)).map_or(Hit::None, Hit::SideRow);
         }
         if y < WORKBAR_H {
             // 도구 막대: 뒤로·앞으로는 지금 칸에 대해 움직인다
@@ -1017,9 +1370,14 @@ impl App {
     /// 누름. clicks는 연속으로 누른 횟수 (2면 두 번 누르기)
     pub fn mouse_down(&mut self, g: &Gfx, x: f32, y: f32, mods: Mods, clicks: usize) {
         let hit = self.hit(g, x, y);
-        // 입력 상자 밖을 누르면 입력을 그만둔다. 알림은 다음 입력 때 지운다
+        // 입력 상자 밖을 누르면 입력(경로, 공간 이름)을 그만둔다. 알림은 다음 입력 때 지운다
         self.editing = None;
+        self.renaming = false;
         self.flash = None;
+        // ⌃-누르기는 오른쪽 단추와 같다
+        if mods.ctrl && self.ask_space_menu(hit) {
+            return;
+        }
         match hit {
             Hit::Tab(p, _) | Hit::TabClose(p, _) | Hit::TabAdd(p) | Hit::Back(p) | Hit::Fwd(p) | Hit::Crumb(p, _) | Hit::CrumbEmpty(p) | Hit::Star(p) | Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) => {
                 self.activate_pane(p)
@@ -1028,7 +1386,13 @@ impl App {
         }
         match hit {
             Hit::CrumbEmpty(p) => self.begin_address(p),
-            Hit::Seg(side) => self.set_side(side),
+            Hit::Space(i) => self.switch_workspace(i),
+            Hit::SpaceAdd => self.new_workspace(),
+            Hit::SideTitle => {
+                if clicks >= 2 {
+                    self.begin_rename();
+                }
+            }
             Hit::SideRow(i) => self.open_side_row(i),
             Hit::LayoutPick => self.menu = Some(MenuKind::Layout),
             Hit::ViewPick => self.menu = Some(MenuKind::View),
@@ -1132,7 +1496,7 @@ impl App {
             (Key::Up, true, false, false) => self.go_up(p),
             (Key::Char('['), true, false, false) => self.go_back(p),
             (Key::Char(']'), true, false, false) => self.go_forward(p),
-            (Key::Char('t'), true, true, false) => self.add_favorite(),
+            (Key::Char('t'), true, true, false) => self.toggle_pin_selected(),
             (Key::Char('t'), true, false, false) => self.new_tab(p),
             (Key::Char('w'), true, false, false) => {
                 let i = self.panes[p].active;
@@ -1170,66 +1534,65 @@ impl App {
         }
     }
 
+    /// 사이드바: 왼쪽에 작업 공간 레일(공통 그리기), 그 옆에 지금 공간의 이름과 고정한 것, 아래에 '모든 공간'
     fn paint_sidebar(&self, g: &Gfx, t: &Theme) {
-        // 창 바탕 위에 아주 옅은 면, 오른쪽에 얇은 선
-        g.fill(R::new(0.0, 0.0, SIDE_W, self.h), alpha(t.text, if t.dark { 0.03 } else { 0.025 }));
-        g.fill(R::new(SIDE_W - 1.0, 0.0, SIDE_W, self.h), alpha(t.text, 0.08));
         if self.standalone {
             traffic_lights(g, WORKBAR_H / 2.0);
         }
-        // 바로가기·즐겨찾기·검색 고르기
-        let track = self.seg_track();
-        g.fill_round(track, track.h() / 2.0, seg_track(t));
-        for (i, side) in Side::ALL.iter().enumerate() {
-            let r = self.seg_rect(i);
-            let on = *side == self.side;
-            if on {
-                seg_on(g, r, r.h() / 2.0, t);
-            } else if self.hover == Hit::Seg(*side) {
-                g.fill_round(r, r.h() / 2.0, hover_fill(t));
-            }
-            g.glyph(side.glyph(), r, false, if on { t.text } else { t.dim });
-        }
-        let pr = self.side_panel();
-        g.text(self.side.title(), R::new(pr.l + 18.0, pr.t, pr.r - 44.0, pr.t + SIDE_HEADER_H), Font::Strong, t.text);
-        if self.side == Side::Favorites {
-            g.glyph(G_PIN_FILL, R::new(pr.r - 36.0, pr.t + 8.0, pr.r - 8.0, pr.t + 36.0), false, t.dim);
-        }
-        let rows = self.side_rows();
-        let note = |l1: &str, l2: &str| {
-            let r = self.side_row_rect(0);
-            g.text(l1, R::new(r.l + 10.0, r.t + 4.0, r.r - 6.0, r.t + 22.0), Font::Small, t.faint);
-            g.text(l2, R::new(r.l + 10.0, r.t + 22.0, r.r - 6.0, r.t + 40.0), Font::Small, t.faint);
+        // 레일: 지금 공간의 칸 나누기 그림은 지금 화면을 따른다 (다른 공간은 저장된 화면)
+        let rail = self.rail();
+        let current = self.workspaces.current.unwrap_or(0);
+        let saved_layout = |w: &Workspace| Layout::ALL[(w.state.layout as usize).min(4)];
+        let spaces: Vec<RailSpace> =
+            self.workspaces.list.iter().enumerate().map(|(i, w)| RailSpace { color: self.space_color(w), layout: if i == current { self.layout } else { saved_layout(w) } }).collect();
+        let hover = match self.hover {
+            Hit::Space(i) => RailHover::Space(i),
+            Hit::SpaceAdd => RailHover::Add,
+            _ => RailHover::None,
         };
-        match self.side {
-            Side::Favorites if rows.is_empty() => note("즐겨찾기가 비어 있어요", "경로 오른쪽 책갈피나 ⌃⌘T로 넣어 보세요"),
-            Side::Search => note("검색은 다음 단계에서 넣어요", "지금은 폴더를 열어 찾아 주세요"),
-            _ => {}
+        paint_rail(g, t, &RailScene { geom: &rail, spaces: &spaces, current, hover, drop: None });
+
+        // 지금 공간의 이름. 고치는 중이면 입력 상자의 바탕과 테두리만 (글자는 창 쪽 입력 상자가 그린다)
+        if self.renaming {
+            let er = self.rename_rect();
+            g.fill_round(er, R_ROW, t.pane);
+            g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
+        } else if let Some(name) = self.workspaces.current_name() {
+            let title = self.side_title();
+            g.text(name, R::new(title.l + 10.0, title.t, title.r - 8.0, title.b), Font::Strong, t.text);
         }
-        let current = self.panes[self.active].tab().loc.dir().map(str::to_string);
+
+        let dir = self.panes[self.active].tab().loc.dir();
         g.clip(self.side_list());
-        for (i, row) in rows.iter().enumerate() {
-            let r = self.side_row_rect(i);
-            if let Some((_, collapsed)) = row.group {
-                if self.hover == Hit::SideRow(i) {
-                    g.fill_round(r, R_ROW, hover_fill(t));
+        for (i, row) in self.side_rows().iter().enumerate() {
+            let r = self.side_rect(row);
+            let hovered = self.hover == Hit::SideRow(i);
+            match row.kind {
+                SideKind::Hint => {
+                    g.text("이 공간에 고정한 곳이 없어요", R::new(r.l + 10.0, r.t + 4.0, r.r - 6.0, r.t + 22.0), Font::Small, t.faint);
+                    g.text("책갈피나 ⌃⌘T로 고정해 보세요", R::new(r.l + 10.0, r.t + 22.0, r.r - 6.0, r.t + 40.0), Font::Small, t.faint);
                 }
-                g.glyph(if collapsed { G_CHEVRON } else { G_CHEVRON_DOWN }, R::new(r.l + 8.0, r.t, r.l + 24.0, r.b), true, t.faint);
-                g.text(&row.label, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
-                continue;
+                // 구역 이름: 위에 얇은 선, 그 아래 작은 글자
+                SideKind::Label => {
+                    g.fill(R::new(r.l + 10.0, r.t, r.r - 10.0, r.t + 1.0), alpha(t.text, 0.08));
+                    g.text(&row.label, R::new(r.l + 10.0, r.t + 4.0, r.r - 8.0, r.b), Font::Small, t.faint);
+                }
+                SideKind::Group(_, collapsed) => {
+                    side_row_bg(g, t, r, false, hovered);
+                    g.glyph(if collapsed { G_CHEVRON } else { G_CHEVRON_DOWN }, R::new(r.l + 8.0, r.t, r.l + 24.0, r.b), true, t.faint);
+                    g.text(&row.label, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                }
+                // 고정한 것, 바로가기, 즐겨찾기 항목: 지금 칸의 폴더면 떠 있는 카드
+                SideKind::Pin | SideKind::Place | SideKind::Fav => {
+                    let here = row.is_dir && row.path.as_deref().zip(dir).is_some_and(|(a, b)| util::eq_path(a, b));
+                    side_row_bg(g, t, r, here, hovered);
+                    let lx = r.l + 36.0 + if row.indent { INDENT } else { 0.0 };
+                    if let Some(path) = &row.path {
+                        g.icon_for_path(path, R::new(lx - 26.0, r.t + 6.0, lx - 10.0, r.t + 22.0));
+                    }
+                    g.text(&row.label, R::new(lx, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                }
             }
-            let is_current = row.is_dir && row.path.as_deref().zip(current.as_deref()).is_some_and(|(a, b)| util::eq_path(a, b));
-            if is_current {
-                g.fill_round(r, R_ROW, well(t));
-            }
-            if self.hover == Hit::SideRow(i) {
-                g.fill_round(r, R_ROW, hover_fill(t));
-            }
-            let lx = r.l + 36.0 + if row.indent { INDENT } else { 0.0 };
-            if let Some(path) = &row.path {
-                g.icon_for_path(path, R::new(lx - 26.0, r.t + 8.0, lx - 10.0, r.t + 24.0));
-            }
-            g.text(&row.label, R::new(lx, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
         }
         g.unclip();
     }
@@ -1261,6 +1624,7 @@ impl App {
                 new_folder_ok: false,
                 view_ok: true,
                 preview_on: false,
+                search_on: false,
                 layout_open: self.menu == Some(MenuKind::Layout),
                 view_open: self.menu == Some(MenuKind::View),
                 hover,
@@ -1300,7 +1664,7 @@ impl App {
             count_rect,
             count_hot,
             filter: None,
-            starred: dir.map(|d| self.favs.find(d).is_some()),
+            starred: dir.map(|d| self.is_marked(d)),
             root: None,
             address: editing,
             // 창에서는 입력 상자가 글자를 그린다. 그림 시험에서만 직접 그린다
@@ -1431,6 +1795,7 @@ fn traffic_lights(g: &Gfx, cy: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sakadu::favorites::Favorite;
 
     /// 시험용 폴더: 하위 폴더 둘, 파일 셋, 숨김 파일 하나
     fn demo() -> (std::path::PathBuf, String) {
@@ -1460,6 +1825,21 @@ mod tests {
     fn names(a: &App, p: usize) -> Vec<String> {
         let t = a.pane(p).tab();
         t.view.iter().map(|&i| t.entries[i as usize].name_string()).collect()
+    }
+
+    /// 사이드바에서 그 이름을 가진 줄의 자리
+    fn side_row(a: &App, label: &str) -> R {
+        let rows = a.side_rows();
+        a.side_rect(rows.iter().find(|r| r.label == label).unwrap_or_else(|| panic!("no sidebar row named {label}")))
+    }
+
+    /// 지금 공간에 고정한 것의 이름
+    fn pin_names(a: &App) -> Vec<String> {
+        a.workspaces().current().unwrap().pins.iter().map(|f| f.name.clone()).collect()
+    }
+
+    fn mid(r: R) -> (f32, f32) {
+        ((r.l + r.r) / 2.0, (r.t + r.b) / 2.0)
     }
 
     #[test]
@@ -1533,17 +1913,20 @@ mod tests {
         assert_eq!(a.active(), 1);
         a.key(Key::Char('.'), Mods { cmd: true, shift: true, ..Default::default() });
         assert!(names(&a, 0).contains(&".숨김".to_string()));
-        // 별: 지금 칸 폴더를 즐겨찾기에 넣고, 사이드바 줄을 누르면 그 폴더로
+        // 책갈피: 지금 칸 폴더를 이 공간에 고정하고, 사이드바의 그 줄을 누르면 그 폴더로
+        a.navigate(1, Location::Dir(util::join(&home, "업무")), None);
+        a.settle();
         a.toggle_star(1);
-        assert_eq!(a.favorites().items.len(), 1);
+        assert_eq!(pin_names(&a), ["업무"]);
+        assert!(a.favorites().items.is_empty(), "the bookmark pins to this workspace, not to favorites");
         a.navigate(1, Location::Dir(util::join(&home, "다운로드")), None);
         a.settle();
-        let r = a.side_row_rect(0);
+        let r = side_row(&a, "업무");
         a.mouse_down(&g, r.l + 40.0, r.t + 10.0, Mods::default(), 1);
         a.settle();
-        assert_eq!(a.pane(1).tab().loc, Location::Dir(home.clone()));
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(util::join(&home, "업무")));
         a.toggle_star(1);
-        assert!(a.favorites().items.is_empty());
+        assert!(pin_names(&a).is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1593,18 +1976,18 @@ mod tests {
         let favs: Vec<Favorite> = (0..40).map(|i| Favorite { name: format!("폴더 {i}"), path: util::join(&home, "다운로드"), is_dir: true }).collect();
         a.favs = Favorites { items: favs, groups: Vec::new() };
         a.resize(1280.0, 420.0);
-        let last = a.side_row_rect(39);
+        let last = side_row(&a, "폴더 39");
         assert!(last.t > a.side_list().b, "the last row starts below the window");
         a.scroll(&g, 100.0, 300.0, 100_000.0);
-        let last = a.side_row_rect(39);
+        let last = side_row(&a, "폴더 39");
         assert!(last.b <= a.side_list().b + 0.5 && last.t >= a.side_list().t, "{last:?}");
         a.mouse_down(&g, last.l + 40.0, last.t + 10.0, Mods::default(), 1);
         a.settle();
         assert_eq!(a.pane(0).tab().loc, Location::Dir(util::join(&home, "다운로드")));
-        // 헤더 위로 밀려난 줄은 누를 수 없다
-        let first = a.side_row_rect(0);
+        // 이름 줄 위로 밀려난 줄은 누를 수 없다 (그 자리는 공간 이름이다)
+        let first = side_row(&a, "폴더 0");
         assert!(first.b < a.side_list().t);
-        assert_eq!(a.hit(&g, first.l + 40.0, a.side_list().t - 6.0), Hit::None);
+        assert_eq!(a.hit(&g, first.l + 40.0, a.side_list().t - 6.0), Hit::SideTitle);
         // 줄이 줄면 스크롤도 줄 수 안으로
         a.favs.items.truncate(3);
         a.resize(1280.0, 420.0);
@@ -1727,18 +2110,18 @@ mod tests {
         a.navigate(1, Location::Dir(util::join(&home, "다운로드")), None);
         a.set_layout(Layout::Three);
         a.activate_pane(2);
-        a.set_side(Side::Places);
         a.toggle_hidden();
         a.split = (0.3, 0.6);
         a.settle();
         let mut s = a.to_session();
         // 다시 읽은 세션 글자로 연다 (파일 형식까지)
         s = session::parse(&session::serialize(&s)).expect("session");
+        assert_eq!(s.ws.as_deref(), Some("기본"), "the session names the workspace it shows");
         s.panes[2].tabs = vec![util::join(&home, "지운 폴더")];
         let (mut b, _g) = app(&home);
         b.restore(&s, &home);
         b.settle();
-        assert_eq!((b.layout(), b.active(), b.side, b.show_hidden, b.split), (Layout::Three, 2, Side::Places, true, (0.3, 0.6)));
+        assert_eq!((b.layout(), b.active(), b.show_hidden, b.split), (Layout::Three, 2, true, (0.3, 0.6)));
         assert_eq!(b.pane(0).tab().loc, Location::Dir(util::join(&home, "업무")));
         assert_eq!(b.pane(1).tabs.len(), 2);
         assert_eq!(b.pane(1).active, 1);
@@ -1829,6 +2212,288 @@ mod tests {
         let (mut b, _g) = app(&home);
         b.restore(&s, &home);
         assert_eq!(b.pane(0).view, ViewMode::List);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 레일: +로 지금 화면에서 새 공간을 만들고, 다른 공간의 아이콘을 누르면 그 공간의 칸 나누기와 탭이 돌아온다
+    #[test]
+    fn rail_makes_workspaces_and_switching_restores_their_screens() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        assert_eq!((a.workspaces().list.len(), a.workspaces().current_name()), (1, Some("기본")));
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        a.navigate(0, Location::Dir(work.clone()), None);
+        a.settle();
+        // +: 이름은 지금 폴더, 색은 아직 쓰지 않은 색. 이름을 바로 고칠 수 있다
+        let (x, y) = mid(a.rail().add);
+        assert_eq!(a.hit(&g, x, y), Hit::SpaceAdd);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        assert_eq!(a.workspaces().current, Some(1));
+        let w = a.workspaces().current().unwrap();
+        assert_eq!((w.name.as_str(), w.color.as_str()), ("업무", "blue"));
+        assert!(a.renaming && a.address_rect().is_some());
+        assert_eq!((a.address_text().as_str(), a.edit_key()), ("업무", Some(usize::MAX)));
+        a.commit_address("  월말 정산 ");
+        assert_eq!((a.renaming, a.workspaces().current_name()), (false, Some("월말 정산")));
+        // 새 공간에서 화면을 바꾼다: 세 칸, 첫 칸에 탭 둘
+        a.set_layout(Layout::Three);
+        a.new_tab(0);
+        a.navigate(0, Location::Dir(downloads.clone()), None);
+        a.settle();
+        // 첫 공간의 아이콘: 그 공간의 화면(두 칸, 탭 하나, 업무 폴더)이 돌아오고 폴더를 다시 읽는다
+        let (x, y) = mid(a.rail().spaces[0].1);
+        assert_eq!(a.hit(&g, x, y), Hit::Space(0));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.settle();
+        assert_eq!((a.workspaces().current, a.layout(), a.pane(0).tabs.len()), (Some(0), Layout::TwoV, 1));
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(work.clone()));
+        assert!(names(&a, 0).contains(&"예산.csv".to_string()));
+        // 둘째 공간으로 돌아가면 떠날 때의 화면 그대로다
+        a.switch_workspace(1);
+        a.settle();
+        assert_eq!((a.layout(), a.pane(0).tabs.len(), a.pane(0).active), (Layout::Three, 2, 1));
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(downloads));
+        // 이름: 두 번 누르면 고치고, 다른 곳을 누르면 그만둔다. 다른 공간과 같은 이름에는 번호가 붙는다
+        let (x, y) = mid(a.side_title());
+        assert_eq!(a.hit(&g, x, y), Hit::SideTitle);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        assert!(!a.renaming);
+        a.mouse_down(&g, x, y, Mods::default(), 2);
+        assert!(a.renaming);
+        let l = a.list_rect(0).unwrap();
+        a.mouse_down(&g, l.l + 60.0, l.b - 10.0, Mods::default(), 1);
+        assert_eq!((a.renaming, a.workspaces().current_name()), (false, Some("월말 정산")));
+        a.begin_rename();
+        a.commit_address("기본");
+        assert_eq!(a.workspaces().current_name(), Some("기본 2"));
+        a.begin_rename();
+        assert!(a.end_editing() && !a.renaming && !a.end_editing());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 공간 메뉴(오른쪽 단추): 색을 바꾸고 지운다. 마지막 하나는 지울 수 없다
+    #[test]
+    fn workspace_menu_sets_the_color_and_keeps_the_last_workspace() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        // 공간이 하나뿐일 때: 색 여섯 가지와 이름 바꾸기. 지우기는 없다
+        let items = a.menu_items(MenuKind::Space(0));
+        assert_eq!(items.len(), workspaces::COLORS.len() + 1);
+        assert!(items.iter().all(|(_, on)| !on), "no colour is chosen yet: it follows the system accent");
+        a.delete_workspace(0);
+        assert_eq!(a.workspaces().list.len(), 1);
+        // 오른쪽 단추: 메뉴를 열어 달라고 하고, 아이콘 자리를 알려 준다. ⌃-누르기도 같다
+        let tile = a.rail().spaces[0].1;
+        let (x, y) = mid(tile);
+        assert!(a.right_down(&g, x, y));
+        assert_eq!(a.take_menu().map(|(k, r)| (k, r.t)), Some((MenuKind::Space(0), tile.t)));
+        a.mouse_down(&g, x, y, Mods { ctrl: true, ..Default::default() }, 1);
+        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Space(0)));
+        assert!(!a.right_down(&g, a.list_rect(0).unwrap().l + 60.0, 300.0), "only workspace tiles have a menu");
+        // 색: 고르면 그 공간의 색이 되고, 지금 공간이면 강조 색도 바뀐다
+        let before = a.theme.accent;
+        a.pick_menu(MenuKind::Space(0), 2);
+        assert_eq!(a.workspaces().list[0].color, "orange");
+        assert_eq!(a.menu_items(MenuKind::Space(0)).iter().position(|(_, on)| *on), Some(2));
+        let orange = a.theme.accent;
+        assert_ne!(orange, before);
+        // 이름 바꾸기는 지금 공간의 메뉴에만 있다
+        a.pick_menu(MenuKind::Space(0), workspaces::COLORS.len());
+        assert!(a.renaming);
+        a.cancel_address();
+        // 공간이 둘이면 지우기가 생긴다. 새 공간은 다른 색을 받는다
+        a.new_workspace();
+        a.cancel_address();
+        a.set_layout(Layout::One);
+        assert_ne!(a.theme.accent, orange, "the new workspace has its own colour");
+        assert_eq!(a.menu_items(MenuKind::Space(0)).len(), workspaces::COLORS.len() + 1, "another workspace: colours and delete, no rename");
+        let items = a.menu_items(MenuKind::Space(1));
+        assert_eq!((items.len(), items.last().unwrap().0.as_str()), (workspaces::COLORS.len() + 2, "이 작업 공간 지우기"));
+        assert_eq!(a.menu_break(MenuKind::Space(1)), Some(workspaces::COLORS.len()));
+        // 지금 공간을 지우면 남은 공간의 화면과 색으로 바뀐다
+        a.pick_menu(MenuKind::Space(1), items.len() - 1);
+        a.settle();
+        assert_eq!((a.workspaces().list.len(), a.workspaces().current, a.layout()), (1, Some(0), Layout::TwoV));
+        assert_eq!(a.theme.accent, orange);
+        // 지금 것이 아닌 공간을 지우면 화면은 그대로다
+        a.new_workspace();
+        a.cancel_address();
+        a.set_layout(Layout::Four);
+        a.pick_menu(MenuKind::Space(0), workspaces::COLORS.len());
+        assert_eq!((a.workspaces().list.len(), a.workspaces().current, a.layout()), (1, Some(0), Layout::Four));
+        // 메뉴 줄 번호(tag)에서 메뉴와 줄을 되찾는다
+        // 공간이 아주 많아도(100개, 1000개를 넘어도) 줄 번호와 공간 번호가 잘리지 않는다
+        for (kind, item) in [(MenuKind::Layout, 4), (MenuKind::View, 6), (MenuKind::Space(0), 0), (MenuKind::Space(12), 7), (MenuKind::Space(1500), 7), (MenuKind::Spaces, 0), (MenuKind::Spaces, 99), (MenuKind::Spaces, 100), (MenuKind::Spaces, 2500)] {
+            assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
+        }
+        assert_eq!(MenuKind::from_tag(-1), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// + 를 오른쪽 단추로 누르면 모든 작업 공간이 나온다: 창이 낮아 레일에 다 보이지 않는 공간도 고를 수 있다
+    #[test]
+    fn add_menu_lists_every_workspace_even_those_the_rail_hides() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        for _ in 0..7 {
+            a.new_workspace();
+            a.cancel_address();
+        }
+        // 낮은 창: 레일에 여덟 개가 다 들어가지 않는다
+        a.resize(900.0, 300.0);
+        a.switch_workspace(0);
+        a.settle();
+        let rail = a.rail();
+        assert!(rail.spaces.len() < 8, "{} tiles fit", rail.spaces.len());
+        let hidden = (0..8).find(|i| !rail.spaces.iter().any(|(s, _)| s == i)).unwrap();
+        // + 를 오른쪽 단추로: 메뉴를 + 자리에 열어 달라고 한다. 모든 공간의 이름이 있고 지금 것에 체크
+        let (x, y) = mid(rail.add);
+        assert!(a.right_down(&g, x, y));
+        assert_eq!(a.take_menu().map(|(k, r)| (k, r.t)), Some((MenuKind::Spaces, rail.add.t)));
+        let items = a.menu_items(MenuKind::Spaces);
+        assert_eq!((items.len(), items.iter().position(|(_, on)| *on)), (8, Some(0)));
+        assert_eq!(a.menu_break(MenuKind::Spaces), None);
+        assert_eq!(MenuKind::from_tag(MenuKind::Spaces.tag(5)), Some((MenuKind::Spaces, 5)));
+        // 안 보이던 공간을 고르면 그 공간으로 바뀌고, 레일도 그 공간이 보이는 범위로 옮겨진다
+        a.pick_menu(MenuKind::Spaces, hidden);
+        a.settle();
+        assert_eq!(a.workspaces().current, Some(hidden));
+        assert!(a.rail().spaces.iter().any(|(s, _)| *s == hidden));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 책갈피와 ⌃⌘T는 지금 공간에만 고정한다: 다른 공간에서는 보이지 않고, 돌아오면 그대로 있다
+    #[test]
+    fn pins_belong_to_the_current_workspace() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        a.navigate(0, Location::Dir(work.clone()), None);
+        a.settle();
+        assert!(!a.is_marked(&work));
+        a.toggle_star(0);
+        assert!(a.is_marked(&work) && a.favorites().items.is_empty());
+        assert_eq!(pin_names(&a), ["업무"]);
+        // ⌃⌘T: 커서 항목을 고정하고, 다시 누르면 푼다
+        let (x, y) = row_point(&a, 0, 1);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        let ctrl_cmd = Mods { cmd: true, ctrl: true, ..Default::default() };
+        assert!(a.key(Key::Char('t'), ctrl_cmd));
+        assert_eq!(pin_names(&a), ["업무", "예산.csv"]);
+        assert!(!a.workspaces().current().unwrap().pins[1].is_dir);
+        // 고정한 파일 줄을 누르면 macOS '열기'로 넘긴다
+        let r = side_row(&a, "예산.csv");
+        a.mouse_down(&g, r.l + 40.0, r.t + 10.0, Mods::default(), 1);
+        assert_eq!(a.open_files, [util::join(&work, "예산.csv")]);
+        let (x, y) = row_point(&a, 0, 1);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        assert!(a.key(Key::Char('t'), ctrl_cmd));
+        assert_eq!(pin_names(&a), ["업무"]);
+        // 새 공간에는 고정한 것이 없고, 원래 공간으로 돌아오면 그대로 있다
+        a.new_workspace();
+        a.cancel_address();
+        assert!(pin_names(&a).is_empty() && !a.is_marked(&work));
+        a.switch_workspace(0);
+        a.settle();
+        assert_eq!(pin_names(&a), ["업무"]);
+        // '모든 공간'(즐겨찾기)에만 있는 폴더: 책갈피가 채워져 보이고, 누르면 거기서 빠진다 (이 공간에 고정되지는 않는다)
+        a.favs.push(None, Favorite { name: "다운로드".into(), path: downloads.clone(), is_dir: true });
+        a.navigate(0, Location::Dir(downloads.clone()), None);
+        a.settle();
+        assert!(a.is_marked(&downloads));
+        a.toggle_star(0);
+        assert!(a.favorites().items.is_empty() && !a.is_marked(&downloads));
+        assert_eq!(pin_names(&a), ["업무"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// '모든 공간'은 줄이 적으면 사이드바 아래 끝에 붙고, 고정한 것이 많아 넘치면 그 아래에 이어져 함께 스크롤된다
+    #[test]
+    fn common_block_sits_at_the_bottom_until_the_list_overflows() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let downloads = util::join(&home, "다운로드");
+        a.places = vec![("홈".to_string(), home.clone()), ("다운로드".to_string(), downloads.clone())];
+        a.resize(1280.0, 800.0);
+        let list = a.side_list();
+        // 고정한 것이 없으면 맨 위에 안내, '모든 공간'은 맨 아래
+        let kinds: Vec<SideKind> = a.side_rows().iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, [SideKind::Hint, SideKind::Label, SideKind::Place, SideKind::Place]);
+        let hint = a.side_rect(&a.side_rows()[0]);
+        let (label, last) = (side_row(&a, "모든 공간"), side_row(&a, "다운로드"));
+        assert_eq!(hint.t, list.t);
+        assert!((last.b - list.b).abs() < 0.5, "{last:?} {list:?}");
+        assert!(label.t > hint.b + 100.0, "the pins and the common block are apart");
+        assert_eq!(a.side_scroll, 0.0);
+        // 안내와 구역 이름은 누를 수 없고, 바로가기 줄은 그 폴더를 연다
+        assert_eq!(a.hit(&g, hint.l + 20.0, hint.t + 10.0), Hit::None);
+        assert_eq!(a.hit(&g, label.l + 20.0, label.t + 10.0), Hit::None);
+        a.mouse_down(&g, last.l + 40.0, last.t + 10.0, Mods::default(), 1);
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(downloads));
+        // 고정한 것이 많고 창이 낮으면: '모든 공간'이 고정한 것 바로 아래에 이어지고, 끝까지 스크롤하면 마지막 줄이 보인다
+        for i in 0..40 {
+            a.workspaces.current_mut().unwrap().pin(&util::join(&home, &format!("폴더 {i}")), true);
+        }
+        a.resize(1280.0, 420.0);
+        let (pin, label) = (side_row(&a, "폴더 39"), side_row(&a, "모든 공간"));
+        assert!((label.t - pin.b - COMMON_GAP).abs() < 0.5);
+        assert!(side_row(&a, "다운로드").t > a.side_list().b);
+        a.scroll(&g, 100.0, 300.0, 100_000.0);
+        let last = side_row(&a, "다운로드");
+        assert!((last.b - a.side_list().b).abs() < 0.5 && a.side_scroll > 0.0);
+        // 고정한 것이 줄면 스크롤이 풀리고 '모든 공간'은 다시 아래 끝으로
+        a.workspaces.current_mut().unwrap().pins.truncate(2);
+        a.resize(1280.0, 420.0);
+        assert_eq!(a.side_scroll, 0.0);
+        assert!((side_row(&a, "다운로드").b - a.side_list().b).abs() < 0.5);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 작업 공간 파일: 앱의 공간(이름·색·고정한 것·화면)을 파일 글자로 적었다가 읽으면 그대로고, 그것으로 다시 열 수 있다
+    #[test]
+    fn workspaces_survive_the_file_format_and_reopen() {
+        let (root, home) = demo();
+        let (mut a, _g) = app(&home);
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        a.navigate(0, Location::Dir(work.clone()), None);
+        a.settle();
+        a.toggle_star(0);
+        a.new_workspace();
+        a.commit_address("사진 정리");
+        a.set_workspace_color(1, "purple");
+        a.set_layout(Layout::Four);
+        a.navigate(1, Location::Dir(downloads.clone()), None);
+        a.settle();
+        a.save_workspaces();
+        let saved = workspaces::parse(&workspaces::serialize(a.workspaces())).expect("workspaces");
+        assert_eq!(&saved, a.workspaces());
+        let session = session::parse(&session::serialize(&a.to_session())).expect("session");
+        assert_eq!(session.ws.as_deref(), Some("사진 정리"));
+        // 다시 연 앱: 세션이 지금 공간의 화면이면 그 화면으로 열고, 색도 그 공간의 색이다
+        let (mut b, _g) = app(&home);
+        b.open_saved(saved.clone(), Some(&session), &home);
+        b.settle();
+        assert_eq!((b.workspaces().current_name(), b.layout()), (Some("사진 정리"), Layout::Four));
+        assert_eq!(b.pane(1).tab().loc, Location::Dir(downloads));
+        assert_eq!(b.theme.accent, a.theme.accent);
+        assert!(pin_names(&b).is_empty());
+        b.switch_workspace(0);
+        b.settle();
+        assert_eq!((b.layout(), pin_names(&b)), (Layout::TwoV, vec!["업무".to_string()]));
+        assert_eq!(b.pane(0).tab().loc, Location::Dir(work));
+        // 세션이 다른 공간의 화면이면 지금 공간에 저장된 화면으로 연다
+        let mut other = session.clone();
+        other.ws = Some("기본".to_string());
+        other.layout = 0;
+        let (mut c, _g) = app(&home);
+        c.open_saved(saved, Some(&other), &home);
+        assert_eq!((c.workspaces().current_name(), c.layout()), (Some("사진 정리"), Layout::Four));
+        // 작업 공간 파일이 없으면 지난번 화면이 '기본' 공간이 된다
+        let (mut d, _g) = app(&home);
+        d.open_saved(Workspaces::default(), Some(&session), &home);
+        assert_eq!((d.workspaces().list.len(), d.workspaces().current_name(), d.layout()), (1, Some("기본"), Layout::Four));
+        assert_eq!(d.workspaces().list[0].state.layout, 4, "the new workspace starts from that screen");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

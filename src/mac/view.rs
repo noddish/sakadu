@@ -1,6 +1,6 @@
-//! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 경로 입력 상자(NSTextField).
+//! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름).
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인은 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다.
-//! 끝낼 때 화면 상태(세션)를 저장하고, 다음에 그대로 연다
+//! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, MenuKind, Mods};
 use sakadu::ui::ROW_H;
@@ -48,16 +48,19 @@ impl System for Mac {
     }
 }
 
-fn theme(mtm: MainThreadMarker) -> Theme {
-    Theme::resolve("system", "system", &Mac(mtm))
+/// 맥 설정에서 읽은 모양(어두운지)과 강조 색. 테마는 App이 이 값과 지금 작업 공간의 색으로 정한다
+fn system(mtm: MainThreadMarker) -> (bool, Option<Color>) {
+    let sys = Mac(mtm);
+    let dark = sys.prefers_dark();
+    (dark, sys.accent(dark))
 }
 
 pub struct ViewIvars {
     /// 그리기 밖(누르기 판정)에서 글자 폭을 재는 그림판
     measure: Gfx,
-    /// 경로 입력 상자. 입력할 때만 보인다 (한글 조합은 맥이 처리)
+    /// 입력 상자 (경로, 작업 공간 이름). 입력할 때만 보인다 (한글 조합은 맥이 처리)
     field: OnceCell<Retained<NSTextField>>,
-    /// 입력 상자가 지금 어느 칸의 경로를 담고 있는지 (다른 칸으로 옮기면 다시 채운다)
+    /// 입력 상자가 지금 무엇을 담고 있는지: 어느 칸의 경로인지, 작업 공간 이름인지 (App::edit_key. 바뀌면 다시 채운다)
     field_pane: std::cell::Cell<Option<usize>>,
 }
 
@@ -122,6 +125,15 @@ define_class!(
             self.after_input();
         }
 
+        /// 오른쪽 단추: 작업 공간 아이콘이면 그 공간의 메뉴 (색, 이름 바꾸기, 지우기)
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, e: &NSEvent) {
+            let (x, y) = self.point(e);
+            if with_app(|a| a.right_down(&self.ivars().measure, x, y)).unwrap_or(false) {
+                self.after_input();
+            }
+        }
+
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, e: &NSEvent) {
             let (x, y) = self.point(e);
@@ -176,19 +188,18 @@ define_class!(
             self.after_input();
         }
 
-        /// 도구 막대 메뉴에서 고른 줄. tag = 메뉴 종류 × 100 + 줄 번호
+        /// 메뉴(도구 막대 단추, 작업 공간 아이콘)에서 고른 줄. tag에 메뉴 종류와 줄 번호가 들어 있다 (MenuKind::tag)
         #[unsafe(method(pickMenu:))]
         fn pick_menu(&self, sender: &NSMenuItem) {
-            let tag = sender.tag();
-            let kind = if tag >= 100 { MenuKind::View } else { MenuKind::Layout };
-            with_app(|a| a.pick_menu(kind, (tag % 100) as usize));
+            let Some((kind, item)) = MenuKind::from_tag(sender.tag()) else { return };
+            with_app(|a| a.pick_menu(kind, item));
             self.after_input();
         }
 
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
         fn appearance_changed(&self) {
-            let t = theme(self.mtm());
-            with_app(|a| a.theme = t);
+            let (dark, accent) = system(self.mtm());
+            with_app(|a| a.set_system(dark, accent));
             self.setNeedsDisplay(true);
         }
     }
@@ -214,7 +225,7 @@ define_class!(
         /// 다른 곳을 눌러 입력을 마치면 취소
         #[unsafe(method(controlTextDidEndEditing:))]
         fn did_end_editing(&self, _n: &NSNotification) {
-            if with_app(|a| a.editing.take().is_some()).unwrap_or(false) {
+            if with_app(App::end_editing).unwrap_or(false) {
                 self.after_input();
             }
         }
@@ -228,7 +239,7 @@ impl SakaduView {
         let measure = Gfx::bitmap(8.0, 8.0, 1.0).expect("글자 폭을 잴 그림판");
         let this = Self::alloc(mtm).set_ivars(ViewIvars { measure, field: OnceCell::new(), field_pane: std::cell::Cell::new(None) });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
-        // 경로 입력 상자: 테두리·바탕 없이 (바탕과 강조 색 테두리는 App이 그린다)
+        // 입력 상자: 테두리·바탕 없이 (바탕과 강조 색 테두리는 App이 그린다)
         let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
         field.setBezeled(false);
         field.setBordered(false);
@@ -265,31 +276,30 @@ impl SakaduView {
         }
     }
 
-    /// 도구 막대 단추 아래에 맥 기본 메뉴를 연다: 이름, 지금 것에 체크. 고르면 pickMenu:로 온다.
+    /// 단추(도구 막대 단추, 작업 공간 아이콘) 아래에 맥 기본 메뉴를 연다: 이름, 지금 것에 체크. 고르면 pickMenu:로 온다.
     /// 메뉴가 떠 있는 동안 이 함수는 돌아오지 않으므로 App을 빌린 채로 부르지 않는다
     fn pop_menu(&self, kind: MenuKind, anchor: sakadu::draw::R) {
         let mtm = self.mtm();
-        let Some(items) = with_app(|a| a.menu_items(kind)) else { return };
+        let Some((items, brk)) = with_app(|a| (a.menu_items(kind), a.menu_break(kind))) else { return };
         let menu = NSMenu::new(mtm);
-        let base = if kind == MenuKind::View { 100 } else { 0 };
         for (i, (title, on)) in items.iter().enumerate() {
-            // 보기 방식 여섯 가지와 숨김 항목 보기 사이에 구분선
-            if kind == MenuKind::View && i == items.len() - 1 {
+            // 구분선: 보기 방식과 숨김 항목 보기 사이, 공간 색과 그 밖의 줄 사이
+            if brk == Some(i) {
                 menu.addItem(&NSMenuItem::separatorItem(mtm));
             }
             let it = unsafe { menu.addItemWithTitle_action_keyEquivalent(&NSString::from_str(title), Some(sel!(pickMenu:)), &NSString::from_str("")) };
             unsafe { it.setTarget(Some(self)) };
-            it.setTag(base + i as isize);
+            it.setTag(kind.tag(i));
             it.setState(if *on { NSControlStateValueOn } else { NSControlStateValueOff });
         }
         // 뷰는 위아래를 뒤집어 쓰므로(왼쪽 위가 0) 단추 아래 끝이 곧 메뉴의 위
         menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(anchor.l as f64, anchor.b as f64 + 4.0), Some(self));
     }
 
-    /// 경로 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 칸의 경로 자리에 보이고 키 입력을 받는다
+    /// 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 자리(칸의 경로 자리, 사이드바의 공간 이름 자리)에 보이고 키 입력을 받는다
     fn sync_field(&self) {
         let Some(field) = self.ivars().field.get() else { return };
-        let Some((rect, text, color, pane)) = with_app(|a| (a.address_rect(), a.address_text(), a.theme.text, a.editing)) else { return };
+        let Some((rect, text, color, pane)) = with_app(|a| (a.address_rect(), a.address_text(), a.theme.text, a.edit_key())) else { return };
         match rect {
             Some(r) => {
                 // 한 줄 글자가 세로 가운데에 오게 (시스템 13pt 글꼴의 줄 높이 약 17)
@@ -297,7 +307,7 @@ impl SakaduView {
                 let frame = NSRect::new(NSPoint::new((r.l + 6.0) as f64, (r.t + (r.h() - h) / 2.0) as f64), NSSize::new((r.w() - 12.0).max(0.0) as f64, h as f64));
                 field.setFrame(frame);
                 field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(color.r as f64, color.g as f64, color.b as f64, 1.0)));
-                // 처음 열 때와, 입력 중에 다른 칸의 경로 입력으로 옮겼을 때 그 칸의 경로로 다시 채운다
+                // 처음 열 때와, 입력 중에 다른 입력(다른 칸의 경로, 공간 이름)으로 옮겼을 때 그 글로 다시 채운다
                 if field.isHidden() || self.ivars().field_pane.get() != pane {
                     self.ivars().field_pane.set(pane);
                     field.setStringValue(&NSString::from_str(&text));
@@ -405,7 +415,7 @@ fn key_of(code: u16) -> Option<Key> {
     })
 }
 
-/// 홈 아래 바로가기 줄과 연결된 디스크
+/// 사이드바 '모든 공간'에 늘 있는 줄: 홈 아래 폴더들과 연결된 디스크
 fn places() -> Vec<(String, String)> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let mut out = vec![("홈".to_string(), home.clone())];
@@ -454,10 +464,16 @@ define_class!(
             true
         }
 
-        /// 끝낼 때(⌘Q, 창 닫기) 화면 상태를 저장한다
+        /// 끝낼 때(⌘Q, 창 닫기) 작업 공간과 화면 상태를 저장한다
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
-            let s = with_app(|a| a.persist.then(|| a.to_session())).flatten();
+            let s = with_app(|a| {
+                a.persist.then(|| {
+                    a.save_workspaces();
+                    a.to_session()
+                })
+            })
+            .flatten();
             if let Some(s) = s
                 && let Err(e) = sakadu::session::save(&s)
             {
@@ -496,13 +512,13 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
 
     let home = sakadu::util::normalize(&std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
     let first = start.as_deref().map(sakadu::util::normalize).unwrap_or_else(|| home.clone());
-    let mut app = App::new(1280.0, 800.0, theme(mtm), &first, sakadu::favorites::load(), places());
-    // 보통 실행: 지난번 화면 상태로 열고 끝낼 때 저장한다 (CI 창 확인처럼 시작 폴더를 준 경우는 그대로)
+    let (dark, accent) = system(mtm);
+    let mut app = App::new(1280.0, 800.0, if dark { Theme::DARK } else { Theme::LIGHT }, &first, sakadu::favorites::load(), places());
+    app.set_system(dark, accent);
+    // 보통 실행: 지난번 작업 공간과 화면 상태로 열고 끝낼 때 저장한다 (CI 창 확인처럼 시작 폴더를 준 경우는 그대로)
     if start.is_none() {
         app.persist = true;
-        if let Some(s) = sakadu::session::load() {
-            app.restore(&s, &home);
-        }
+        app.open_saved(sakadu::workspaces::load(), sakadu::session::load().as_ref(), &home);
     }
     app.lights_bottom = lights_bottom(&window);
     window.setTitle(&NSString::from_str(&app.title()));
