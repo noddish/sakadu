@@ -3,12 +3,43 @@
 
 use objc2::rc::Retained;
 use objc2_app_kit::{NSCompositingOperation, NSFont, NSFontWeightRegular, NSFontWeightSemibold, NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSWorkspace};
-use objc2_core_foundation::{CFAttributedString, CFDictionary, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
-use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImageAlphaInfo, CGPath, kCGColorSpaceSRGB};
+use objc2_core_foundation::{CFAttributedString, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
+use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGInterpolationQuality, CGPath, kCGColorSpaceSRGB};
 use objc2_core_text::{CTFont, CTLine, CTLineTruncationType, kCTFontAttributeName, kCTForegroundColorFromContextAttributeName};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL, NSURLLocalizedTypeDescriptionKey};
-use objc2_image_io::CGImageDestination;
+use objc2_image_io::{
+    CGImageDestination, CGImageSource, kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceShouldCacheImmediately,
+    kCGImageSourceThumbnailMaxPixelSize,
+};
 use sakadu::draw::{Color, Font, R};
+
+/// 고정폭 글(글 파일 미리 보기)의 줄 높이
+pub const MONO_LINE_H: f32 = 17.0;
+
+/// 읽어 둔 그림. 뒷줄에서 읽어(Gfx::load_picture) 메인 줄에서 그린다 (CGImage는 만든 뒤 바뀌지 않아 줄 사이로 넘겨도 된다)
+pub struct Picture {
+    img: CFRetained<CGImage>,
+}
+
+impl Picture {
+    /// 가로·세로 픽셀 수
+    pub fn size(&self) -> (usize, usize) {
+        (CGImage::width(Some(&self.img)), CGImage::height(Some(&self.img)))
+    }
+
+    /// 긴 쪽의 픽셀 수
+    pub fn longest(&self) -> u32 {
+        let (w, h) = self.size();
+        w.max(h) as u32
+    }
+
+    /// 시험용: 빈 그림 (파일을 읽지 않고 만든다)
+    #[cfg(test)]
+    pub fn blank(w: usize, h: usize) -> Option<Picture> {
+        let g = Gfx::bitmap(w as f32, h as f32, 1.0)?;
+        CGBitmapContextCreateImage(g.c()).map(|img| Picture { img })
+    }
+}
 
 pub struct Gfx {
     ctx: CFRetained<CGContext>,
@@ -51,6 +82,10 @@ fn symbol_name(code: u16) -> &'static str {
         // 책갈피 (ui::glyph::G_BOOKMARK, G_BOOKMARK_FILL)
         0xFFF0 => "bookmark",
         0xFFF1 => "bookmark.fill",
+        // 자동 미리 보기의 눈, 미리 보기 카드의 크게 보기·작게 보기 (ui::glyph::G_EYE, G_EXPAND, G_SHRINK)
+        0xE890 => "eye",
+        0xE740 => "arrow.up.left.and.arrow.down.right",
+        0xE73F => "arrow.down.right.and.arrow.up.left",
         _ => "questionmark.square.dashed",
     }
 }
@@ -67,11 +102,13 @@ impl sakadu::ui::Canvas for Gfx {
         Gfx::stroke_round(self, r, radius, c, width)
     }
     fn text(&self, s: &str, r: R, f: Font, c: Color) {
-        // Core Text 한 줄 그리기라, 여러 줄 글(목록 안내)은 줄마다 20pt씩 내려 그린다
+        // Core Text 한 줄 그리기라, 여러 줄 글(목록 안내)은 줄마다 20pt씩 내려 그린다.
+        // 고정폭 글(글 파일 미리 보기)은 줄 사이를 좁힌다. 긴 줄은 넘기지 않고 끝을 줄인다
         if s.contains('\n') {
+            let line_h = if matches!(f, Font::Mono) { MONO_LINE_H } else { 20.0 };
             for (i, line) in s.lines().enumerate() {
-                let y = r.t + i as f32 * 20.0;
-                Gfx::text(self, line, R::new(r.l, y, r.r, y + 20.0), f, c);
+                let y = r.t + i as f32 * line_h;
+                Gfx::text(self, line, R::new(r.l, y, r.r, y + line_h), f, c);
             }
             return;
         }
@@ -269,6 +306,42 @@ impl Gfx {
         NSGraphicsContext::setCurrentContext(Some(&self.ns));
         unsafe { img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(dst, NSRect::ZERO, NSCompositingOperation::SourceOver, 1.0, true, None) };
         NSGraphicsContext::restoreGraphicsState_class();
+    }
+
+    /// 그림 파일을 읽는다. 긴 쪽이 max_px를 넘으면 그만큼으로 줄여 읽고(ImageIO가 읽으면서 줄인다), 사진에 적힌 회전도 반영한다.
+    /// 읽지 못하면(그림이 아니거나 맥이 모르는 형식) None. 그리지 않고 읽기만 하므로 뒷줄에서 불러도 된다
+    pub fn load_picture(path: &str, max_px: u32) -> Option<Picture> {
+        let url = CFURL::from_file_path(path)?;
+        let source = unsafe { CGImageSource::with_url(&url, None) }?;
+        let max = CFNumber::new_i32(max_px.min(i32::MAX as u32) as i32);
+        let yes: &CFType = unsafe { kCFBooleanTrue }?;
+        // 원본이 작아도 늘 새로 만들고(파일에 든 작은 썸네일을 쓰지 않는다), 여기서 바로 풀어 둔다 (그릴 때 메인 줄에서 풀지 않게)
+        let keys: [&CFString; 4] =
+            unsafe { [kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceShouldCacheImmediately, kCGImageSourceThumbnailMaxPixelSize] };
+        let values: [&CFType; 4] = [yes, yes, yes, max.as_ref()];
+        let options = CFDictionary::from_slices(&keys, &values);
+        let img = unsafe { source.thumbnail_at_index(0, Some(options.as_opaque())) }?;
+        let pic = Picture { img };
+        (pic.longest() > 0).then_some(pic)
+    }
+
+    /// 그림을 r 안에 비율을 지켜 가운데에 그린다. 자리가 그림보다 크면 늘리지 않고 제 크기(1픽셀 = 1pt)로 둔다
+    pub fn picture(&self, pic: &Picture, r: R) {
+        let (w, h) = pic.size();
+        let (w, h) = (w as f32, h as f32);
+        if w <= 0.0 || h <= 0.0 || r.w() <= 0.0 || r.h() <= 0.0 {
+            return;
+        }
+        let k = (r.w() / w).min(r.h() / h).min(1.0);
+        let (dw, dh) = (w * k, h * k);
+        let (x, y) = (r.l + (r.w() - dw) / 2.0, r.t + (r.h() - dh) / 2.0);
+        // 위아래를 뒤집은 좌표라 그대로 그리면 그림이 거꾸로 선다: 그림을 그리는 동안만 그림의 아래 끝을 0으로 다시 뒤집는다
+        CGContext::save_g_state(self.c());
+        CGContext::translate_ctm(self.c(), x as CGFloat, (y + dh) as CGFloat);
+        CGContext::scale_ctm(self.c(), 1.0, -1.0);
+        CGContext::set_interpolation_quality(self.c(), CGInterpolationQuality::High);
+        CGContext::draw_image(self.c(), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(dw as CGFloat, dh as CGFloat)), Some(&pic.img));
+        CGContext::restore_g_state(self.c());
     }
 
     /// 그 경로의 Finder '종류' 이름 ("폴더", "PDF 문서"). 읽지 못하면 None

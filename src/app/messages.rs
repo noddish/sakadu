@@ -120,6 +120,8 @@ impl App {
                         self.pal_run_query();
                     } else if id == TIMER_PREVIEW {
                         self.start_preview();
+                    } else if id == preview_card::TIMER_CARD {
+                        self.start_card();
                     } else if id == TIMER_PROBE {
                         self.on_probe_timer();
                     } else if id == TIMER_REDRAW {
@@ -420,7 +422,18 @@ impl App {
     }
 
     pub(super) fn press(&mut self, x: f32, y: f32, dbl: bool) {
-        let hit = self.hit(x, y);
+        let mut hit = self.hit(x, y);
+        // 두 번 클릭은 첫 누름이 닿은 쪽의 것이다 (미리 보기 카드는 누름 한 번에 뜨고, 작아지고, 닫혀서 둘째 누름 때는 그 자리에 다른 것이 있다).
+        // - 첫 누름이 카드였으면 둘째 누름은 버린다: 카드가 작아지거나 닫혀 드러난 줄을 열지 않는다
+        // - 첫 누름이 카드가 아니었으면 둘째 누름은 카드 아래 것이 받는다: 그 누름으로 뜬 카드가 가로채면 파일이 열리지 않는다
+        let on_card = matches!(hit, Hit::Card | Hit::CardExpand | Hit::CardClose);
+        if !dbl {
+            self.press_on_card = on_card;
+        } else if self.press_on_card {
+            return;
+        } else if on_card {
+            hit = self.hit_with(x, y, false);
+        }
         if self.cmd.is_some() {
             return self.cmd_click(hit);
         }
@@ -450,7 +463,7 @@ impl App {
             && matches!(
                 hit,
                 Hit::Rail(_) | Hit::RailAdd | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder
-                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen
+                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen | Hit::PreviewButton | Hit::CardExpand | Hit::CardClose | Hit::Card
             )
         {
             return;
@@ -499,7 +512,9 @@ impl App {
             Hit::PalRow(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalScope(_) => self.pal_mouse_down(hit, dbl),
             Hit::PalClose => self.close_palette(),
             Hit::NewFolder(p) => self.new_folder(p),
-            Hit::PreviewButton => self.toggle_preview(),
+            Hit::PreviewButton => self.toggle_auto_preview(),
+            Hit::CardExpand | Hit::Card => self.toggle_card_large(),
+            Hit::CardClose => self.close_card(),
             Hit::PreviewPin | Hit::PreviewChip => self.toggle_preview_pin(),
             Hit::PreviewOpen => self.preview_open(),
             Hit::SettingsButton => self.toggle_settings(settings_ui::Page::General),

@@ -1,4 +1,5 @@
 //! 오른쪽 미리 보기 창 (Alt+P). 활성 패널에서 선택한 항목을 보여 준다.
+//! 그림·글 파일을 고르면 저절로 뜨는 작은 카드는 preview_card.rs (이 창이 열려 있으면 카드는 뜨지 않는다).
 //! 사진은 셸 썸네일, 텍스트는 앞부분, 그 밖은 Windows 미리 보기 처리기(PDF·Office 등),
 //! 처리기가 없으면 큰 아이콘과 정보.
 //! 머리의 핀으로 파일을 고정하면 선택을 바꿔도 그 파일을 계속 보여 준다. 고정한 파일은 파일 번호로 기억해,
@@ -36,8 +37,8 @@ const SNIFF_MAX: u64 = 2 * 1024 * 1024;
 const TEXT_READ: u64 = 64 * 1024;
 const TEXT_LINES: usize = 600;
 
-const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jfif", "png", "gif", "bmp", "dib", "webp", "heic", "heif", "avif", "tif", "tiff", "ico"];
-const TEXT_EXTS: &[&str] = &[
+pub(super) const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jfif", "png", "gif", "bmp", "dib", "webp", "heic", "heif", "avif", "tif", "tiff", "ico"];
+pub(super) const TEXT_EXTS: &[&str] = &[
     "txt", "log", "md", "markdown", "csv", "tsv", "json", "jsonc", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "config", "env",
     "gitignore", "editorconfig", "properties", "rs", "c", "h", "cpp", "hpp", "cc", "cs", "java", "kt", "kts", "go", "py", "rb", "php",
     "js", "mjs", "cjs", "ts", "tsx", "jsx", "css", "scss", "less", "html", "htm", "vue", "svelte", "sql", "sh", "bash", "zsh", "ps1",
@@ -122,7 +123,7 @@ pub struct Found {
 
 /// 뒤에서 읽은 결과가 지금 것인지 가리는 순번. 미리 보기를 닫았다 다시 열어도 되풀이되지 않게 앱 전체에서 하나씩 늘린다
 /// (닫기 전에 시작한 읽기·확인이 늦게 도착해 새 대상에 붙지 않게)
-fn next_seq() -> u64 {
+pub(super) fn next_seq() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -192,7 +193,7 @@ pub(super) fn is_image_ext(ext: &str) -> bool {
     IMAGE_EXTS.contains(&ext)
 }
 
-fn ext_of(name: &str) -> String {
+pub(super) fn ext_of(name: &str) -> String {
     match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() || name.starts_with('.') => ext.to_ascii_lowercase(),
         _ => String::new(),
@@ -265,7 +266,7 @@ fn ansi(b: &[u8]) -> String {
     }
 }
 
-fn spawn_text(hwnd: HWND, seq: u64, path: String) {
+pub(super) fn spawn_text(hwnd: HWND, seq: u64, path: String) {
     let owner = shell::SendHwnd(hwnd);
     std::thread::spawn(move || {
         use std::io::Read;
@@ -296,7 +297,7 @@ fn spawn_zone(hwnd: HWND, seq: u64, path: String, clsid: GUID) {
 }
 
 /// 그림 요청 크기를 단계로 맞춰, 창 크기를 바꾸는 동안 매번 새로 만들지 않게 한다
-fn image_px(longest_dip: f32, scale: f32) -> u32 {
+pub(super) fn image_px(longest_dip: f32, scale: f32) -> u32 {
     (((longest_dip * scale) / 256.0).ceil() as u32 * 256).clamp(256, 1536)
 }
 
@@ -451,6 +452,12 @@ impl App {
     }
 
     pub(super) fn on_preview_msg(&mut self, m: PreviewMsg) {
+        // 자동 미리 보기 카드가 읽어 달라고 한 글이면 카드가 받는다
+        if let PreviewMsg::Text { seq, text } = &m
+            && self.card_text(*seq, text)
+        {
+            return;
+        }
         let Some(pv) = self.preview.as_mut() else { return };
         match m {
             PreviewMsg::Text { seq, text } if seq == pv.seq => {

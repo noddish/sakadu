@@ -122,6 +122,11 @@ impl App {
     }
 
     pub(super) fn hit(&self, x: f32, y: f32) -> Hit {
+        self.hit_with(x, y, true)
+    }
+
+    /// card가 false면 미리 보기 카드는 없는 것으로 보고 그 아래 것을 찾는다 (두 번 클릭의 둘째 누름: messages.rs press)
+    pub(super) fn hit_with(&self, x: f32, y: f32, card: bool) -> Hit {
         if self.settings.is_some() {
             return Hit::Set(self.settings_hit(x, y));
         }
@@ -175,6 +180,12 @@ impl App {
                 (m.more, Hit::More),
             ];
             return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);
+        }
+        // 자동 미리 보기 카드는 칸 위에 떠 있다
+        if card
+            && let Some(h) = self.card_hit(x, y)
+        {
+            return h;
         }
         if let Some(h) = self.preview_hit(x, y) {
             return h;

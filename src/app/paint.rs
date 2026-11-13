@@ -20,6 +20,7 @@ impl App {
             }
         }
         self.sync_preview();
+        self.sync_card();
         self.place_filter_edit(false);
         if !self.gfx.begin(self.hwnd) {
             return;
@@ -40,6 +41,7 @@ impl App {
             self.paint_pane(p, r, &mut missing);
         }
         self.paint_preview(&mut missing);
+        self.paint_card(&mut missing);
         // 패널은 칸 다음에: 떠 있을 때 칸 위에 그려진다
         self.paint_sidebar();
         let t = self.theme;
@@ -106,7 +108,7 @@ impl App {
         }
     }
 
-    /// 칸 영역 위 도구 막대: 뒤로·앞으로·위로, 폴더 이름, 칸 나누기·보기 방식, 새 폴더, 미리 보기, 검색, `…`.
+    /// 칸 영역 위 도구 막대: 뒤로·앞으로·위로, 폴더 이름, 칸 나누기·보기 방식, 새 폴더, 자동 미리 보기(눈), 검색, `…`.
     /// 창 단추는 paint_caption
     pub(super) fn paint_workbar(&self) {
         let m = self.toolbar();
@@ -140,7 +142,7 @@ impl App {
                 can_up: can_go_up(&tab.loc),
                 new_folder_ok: !start && tab.loc.dir().is_some(),
                 view_ok: !start,
-                preview_on: self.preview.is_some(),
+                preview_on: self.auto_preview,
                 search_on: self.pal_shown(),
                 layout_open: open == Some(view_menu::MenuKind::Layout),
                 view_open: open == Some(view_menu::MenuKind::View),
@@ -175,7 +177,7 @@ impl App {
                     None => named(Action::Search, "검색"),
                 },
             ),
-            Hit::PreviewButton => (self.toolbar().preview, named(Action::Preview, "미리 보기 창")),
+            Hit::PreviewButton => (self.toolbar().preview, (if self.auto_preview { "자동 미리 보기 끄기" } else { "자동 미리 보기 · 그림이나 글 파일을 고르면 보여요" }).to_string()),
             Hit::SettingsButton => (self.settings_button(), named(Action::Settings, "설정")),
             // 레일의 공간 아이콘: 이름. 패널이 열려 있는 지금 공간에는 붙이지 않는다 (이름이 패널 머리에 보인다)
             Hit::Rail(i) if Some(i) == self.workspaces.current && self.side_panel() == Some(Panel::Main) => return None,
@@ -186,6 +188,7 @@ impl App {
             Hit::PalClose => (self.pal_close_rect(), "검색 닫기".to_string()),
             Hit::Start(p, i) => return self.start_tip(p, i),
             Hit::PreviewPin | Hit::PreviewOpen => return self.preview_tip(),
+            Hit::CardExpand | Hit::CardClose => return self.card_tip(),
             _ => return None,
         })
     }

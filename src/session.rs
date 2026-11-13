@@ -22,6 +22,8 @@ pub struct Session {
     pub active: usize,
     pub show_hidden: bool,
     pub preview: bool,
+    /// 자동 미리 보기 카드: 미리 볼 수 있는 파일을 고르면 저절로 뜬다. 끄지 않았으면 켜져 있다
+    pub auto_preview: bool,
     /// 새 탭(Ctrl+T·+)을 열 위치: NEW_TAB_SAME이면 지금 탭과 같은 폴더, 아니면 탭 경로 형식("::start"·"::computer" 또는 폴더)
     pub new_tab: String,
     /// 시작 화면에 보일 최근 위치 (최근 것이 앞)
@@ -106,6 +108,7 @@ pub fn serialize(s: &Session) -> String {
     out.push_str(&format!("active={}\n", s.active));
     out.push_str(&format!("hidden={}\n", s.show_hidden as u8));
     out.push_str(&format!("preview={}\n", s.preview as u8));
+    out.push_str(&format!("autopreview={}\n", s.auto_preview as u8));
     // 0.5.x까지의 "newtab"은 내 PC가 기본이라 사용자가 고른 값인지 알 수 없어, 새 이름으로 쓴다
     out.push_str(&format!("newtab2={}\n", s.new_tab));
     out.push_str(&format!("side={}\nsidew={}\n", s.side, s.side_w));
@@ -162,6 +165,8 @@ pub fn parse(text: &str) -> Option<Session> {
         active: 0,
         show_hidden: false,
         preview: false,
+        // 이 줄이 없는 예전 세션도 켜진 채로 연다
+        auto_preview: true,
         new_tab: NEW_TAB_START.to_string(),
         recent: Vec::new(),
         // 0.5.x까지는 즐겨찾기 사이드바가 늘 보였으니, 그 세션은 즐겨찾기 패널을 고정한 채로 연다
@@ -197,6 +202,7 @@ pub fn parse(text: &str) -> Option<Session> {
             "active" => s.active = value.parse().unwrap_or(0),
             "hidden" => s.show_hidden = value == "1",
             "preview" => s.preview = value == "1",
+            "autopreview" => s.auto_preview = value != "0",
             // 예전 기본값(내 PC)은 시작 화면으로 옮긴다. 고른 폴더·"지금 탭과 같은 폴더"는 그대로
             "newtab" => s.new_tab = if value == "::computer" { NEW_TAB_START.to_string() } else { value.to_string() },
             "newtab2" => new_tab2 = Some(value.to_string()),
@@ -264,6 +270,7 @@ mod tests {
             active: 2,
             show_hidden: true,
             preview: true,
+            auto_preview: false,
             new_tab: "D:\\업무".into(),
             recent: vec!["C:\\a=b".into(), "\\\\server\\공유".into()],
             side: "places".into(),
