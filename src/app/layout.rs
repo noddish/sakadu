@@ -12,34 +12,15 @@ impl App {
         R::new(l, WORKBAR_H, right.max(l + 100.0), (self.h - MARGIN).max(WORKBAR_H + 100.0))
     }
 
-    /// 칸 나누기 버튼 5개를 한 덩어리로 담는 판. 작업 줄에서 칸과 같은 왼쪽 선
-    pub(super) fn layout_pill(&self) -> R {
-        let l = self.workspace_button().r + 8.0;
-        R::new(l, 6.0, l + 6.0 + 5.0 * 32.0, 38.0)
+    /// 도구 막대 단추 자리: 아이콘 막대 오른쪽부터 창 단추 앞까지.
+    /// 패널을 고정해도 밀리지 않는다 (패널을 여닫을 때 단추가 움직이지 않게)
+    pub(super) fn toolbar(&self) -> ToolbarGeom {
+        toolbar_geom(&ToolbarSpec { left: BAR_W + MARGIN, right: self.caption_left() - 8.0, up: true, new_folder: true, preview: true, more: true })
     }
 
-    pub(super) fn layout_buttons(&self) -> [R; 5] {
-        let l0 = self.layout_pill().l + 3.0;
-        std::array::from_fn(|i| {
-            let l = l0 + i as f32 * 32.0;
-            R::new(l, 9.0, l + 32.0, 35.0)
-        })
-    }
-
-    /// 작업 줄 오른쪽: 창 단추 바로 앞에 미리 보기, 그 앞에 숨김 항목, 그 앞에 `…`
-    pub(super) fn preview_button(&self) -> R {
-        let r = self.caption_left() - 8.0;
-        R::new(r - 32.0, 6.0, r, 38.0)
-    }
-
-    pub(super) fn hidden_button(&self) -> R {
-        let p = self.preview_button();
-        R::new(p.l - 36.0, 6.0, p.l - 4.0, 38.0)
-    }
-
-    pub(super) fn more_button(&self) -> R {
-        let h = self.hidden_button();
-        R::new(h.l - 36.0, 6.0, h.l - 4.0, 38.0)
+    /// 도구 막대에 보일 이름: 지금 칸의 폴더
+    pub(super) fn toolbar_title(&self) -> String {
+        self.panes[self.active].tab().loc.title()
     }
 
     pub(super) fn pane_rects(&self) -> Vec<(usize, R)> {
@@ -177,22 +158,23 @@ impl App {
             }
         }
         if y < WORKBAR_H {
-            if self.workspace_button().contains(x, y) {
-                return Hit::Workspace;
-            }
-            if let Some(i) = self.layout_buttons().iter().position(|r| r.contains(x, y)) {
-                return Hit::Layout(i);
-            }
-            if self.hidden_button().contains(x, y) {
-                return Hit::Hidden;
-            }
-            if self.preview_button().contains(x, y) {
-                return Hit::PreviewButton;
-            }
-            if self.more_button().contains(x, y) {
-                return Hit::More;
-            }
-            return Hit::None;
+            // 도구 막대: 뒤로·앞으로·위로·새 폴더·보기 방식은 지금 칸에 대해 움직인다
+            let m = self.toolbar();
+            let p = self.active;
+            // 시작 화면에는 보기 방식과 새 폴더가 없다
+            let start = self.panes[p].tab().loc == Location::Start;
+            let hits = [
+                (m.back, Hit::Back(p)),
+                (m.fwd, Hit::Fwd(p)),
+                (m.up, Hit::Up(p)),
+                (self.workspace_button(), Hit::Workspace),
+                (m.layout, Hit::LayoutPick),
+                (m.view, if start { Hit::None } else { Hit::View(p) }),
+                (m.new_folder, if start { Hit::None } else { Hit::NewFolder(p) }),
+                (m.preview, Hit::PreviewButton),
+                (m.more, Hit::More),
+            ];
+            return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);
         }
         if let Some(h) = self.preview_hit(x, y) {
             return h;
@@ -237,23 +219,7 @@ impl App {
                 }
                 return Hit::TabStrip(p);
             }
-            if g.back.contains(x, y) {
-                return Hit::Back(p);
-            }
-            if g.fwd.contains(x, y) {
-                return Hit::Fwd(p);
-            }
-            if g.up.contains(x, y) {
-                return Hit::Up(p);
-            }
-            // 시작 화면에는 보기·새 폴더 단추가 없다
             let start = tab.loc == Location::Start;
-            if !start && g.view.contains(x, y) {
-                return Hit::View(p);
-            }
-            if !start && g.new_folder.contains(x, y) {
-                return Hit::NewFolder(p);
-            }
             if tab.loc.dir().is_some() && self.edit_mode != EditMode::Address(p) && g.star.contains(x, y) {
                 return Hit::Star(p);
             }

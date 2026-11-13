@@ -8,11 +8,12 @@ use crate::gfx::Gfx;
 use sakadu::draw::{Color, Font, R};
 use sakadu::favorites::{self, Favorite, Favorites, Row};
 use sakadu::listing::{self, Entry, Kind};
-use sakadu::palette::{R_CTRL, R_ROW, Theme, alpha};
+use sakadu::palette::{R_ROW, Theme, alpha};
 use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab, ViewMode, child_toward};
 use sakadu::session::{self, Look, PaneState, Session};
 use sakadu::ui::glyph::*;
 use sakadu::ui::paint::{EntryArt, PaneHover, PaneScene, paint_pane_border, paint_pane_head, paint_pane_list};
+use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, paint_toolbar, toolbar_geom};
 use sakadu::ui::*;
 use sakadu::util;
 use std::cell::RefCell;
@@ -57,14 +58,15 @@ pub enum Hit {
     None,
     Seg(Side),
     SideRow(usize),
-    Layout(usize),
-    Hidden,
+    /// 도구 막대의 칸 나누기·보기 방식 단추 (누르면 메뉴가 열린다)
+    LayoutPick,
+    ViewPick,
     Tab(usize, usize),
     TabClose(usize, usize),
     TabAdd(usize),
+    /// 도구 막대의 뒤로·앞으로 (지금 칸)
     Back(usize),
     Fwd(usize),
-    Up(usize),
     Crumb(usize, usize),
     /// 경로 줄의 빈 곳 (누르면 경로 입력)
     CrumbEmpty(usize),
@@ -85,11 +87,22 @@ pub struct Mods {
     pub ctrl: bool,
 }
 
+/// 도구 막대 단추가 여는 메뉴
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuKind {
+    /// 칸 나누기 다섯 가지
+    Layout,
+    /// 보기 방식 여섯 가지와 맨 아래 '숨김 항목 보기'
+    View,
+}
+
 /// 맥 키 (글자 키는 소문자 그대로)
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Key {
     Up,
     Down,
+    Left,
+    Right,
     Home,
     End,
     PageUp,
@@ -102,6 +115,7 @@ pub enum Key {
 pub struct Pane {
     pub tabs: Vec<Tab>,
     pub active: usize,
+    pub view: ViewMode,
 }
 
 impl Pane {
@@ -202,6 +216,8 @@ pub struct App {
     pub open_files: Vec<String>,
     /// 즐겨찾기를 파일에 저장할지 (시험·그림에서는 저장하지 않는다)
     pub persist: bool,
+    /// 열어 달라는 메뉴 (창 쪽이 맥 기본 메뉴로 연다)
+    menu: Option<MenuKind>,
     /// Finder '종류' 이름: 확장자별로 한 번만 묻는다 (폴더는 앞에 '/')
     kinds: RefCell<HashMap<String, String>>,
 }
@@ -237,11 +253,12 @@ impl App {
             side_scroll: 0.0,
             open_files: Vec::new(),
             persist: false,
+            menu: None,
             kinds: RefCell::new(HashMap::new()),
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
-            app.panes.push(Pane { tabs: vec![tab], active: 0 });
+            app.panes.push(Pane { tabs: vec![tab], active: 0, view: ViewMode::Details });
         }
         for p in 0..app.layout.count() {
             app.load(p);
@@ -306,7 +323,7 @@ impl App {
     pub fn on_listed(&mut self, tab_id: u64, generation: u64, result: Result<Vec<Entry>, String>) {
         let (sort, hidden) = (self.sort, self.show_hidden);
         let Some(p) = self.panes.iter().position(|pane| pane.tabs.iter().any(|t| t.id == tab_id)) else { return };
-        let list = self.list_rect(p);
+        let (list, view) = (self.list_rect(p), self.panes[p].view);
         let current = self.panes[p].tabs.iter().any(|t| t.id == tab_id && t.generation == generation);
         if !current {
             return;
@@ -321,9 +338,9 @@ impl App {
                 let restore = tab.set_entries(entries, sort, hidden);
                 // 스크롤은 다 읽은 그 탭에 맞춘다 (그 사이 다른 탭으로 옮겼어도 보고 있는 탭은 그대로)
                 if let Some(list) = list {
-                    clamp_tab(tab, list);
+                    clamp_tab(tab, list, view);
                     if restore.is_some_and(|r| r.reveal) {
-                        reveal(tab, list);
+                        reveal(tab, list, view);
                     }
                 }
             }
@@ -466,7 +483,7 @@ impl App {
                     cols: DEFAULT_COLS,
                     sort_key: 0,
                     sort_desc: false,
-                    view: 0,
+                    view: pane.view.code(),
                 })
                 .collect(),
         }
@@ -499,7 +516,7 @@ impl App {
             }
             if !tabs.is_empty() {
                 let active = ps.active.min(tabs.len() - 1);
-                self.panes[p] = Pane { tabs, active };
+                self.panes[p] = Pane { tabs, active, view: ViewMode::from_code(ps.view) };
             }
         }
         self.active = s.active.min(self.layout.count() - 1);
@@ -657,6 +674,52 @@ impl App {
         }
     }
 
+    /// 칸 p의 보기 방식을 바꾼다. 커서 줄이 계속 보이게 스크롤을 맞춘다
+    pub fn set_view(&mut self, p: usize, view: ViewMode) {
+        self.panes[p].view = view;
+        self.clamp_scroll(p);
+        self.ensure_visible(p);
+    }
+
+    /// 열어 달라는 메뉴와 그 단추 자리 (창 쪽이 가져가서 맥 기본 메뉴로 연다)
+    pub fn take_menu(&mut self) -> Option<(MenuKind, R)> {
+        let kind = self.menu.take()?;
+        let m = self.toolbar();
+        Some((kind, if kind == MenuKind::Layout { m.layout } else { m.view }))
+    }
+
+    /// 메뉴의 줄: (이름, 지금 것인지). 보기 방식 메뉴의 맨 아래 줄은 숨김 항목 보기
+    pub fn menu_items(&self, kind: MenuKind) -> Vec<(String, bool)> {
+        use sakadu::keys::{Action, name};
+        match kind {
+            MenuKind::Layout => {
+                let names = [Action::Layout1, Action::Layout2, Action::Layout3, Action::Layout4, Action::Layout5];
+                Layout::ALL.iter().zip(names).map(|(l, a)| (name(a).to_string(), *l == self.layout)).collect()
+            }
+            MenuKind::View => {
+                let current = self.panes[self.active].view;
+                let mut v: Vec<_> = ViewMode::ALL.iter().map(|v| (v.label().to_string(), *v == current)).collect();
+                v.push(("숨김 항목 보기".to_string(), self.show_hidden));
+                v
+            }
+        }
+    }
+
+    /// 메뉴에서 i번째 줄을 골랐다
+    pub fn pick_menu(&mut self, kind: MenuKind, i: usize) {
+        match kind {
+            MenuKind::Layout => {
+                if let Some(l) = Layout::ALL.get(i) {
+                    self.set_layout(*l);
+                }
+            }
+            MenuKind::View => match ViewMode::ALL.get(i) {
+                Some(v) => self.set_view(self.active, *v),
+                None => self.toggle_hidden(),
+            },
+        }
+    }
+
     pub fn set_side(&mut self, side: Side) {
         if self.side != side {
             self.side = side;
@@ -674,26 +737,45 @@ impl App {
         self.panes[self.active].tab_mut().clear_selection();
     }
 
-    /// 줄 이동 (↑↓·Home·End·Page). shift는 범위 고르기
+    /// 커서 이동 (화살표·Home·End·Page). 아이콘 보기에서는 칸 배치를 따라 움직인다 (Windows와 같은 규칙). shift는 범위 고르기
     pub fn move_cursor(&mut self, key: Key, shift: bool) {
         let p = self.active;
-        let page = (self.list_rect(p).map_or(ROW_H, |l| l.h()) / ROW_H).floor().max(1.0) as usize;
+        let Some(list) = self.list_rect(p) else { return };
+        let grid = Grid::of(list, self.panes[p].view);
         let tab = self.panes[p].tab_mut();
         let n = tab.view.len();
         if n == 0 {
             return;
         }
-        let c = tab.cursor;
+        let (cur, last) = (tab.cursor as isize, n as isize - 1);
+        // 한 줄(목록 보기는 한 열)에 든 개수와 한 화면에 든 개수
+        let (line, page) = if grid.horiz {
+            (grid.rows as isize, ((list.w() / grid.cell_w).floor() as isize).max(1) * grid.rows as isize)
+        } else {
+            (grid.cols as isize, ((list.h() / grid.cell_h).floor() as isize).max(1) * grid.cols as isize)
+        };
+        // 줄을 건너는 이동: 끝 줄이 덜 찼으면 아래 칸 대신 마지막 항목으로
+        let jump = |fwd: bool| match fwd {
+            false if cur < line => cur,
+            false => cur - line,
+            true if cur + line > last && cur / line < last / line => last,
+            true if cur + line > last => cur,
+            true => cur + line,
+        };
+        // 목록 보기는 위아래가 한 칸, 좌우가 옆 열. 나머지는 좌우가 한 칸, 위아래가 옆 줄
+        let (prev, next, back, fwd) = if grid.horiz { (Key::Up, Key::Down, Key::Left, Key::Right) } else { (Key::Left, Key::Right, Key::Up, Key::Down) };
         let to = match key {
-            Key::Up => c.saturating_sub(1),
-            Key::Down => (c + 1).min(n - 1),
+            k if k == prev => cur - 1,
+            k if k == next => cur + 1,
+            k if k == back => jump(false),
+            k if k == fwd => jump(true),
             Key::Home => 0,
-            Key::End => n - 1,
-            Key::PageUp => c.saturating_sub(page),
-            Key::PageDown => (c + page).min(n - 1),
+            Key::End => last,
+            Key::PageUp => cur - page,
+            Key::PageDown => cur + page,
             _ => return,
         };
-        tab.move_cursor(to, shift, false);
+        tab.move_cursor(to.clamp(0, last) as usize, shift, false);
         self.ensure_visible(p);
     }
 
@@ -788,14 +870,16 @@ impl App {
 
     fn clamp_scroll(&mut self, p: usize) {
         let Some(list) = self.list_rect(p) else { return };
+        let view = self.panes[p].view;
         for tab in &mut self.panes[p].tabs {
-            clamp_tab(tab, list);
+            clamp_tab(tab, list, view);
         }
     }
 
     fn ensure_visible(&mut self, p: usize) {
         let Some(list) = self.list_rect(p) else { return };
-        reveal(self.panes[p].tab_mut(), list);
+        let view = self.panes[p].view;
+        reveal(self.panes[p].tab_mut(), list, view);
     }
 
     /// 사이드바 고르기 단추 판
@@ -832,23 +916,11 @@ impl App {
         self.side_scroll = self.side_scroll.clamp(0.0, max);
     }
 
-    fn workspace_button(&self, g: &Gfx) -> R {
-        let l = SIDE_W + MARGIN;
-        R::new(l, 6.0, l + (g.measure("작업 공간", Font::Normal) + 40.0).clamp(96.0, 220.0), 38.0)
-    }
-
-    fn layout_buttons(&self, g: &Gfx) -> [R; 5] {
-        let l0 = self.workspace_button(g).r + 8.0 + 3.0;
-        std::array::from_fn(|i| {
-            let l = l0 + i as f32 * 32.0;
-            R::new(l, 9.0, l + 32.0, 35.0)
-        })
-    }
-
-    /// 작업 줄 오른쪽 단추: 설정, 미리 보기, 숨김, … (오른쪽 끝부터)
-    fn right_button(&self, i: usize) -> R {
-        let r = self.w - 8.0 - i as f32 * 36.0;
-        R::new(r - 32.0, 6.0, r, 38.0)
+    /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다.
+    /// 새 폴더·미리 보기는 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
+    fn toolbar(&self) -> ToolbarGeom {
+        let a = self.area();
+        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: false, more: false })
     }
 
     /// 탭 칩 자리와 새 탭(+) 자리 (app.rs chips와 같다: 오른쪽 항목 수 자리 앞까지, 넘치면 지금 탭을 지킨다)
@@ -872,6 +944,11 @@ impl App {
 
     // ---------- 누르기 판정 ----------
 
+    /// 창을 끌 수 있는 곳인지: 도구 막대 높이 안의 빈 곳 (단추가 없는 자리, 사이드바 위 신호등 옆 포함)
+    pub fn drag_zone(&self, g: &Gfx, x: f32, y: f32) -> bool {
+        y < WORKBAR_H && self.hit(g, x, y) == Hit::None
+    }
+
     pub fn hit(&self, g: &Gfx, x: f32, y: f32) -> Hit {
         if x < SIDE_W {
             for (i, side) in Side::ALL.iter().enumerate() {
@@ -886,13 +963,11 @@ impl App {
             return (0..n).find(|&i| self.side_row_rect(i).contains(x, y)).map_or(Hit::None, Hit::SideRow);
         }
         if y < WORKBAR_H {
-            if let Some(i) = self.layout_buttons(g).iter().position(|r| r.contains(x, y)) {
-                return Hit::Layout(i);
-            }
-            if self.right_button(2).contains(x, y) {
-                return Hit::Hidden;
-            }
-            return Hit::None;
+            // 도구 막대: 뒤로·앞으로는 지금 칸에 대해 움직인다
+            let m = self.toolbar();
+            let p = self.active;
+            let hits = [(m.back, Hit::Back(p)), (m.fwd, Hit::Fwd(p)), (m.layout, Hit::LayoutPick), (m.view, Hit::ViewPick)];
+            return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);
         }
         let (sx, sy) = self.splitters();
         if sx.is_some_and(|r| r.contains(x, y)) {
@@ -917,10 +992,8 @@ impl App {
                 }
                 return if add.contains(x, y) { Hit::TabAdd(p) } else { Hit::Pane(p) };
             }
-            for (rr, h) in [(gm.back, Hit::Back(p)), (gm.fwd, Hit::Fwd(p)), (gm.up, Hit::Up(p)), (gm.star, Hit::Star(p))] {
-                if rr.contains(x, y) {
-                    return h;
-                }
+            if gm.star.contains(x, y) {
+                return Hit::Star(p);
             }
             if gm.crumb.contains(x, y) {
                 if let Some(dir) = tab.loc.dir()
@@ -931,7 +1004,7 @@ impl App {
                 return Hit::CrumbEmpty(p);
             }
             if gm.list.contains(x, y) {
-                let grid = Grid::of(gm.list, ViewMode::Details);
+                let grid = Grid::of(gm.list, self.panes[p].view);
                 return grid.at(x, y, tab.scroll, tab.view.len()).map_or(Hit::List(p), |vi| Hit::Row(p, vi));
             }
             return Hit::Pane(p);
@@ -948,7 +1021,7 @@ impl App {
         self.editing = None;
         self.flash = None;
         match hit {
-            Hit::Tab(p, _) | Hit::TabClose(p, _) | Hit::TabAdd(p) | Hit::Back(p) | Hit::Fwd(p) | Hit::Up(p) | Hit::Crumb(p, _) | Hit::CrumbEmpty(p) | Hit::Star(p) | Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) => {
+            Hit::Tab(p, _) | Hit::TabClose(p, _) | Hit::TabAdd(p) | Hit::Back(p) | Hit::Fwd(p) | Hit::Crumb(p, _) | Hit::CrumbEmpty(p) | Hit::Star(p) | Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) => {
                 self.activate_pane(p)
             }
             _ => {}
@@ -957,14 +1030,13 @@ impl App {
             Hit::CrumbEmpty(p) => self.begin_address(p),
             Hit::Seg(side) => self.set_side(side),
             Hit::SideRow(i) => self.open_side_row(i),
-            Hit::Layout(i) => self.set_layout(Layout::ALL[i]),
-            Hit::Hidden => self.toggle_hidden(),
+            Hit::LayoutPick => self.menu = Some(MenuKind::Layout),
+            Hit::ViewPick => self.menu = Some(MenuKind::View),
             Hit::Tab(p, i) => self.activate_tab(p, i),
             Hit::TabClose(p, i) => self.close_tab(p, i),
             Hit::TabAdd(p) => self.new_tab(p),
             Hit::Back(p) => self.go_back(p),
             Hit::Fwd(p) => self.go_forward(p),
-            Hit::Up(p) => self.go_up(p),
             Hit::Star(p) => self.toggle_star(p),
             Hit::Crumb(p, i) => {
                 let Some(r) = self.pane_rects().into_iter().find(|(q, _)| *q == p).map(|(_, r)| geom(r).crumbs) else { return };
@@ -1055,7 +1127,7 @@ impl App {
             // 경로 입력: ⌘L(Windows Ctrl+L), ⌘⇧G(Finder '폴더로 이동')
             (Key::Char('l'), true, false, false) => self.begin_address(p),
             (Key::Char('g'), true, false, false) if m.shift => self.begin_address(p),
-            (Key::Up | Key::Down, false, false, false) | (Key::Home | Key::End | Key::PageUp | Key::PageDown, false, false, false) => self.move_cursor(key, m.shift),
+            (Key::Up | Key::Down | Key::Left | Key::Right, false, false, false) | (Key::Home | Key::End | Key::PageUp | Key::PageDown, false, false, false) => self.move_cursor(key, m.shift),
             (Key::Down, true, false, false) | (Key::Char('o'), true, false, false) => self.open_selected(p),
             (Key::Up, true, false, false) => self.go_up(p),
             (Key::Char('['), true, false, false) => self.go_back(p),
@@ -1130,7 +1202,7 @@ impl App {
             g.text(l2, R::new(r.l + 10.0, r.t + 22.0, r.r - 6.0, r.t + 40.0), Font::Small, t.faint);
         };
         match self.side {
-            Side::Favorites if rows.is_empty() => note("즐겨찾기가 비어 있어요", "경로 오른쪽 별(☆)이나 ⌃⌘T로 넣어 보세요"),
+            Side::Favorites if rows.is_empty() => note("즐겨찾기가 비어 있어요", "경로 오른쪽 책갈피나 ⌃⌘T로 넣어 보세요"),
             Side::Search => note("검색은 다음 단계에서 넣어요", "지금은 폴더를 열어 찾아 주세요"),
             _ => {}
         }
@@ -1162,34 +1234,38 @@ impl App {
         g.unclip();
     }
 
+    /// 칸 영역 위 도구 막대: 뒤로·앞으로, 지금 폴더 이름, 칸 나누기·보기 방식 단추 (공통 그리기)
     fn paint_workbar(&self, g: &Gfx, t: &Theme) {
-        let ws = self.workspace_button(g);
-        g.text("작업 공간", R::new(ws.l + 10.0, ws.t, ws.r - 24.0, ws.b), Font::Normal, t.dim);
-        g.glyph(G_CHEVRON_DOWN, R::new(ws.r - 22.0, ws.t + 1.0, ws.r - 8.0, ws.b + 1.0), true, t.faint);
-        let bs = self.layout_buttons(g);
-        let pill = R::new(bs[0].l - 3.0, 6.0, bs[4].r + 3.0, 38.0);
-        g.fill_round(pill, pill.h() / 2.0, seg_track(t));
-        for (i, r) in bs.iter().enumerate() {
-            let current = Layout::ALL[i] == self.layout;
-            if current {
-                seg_on(g, *r, r.h() / 2.0, t);
-            } else if self.hover == Hit::Layout(i) {
-                g.fill_round(*r, r.h() / 2.0, hover_fill(t));
-            }
-            draw_layout_icon(g, *r, Layout::ALL[i], if current || self.hover == Hit::Layout(i) { t.text } else { t.dim });
-        }
-        // 오른쪽 끝부터 설정, 미리 보기, 숨김 항목, … (설정·미리 보기·…는 뒤 단계라 흐리게)
-        let off = alpha(t.dim, 0.45);
-        for (i, glyph) in [G_SETTINGS, G_PREVIEW, G_HIDDEN, G_MORE].into_iter().enumerate() {
-            let r = self.right_button(i);
-            let hidden_btn = glyph == G_HIDDEN;
-            if hidden_btn && self.show_hidden {
-                seg_on(g, r, R_CTRL, t);
-            } else if hidden_btn && self.hover == Hit::Hidden {
-                g.fill_round(r, R_CTRL, hover_fill(t));
-            }
-            g.glyph(glyph, r, false, if !hidden_btn { off } else if self.show_hidden || self.hover == Hit::Hidden { t.text } else { t.dim });
-        }
+        let m = self.toolbar();
+        let p = self.active;
+        let tab = self.panes[p].tab();
+        let title = tab.loc.title();
+        let hover = match self.hover {
+            Hit::Back(_) => ToolbarHover::Back,
+            Hit::Fwd(_) => ToolbarHover::Fwd,
+            Hit::LayoutPick => ToolbarHover::Layout,
+            Hit::ViewPick => ToolbarHover::View,
+            _ => ToolbarHover::None,
+        };
+        paint_toolbar(
+            g,
+            t,
+            &ToolbarScene {
+                geom: &m,
+                title: &title,
+                layout: self.layout,
+                view: self.panes[p].view,
+                can_back: !tab.back.is_empty(),
+                can_fwd: !tab.fwd.is_empty(),
+                can_up: can_go_up(&tab.loc),
+                new_folder_ok: false,
+                view_ok: true,
+                preview_on: false,
+                layout_open: self.menu == Some(MenuKind::Layout),
+                view_open: self.menu == Some(MenuKind::View),
+                hover,
+            },
+        );
     }
 
     /// 칸 하나: 이 앱의 상태로 장면을 채워 공통 칸 그리기에 넘긴다 (맥에 아직 없는 필터·이름 바꾸기·끌어 놓기는 비워 둔다)
@@ -1213,7 +1289,7 @@ impl App {
             current: pane.active,
             sort: self.sort,
             cols: DEFAULT_COLS,
-            view: ViewMode::Details,
+            view: pane.view,
             active,
             multi: self.layout.count() > 1,
             keyboard_here: active,
@@ -1229,10 +1305,6 @@ impl App {
             address: editing,
             // 창에서는 입력 상자가 글자를 그린다. 그림 시험에서만 직접 그린다
             address_text: dir.filter(|_| editing && self.standalone),
-            tools: true,
-            new_folder_ok: false,
-            view_ok: false,
-            view_menu_open: false,
             renaming: false,
             dragged_tab: None,
             tab_drop: None,
@@ -1258,9 +1330,6 @@ fn pane_hover(h: Hit, p: usize) -> PaneHover {
         Hit::Tab(q, i) if q == p => PaneHover::Tab(i),
         Hit::TabClose(q, i) if q == p => PaneHover::TabClose(i),
         Hit::TabAdd(q) if q == p => PaneHover::TabAdd,
-        Hit::Back(q) if q == p => PaneHover::Back,
-        Hit::Fwd(q) if q == p => PaneHover::Fwd,
-        Hit::Up(q) if q == p => PaneHover::Up,
         Hit::Star(q) if q == p => PaneHover::Star,
         Hit::Crumb(q, i) if q == p => PaneHover::Crumb(i),
         Hit::CrumbEmpty(q) if q == p => PaneHover::CrumbEmpty,
@@ -1326,20 +1395,26 @@ fn count_text(tab: &Tab) -> String {
     }
 }
 
-/// 탭의 스크롤을 목록 길이 안으로
-fn clamp_tab(tab: &mut Tab, list: R) {
-    let max = (tab.view.len() as f32 * ROW_H - list.h()).max(0.0);
+/// 탭의 스크롤을 내용 길이 안으로 (보기 방식의 칸 배치에 맞춰)
+fn clamp_tab(tab: &mut Tab, list: R, view: ViewMode) {
+    let grid = Grid::of(list, view);
+    let max = (grid.content(tab.view.len()) - grid.page(list)).max(0.0);
     tab.scroll = tab.scroll.clamp(0.0, max);
 }
 
-/// 커서 줄이 보이게 탭을 스크롤한다
-fn reveal(tab: &mut Tab, list: R) {
-    let top = tab.cursor as f32 * ROW_H;
+/// 커서 항목이 보이게 탭을 스크롤한다
+fn reveal(tab: &mut Tab, list: R, view: ViewMode) {
+    let grid = Grid::of(list, view);
+    // 스크롤 0 기준 위치 (스크롤 방향으로)
+    let it = grid.item(tab.cursor, 0.0);
+    let (top, bottom) = if grid.horiz { (it.l - list.l, it.r - list.l + 4.0) } else { (it.t - list.t, it.b - list.t) };
+    let page = grid.page(list);
     if top < tab.scroll {
         tab.scroll = top;
-    } else if top + ROW_H > tab.scroll + list.h() {
-        tab.scroll = top + ROW_H - list.h();
+    } else if bottom > tab.scroll + page {
+        tab.scroll = bottom - page;
     }
+    clamp_tab(tab, list, view);
 }
 
 /// 맥 창의 닫기·최소화·확대 단추 (그림 시험용. 실제 창에서는 시스템이 그린다)
@@ -1695,6 +1770,65 @@ mod tests {
         a.mouse_down(&g, cr.l + 4.0, cr.t + 8.0, Mods::default(), 1);
         a.settle();
         assert_eq!(a.pane(0).tab().cursor_entry().unwrap().name_string(), "2026 4분기");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn toolbar_buttons_work_on_the_active_pane_and_ask_for_menus() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let m = a.toolbar();
+        let mid = |r: R| ((r.l + r.r) / 2.0, (r.t + r.b) / 2.0);
+        // 뒤로·앞으로는 지금 칸의 것
+        let (x, y) = mid(m.back);
+        assert_eq!(a.hit(&g, x, y), Hit::Back(a.active()));
+        // 칸 나누기 단추: 메뉴를 열어 달라고 하고, 단추 자리를 알려 준다
+        let (x, y) = mid(m.layout);
+        assert_eq!(a.hit(&g, x, y), Hit::LayoutPick);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        assert_eq!(a.take_menu().map(|(k, r)| (k, r.l)), Some((MenuKind::Layout, m.layout.l)));
+        assert!(a.take_menu().is_none(), "the request is handed over once");
+        assert_eq!(a.menu_items(MenuKind::Layout).iter().filter(|(_, on)| *on).count(), 1);
+        a.pick_menu(MenuKind::Layout, 4);
+        assert_eq!(a.layout(), Layout::Four);
+        // 보기 방식 메뉴: 여섯 가지와 맨 아래 숨김 항목 보기
+        let (x, y) = mid(a.toolbar().view);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::View));
+        assert_eq!(a.menu_items(MenuKind::View).len(), ViewMode::ALL.len() + 1);
+        let p = a.active();
+        a.pick_menu(MenuKind::View, 2);
+        assert_eq!(a.pane(p).view, ViewMode::Medium);
+        let hidden = a.menu_items(MenuKind::View).last().unwrap().1;
+        a.pick_menu(MenuKind::View, ViewMode::ALL.len());
+        assert_ne!(a.menu_items(MenuKind::View).last().unwrap().1, hidden);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn icon_view_moves_along_the_grid_and_is_saved_in_the_session() {
+        let (root, home) = demo();
+        let (mut a, _g) = app(&util::join(&home, "업무"));
+        a.set_view(0, ViewMode::Medium);
+        let n = a.pane(0).tab().view.len();
+        assert_eq!(n, 3);
+        // 아이콘 보기: 좌우가 한 칸. 한 줄에 다 들어가 있으면 위아래로는 움직이지 않는다
+        a.key(Key::Home, Mods::default());
+        a.key(Key::Right, Mods::default());
+        assert_eq!(a.pane(0).tab().cursor, 1);
+        a.key(Key::Down, Mods::default());
+        assert_eq!(a.pane(0).tab().cursor, 1);
+        a.key(Key::End, Mods::default());
+        assert_eq!(a.pane(0).tab().cursor, n - 1);
+        // 목록 보기: 위아래가 한 칸
+        a.set_view(0, ViewMode::List);
+        a.key(Key::Up, Mods::default());
+        assert_eq!(a.pane(0).tab().cursor, n - 2);
+        // 보기 방식은 세션에 남는다
+        let s = a.to_session();
+        let (mut b, _g) = app(&home);
+        b.restore(&s, &home);
+        assert_eq!(b.pane(0).view, ViewMode::List);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

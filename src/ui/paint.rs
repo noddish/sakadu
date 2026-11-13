@@ -15,11 +15,6 @@ pub enum PaneHover {
     Tab(usize),
     TabClose(usize),
     TabAdd,
-    Back,
-    Fwd,
-    Up,
-    NewFolder,
-    View,
     Star,
     Crumb(usize),
     CrumbEmpty,
@@ -73,11 +68,6 @@ pub struct PaneScene<'a> {
     /// 경로 입력 중. 입력 상자가 없으면(그림 시험) 그 글자를 직접 그린다
     pub address: bool,
     pub address_text: Option<&'a str>,
-    /// 새 폴더·보기 단추를 둘지 (시작 화면에는 없다), 쓸 수 있는지
-    pub tools: bool,
-    pub new_folder_ok: bool,
-    pub view_ok: bool,
-    pub view_menu_open: bool,
     /// 이름 바꾸는 중 (커서 줄에 입력 자리)
     pub renaming: bool,
     /// 이 칸에서 끌고 있는 탭, 이 칸에 탭을 놓을 자리
@@ -138,19 +128,17 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
     let g = geom(r);
     let (trs, add) = (&s.chips, s.add);
 
-    // 카드: 밝은 테마는 테두리 없이 옅은 그림자로 떠 있고, 지금 칸은 조금 더 높이 뜬다 (고대비는 테두리로)
+    // 카드: 지금 칸은 흰 면에 진한 그림자로 떠 있고, 다른 칸은 창 바탕 쪽으로 가라앉는다 (색 선이나 테두리 없이 구분).
+    // 칸이 하나뿐이면 옅은 그림자만. 고대비는 테두리로 구분한다 (paint_pane_border)
+    let sunk = multi && !active && !t.high_contrast;
     if active && multi && !t.high_contrast {
         soft_shadow(gfx, r, RADIUS, 12.0, 0.10, t.dark);
-    } else if !t.high_contrast && !t.dark {
+    } else if !multi && !t.high_contrast && !t.dark {
         soft_shadow(gfx, r, RADIUS, 6.0, 0.06, false);
     }
-    gfx.fill_round(r, RADIUS, t.pane);
-    // 지금 칸: 위쪽 가장자리 안쪽에 얇은 강조 선 (칸이 여럿일 때 어느 칸에서 일하는지 한눈에)
-    if active && multi {
-        gfx.fill_round(R::new(r.l + RADIUS, r.t + 1.0, r.r - RADIUS, r.t + 3.0), 1.0, if t.high_contrast { t.focus } else { t.accent });
-    }
+    gfx.fill_round(r, RADIUS, if sunk { mix(t.pane, t.window, 0.5) } else { t.pane });
 
-    // 칩 줄: 탭 칩. 지금 탭은 바탕이 있는 칩(지금 칸이면 옅은 강조 색), 나머지는 글자만이고 올리면 옅은 바탕.
+    // 칩 줄: 탭 칩. 지금 탭은 바탕이 있는 칩(지금 칸이면 옅은 강조 색 바탕에 강조 색 글자), 나머지는 글자만이고 올리면 옅은 바탕.
     // 오른쪽 자리(필터 칩·개수) 앞까지만 그린다 (좁은 칸에서 겹치면 누르기도 오른쪽 자리가 먼저)
     let right = s.filter.as_ref().map_or(s.count_rect, |f| f.chip);
     gfx.clip(R::new(r.l + 1.0, g.head.t, (right.l - 4.0).max(r.l + 1.0), g.head.b));
@@ -166,7 +154,7 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
         let current = i == s.current;
         let hovered = hovered_tab == Some(i);
         if current {
-            gfx.fill_round(*tr, tr.h() / 2.0, well(&t));
+            gfx.fill_round(*tr, tr.h() / 2.0, if active { t.accent_soft } else { well(&t) });
             // 고대비에서는 바탕색만으로 구분이 어려우니 테두리를 더한다
             if t.high_contrast {
                 gfx.stroke_round(tr.inset(0.5, 0.5), tr.h() / 2.0, if active { t.focus } else { t.pane_border }, 1.0);
@@ -176,7 +164,7 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
         }
         let closable = s.tabs.len() > 1 && (current || hovered);
         let label = R::new(tr.l + 12.0, tr.t, tr.r - if closable { 26.0 } else { 10.0 }, tr.b);
-        let fg = t.text;
+        let fg = if current && active { t.chip_text } else { t.text };
         let color = if s.dragged_tab == Some(i) { alpha(fg, 0.5) } else { fg };
         gfx.text(&s.tabs[i].loc.title(), label, Font::Normal, color);
         if closable {
@@ -222,35 +210,6 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
         }
     }
 
-    // 경로 줄: 탐색 단추
-    let off = if t.high_contrast { t.faint } else { alpha(t.dim, 0.45) };
-    let nav_btn = |rr: R, glyph: u16, font: Font, enabled: bool, hovered: bool| {
-        if rr.w() <= 0.0 {
-            return;
-        }
-        if hovered && enabled {
-            gfx.fill_round(rr, R_CTRL, t.hover);
-        }
-        gfx.glyph_font(glyph, rr, font, if !enabled { off } else if hovered { t.text } else { t.dim });
-    };
-    // 이동 화살표는 가운데 크기(12px), 새 폴더·별·보기는 도구 아이콘 크기(16px)
-    nav_btn(g.back, G_BACK, Font::GlyphMid, !tab.back.is_empty(), p_hover == PaneHover::Back);
-    nav_btn(g.fwd, G_FWD, Font::GlyphMid, !tab.fwd.is_empty(), p_hover == PaneHover::Fwd);
-    nav_btn(g.up, G_UP, Font::GlyphMid, up_ok(&tab.loc), p_hover == PaneHover::Up);
-    // 시작 화면에는 새 폴더·보기 단추가 없다. 좁은 칸의 경로 입력 상자가 그 자리를 덮으면 그리지 않는다
-    if s.tools && !(s.address && g.crumb.w() < ADDR_MIN_W) {
-        nav_btn(g.new_folder, G_NEW_FOLDER, Font::Glyph, s.new_folder_ok, p_hover == PaneHover::NewFolder);
-        // 보기 방식: 지금 보기 그림과 아래 화살표 (누르면 보기 메뉴)
-        let view_hot = s.view_ok && (p_hover == PaneHover::View || s.view_menu_open);
-        if view_hot {
-            gfx.fill_round(g.view, R_CTRL, t.hover);
-        }
-        let view_glyph = if matches!(s.view, ViewMode::Huge | ViewMode::Large | ViewMode::Medium) { G_GRID } else { G_LIST };
-        let view_color = if !s.view_ok { off } else if view_hot { t.text } else { t.dim };
-        gfx.glyph(view_glyph, R::new(g.view.l + 2.0, g.view.t, g.view.l + 26.0, g.view.b), false, view_color);
-        gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - 16.0, g.view.t + 1.0, g.view.r - 4.0, g.view.b + 1.0), true, t.faint);
-    }
-
     // 경로: 상자 없이 글자만. 경로 위에 올리면 옅은 바탕(빈 곳을 누르면 경로 입력), 조각에 올리면 그 조각이 한 단계 진하게
     if s.address {
         let ar = addr_rect(&g);
@@ -266,13 +225,20 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
         }
         let cs = crumbs(gfx, g.crumbs, &tab.loc, s.root);
         let n = cs.len();
-        // 별 단추: 이 폴더가 즐겨찾기에 있으면 채운 별(강조 색), 없으면 빈 별
+        // 책갈피: 이 폴더가 즐겨찾기에 있으면 채운 책갈피(강조 색), 없으면 빈 책갈피
         if let Some(on) = s.starred.filter(|_| g.star.w() > 0.0) {
             let hot = p_hover == PaneHover::Star;
             if hot {
                 gfx.fill_round(g.star, R_CTRL, t.hover);
             }
-            gfx.glyph(if on { G_STAR_FILL } else { G_STAR }, g.star, false, if on || hot { t.text } else { t.dim });
+            let c = if !on {
+                if hot { t.text } else { t.dim }
+            } else if t.high_contrast {
+                t.text
+            } else {
+                t.accent
+            };
+            gfx.glyph(if on { G_BOOKMARK_FILL } else { G_BOOKMARK }, g.star, false, c);
         }
         gfx.clip(g.crumbs);
         for (i, c) in cs.iter().enumerate() {
@@ -293,12 +259,10 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
     }
 }
 
-/// 위로 갈 곳이 있는지: 폴더면 위가 있다 (드라이브 맨 위는 '내 PC', 맥의 / 는 위가 없다)
-fn up_ok(loc: &Location) -> bool {
-    match loc {
-        Location::Dir(d) => !(d.starts_with('/') && util::parent(d).is_none()),
-        _ => false,
-    }
+/// 두 색을 섞는다 (k=0이면 a, 1이면 b)
+fn mix(a: Color, b: Color, k: f32) -> Color {
+    let f = |x: f32, y: f32| x + (y - x) * k;
+    Color { r: f(a.r, b.r), g: f(a.g, b.g), b: f(a.b, b.b), a: f(a.a, b.a) }
 }
 
 /// 열 머리글, 줄·칸, 안내 글, 네트워크 단추, 스크롤 막대, 네모 고르기, 불러오기 막대
@@ -525,15 +489,18 @@ mod tests {
     use crate::pane::{DEFAULT_COLS, LoadState, Sort};
     use std::cell::RefCell;
 
-    /// 그린 글자만 적어 두는 가짜 그림판 (글자 폭은 한 글자에 7)
+    /// 그린 글자와 둥근 사각형을 적어 두는 가짜 그림판 (글자 폭은 한 글자에 7)
     #[derive(Default)]
     struct Rec {
         texts: RefCell<Vec<String>>,
+        rounds: RefCell<Vec<(R, Color)>>,
     }
 
     impl Canvas for Rec {
         fn fill(&self, _: R, _: Color) {}
-        fn fill_round(&self, _: R, _: f32, _: Color) {}
+        fn fill_round(&self, r: R, _: f32, c: Color) {
+            self.rounds.borrow_mut().push((r, c));
+        }
         fn stroke_round(&self, _: R, _: f32, _: Color, _: f32) {}
         fn text(&self, s: &str, _: R, _: Font, _: Color) {
             self.texts.borrow_mut().push(s.to_string());
@@ -596,10 +563,6 @@ mod tests {
             root: None,
             address: false,
             address_text: None,
-            tools: true,
-            new_folder_ok: true,
-            view_ok: true,
-            view_menu_open: false,
             renaming: false,
             dragged_tab: None,
             tab_drop: None,
@@ -643,5 +606,27 @@ mod tests {
         assert_eq!(names.len(), visible);
         assert!(names.windows(2).all(|w| w[0] != w[1]));
         assert_eq!(art.type_names, visible);
+    }
+
+    /// 지금 칸은 원래 카드 색으로 떠 있고 다른 칸은 창 바탕 쪽으로 가라앉는다. 칸 위쪽의 가는 색 선은 그리지 않는다
+    #[test]
+    fn active_pane_is_raised_and_others_sink_without_a_color_line() {
+        let p = tabs(0);
+        let r = R::new(0.0, 0.0, 800.0, 600.0);
+        let t = Theme::LIGHT;
+        let card = |active: bool| {
+            let g = Rec::default();
+            let mut s = scene(&p, r, Vec::new());
+            s.multi = true;
+            s.active = active;
+            paint_pane_head(&g, &t, &s);
+            let rounds = g.rounds.borrow();
+            assert!(!rounds.iter().any(|(q, _)| q.h() <= 3.0 && q.w() > 100.0 && q.t < r.t + 4.0), "no accent line on top");
+            // 카드 면: 칸과 같은 크기로 칠한 사각형
+            let (_, c) = rounds.iter().rev().find(|(q, _)| q.w() == r.w() && q.h() == r.h()).expect("card fill");
+            (c.r, c.g, c.b)
+        };
+        assert_eq!(card(true), (t.pane.r, t.pane.g, t.pane.b));
+        assert_ne!(card(false), card(true));
     }
 }

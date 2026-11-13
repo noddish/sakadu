@@ -465,8 +465,8 @@ impl App {
         if self.pal_focus && !matches!(hit, Hit::PalRow(_) | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalClose | Hit::SidePanel | Hit::SearchButton) {
             self.pal_blur();
         }
-        // 보기 메뉴가 열려 있으면 메뉴 밖 클릭은 메뉴를 닫기만 한다 (보기 버튼은 아래에서 닫기·다른 칸 메뉴 열기)
-        if self.view_menu.is_some() && !matches!(hit, Hit::View(_)) {
+        // 메뉴가 열려 있으면 메뉴 밖 클릭은 메뉴를 닫기만 한다 (보기 방식·칸 나누기 단추는 아래에서 닫거나 다른 메뉴로 바꾼다)
+        if self.view_menu.is_some() && !matches!(hit, Hit::View(_) | Hit::LayoutPick) {
             self.view_menu_mouse_down(hit);
             self.invalidate();
             return;
@@ -486,7 +486,7 @@ impl App {
             unsafe { SetCapture(app.hwnd) };
         };
         match hit {
-            Hit::Layout(i) => self.set_layout(Layout::ALL[i]),
+            Hit::LayoutPick => self.toggle_layout_menu(),
             Hit::Side(s) => self.side_mouse_down(s, y, dbl),
             // 막대의 검색 아이콘: 패널이 보이면 닫고, 아니면 연다
             Hit::SearchButton => {
@@ -499,7 +499,6 @@ impl App {
             Hit::PalRow(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalScope(_) => self.pal_mouse_down(hit, dbl),
             Hit::PalClose => self.close_palette(),
             Hit::NewFolder(p) => self.new_folder(p),
-            Hit::Hidden => self.toggle_hidden(),
             Hit::PreviewButton => self.toggle_preview(),
             Hit::PreviewPin | Hit::PreviewChip => self.toggle_preview_pin(),
             Hit::PreviewOpen => self.preview_open(),
@@ -514,7 +513,7 @@ impl App {
             Hit::SidePanel => {}
             Hit::SideResize => capture(self, Drag::SideW { start_x: x, start_w: self.side_w }),
             Hit::More => {
-                let r = self.more_button();
+                let r = self.toolbar().more;
                 let pt = self.to_screen(r.l, r.b + 2.0);
                 self.pending.push(Deferred::MoreMenu { pt });
             }

@@ -7,6 +7,7 @@ use crate::palette::Theme;
 use crate::util;
 
 pub mod paint;
+pub mod toolbar;
 
 /// 공통 화면 코드가 쓰는 그리기 (각 OS의 Gfx가 같은 이름의 메서드로 구현한다)
 pub trait Canvas {
@@ -53,22 +54,27 @@ pub mod glyph {
     pub const G_PIN: u16 = 0xE718;
     /// 채운 핀의 안쪽 (바늘이 없어 G_PIN을 겹쳐 그린다: draw_pin)
     pub const G_PIN_FILL: u16 = 0xE841;
+    /// 책갈피(즐겨찾기), 빈 것과 채운 것. Segoe 아이콘 글꼴에 없는 모양이라 글꼴에 없는 번호를 쓴다:
+    /// Windows는 이 번호를 받으면 직접 그리고, 맥은 SF Symbols로 그린다
+    pub const G_BOOKMARK: u16 = 0xFFF0;
+    pub const G_BOOKMARK_FILL: u16 = 0xFFF1;
 }
 use glyph::*;
 
 /// 칸 영역 위 작업 줄 (칸 나누기·숨김·미리 보기·창 단추). 빈 곳은 창을 끄는 제목 줄 역할도 한다
-pub const WORKBAR_H: f32 = 44.0;
+/// 창 위쪽 도구 막대 높이 (ui::toolbar)
+pub const WORKBAR_H: f32 = 52.0;
 pub const MARGIN: f32 = 8.0;
 pub const GAP: f32 = 8.0;
 /// 칸 맨 위 칩 줄 (탭 칩, 새 탭, 오른쪽에 항목 수 또는 필터 칩)
 pub const HEAD_H: f32 = 44.0;
-/// 칩 줄 아래 경로 줄 (뒤로·앞으로·위로, 경로, 별, 새 폴더, 보기)
-pub const PATH_H: f32 = 36.0;
+/// 칩 줄 아래 경로 줄 (경로, 책갈피)
+pub const PATH_H: f32 = 28.0;
 pub const HEADER_H: f32 = 28.0;
 pub const ROW_H: f32 = 28.0;
 pub const SCROLL_W: f32 = 10.0;
 /// 칸 카드의 모서리
-pub const RADIUS: f32 = 12.0;
+pub const RADIUS: f32 = 14.0;
 pub const CHEV_W: f32 = 16.0;
 pub const CRUMB_PAD: f32 = 8.0;
 
@@ -145,62 +151,46 @@ pub fn splitters(a: R, split: (f32, f32), layout: Layout) -> (Option<R>, Option<
 pub struct PaneGeom {
     /// 칩 줄 (탭 칩, 새 탭, 오른쪽 항목 수·필터 칩)
     pub head: R,
-    pub back: R,
-    pub fwd: R,
-    pub up: R,
     /// 경로 글자 자리 (주소 입력 상자도 여기에 놓인다)
     pub crumb: R,
-    /// 경로 조각을 그리는 곳 (오른쪽 끝 별을 뺀 자리)
+    /// 경로 조각을 그리는 곳 (오른쪽 끝 책갈피를 뺀 자리)
     pub crumbs: R,
-    /// 경로 오른쪽 끝: 즐겨찾기 별
+    /// 경로 오른쪽 끝: 즐겨찾기 책갈피
     pub star: R,
-    pub new_folder: R,
-    /// 보기 방식 버튼 (지금 보기 그림 + 아래 화살표)
-    pub view: R,
     pub header: R,
     pub list: R,
 }
 
+/// 칸 안 자리. 경로 줄에는 경로 조각과 책갈피만 있다 (뒤로·앞으로·새 폴더·보기 방식은 도구 막대: ui::toolbar)
 pub fn geom(r: R) -> PaneGeom {
     let head = R::new(r.l, r.t, r.r, r.t + HEAD_H);
     let path = R::new(r.l, head.b, r.r, head.b + PATH_H);
-    let (t, b) = (path.t + 4.0, path.b - 4.0);
-    let view = R::new(path.r - 8.0 - 40.0, t, path.r - 8.0, b);
-    let new_folder = R::new(view.l - 4.0 - 28.0, t, view.l - 4.0, b);
-    // 별은 새 폴더 옆의 단추 (다른 경로 줄 단추와 같은 28×28)
-    let mut star = R::new(new_folder.l - 4.0 - 28.0, t, new_folder.l - 4.0, b);
-    // 좁은 칸: 경로가 PATH_MIN_W보다 좁아지면 뒤로·앞으로를 빼고(위로만 남김), 그래도 좁으면 별도 뺀다.
-    // 빠진 단추는 폭 0 (그리지도 누르지도 않는다). 뒤로·앞으로는 Alt+←→, 별은 Ctrl+D로 된다
-    let compact = star.l - 4.0 - (path.l + 8.0 + 28.0 * 3.0 + 4.0 + 8.0) < PATH_MIN_W;
-    let hidden = |x: f32| R::new(x, t, x, b);
-    let (back, fwd, up) = if compact {
-        let up = R::new(path.l + 8.0, t, path.l + 36.0, b);
-        (hidden(up.l), hidden(up.l), up)
-    } else {
-        let back = R::new(path.l + 8.0, t, path.l + 36.0, b);
-        let fwd = R::new(back.r + 2.0, t, back.r + 30.0, b);
-        (back, fwd, R::new(fwd.r + 2.0, t, fwd.r + 30.0, b))
-    };
-    if star.l - 4.0 - (up.r + 8.0) < PATH_MIN_W {
-        star = hidden(new_folder.l - 4.0);
+    let (t, b) = (path.t + 2.0, path.b - 2.0);
+    // 경로 글자는 목록의 아이콘과 같은 선(16)에서 시작한다: 조각 안쪽 여백(CRUMB_PAD)만큼 앞에서
+    let l = path.l + 16.0 - CRUMB_PAD;
+    // 책갈피: 24×24 단추. 그림의 오른쪽 끝이 목록의 오른쪽 여백(16)과 맞는다
+    let mut star = R::new(path.r - 12.0 - 24.0, t, path.r - 12.0, b);
+    // 좁은 칸: 경로가 PATH_MIN_W보다 좁아지면 책갈피를 뺀다 (폭 0이면 그리지도 누르지도 않는다. 단축키로는 된다)
+    if star.l - 4.0 - l < PATH_MIN_W {
+        star = R::new(path.r - 12.0, t, path.r - 12.0, b);
     }
-    let crumb = R::new(up.r + 8.0, path.t + 4.0, (star.l - 4.0).max(up.r + 8.0), path.b - 4.0);
+    let crumb = R::new(l, t, (star.l - 4.0).max(l), b);
     let crumbs = crumb;
     let header = R::new(r.l, path.b, r.r, path.b + HEADER_H);
     // 아래쪽은 둥근 모서리에 항목이 닿지 않게 조금 띄운다
     let list = R::new(r.l, header.b, r.r, (r.b - 6.0).max(header.b));
-    PaneGeom { head, back, fwd, up, crumb, crumbs, star, new_folder, view, header, list }
+    PaneGeom { head, crumb, crumbs, star, header, list }
 }
 
-/// 경로 입력 상자 자리: 경로 자리가 너무 좁으면 새 폴더·보기 단추 자리까지 덮는다
+/// 경로 입력 상자 자리: 경로 자리가 너무 좁으면 책갈피 자리까지 덮는다
 pub fn addr_rect(g: &PaneGeom) -> R {
-    if g.crumb.w() >= ADDR_MIN_W { g.crumb } else { R::new(g.up.r + 8.0, g.crumb.t, g.view.r, g.crumb.b) }
+    if g.crumb.w() >= ADDR_MIN_W { g.crumb } else { R::new(g.crumb.l, g.crumb.t, g.star.r.max(g.crumb.r), g.crumb.b) }
 }
 
 /// 경로 입력 상자의 가장 좁은 폭
 pub const ADDR_MIN_W: f32 = 80.0;
 
-/// 경로 조각에 남길 가장 좁은 폭. 이보다 좁아지면 경로 줄 단추를 덜어 낸다
+/// 경로 조각에 남길 가장 좁은 폭. 이보다 좁아지면 책갈피를 덜어 낸다
 pub const PATH_MIN_W: f32 = 96.0;
 
 /// 필터 칩 자리 (칩 줄 오른쪽 끝)
@@ -640,20 +630,21 @@ pub fn draw_pin(g: &impl Canvas, r: R, pinned: bool, c: Color) {
 mod tests {
     use super::*;
 
-    /// 모든 보기에서 칸 가운데를 누르면 그 항목이 잡히고, 보이는 범위에 들어 있고, 경로 줄 오른쪽 보기 버튼과 겹치지 않는다
+    /// 모든 보기에서 칸 가운데를 누르면 그 항목이 잡히고, 보이는 범위에 들어 있다. 경로 줄은 경로와 책갈피가 겹치지 않는다
     #[test]
     fn every_view_maps_items_and_clicks_consistently() {
         let g = geom(R::new(0.0, 0.0, 700.0, 520.0));
-        assert!(g.new_folder.l > g.crumb.r && g.view.l > g.new_folder.r && g.view.r <= g.head.r);
-        assert!(g.crumb.r <= g.star.l && g.star.r <= g.new_folder.l && g.back.w() > 0.0);
-        // 좁은 칸: 뒤로·앞으로부터 빠지고, 경로는 단추와 겹치지 않는다
-        for w in [150.0, 200.0, 240.0, 280.0, 330.0] {
+        assert!(g.star.w() > 0.0 && g.crumb.r <= g.star.l && g.star.r <= g.head.r);
+        // 경로 글자와 목록 아이콘이 같은 선에서 시작한다
+        assert_eq!(g.crumb.l + CRUMB_PAD, columns(g.list, [140.0, 130.0, 84.0]).name.0 + 4.0);
+        // 좁은 칸: 책갈피가 빠지고, 경로는 칸 밖으로 나가지 않는다
+        for w in [100.0, 150.0, 200.0, 240.0, 330.0] {
             let g = geom(R::new(0.0, 0.0, w, 400.0));
-            assert!(g.crumb.r <= g.new_folder.l - 4.0 + 0.01, "w={w}");
             assert!(g.star.w() == 0.0 || g.crumb.r <= g.star.l, "w={w}");
-            assert!(g.crumb.l >= g.up.r, "w={w}");
+            assert!(g.crumb.l >= 0.0 && g.crumb.r <= w, "w={w}");
+            assert!(addr_rect(&g).r <= w, "w={w}");
         }
-        assert!(geom(R::new(0.0, 0.0, 240.0, 400.0)).back.w() == 0.0);
+        assert!(geom(R::new(0.0, 0.0, 120.0, 400.0)).star.w() == 0.0);
         let cols = |w: f32| columns(R::new(0.0, 0.0, w, 400.0), [140.0, 130.0, 84.0]);
         assert!(cols(420.0).modified.is_some() && cols(420.0).size.is_none(), "date outlives size");
         assert!(cols(600.0).kind.is_some() && cols(600.0).size.is_some());

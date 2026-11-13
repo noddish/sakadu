@@ -12,7 +12,7 @@ use std::path::Path;
 const W: f32 = 1280.0;
 const H: f32 = 800.0;
 
-/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 일곱 가지 × 밝은·어두운 테마를 out에 그린다
+/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 여덟 가지 × 밝은·어두운 테마를 out에 그린다
 pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let root = util::normalize(&demo.to_string_lossy());
     let d = |rel: &str| rel.split('/').fold(root.clone(), |p, s| util::join(&p, s));
@@ -91,6 +91,12 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         a.navigate(0, Location::Dir(d("다운로드")), None);
         a.settle();
         shots.push(("one", a));
+
+        // 아이콘 보기: 왼쪽은 보통 아이콘, 오른쪽은 목록
+        let mut a = base(favs.clone());
+        a.set_view(0, sakadu::pane::ViewMode::Medium);
+        a.set_view(1, sakadu::pane::ViewMode::List);
+        shots.push(("icons", a));
 
         // 경로 입력 중 (오른쪽 칸), 왼쪽 칸 칩 줄에는 없는 경로 알림
         let mut a = base(favs.clone());

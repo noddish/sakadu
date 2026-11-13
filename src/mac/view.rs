@@ -2,7 +2,7 @@
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인은 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다.
 //! 끝낼 때 화면 상태(세션)를 저장하고, 다음에 그대로 연다
 
-use crate::app::{App, Key, LIGHTS_BOTTOM, Mods};
+use crate::app::{App, Key, LIGHTS_BOTTOM, MenuKind, Mods};
 use sakadu::ui::ROW_H;
 use crate::gfx::Gfx;
 use dispatch2::DispatchQueue;
@@ -12,9 +12,9 @@ use objc2::runtime::{Bool, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
-    NSColorSpace, NSControl, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
-    NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
+    NSTextField, NSTextFieldDelegate, NSTextView, NSTitlebarSeparatorStyle, NSToolbar, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 use sakadu::draw::Color;
@@ -96,11 +96,28 @@ define_class!(
             self.sync_field();
         }
 
+        /// 제목 표시줄 자리까지 이 뷰가 덮고 있다. 기본값(true)이면 그 자리의 클릭이 창 끌기로만 쓰여 도구 막대 단추가 눌리지 않는다
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool {
+            false
+        }
+
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, e: &NSEvent) {
             let (x, y) = self.point(e);
             let m = mods(e);
             let clicks = e.clickCount().max(1) as usize;
+            // 도구 막대의 빈 곳: 끌면 창이 움직이고, 두 번 누르면 확대·축소 (제목 표시줄과 같게)
+            if with_app(|a| a.drag_zone(&self.ivars().measure, x, y)).unwrap_or(false) {
+                if let Some(w) = self.window() {
+                    if clicks == 2 {
+                        w.performZoom(None);
+                    } else {
+                        w.performWindowDragWithEvent(e);
+                    }
+                }
+                return;
+            }
             with_app(|a| a.mouse_down(&self.ivars().measure, x, y, m, clicks));
             self.after_input();
         }
@@ -156,6 +173,15 @@ define_class!(
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&objc2::runtime::AnyObject>) {
             with_app(App::select_all);
+            self.after_input();
+        }
+
+        /// 도구 막대 메뉴에서 고른 줄. tag = 메뉴 종류 × 100 + 줄 번호
+        #[unsafe(method(pickMenu:))]
+        fn pick_menu(&self, sender: &NSMenuItem) {
+            let tag = sender.tag();
+            let kind = if tag >= 100 { MenuKind::View } else { MenuKind::Layout };
+            with_app(|a| a.pick_menu(kind, (tag % 100) as usize));
             self.after_input();
         }
 
@@ -226,7 +252,7 @@ impl SakaduView {
         (p.x as f32, p.y as f32)
     }
 
-    /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다
+    /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다. 메뉴를 열어 달라고 했으면 연다
     fn after_input(&self) {
         pump();
         if let (Some(w), Some(title)) = (self.window(), with_app(|a| a.title())) {
@@ -234,6 +260,30 @@ impl SakaduView {
         }
         self.sync_field();
         self.setNeedsDisplay(true);
+        if let Some((kind, anchor)) = with_app(|a| a.take_menu()).flatten() {
+            self.pop_menu(kind, anchor);
+        }
+    }
+
+    /// 도구 막대 단추 아래에 맥 기본 메뉴를 연다: 이름, 지금 것에 체크. 고르면 pickMenu:로 온다.
+    /// 메뉴가 떠 있는 동안 이 함수는 돌아오지 않으므로 App을 빌린 채로 부르지 않는다
+    fn pop_menu(&self, kind: MenuKind, anchor: sakadu::draw::R) {
+        let mtm = self.mtm();
+        let Some(items) = with_app(|a| a.menu_items(kind)) else { return };
+        let menu = NSMenu::new(mtm);
+        let base = if kind == MenuKind::View { 100 } else { 0 };
+        for (i, (title, on)) in items.iter().enumerate() {
+            // 보기 방식 여섯 가지와 숨김 항목 보기 사이에 구분선
+            if kind == MenuKind::View && i == items.len() - 1 {
+                menu.addItem(&NSMenuItem::separatorItem(mtm));
+            }
+            let it = unsafe { menu.addItemWithTitle_action_keyEquivalent(&NSString::from_str(title), Some(sel!(pickMenu:)), &NSString::from_str("")) };
+            unsafe { it.setTarget(Some(self)) };
+            it.setTag(base + i as isize);
+            it.setState(if *on { NSControlStateValueOn } else { NSControlStateValueOff });
+        }
+        // 뷰는 위아래를 뒤집어 쓰므로(왼쪽 위가 0) 단추 아래 끝이 곧 메뉴의 위
+        menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(anchor.l as f64, anchor.b as f64 + 4.0), Some(self));
     }
 
     /// 경로 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 칸의 경로 자리에 보이고 키 입력을 받는다
@@ -328,6 +378,8 @@ fn key_of(code: u16) -> Option<Key> {
     Some(match code {
         0x7E => Key::Up,
         0x7D => Key::Down,
+        0x7B => Key::Left,
+        0x7C => Key::Right,
         0x73 => Key::Home,
         0x77 => Key::End,
         0x74 => Key::PageUp,
@@ -424,7 +476,7 @@ impl Delegate {
     }
 }
 
-/// 모양 2의 창: 제목 표시줄을 투명하게 하고 내용이 창 전체를 쓴다 (신호등은 사이드바 위에 겹친다).
+/// 창: 제목 표시줄을 투명하게 하고 내용이 창 전체를 쓴다 (신호등은 사이드바 위에 겹친다).
 /// start가 있으면 그 폴더에서 시작한다 (없으면 홈)
 fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindow> {
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
@@ -433,6 +485,11 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitlebarAppearsTransparent(true);
     window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    // 빈 도구 막대를 달면 제목 표시줄이 도구 막대 높이(52)가 되어, 신호등이 우리가 그리는 도구 막대 단추와 같은 높이에 온다.
+    // 최신 macOS에서는 도구 막대가 있는 창의 모서리가 Finder처럼 더 둥글다
+    window.setToolbar(Some(&NSToolbar::new(mtm)));
+    window.setToolbarStyle(NSWindowToolbarStyle::Unified);
+    window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
     window.setContentMinSize(NSSize::new(760.0, 420.0));
     window.center();
     let _ = window.setFrameAutosaveName(&NSString::from_str("SakaduMain"));
