@@ -34,7 +34,7 @@ pub struct CardGeom {
     pub close: R,
 }
 
-/// panes: 보이는 칸(번호, 자리), active: 지금 칸(고른 파일이 있는 칸), large: 크게 보기(칸을 거의 채운다).
+/// panes: 보이는 칸(번호, 자리), active: 지금 칸(고른 파일이 있는 칸), large: 크게 보기(놓인 칸을 채운다. 지금 칸이면 이름 자리는 남긴다).
 /// 놓을 만한 칸이 없으면(좁거나 낮으면) None
 pub fn card_geom(panes: &[(usize, R)], active: usize, large: bool) -> Option<CardGeom> {
     let small_h = BODY_H + FOOT_H;
@@ -43,10 +43,13 @@ pub fn card_geom(panes: &[(usize, R)], active: usize, large: bool) -> Option<Car
     let mut others: Vec<&(usize, R)> = panes.iter().filter(|(i, r)| *i != active && fits(r, false)).collect();
     others.sort_by(|a, b| (b.1.b, b.1.r).partial_cmp(&(a.1.b, a.1.r)).unwrap_or(std::cmp::Ordering::Equal));
     let (host, r) = *others.first().copied().or_else(|| panes.iter().find(|(i, r)| *i == active && fits(r, true)))?;
+    // 지금 칸에 놓을 때는 왼쪽의 이름 자리를 늘 남긴다: 작은 카드는 그만큼 좁아지고, 큰 카드도 이름 자리 오른쪽만 채운다
+    // (고른 파일의 이름이 보이고, 이름을 눌러 다른 파일로 옮겨 갈 수 있게)
+    let left = r.l + CARD_MARGIN + if host == active { NAME_ROOM } else { 0.0 };
     let card = if large {
-        r.inset(CARD_MARGIN, CARD_MARGIN)
+        R::new(left, r.t + CARD_MARGIN, r.r - CARD_MARGIN, r.b - CARD_MARGIN)
     } else {
-        let w = CARD_W.min(r.w() - 2.0 * CARD_MARGIN);
+        let w = CARD_W.min(r.r - CARD_MARGIN - left);
         R::new(r.r - CARD_MARGIN - w, r.b - CARD_MARGIN - small_h, r.r - CARD_MARGIN, r.b - CARD_MARGIN)
     };
     let foot = R::new(card.l, card.b - FOOT_H, card.r, card.b);
@@ -198,6 +201,15 @@ mod tests {
         assert_eq!(m.host, 0);
         assert!(m.card.l - wide[0].1.l >= NAME_ROOM);
         assert_eq!(card_geom(&[(0, R::new(52.0, 52.0, 452.0, 804.0))], 0, false), None, "too narrow to keep the names visible");
+        // 겨우 들어가는 폭(448~511): 카드가 좁아져 이름 자리를 남긴다. 크게 봐도 이름 자리는 남는다
+        for w in [448.0, 460.0, 511.0, 512.0, 700.0] {
+            let pane = R::new(52.0, 52.0, 52.0 + w, 804.0);
+            for large in [false, true] {
+                let m = card_geom(&[(0, pane)], 0, large).unwrap();
+                assert!(m.card.l - pane.l >= NAME_ROOM + CARD_MARGIN, "w={w} large={large}: {}", m.card.l - pane.l);
+                assert!(m.card.w() >= MIN_W && m.card.r == pane.r - CARD_MARGIN, "w={w} large={large}");
+            }
+        }
         assert_eq!(card_geom(&[(0, R::new(52.0, 52.0, 1256.0, 300.0))], 0, false), None, "too short");
         // 좁은 다른 칸에는 카드가 그 칸 폭에 맞춰 줄어든다
         let narrow = [(0usize, R::new(52.0, 52.0, 700.0, 804.0)), (1usize, R::new(708.0, 52.0, 968.0, 804.0))];
