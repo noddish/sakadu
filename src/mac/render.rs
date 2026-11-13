@@ -12,6 +12,8 @@ use std::path::Path;
 
 const W: f32 = 1280.0;
 const H: f32 = 800.0;
+/// 그림판의 배율 (레티나처럼 2배로 그린다). 썸네일도 이 배율에 맞춰 읽는다
+const SCALE: f32 = 2.0;
 
 /// 미리 보기 카드 장면에 쓰는 데모 파일 (사진/제주살이 안에 만든다)
 const DEMO_PICTURE: &str = "협재 노을.bmp";
@@ -98,6 +100,7 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         let base = |favs: Favorites, spaces: bool| {
             let mut a = App::new(W, H, theme, &root, favs, places.clone());
             a.standalone = true;
+            a.scale = SCALE;
             a.navigate(0, Location::Dir(d("업무/2026 4분기")), None);
             a.navigate(1, Location::Dir(d("다운로드")), None);
             a.settle();
@@ -162,10 +165,13 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         a.settle();
         shots.push(("one", a));
 
-        // 아이콘 보기: 왼쪽은 보통 아이콘, 오른쪽은 목록
+        // 아이콘 보기: 왼쪽은 보통 아이콘(사진 폴더. 그림 파일은 썸네일로 보인다), 오른쪽은 목록.
+        // 썸네일은 settle이 바로 읽는다. CI가 만드는 내용 없는 jpg는 읽히지 않아 파일 아이콘으로 남는다
         let mut a = base(favs.clone(), true);
+        a.navigate(0, Location::Dir(d("사진/제주살이")), None);
         a.set_view(0, sakadu::pane::ViewMode::Medium);
         a.set_view(1, sakadu::pane::ViewMode::List);
+        a.settle();
         shots.push(("icons", a));
 
         // 경로 입력 중 (오른쪽 칸), 왼쪽 칸 칩 줄에는 없는 경로 알림
@@ -193,7 +199,7 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         shots.push(("preview-text", preview(DEMO_NOTE)));
 
         for (name, a) in shots {
-            let mut g = Gfx::bitmap(W, H, 2.0).ok_or("그림판을 만들지 못함")?;
+            let mut g = Gfx::bitmap(W, H, SCALE).ok_or("그림판을 만들지 못함")?;
             a.paint(&mut g);
             let path = out.join(format!("{name}-{}.png", if dark { "dark" } else { "light" }));
             g.save_png(&path)?;
