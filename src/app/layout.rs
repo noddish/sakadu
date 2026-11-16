@@ -12,10 +12,19 @@ impl App {
         R::new(l, WORKBAR_H, right.max(l + 100.0), (self.h - MARGIN).max(WORKBAR_H + 100.0))
     }
 
-    /// 도구 막대 단추 자리: 작업 공간 레일 오른쪽부터 창 단추 앞까지.
-    /// 패널을 고정해도 밀리지 않는다 (패널을 여닫을 때 단추가 움직이지 않게)
+    /// 도구 막대에 둘 것과 양 끝: 첫 칸의 왼쪽 가장자리부터 창 단추 앞까지 (맥과 같다).
+    /// 레일과 고정한 패널 위는 비워 둔다 (앱 아이콘만 있고 나머지는 창을 끄는 자리)
+    pub(super) fn toolbar_spec(&self) -> ToolbarSpec {
+        self.toolbar_spec_at(self.panes_left())
+    }
+
+    /// 왼쪽 끝을 left로 놓았을 때의 도구 막대 (패널 너비를 정할 때는 패널 자리를 모르는 채로 필요한 폭만 묻는다)
+    pub(super) fn toolbar_spec_at(&self, left: f32) -> ToolbarSpec {
+        ToolbarSpec { left, right: self.caption_left() - 8.0, up: true, new_folder: true, preview: true, search: true }
+    }
+
     pub(super) fn toolbar(&self) -> ToolbarGeom {
-        toolbar_geom(&ToolbarSpec { left: BAR_W + MARGIN, right: self.caption_left() - 8.0, up: true, new_folder: true, preview: true, search: true, more: true })
+        toolbar_geom(&self.toolbar_spec())
     }
 
     /// 도구 막대에 보일 이름: 지금 칸의 폴더
@@ -177,7 +186,6 @@ impl App {
                 (m.new_folder, if start { Hit::None } else { Hit::NewFolder(p) }),
                 (m.preview, Hit::PreviewButton),
                 (m.search, Hit::SearchButton),
-                (m.more, Hit::More),
             ];
             return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);
         }

@@ -41,12 +41,19 @@ pub enum Font {
     Caption,
     /// 텍스트 파일 미리 보기: 고정폭, 줄바꿈, 위쪽 정렬
     Mono,
-    /// 설정 창 쪽 제목
+    /// 제목: 도구 막대의 폴더 이름, 작업 공간 이름, 설정 쪽 제목 (15, 굵게)
     Title,
     /// 설명·작은 안내
     Small,
     /// 이동 화살표(뒤로·앞으로·위로)용 아이콘: 도구 아이콘(Glyph, 16px)과 장식(GlyphSmall, 10px) 사이
     GlyphMid,
+    /// 구역 이름: 사이드바의 '모든 공간', 설정 카드 머리 (11)
+    Label,
+}
+
+impl Font {
+    /// 글꼴 가짓수. 그리는 쪽(Windows gfx, 맥 gfx)의 글꼴 표가 이 순서와 개수를 따른다
+    pub const COUNT: usize = Font::Label as usize + 1;
 }
 
 /// 색 (각 성분 0~1, 알파는 미리 곱하지 않음). Direct2D `D2D1_COLOR_F`와 같은 배치라 Windows에서는 그대로 바꿔 넘긴다

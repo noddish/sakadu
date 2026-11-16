@@ -42,6 +42,17 @@ impl App {
         self.w - 3.0 * CAPTION_BTN_W
     }
 
+    /// 왼쪽 위 앱 아이콘: 레일 아이콘과 같은 세로줄, 도구 막대 단추와 같은 높이
+    pub(super) fn app_icon_rect(&self) -> R {
+        let (cx, cy) = (BAR_W / 2.0, WORKBAR_H / 2.0);
+        R::new(cx - 10.0, cy - 10.0, cx + 10.0, cy + 10.0)
+    }
+
+    pub(super) fn paint_app_icon(&mut self) {
+        let (r, c) = (self.app_icon_rect(), self.theme.text);
+        self.gfx.app_icon(r, c);
+    }
+
     fn caption_rect(&self, b: CaptionButton) -> R {
         let i = CaptionButton::ALL.iter().position(|x| *x == b).unwrap_or(0) as f32;
         let l = self.caption_left() + i * CAPTION_BTN_W;
@@ -80,11 +91,16 @@ impl App {
         if y >= WORKBAR_H {
             return None;
         }
+        // 앱 아이콘은 Windows 기본 창 메뉴 자리다 (누르면 창 메뉴, 두 번 누르면 닫기)
+        if self.view_menu.is_none() && self.cmd.is_none() && self.app_icon_rect().inset(-4.0, -4.0).contains(x, y) {
+            return Some(HTSYSMENU);
+        }
         // 팝업이 열려 있으면 빈 곳을 눌러 닫을 수 있게 그대로 둔다
         if self.view_menu.is_some() {
             return None;
         }
         match self.hit(x, y) {
+            // 설정 창의 줄(Row)은 끄는 자리가 아니다: 마우스가 올라간 줄을 알아야 설명을 띄운다
             Hit::None | Hit::Set(settings_ui::SetHit::Panel) => Some(HTCAPTION),
             _ => None,
         }

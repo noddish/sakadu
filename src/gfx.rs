@@ -15,7 +15,8 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FO
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::Controls::{HIMAGELIST, ILD_NORMAL, ImageList_GetIcon};
-use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetClientRect};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetClientRect, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW};
 use windows::core::{BOOL, HSTRING, PCWSTR, Result, w};
 
 /// 공통 화면 코드(sakadu::ui)가 쓰는 그리기: 같은 이름의 메서드를 그대로 부른다
@@ -75,6 +76,8 @@ pub struct Gfx {
     brush: Option<ID2D1SolidColorBrush>,
     fonts: Vec<IDWriteTextFormat>,
     icons: HashMap<i32, ID2D1Bitmap>,
+    /// 왼쪽 위 앱 아이콘 (지금 배율에 맞춘 것)
+    app_icon: Option<ID2D1Bitmap>,
     /// 키 → (비트맵, 마지막으로 그린 순번)
     thumbs: HashMap<String, (ID2D1Bitmap, u64)>,
     clock: u64,
@@ -155,6 +158,7 @@ impl Gfx {
                 brush: None,
                 fonts,
                 icons: HashMap::new(),
+                app_icon: None,
                 thumbs: HashMap::new(),
                 clock: 0,
                 imagelist,
@@ -256,7 +260,7 @@ fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextF
             mono.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
             mono.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK)?;
             // Font 순서와 같게
-            Ok(vec![
+            let fonts = vec![
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false)?,
                 make(ui, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
@@ -266,10 +270,13 @@ fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextF
                 path,
                 caption,
                 mono,
-                make(ui, 24.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
+                make(ui, 15.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
                 make(ui, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
                 make(icons, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false)?,
-            ])
+                make(ui, 11.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
+            ];
+            debug_assert_eq!(fonts.len(), Font::COUNT);
+            Ok(fonts)
         }
     }
 }
@@ -319,6 +326,7 @@ impl Gfx {
     pub fn discard(&mut self) {
         *self.layer.get_mut() = None;
         self.icons.clear();
+        self.app_icon = None;
         self.thumbs.clear();
         self.brush = None;
         self.rt = None;
@@ -336,6 +344,7 @@ impl Gfx {
         self.dpi = dpi;
         // 아이콘·썸네일 비트맵은 DPI에 따라 크기가 달라지므로 새로 만든다
         self.icons.clear();
+        self.app_icon = None;
         self.thumbs.clear();
         if let Some(rt) = &self.rt {
             unsafe { rt.SetDpi(dpi, dpi) };
@@ -547,6 +556,43 @@ impl Gfx {
         let bmp = &self.icons[&index];
         unsafe {
             self.rt().DrawBitmap(bmp, Some(&d2d(r)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+        }
+    }
+
+    /// 앱 아이콘을 색 c로 r에 그린다. 아이콘은 한 가지 색 그림이라 모양(알파)만 쓰고 색은 붓으로 칠한다
+    /// (밝은 테마에서는 어둡게, 어두운 테마에서는 밝게)
+    pub fn app_icon(&mut self, r: R, c: Color) {
+        if self.rt.is_none() {
+            return;
+        }
+        if self.app_icon.is_none() {
+            self.app_icon = self.make_app_icon((r.w() * self.dpi / 96.0).round() as i32);
+        }
+        let Some(bmp) = &self.app_icon else { return };
+        unsafe {
+            let rt = self.rt();
+            // 불투명도 마스크는 계단 현상 방지를 끈 상태에서만 칠할 수 있다
+            rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            rt.FillOpacityMask(bmp, self.brush(c), D2D1_OPACITY_MASK_CONTENT_GRAPHICS, Some(&d2d(r)), None);
+            rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        }
+    }
+
+    /// 실행 파일에 넣어 둔 앱 아이콘(리소스 1)을 px 크기로 읽는다
+    fn make_app_icon(&self, px: i32) -> Option<ID2D1Bitmap> {
+        unsafe {
+            let module = GetModuleHandleW(None).ok()?;
+            // 리소스 번호 1 (build.rs): 주소가 아니라 번호를 포인터 자리에 넣어 넘긴다
+            let handle = LoadImageW(Some(module.into()), PCWSTR(std::ptr::without_provenance(1)), IMAGE_ICON, px, px, LR_DEFAULTCOLOR).ok()?;
+            let hicon = HICON(handle.0);
+            let bmp = (|| -> Result<ID2D1Bitmap> {
+                let src = self.wic.CreateBitmapFromHICON(hicon)?;
+                let conv = self.wic.CreateFormatConverter()?;
+                conv.Initialize(&src, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeMedianCut)?;
+                self.rt().CreateBitmapFromWicBitmap(&conv, None)
+            })();
+            let _ = DestroyIcon(hicon);
+            bmp.ok()
         }
     }
 

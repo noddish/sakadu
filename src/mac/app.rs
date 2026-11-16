@@ -1920,7 +1920,7 @@ impl App {
     /// 새 폴더·검색은 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
     fn toolbar(&self) -> ToolbarGeom {
         let a = self.area();
-        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: true, search: false, more: false })
+        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: true, search: false })
     }
 
     /// 탭 칩 자리와 새 탭(+) 자리 (app.rs chips와 같다: 오른쪽 항목 수 자리 앞까지, 넘치면 지금 탭을 지킨다)
@@ -2280,7 +2280,7 @@ impl App {
             g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
         } else if let Some(name) = self.workspaces.current_name() {
             let title = self.side_title();
-            g.text(name, R::new(title.l + 10.0, title.t, title.r - 8.0, title.b), Font::Strong, t.text);
+            g.text(name, R::new(title.l + 10.0, title.t, title.r - 8.0, title.b), Font::Title, t.text);
         }
 
         let dir = self.panes[self.active].tab().loc.dir();
@@ -2296,7 +2296,7 @@ impl App {
                 // 구역 이름: 위에 얇은 선, 그 아래 작은 글자
                 SideKind::Label => {
                     g.fill(R::new(r.l + 10.0, r.t, r.r - 10.0, r.t + 1.0), alpha(t.text, 0.08));
-                    g.text(&row.label, R::new(r.l + 10.0, r.t + 4.0, r.r - 8.0, r.b), Font::Small, t.faint);
+                    g.text(&row.label, R::new(r.l + 10.0, r.t + 4.0, r.r - 8.0, r.b), Font::Label, t.faint);
                 }
                 SideKind::Group(_, collapsed) => {
                     side_row_bg(g, t, r, false, hovered);

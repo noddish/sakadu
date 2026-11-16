@@ -35,6 +35,8 @@ pub mod glyph {
     pub const G_BACK: u16 = 0xE72B;
     pub const G_FWD: u16 = 0xE72A;
     pub const G_UP: u16 = 0xE74A;
+    /// 도구 막대의 뒤로: 왼쪽 꺾쇠 (앞으로는 G_CHEVRON, 위로는 G_SORT_UP)
+    pub const G_CHEVRON_LEFT: u16 = 0xE76B;
     pub const G_ADD: u16 = 0xE710;
     pub const G_CLOSE: u16 = 0xE8BB;
     pub const G_CHEVRON: u16 = 0xE76C;

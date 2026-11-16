@@ -61,6 +61,7 @@ fn symbol_name(code: u16) -> &'static str {
         0xE74A => "arrow.up",
         0xE710 => "plus",
         0xE8BB => "xmark",
+        0xE76B => "chevron.left",
         0xE76C => "chevron.right",
         0xE70D => "chevron.down",
         0xE70E => "chevron.up",
@@ -164,10 +165,12 @@ impl Gfx {
             font(13.0, false),
             font(12.0, false),
             NSFont::monospacedSystemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular }),
-            font(24.0, false),
+            font(15.0, true),
             font(12.0, false),
             font(12.0, false),
+            font(11.0, false),
         ];
+        debug_assert_eq!(fonts.len(), Font::COUNT);
         Gfx { ctx, ns, fonts }
     }
 

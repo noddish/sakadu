@@ -6,7 +6,7 @@
 use crate::gfx::{Font, Gfx, R};
 pub(crate) use sakadu::ui::glyph::*;
 pub(crate) use sakadu::ui::*;
-pub(crate) use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, draw_view_icon, paint_toolbar, toolbar_geom};
+pub(crate) use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, draw_view_icon, paint_toolbar, toolbar_geom, toolbar_need};
 use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time, list_dir};
 use crate::pane::*;
 use crate::shell::{self, FileOp, key_down, list_computer};
@@ -153,8 +153,6 @@ enum Hit {
     SidePanel,
     /// 고정한 패널의 오른쪽 가장자리 (너비 조절)
     SideResize,
-    /// 작업 줄 오른쪽 `…` (도움말·설정·정보 메뉴)
-    More,
     /// 검색 패널의 "이 폴더도 검색하기" 버튼
     PalAddFolder,
     /// 도구 막대의 검색 단추
@@ -177,8 +175,8 @@ enum Hit {
     PreviewPin,
     /// 미리 보기 머리의 열기 (기본 앱으로)
     PreviewOpen,
-    /// 미리 보기의 고정 칩 (누르면 핀과 같다)
-    PreviewChip,
+    /// 미리 보기 머리의 이름 자리 (누르면 아무 일도 없고, 올려 두면 그림 크기·날짜·위치가 뜬다)
+    PreviewHead,
     /// 자동 미리 보기 카드: 크게 보기 단추, 닫기 단추, 카드의 그 밖의 곳 (아래 칸을 누르지 않게 잡는다. 누르면 크게·작게)
     CardExpand,
     CardClose,
@@ -305,8 +303,6 @@ pub enum Deferred {
     Settings { ctl: settings_ui::Ctl, index: usize, pt: POINT },
     /// 검색 결과 오른쪽 버튼 메뉴
     PalMenu { pt: POINT },
-    /// 작업 줄 `…` 메뉴 (도움말·설정·정보)
-    MoreMenu { pt: POINT },
     /// 새 탭 시작 화면 항목의 메뉴. 위치는 메뉴를 열 때 정해 둔다
     StartMenu { pane: usize, item: start::StartItem, loc: Location, pt: POINT },
     /// 작업 공간 목록 메뉴 (레일의 + 를 우클릭: 모든 작업 공간·새로 만들기·이름 바꾸기·지우기)
