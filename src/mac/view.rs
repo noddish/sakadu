@@ -442,8 +442,9 @@ fn read_clipboard() -> (Vec<String>, bool) {
         let Some(url) = NSURL::URLWithString(&text) else { continue };
         // Finder는 파일 번호로 된 주소를 줄 때가 있다: 경로로 된 주소로 바꿔 읽는다
         let url = url.filePathURL().unwrap_or(url);
+        // 경로는 받은 글자 그대로 쓴다 (사용자가 친 경로처럼 다듬으면 이름 끝의 공백이나 따옴표가 잘려 다른 파일이 된다)
         if let Some(path) = url.path() {
-            out.push(sakadu::util::normalize(&path.to_string()));
+            out.push(path.to_string());
         }
     }
     (out, cut)

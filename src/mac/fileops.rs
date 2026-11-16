@@ -186,10 +186,6 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
     }
 }
 
-/// 복사하는 동안 받는 쪽에 두는 임시 이름의 꼬리. 다 복사한 뒤에 제 이름으로 바꾼다:
-/// 하다 만 복사가 다 된 것처럼 제 이름으로 남지 않게
-const COPYING: &str = ".sakadu-copying";
-
 /// dir이 폴더 folder 자신이거나 그 안인지 (링크와 대소문자를 풀어 실제 경로로 본다). 받는 폴더를 읽지 못하면 아니라고 본다
 /// (그때는 복사가 제 오류로 실패한다)
 fn inside(dir: &str, folder: &str) -> bool {
@@ -220,7 +216,7 @@ fn copy_item(src: &str, dir: &str, file_id: u64) -> Result<Done, Fail> {
     // 임시 이름: 같은 임시 이름이 남아 있으면(앞서 하다 만 것) 건드리지 않고 번호를 붙인다
     let mut temp = None;
     for n in 1..1000 {
-        let candidate = util::join(dir, &fileops::numbered(&format!("{name}{COPYING}"), n));
+        let candidate = util::join(dir, &fileops::staging_name(name, n));
         if std::fs::symlink_metadata(&candidate).is_ok() {
             continue;
         }
@@ -566,6 +562,14 @@ mod tests {
         assert_eq!(names(&dir), ["받는 곳", "원본"]);
         // 원본은 그대로다
         assert_eq!((std::fs::read(&src).unwrap(), names(&from)), (b"report".to_vec(), vec!["보고서.docx".to_string()]));
+        // 길이 한도에 닿는 이름도 복사된다 (임시 이름이 한도를 넘지 않는다). 이름 끝의 공백도 그대로 간다
+        for name in ["a".repeat(fileops::NAME_MAX), format!("{}.txt", "가".repeat(83)), "끝에 공백 ".to_string()] {
+            let long = util::join(&from, &name);
+            std::fs::write(&long, b"long").unwrap();
+            assert!(matches!(run(&Job::Copy { src: long, dir: to.clone(), file_id: 0 }), Ok(Done::Copied { name: made, renamed: false, .. }) if made == name), "{} bytes", name.len());
+            assert_eq!(std::fs::read(util::join(&to, &name)).unwrap(), b"long");
+        }
+        assert!(!names(&to).iter().any(|n| n.contains("sakadu-copying")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
