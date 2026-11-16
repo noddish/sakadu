@@ -357,12 +357,20 @@ define_class!(
         /// 놓았다: 그 자리의 폴더로 옮기거나 복사하기 시작한다
         #[unsafe(method(performDragOperation:))]
         fn perform_drag(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-            let paths = board_paths(&sender.draggingPasteboard());
-            let p = self.convertPoint_fromView(sender.draggingLocation(), None);
-            let how = drop_kind(sender.draggingSourceOperationMask());
-            let started = with_app(|a| a.drop_paths(&self.ivars().measure, p.x as f32, p.y as f32, paths, how)).unwrap_or(false);
-            self.after_input();
-            started
+            match drop_kind(sender.draggingSourceOperationMask()) {
+                Some(how) => {
+                    let paths = board_paths(&sender.draggingPasteboard());
+                    let p = self.convertPoint_fromView(sender.draggingLocation(), None);
+                    let started = with_app(|a| a.drop_paths(&self.ivars().measure, p.x as f32, p.y as f32, paths, how)).unwrap_or(false);
+                    self.after_input();
+                    started
+                }
+                // 복사도 옮기기도 허락되지 않은 끌기(⌥⌘: 가상본 만들기)는 받지 않는다
+                None => {
+                    self.refuse_drag();
+                    false
+                }
+            }
         }
 
         #[unsafe(method(draggingEnded:))]
@@ -432,16 +440,27 @@ impl SakaduView {
     /// 끌려 온 것이 지금 어디에 놓일지 App에 묻고(그 자리를 강조한다), 놓으면 무엇을 할지 돌려준다:
     /// 복사면 마우스에 더하기 표시가 붙고, 놓을 수 없는 곳이면 아무것도 하지 않는다
     fn drag_over(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        // 복사도 옮기기도 허락되지 않은 끌기(⌥⌘: 가상본 만들기)는 받지 않는다: 놓일 곳도 강조하지 않는다
+        let Some(how) = drop_kind(sender.draggingSourceOperationMask()) else {
+            self.refuse_drag();
+            return NSDragOperation::None;
+        };
         let paths = board_paths(&sender.draggingPasteboard());
         let p = self.convertPoint_fromView(sender.draggingLocation(), None);
         let dir = with_app(|a| a.drag_over(&self.ivars().measure, p.x as f32, p.y as f32, &paths)).flatten();
         self.setNeedsDisplay(true);
         let (Some(dir), Some(first)) = (dir, paths.first()) else { return NSDragOperation::None };
-        match drop_kind(sender.draggingSourceOperationMask()) {
+        match how {
             Paste::Copy => NSDragOperation::Copy,
             Paste::Drop if !same_volume(first, &dir) => NSDragOperation::Copy,
             _ => NSDragOperation::Move,
         }
+    }
+
+    /// 받지 않는 끌기: 앞서 강조해 둔 놓일 곳이 있으면 지운다 (끄는 중에 누른 키가 바뀌면 받던 끌기가 받지 않는 끌기가 된다)
+    fn refuse_drag(&self) {
+        with_app(App::drag_exit);
+        self.setNeedsDisplay(true);
     }
 
     /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다. 메뉴를 열어 달라고 했으면 연다
@@ -550,14 +569,17 @@ fn read_clipboard() -> (Vec<String>, Option<isize>) {
 
 /// 끌어다 놓을 때 누른 키에 따라 무엇을 할지. 맥은 누른 키에 맞춰 끌어 낸 쪽이 허락한 일을 줄여서 알려 준다:
 /// ⌥를 누르면 복사만 남고, ⌘를 누르면 옮기기만 남는다. 아무 키도 누르지 않았으면 디스크에 따라 정한다
-/// (같은 디스크면 옮기고 다른 디스크면 복사)
-fn drop_kind(allowed: NSDragOperation) -> Paste {
+/// (같은 디스크면 옮기고 다른 디스크면 복사).
+/// 복사도 옮기기도 남지 않았으면 None: 받지 않는다. ⌥⌘를 누르면 가상본 만들기만 남는데, 그것은 사카두에 없는 일이다
+/// (그때 옮겨 버리면 가상본을 바랐는데 원본이 자리를 뜬다)
+fn drop_kind(allowed: NSDragOperation) -> Option<Paste> {
     let copy = allowed.0 & NSDragOperation::Copy.0 != 0;
     let moving = allowed.0 & (NSDragOperation::Move.0 | NSDragOperation::Generic.0) != 0;
     match (copy, moving) {
-        (true, false) => Paste::Copy,
-        (false, true) => Paste::Move,
-        _ => Paste::Drop,
+        (true, true) => Some(Paste::Drop),
+        (true, false) => Some(Paste::Copy),
+        (false, true) => Some(Paste::Move),
+        (false, false) => None,
     }
 }
 
@@ -1015,4 +1037,27 @@ pub fn run() {
     let delegate = Delegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 끌어 낸 쪽이 허락한 일에서 할 일을 고른다. 복사도 옮기기도 없으면 받지 않는다
+    #[test]
+    fn drop_kind_follows_what_the_source_allows() {
+        let mask = |ops: &[NSDragOperation]| NSDragOperation(ops.iter().fold(0, |all, op| all | op.0));
+        // 아무 키도 누르지 않았다: 사카두가 끌어 낸 것(복사, 옮기기), Finder가 끌어 낸 것(모두)
+        assert_eq!(drop_kind(mask(&[NSDragOperation::Copy, NSDragOperation::Move, NSDragOperation::Generic])), Some(Paste::Drop));
+        assert_eq!(drop_kind(NSDragOperation::Every), Some(Paste::Drop));
+        // ⌥: 복사만 남는다. ⌘: 옮기기만 남는다
+        assert_eq!(drop_kind(NSDragOperation::Copy), Some(Paste::Copy));
+        assert_eq!(drop_kind(mask(&[NSDragOperation::Copy, NSDragOperation::Link])), Some(Paste::Copy));
+        assert_eq!(drop_kind(NSDragOperation::Generic), Some(Paste::Move));
+        assert_eq!(drop_kind(NSDragOperation::Move), Some(Paste::Move));
+        // ⌥⌘: 가상본 만들기만 남는다. 옮기지도 복사하지도 않는다
+        assert_eq!(drop_kind(NSDragOperation::Link), None);
+        assert_eq!(drop_kind(NSDragOperation::None), None);
+        assert_eq!(drop_kind(mask(&[NSDragOperation::Link, NSDragOperation::Delete, NSDragOperation::Private])), None);
+    }
 }
