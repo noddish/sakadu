@@ -6,7 +6,7 @@
 use crate::gfx::{Font, Gfx, R};
 pub(crate) use sakadu::ui::glyph::*;
 pub(crate) use sakadu::ui::*;
-pub(crate) use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, draw_view_icon, paint_toolbar, toolbar_geom, toolbar_need};
+pub(crate) use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, draw_view_icon, paint_toolbar, search_field_parts, toolbar_geom, toolbar_need};
 use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time, list_dir};
 use crate::pane::*;
 use crate::shell::{self, FileOp, key_down, list_computer};
@@ -157,6 +157,8 @@ enum Hit {
     PalAddFolder,
     /// 도구 막대의 검색 단추
     SearchButton,
+    /// 도구 막대에서 입력 칸으로 늘어난 검색의 돋보기와 둘레 (누르면 키보드를 입력 상자로. 글자 자리는 입력 상자가 직접 받는다)
+    SearchField,
     PalRow(usize),
     PalInstall,
     /// 검색 패널 머리의 닫기

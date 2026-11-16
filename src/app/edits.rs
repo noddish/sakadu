@@ -78,9 +78,10 @@ impl App {
         let edit_h = 20.0;
         let center = |b: R, lp: f32, rp: f32| R::new(b.l + lp, b.t + (b.h() - edit_h) / 2.0, b.r - rp, b.t + (b.h() + edit_h) / 2.0);
         self.place_filter_edit(true);
-        // 다른 패널이 잠깐 가리는 동안 검색 상자는 숨기지 않고 화면 밖에 둔다 (숨기면 키보드 포커스가 메인 창으로 가 버린다)
-        let search_at = if self.pal_visible() {
-            Some(center(self.pal_input_rect(), 4.0, 4.0))
+        // 검색 상자는 도구 막대의 입력 칸 자리에 둔다. 명령 메뉴가 화면을 덮는 동안은 숨기지 않고 화면 밖에 둔다
+        // (그 위로 비쳐 보이지 않게. 숨기면 키보드 포커스가 메인 창으로 가 버린다)
+        let search_at = if self.pal_shown() && self.cmd.is_none() {
+            Some(center(self.pal_input_rect(), 0.0, 0.0))
         } else if self.pal_shown() {
             Some(R::new(-4000.0, -4000.0, -3800.0, -3980.0))
         } else {

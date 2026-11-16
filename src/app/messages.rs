@@ -469,13 +469,13 @@ impl App {
             return;
         }
         // 떠 있는 패널 밖을 누르면 패널은 닫고, 누른 것은 그대로 처리한다
-        if self.side_floating() && !matches!(hit, Hit::Side(_) | Hit::SidePin | Hit::SidePanel | Hit::Rail(_) | Hit::RailAdd | Hit::SearchButton | Hit::SettingsButton) {
+        if self.side_floating() && !matches!(hit, Hit::Side(_) | Hit::SidePin | Hit::SidePanel | Hit::Rail(_) | Hit::RailAdd | Hit::SearchButton | Hit::SearchField | Hit::SettingsButton) {
             self.close_peek();
         }
         let ctrl = key_down(VK_CONTROL);
         let shift = key_down(VK_SHIFT);
         // 검색 패널 밖을 누르면 키보드는 검색 상자에서 칸으로 (패널과 결과는 그대로)
-        if self.pal_focus && !matches!(hit, Hit::PalRow(_) | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalClose | Hit::SidePanel | Hit::SearchButton) {
+        if self.pal_focus && !matches!(hit, Hit::PalRow(_) | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalClose | Hit::SidePanel | Hit::SearchButton | Hit::SearchField) {
             self.pal_blur();
         }
         // 메뉴가 열려 있으면 메뉴 밖 클릭은 메뉴를 닫기만 한다 (보기 방식·칸 나누기 단추는 아래에서 닫거나 다른 메뉴로 바꾼다)
@@ -511,6 +511,7 @@ impl App {
             }
             Hit::PalRow(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalScope(_) => self.pal_mouse_down(hit, dbl),
             Hit::PalClose => self.close_palette(),
+            Hit::SearchField => self.pal_focus_input(),
             Hit::NewFolder(p) => self.new_folder(p),
             Hit::PreviewButton => self.toggle_auto_preview(),
             Hit::CardExpand | Hit::Card => self.toggle_card_large(),

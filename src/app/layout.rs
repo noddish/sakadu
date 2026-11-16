@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// 도구 막대의 검색 입력 칸이 넉넉할 때의 폭
+const SEARCH_FIELD_W: f32 = 240.0;
+
 impl App {
     // ---------- 레이아웃 ----------
 
@@ -20,7 +23,9 @@ impl App {
 
     /// 왼쪽 끝을 left로 놓았을 때의 도구 막대 (패널 너비를 정할 때는 패널 자리를 모르는 채로 필요한 폭만 묻는다)
     pub(super) fn toolbar_spec_at(&self, left: f32) -> ToolbarSpec {
-        ToolbarSpec { left, right: self.caption_left() - 8.0, up: true, new_folder: true, preview: true, search: true }
+        // 검색이 열려 있으면 돋보기 자리가 입력 칸으로 늘어난다
+        let search_w = if self.pal_shown() { SEARCH_FIELD_W } else { 0.0 };
+        ToolbarSpec { left, right: self.caption_left() - 8.0, up: true, new_folder: true, preview: true, search: true, search_w }
     }
 
     pub(super) fn toolbar(&self) -> ToolbarGeom {
@@ -175,6 +180,15 @@ impl App {
             // 도구 막대: 뒤로·앞으로·위로·새 폴더·보기 방식은 지금 칸에 대해 움직인다
             let m = self.toolbar();
             let p = self.active;
+            // 입력 칸으로 늘어난 검색: 닫기 단추, 나머지 둘레는 입력 칸 (빈 곳으로 두면 창을 끄는 자리가 된다)
+            if let Some((_, _, close)) = search_field_parts(&m) {
+                if close.contains(x, y) {
+                    return Hit::PalClose;
+                }
+                if m.search.contains(x, y) {
+                    return Hit::SearchField;
+                }
+            }
             // 시작 화면에는 보기 방식과 새 폴더가 없다
             let start = self.panes[p].tab().loc == Location::Start;
             let hits = [

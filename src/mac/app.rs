@@ -1920,7 +1920,7 @@ impl App {
     /// 새 폴더·검색은 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
     fn toolbar(&self) -> ToolbarGeom {
         let a = self.area();
-        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: true, search: false })
+        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: true, search: false, search_w: 0.0 })
     }
 
     /// 탭 칩 자리와 새 탭(+) 자리 (app.rs chips와 같다: 오른쪽 항목 수 자리 앞까지, 넘치면 지금 탭을 지킨다)
@@ -2347,6 +2347,7 @@ impl App {
                 view_ok: true,
                 preview_on: self.auto_preview,
                 search_on: false,
+                search_focus: false,
                 layout_open: self.menu == Some(MenuKind::Layout),
                 view_open: self.menu == Some(MenuKind::View),
                 hover,
