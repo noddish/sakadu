@@ -1,6 +1,6 @@
 //! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름, 항목 이름).
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인·미리 보기 카드의 그림과 글 읽기·아이콘 보기의 썸네일 읽기는
-//! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다. 파일 작업(새 폴더, 이름 바꾸기)은 뒷줄 하나가 맡긴 순서대로 하나씩 한다.
+//! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다. 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 되돌리기)은 뒷줄 하나가 맡긴 순서대로 하나씩 한다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods};
@@ -141,7 +141,8 @@ define_class!(
         }
 
         /// 오른쪽 단추: 작업 공간 아이콘이면 그 공간의 메뉴 (색, 이름 바꾸기, 지우기),
-        /// 사이드바의 고정한 줄이나 즐겨찾기 항목이면 그 줄의 메뉴 (옮기기, '모든 공간'에 두고 빼기, 고정 풀기)
+        /// 사이드바의 고정한 줄이나 즐겨찾기 항목이면 그 줄의 메뉴 (옮기기, '모든 공간'에 두고 빼기, 고정 풀기),
+        /// 목록의 줄이면 고른 항목들의 메뉴 (열기, Finder에서 보기, 이름 바꾸기, 휴지통으로 이동), 목록의 빈 곳이면 새 폴더와 새로 고침
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, e: &NSEvent) {
             let (x, y) = self.point(e);
@@ -209,7 +210,24 @@ define_class!(
             self.after_input();
         }
 
-        /// 메뉴(도구 막대 단추, 작업 공간 아이콘, 사이드바 줄)에서 고른 줄. tag에 메뉴 종류와 줄 번호가 들어 있다 (MenuKind::tag)
+        /// 편집 메뉴의 실행 취소(⌘Z): 키 입력이 목록에 있을 때 가장 나중에 한 파일 작업(이름 바꾸기, 새 폴더, 휴지통)을 되돌린다.
+        /// 이름이나 경로를 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라 친 글자를 되돌린다:
+        /// 이 뷰가 받지 않았을 때 창이 하던 대로, 창의 되돌리기 관리자에 넘긴다
+        #[unsafe(method(undo:))]
+        fn undo(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            if with_app(|a| a.edit != crate::app::Editing::None).unwrap_or(false) {
+                if let Some(typed) = self.undoManager()
+                    && typed.canUndo()
+                {
+                    typed.undo();
+                }
+                return;
+            }
+            with_app(App::undo);
+            self.after_input();
+        }
+
+        /// 메뉴(도구 막대 단추, 작업 공간 아이콘, 사이드바 줄, 목록)에서 고른 줄. tag에 메뉴 종류와 줄 번호가 들어 있다 (MenuKind::tag)
         #[unsafe(method(pickMenu:))]
         fn pick_menu(&self, sender: &NSMenuItem) {
             let Some((kind, item)) = MenuKind::from_tag(sender.tag()) else { return };
@@ -375,8 +393,17 @@ fn redraw() {
 /// 쌓인 폴더 읽기 요청은 뒷줄에서 읽어 메인 줄로 돌려받고, 열어 달라는 파일은 macOS '열기'로 연다
 /// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다). 미리 보기 카드의 그림과 글도 뒷줄에서 읽는다
 fn pump() {
-    let Some((reqs, probes, previews, files, ops)) = with_app(|a| (a.take_requests(), a.take_probes(), a.take_previews(), std::mem::take(&mut a.open_files), a.take_ops())) else { return };
+    let Some((reqs, probes, previews, files, ops, reveal)) =
+        with_app(|a| (a.take_requests(), a.take_probes(), a.take_previews(), std::mem::take(&mut a.open_files), a.take_ops(), std::mem::take(&mut a.reveal_files)))
+    else {
+        return;
+    };
     run_ops(ops);
+    // Finder에서 보기: Finder를 앞으로 불러 그 항목들을 고른다
+    if !reveal.is_empty() {
+        let urls: Vec<Retained<NSURL>> = reveal.iter().map(|f| NSURL::fileURLWithPath(&NSString::from_str(f))).collect();
+        NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&urls));
+    }
     let mut picture = false;
     for r in previews {
         LATEST_PREVIEW.store(r.seq, Ordering::Relaxed);
@@ -506,6 +533,8 @@ fn key_of(code: u16) -> Option<Key> {
         0x35 => Key::Esc,
         // Return과 숫자판의 Enter
         0x24 | 0x4C => Key::Return,
+        // 지우기(⌫)
+        0x33 => Key::Delete,
         0x31 => Key::Char(' '),
         0x00 => Key::Char('a'),
         0x25 => Key::Char('l'),
@@ -655,7 +684,8 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
     window
 }
 
-/// 앱 메뉴: Sakadu(정보·가리기·끝내기), 편집(입력 상자의 실행 취소·복사·붙여넣기·모두 선택), 윈도(최소화·확대/축소)
+/// 앱 메뉴: Sakadu(정보·가리기·끝내기), 편집(실행 취소·오려두기·복사·붙여넣기·모두 선택), 윈도(최소화·확대/축소).
+/// 편집 메뉴의 줄은 키 입력을 가진 쪽이 받는다: 입력 상자에서는 글자에, 목록에서는 실행 취소가 파일 작업 되돌리기, 전체 선택이 모든 줄 고르기
 fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
     let item = |menu: &NSMenu, title: &str, action: Sel, key: &str, mods: Option<NSEventModifierFlags>| {
         let it = unsafe { menu.addItemWithTitle_action_keyEquivalent(&NSString::from_str(title), Some(action), &NSString::from_str(key)) };

@@ -1,5 +1,5 @@
-//! 맥 파일 작업의 바탕: 화면과 상관없는 판단(이름 규칙, 번호 붙인 이름, 이름에서 확장자 앞부분, 실패한 까닭을 알리는 말)과
-//! 파일을 실제로 건드리는 가장 작은 호출들(폴더 만들기, 덮어쓰지 않는 이름 바꾸기, 파일 번호 읽기).
+//! 맥 파일 작업의 바탕: 화면과 상관없는 판단(이름 규칙, 번호 붙인 이름, 이름에서 확장자 앞부분, 실패한 까닭을 알리는 말,
+//! 되돌리기 기록)과 파일을 실제로 건드리는 가장 작은 호출들(폴더 만들기, 덮어쓰지 않는 이름 바꾸기, 파일 번호 읽기).
 //! 맥 앱(src/mac)이 쓴다. Windows 앱의 파일 작업은 셸로 따로 한다 (app/file_ops.rs).
 //! 원칙 두 가지: 덮어쓰지 않는다 (같은 이름이 있으면 실패한다). 파일을 없애는 호출은 여기에 두지 않는다
 
@@ -73,6 +73,92 @@ pub fn make_dir_numbered(parent: &str, base: &str) -> io::Result<String> {
         }
     }
     Err(io::Error::from(io::ErrorKind::AlreadyExists))
+}
+
+/// 휴지통으로 보낸 항목 하나
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trashed {
+    /// 원래 있던 폴더 안에서의 이름
+    pub name: String,
+    pub file_id: u64,
+    /// 휴지통 안에서의 경로. 모르면 비어 있다 (그 항목은 되돌릴 수 없다)
+    pub trash_path: String,
+}
+
+/// 되돌릴 수 있는 파일 작업 하나 (맥 앱의 것. Windows 앱은 undo.rs를 쓴다).
+/// 되돌릴 때는 그 항목이 그때의 그 항목인지(파일 번호) 다시 보고, 덮어쓰지 않으며, 만든 것을 없앨 때도 휴지통으로 보낸다
+#[derive(Debug, Clone, PartialEq)]
+pub enum Undo {
+    /// dir 안에서 from을 to로 이름을 바꿨다
+    Rename { dir: String, from: String, to: String, file_id: u64 },
+    /// dir 안에 name 폴더를 만들었다
+    NewFolder { dir: String, name: String, file_id: u64 },
+    /// dir 안의 항목들을 휴지통으로 보냈다
+    Trash { dir: String, items: Vec<Trashed> },
+}
+
+impl Undo {
+    /// 무엇을 되돌리는지 (알림에 쓴다)
+    pub fn label(&self) -> String {
+        match self {
+            Undo::Rename { from, .. } => format!("이름을 ‘{from}’(으)로 되돌렸어요"),
+            Undo::NewFolder { name, .. } => format!("만든 폴더 ‘{name}’을(를) 휴지통으로 보냈어요"),
+            Undo::Trash { items, .. } => format!("{}개를 휴지통에서 되돌려 놓았어요", items.len()),
+        }
+    }
+}
+
+/// 되돌리기 기록에 남겨 두는 작업 수 (넘으면 가장 오래된 것부터 잊는다)
+pub const UNDO_MAX: usize = 100;
+
+/// 되돌리기 기록: 가장 나중에 한 작업부터 꺼낸다
+#[derive(Debug, Default)]
+pub struct UndoStack {
+    list: std::collections::VecDeque<Undo>,
+}
+
+impl UndoStack {
+    pub fn push(&mut self, undo: Undo) {
+        self.list.push_back(undo);
+        if self.list.len() > UNDO_MAX {
+            self.list.pop_front();
+        }
+    }
+
+    pub fn pop(&mut self) -> Option<Undo> {
+        self.list.pop_back()
+    }
+
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+}
+
+/// 폴더가 비었는지. Finder가 폴더마다 남기는 .DS_Store만 있으면 빈 것으로 본다.
+/// 만든 폴더를 되돌릴 때 쓴다: 그사이 무엇이 들어왔으면 함께 휴지통으로 보내지 않는다
+pub fn dir_is_empty(path: &str) -> io::Result<bool> {
+    for item in std::fs::read_dir(path)? {
+        if item?.file_name() != ".DS_Store" {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// 그 항목이 다른 볼륨이 붙은 자리(마운트 지점)인지: 놓여 있는 폴더와 볼륨이 다르다.
+/// 디스크 자체를 휴지통으로 보내려는 것을 막는다. 알 수 없으면 false
+#[cfg(unix)]
+pub fn is_mount_point(path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(parent) = util::parent(path) else { return true };
+    match (std::fs::symlink_metadata(path), std::fs::symlink_metadata(&parent)) {
+        (Ok(a), Ok(b)) => a.dev() != b.dev(),
+        _ => false,
+    }
 }
 
 /// 그 경로에 있는 항목 자체의 파일 번호 (링크면 가리키는 것이 아니라 링크의 번호).
@@ -202,6 +288,52 @@ mod tests {
         assert_eq!(reason(&io::Error::from(io::ErrorKind::PermissionDenied)), "권한이 없어요");
         assert_eq!(reason(&io::Error::from(io::ErrorKind::AlreadyExists)), "같은 이름이 이미 있어요");
         assert!(!reason(&io::Error::other("이상한 오류")).is_empty());
+    }
+
+    /// 되돌리기 기록: 나중 것부터 나오고, 100개를 넘으면 가장 오래된 것을 잊는다
+    #[test]
+    fn undo_stack_is_last_in_first_out_and_bounded() {
+        let made = |n: usize| Undo::NewFolder { dir: "/t".into(), name: format!("폴더 {n}"), file_id: n as u64 };
+        let mut s = UndoStack::default();
+        assert!(s.is_empty() && s.pop().is_none());
+        for n in 0..UNDO_MAX + 5 {
+            s.push(made(n));
+        }
+        assert_eq!(s.len(), UNDO_MAX);
+        assert_eq!(s.pop(), Some(made(UNDO_MAX + 4)));
+        let mut last = None;
+        while let Some(u) = s.pop() {
+            last = Some(u);
+        }
+        assert_eq!(last, Some(made(5)), "the five oldest were forgotten");
+        // 알림 글
+        let trashed = |name: &str| Trashed { name: name.into(), file_id: 1, trash_path: String::new() };
+        assert!(Undo::Rename { dir: "/t".into(), from: "a.txt".into(), to: "b.txt".into(), file_id: 1 }.label().contains("a.txt"));
+        assert!(Undo::Trash { dir: "/t".into(), items: vec![trashed("a"), trashed("b")] }.label().starts_with("2개"));
+    }
+
+    /// 빈 폴더: 아무것도 없거나 .DS_Store뿐일 때. 없는 폴더는 오류
+    #[test]
+    fn a_folder_with_only_ds_store_counts_as_empty() {
+        let dir = temp("empty");
+        assert!(dir_is_empty(&dir).unwrap());
+        std::fs::write(util::join(&dir, ".DS_Store"), b"x").unwrap();
+        assert!(dir_is_empty(&dir).unwrap());
+        std::fs::write(util::join(&dir, "메모.txt"), b"x").unwrap();
+        assert!(!dir_is_empty(&dir).unwrap());
+        assert!(dir_is_empty(&util::join(&dir, "없는 곳")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 마운트 지점: 보통 폴더와 파일은 아니고, 볼륨의 맨 위는 맞다
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_items_are_not_mount_points() {
+        let dir = temp("mount");
+        std::fs::write(util::join(&dir, "a.txt"), b"a").unwrap();
+        assert!(!is_mount_point(&dir) && !is_mount_point(&util::join(&dir, "a.txt")));
+        assert!(is_mount_point("/"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 새 폴더: 같은 이름이 있으면 번호를 올리고, 파일이 그 이름을 쓰고 있어도 건드리지 않는다. 동시에 만들어도 겹치지 않는다
