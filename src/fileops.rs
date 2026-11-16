@@ -150,13 +150,15 @@ pub fn dir_is_empty(path: &str) -> io::Result<bool> {
 }
 
 /// 그 항목이 다른 볼륨이 붙은 자리(마운트 지점)인지: 놓여 있는 폴더와 볼륨이 다르다.
-/// 디스크 자체를 휴지통으로 보내려는 것을 막는다. 알 수 없으면 false
+/// 디스크 자체를 휴지통으로 보내려는 것을 막는다. 알 수 없으면 false.
+/// 항목은 그 자체를 보고(링크면 링크), 놓여 있는 폴더는 링크를 따라가서 본다: 다른 볼륨을 가리키는 링크로 연 폴더에서
+/// 폴더 쪽을 링크 자체로 보면, 그 안의 보통 파일이 모두 마운트 지점으로 보인다
 #[cfg(unix)]
 pub fn is_mount_point(path: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Some(parent) = util::parent(path) else { return true };
-    match (std::fs::symlink_metadata(path), std::fs::symlink_metadata(&parent)) {
-        (Ok(a), Ok(b)) => a.dev() != b.dev(),
+    match (std::fs::symlink_metadata(path), std::fs::metadata(&parent)) {
+        (Ok(item), Ok(folder)) => item.dev() != folder.dev(),
         _ => false,
     }
 }
@@ -352,6 +354,13 @@ mod tests {
         std::fs::write(util::join(&dir, "a.txt"), b"a").unwrap();
         assert!(!is_mount_point(&dir) && !is_mount_point(&util::join(&dir, "a.txt")));
         assert!(is_mount_point("/"));
+        // 다른 볼륨(/dev)을 가리키는 링크로 연 폴더: 그 안의 항목은 마운트 지점이 아니고, /dev 자체는 맞다.
+        // 링크 자체는 놓여 있는 폴더와 같은 볼륨의 항목이다 (휴지통으로 보내면 링크만 간다)
+        if std::fs::metadata("/dev/null").is_ok() && is_mount_point("/dev") {
+            std::os::unix::fs::symlink("/dev", util::join(&dir, "다른 볼륨")).unwrap();
+            assert!(!is_mount_point(&util::join(&util::join(&dir, "다른 볼륨"), "null")));
+            assert!(!is_mount_point(&util::join(&dir, "다른 볼륨")));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
