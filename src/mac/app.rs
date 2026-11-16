@@ -1709,8 +1709,13 @@ impl App {
                         }
                     }
                     Undo::Copy { dir, items } => {
-                        for (_, file_id) in items {
+                        // 휴지통으로 간 복사본만: 고른 것에서 빼고, 그 안을 보던 탭은 남아 있는 위 폴더로 올린다
+                        for (name, file_id) in items {
+                            if left.iter().any(|(kept, _)| kept == name) {
+                                continue;
+                            }
                             self.deselect_file(dir, *file_id);
+                            self.tabs_left(&util::join(dir, name), dir);
                         }
                     }
                     Undo::Move { to, items } => {
@@ -4837,9 +4842,14 @@ mod tests {
         assert_eq!(std::fs::read(util::join(&downloads, "예산.csv")).unwrap(), b"mine", "what was there is not replaced");
         assert_eq!(std::fs::read(util::join(&downloads, "예산 2.csv")).unwrap(), b"x");
         assert!(noted(&a, "2개를 복사했어요") && noted(&a, "2개에는 번호를 붙였어요"), "{:?}", a.flash);
-        // 되돌리기: 방금 만든 복사본 둘만 휴지통으로 간다
+        // 되돌리기: 방금 만든 복사본 둘만 휴지통으로 간다. 그 복사본 안을 보던 칸은 위 폴더로 올라간다
+        a.navigate(0, Location::Dir(util::join(&downloads, "2026 4분기 2")), None);
+        a.settle();
+        assert_eq!(names(&a, 0), ["보고서.docx"]);
         a.undo();
         a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(downloads.clone()));
+        assert!(matches!(a.pane(0).tab().state, LoadState::Ready));
         assert_eq!(names(&a, 1), ["2026 4분기", "사진.jpg", "예산.csv"]);
         assert_eq!(std::fs::read(util::join(&downloads, "예산.csv")).unwrap(), b"mine");
         assert!(noted(&a, "복사본 2개를 휴지통으로 보냈어요"), "{:?}", a.flash);
