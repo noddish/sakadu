@@ -37,6 +37,18 @@ pub fn numbered(base: &str, n: usize) -> String {
     if n <= 1 { base.to_string() } else { format!("{base} {n}") }
 }
 
+/// 같은 이름이 있을 때 n번째로 시도할 이름: 처음은 그대로, 그다음부터 번호를 붙인다.
+/// 파일은 확장자 앞에 붙이고("보고서 2.docx"), 폴더와 확장자 없는 이름·점으로 시작하는 이름은 끝에 붙인다
+pub fn numbered_name(name: &str, n: usize, is_dir: bool) -> String {
+    if n <= 1 {
+        return name.to_string();
+    }
+    match name.rfind('.') {
+        Some(i) if i > 0 && !is_dir => format!("{} {n}{}", &name[..i], &name[i..]),
+        _ => format!("{name} {n}"),
+    }
+}
+
 /// 이름을 고칠 때 미리 골라 둘 앞부분의 길이 (UTF-16 단위: 맥과 Windows 입력 상자가 쓰는 단위).
 /// 파일은 확장자 앞까지, 폴더와 확장자 없는 이름·점으로 시작하는 이름은 전체
 pub fn stem_units(name: &str, is_dir: bool) -> usize {
@@ -95,6 +107,8 @@ pub enum Undo {
     NewFolder { dir: String, name: String, file_id: u64 },
     /// dir 안의 항목들을 휴지통으로 보냈다
     Trash { dir: String, items: Vec<Trashed> },
+    /// dir 안에 복사본들(이름, 파일 번호)을 만들었다. 되돌리면 그 복사본들을 휴지통으로 보낸다
+    Copy { dir: String, items: Vec<(String, u64)> },
 }
 
 impl Undo {
@@ -104,6 +118,7 @@ impl Undo {
             Undo::Rename { from, .. } => format!("이름을 ‘{from}’(으)로 되돌렸어요"),
             Undo::NewFolder { name, .. } => format!("만든 폴더 ‘{name}’을(를) 휴지통으로 보냈어요"),
             Undo::Trash { items, .. } => format!("{}개를 휴지통에서 되돌려 놓았어요", items.len()),
+            Undo::Copy { items, .. } => format!("복사본 {}개를 휴지통으로 보냈어요", items.len()),
         }
     }
 }
@@ -295,6 +310,13 @@ mod tests {
     #[test]
     fn numbered_names_and_stems() {
         assert_eq!([1, 2, 3].map(|n| numbered(NEW_FOLDER, n)), ["새 폴더", "새 폴더 2", "새 폴더 3"]);
+        // 복사본의 이름: 파일은 확장자 앞에, 폴더와 확장자 없는 이름은 끝에
+        assert_eq!([1, 2, 10].map(|n| numbered_name("보고서.docx", n, false)), ["보고서.docx", "보고서 2.docx", "보고서 10.docx"]);
+        assert_eq!(numbered_name("archive.tar.gz", 2, false), "archive.tar 2.gz");
+        assert_eq!(numbered_name("README", 2, false), "README 2");
+        assert_eq!(numbered_name(".gitignore", 2, false), ".gitignore 2");
+        assert_eq!(numbered_name("자료.d", 2, true), "자료.d 2");
+        assert!(Undo::Copy { dir: "/t".into(), items: vec![("a".into(), 1)] }.label().contains("복사본 1개"));
         assert_eq!(stem_units("보고서.xlsx", false), 3);
         assert_eq!(stem_units("archive.tar.gz", false), 11);
         assert_eq!(stem_units("README", false), 6);
