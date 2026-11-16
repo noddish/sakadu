@@ -5,10 +5,11 @@ use super::*;
 use crate::keys::{ACTIONS, Action};
 
 const CMD_W: f32 = 560.0;
-const CMD_INPUT_H: f32 = 48.0;
-const CMD_ROW_H: f32 = 36.0;
-const CMD_ROWS: usize = 9;
-const CMD_FOOT_H: f32 = 32.0;
+const CMD_INPUT_H: f32 = 44.0;
+/// 줄 높이는 파일 목록과 같다
+const CMD_ROW_H: f32 = 28.0;
+/// 한 번에 보이는 줄 수 (넘치면 스크롤)
+const CMD_ROWS: usize = 12;
 /// 치기 전에 보여 줄 최근 위치 수
 const RECENT_SHOWN: usize = 5;
 pub(super) const CMD_FADE_MS: f32 = 160.0;
@@ -182,7 +183,7 @@ impl App {
         let c = self.cmd.as_ref()?;
         let w = CMD_W.min(self.w - 96.0).max(280.0);
         let rows = c.items.len().clamp(1, CMD_ROWS) as f32;
-        let h = CMD_INPUT_H + 1.0 + 8.0 + rows * CMD_ROW_H + 8.0 + CMD_FOOT_H;
+        let h = CMD_INPUT_H + 1.0 + 8.0 + rows * CMD_ROW_H + 8.0;
         let top = (self.h * 0.2).max(WORKBAR_H + 8.0).min((self.h - h - MARGIN).max(MARGIN));
         let l = (self.w - w) / 2.0;
         Some(R::new(l, top, l + w, top + h))
@@ -196,7 +197,7 @@ impl App {
 
     fn cmd_list(&self) -> Option<R> {
         let r = self.cmd_rect()?;
-        Some(R::new(r.l + 8.0, r.t + CMD_INPUT_H + 1.0 + 8.0, r.r - 8.0, r.b - 8.0 - CMD_FOOT_H))
+        Some(R::new(r.l + 8.0, r.t + CMD_INPUT_H + 1.0 + 8.0, r.r - 8.0, r.b - 8.0))
     }
 
     /// 명령 메뉴가 열려 있으면 무엇을 눌렀는지 (카드 밖은 닫기)
@@ -225,6 +226,12 @@ impl App {
             Hit::CmdPanel => {}
             _ => self.close_commands(),
         }
+    }
+
+    /// 줄에 마우스를 올려 두면 보여 줄 여는 방법 (카드 아래에 뜬다). 전에는 카드 아래 줄에 늘 적혀 있었다
+    pub(super) fn cmd_tip(&self) -> Option<(R, String)> {
+        let r = self.cmd_rect()?;
+        matches!(self.hover, Hit::CmdRow(_)).then(|| (R::new(r.l, r.b - 8.0, r.r, r.b), "Enter 열기 · Alt+Enter 옆 칸 · Ctrl+Enter 새 탭".to_string()))
     }
 
     pub(super) fn cmd_hover(&mut self, hit: Hit) {
@@ -358,7 +365,6 @@ impl App {
             c.items.iter().map(|it| if let CmdItem::Command(a) = it { self.keys.get(*a).map(|k| k.label()) } else { None }).collect()
         });
         let fade = anim_progress(self.cmd_at, CMD_FADE_MS);
-        let typed = !edit_text(self.cmd_edit).trim().is_empty();
         let App { gfx: g, cmd, .. } = self;
         let Some(c) = cmd.as_ref() else { return };
 
@@ -366,13 +372,13 @@ impl App {
         g.fill(R::new(0.0, 0.0, w, h), Color { r: 0.0, g: 0.0, b: 0.0, a: if t.dark { 0.40 } else { 0.16 } });
         let pushed = fade.is_some_and(|f| g.push_fade(f, 0.0, -(1.0 - f) * 6.0));
         if !t.high_contrast {
-            soft_shadow(g, r, 12.0, 16.0, 0.18, t.dark);
+            soft_shadow(g, r, RADIUS, 16.0, 0.18, t.dark);
         }
-        g.fill_round(r, 12.0, t.pane);
-        g.stroke_round(r.inset(0.5, 0.5), 12.0, t.pane_border, 1.0);
-        // 입력 줄: 돋보기와 (입력 상자는 자식 창), 아래 구분선
-        g.glyph_font(palette::G_SEARCH, R::new(r.l + 16.0, r.t, r.l + 36.0, r.t + CMD_INPUT_H), Font::GlyphMid, t.dim);
-        g.fill(R::new(r.l, r.t + CMD_INPUT_H, r.r, r.t + CMD_INPUT_H + 1.0), t.border);
+        g.fill_round(r, RADIUS, t.pane);
+        g.stroke_round(r.inset(0.5, 0.5), RADIUS, t.pane_border, 1.0);
+        // 입력 줄: 돋보기와 (입력 상자는 자식 창), 아래 가는 선
+        g.glyph(palette::G_SEARCH, R::new(r.l + 16.0, r.t, r.l + 32.0, r.t + CMD_INPUT_H), false, t.dim);
+        g.fill(R::new(r.l, r.t + CMD_INPUT_H, r.r, r.t + CMD_INPUT_H + 1.0), if t.high_contrast { t.border } else { alpha(t.text, 0.07) });
 
         g.clip(list);
         if c.items.is_empty() {
@@ -383,13 +389,14 @@ impl App {
         for i in first..(first + count).min(c.items.len()) {
             let y = list.t + i as f32 * CMD_ROW_H - c.scroll;
             let row = R::new(list.l, y, list.r, y + CMD_ROW_H);
+            // 고른 줄: 파일 목록의 고른 줄과 같은 옅은 강조 색
             if i == c.sel {
-                g.fill_round(row, R_ROW, t.sel_inactive);
+                g.fill_round(row, R_ROW, t.sel);
                 if t.high_contrast {
                     g.stroke_round(row.inset(0.75, 0.75), R_ROW, t.focus, 1.5);
                 }
             }
-            let ir = R::new(row.l + 12.0, y + 10.0, row.l + 28.0, y + 26.0);
+            let ir = R::new(row.l + 12.0, y + 6.0, row.l + 28.0, y + 22.0);
             match (&c.items[i], icons.get(i).copied().unwrap_or(-1)) {
                 (CmdItem::Workspace(..), _) => g.glyph(G_WORKSPACE, ir, false, t.dim),
                 (CmdItem::SearchDisk(_), _) => g.glyph_font(palette::G_SEARCH, ir, Font::GlyphMid, t.dim),
@@ -397,7 +404,7 @@ impl App {
                 (_, icon) if icon >= 0 => g.icon(icon, ir),
                 _ => {}
             }
-            // 이름, 그 뒤에 흐린 위치, 오른쪽에 종류(명령이면 단축키)
+            // 이름, 그 뒤에 흐린 위치. 오른쪽의 종류(명령이면 단축키)는 고른 줄에만 보인다
             let (name, detail, kind): (String, String, String) = match &c.items[i] {
                 CmdItem::Tab { pane, title, path, .. } => (title.clone(), path.clone().unwrap_or_default(), if multi { format!("{}번 칸 탭", pane + 1) } else { "열린 탭".to_string() }),
                 CmdItem::Fav { name, path, .. } => (name.clone(), util::parent(path).unwrap_or_default(), "모든 공간".to_string()),
@@ -412,6 +419,7 @@ impl App {
                 CmdItem::SearchDisk(q) => (format!("‘{q}’ 디스크에서 찾기"), String::new(), "검색".to_string()),
             };
             let right = match keys.get(i).cloned().flatten() {
+                _ if i != c.sel => row.r - 12.0,
                 Some(k) => {
                     let kw = g.measure(&k, Font::Small) + 10.0;
                     palette::kbd(g, &t, row.r - 10.0 - kw, (row.t + row.b) / 2.0, &k);
@@ -419,7 +427,7 @@ impl App {
                 }
                 None if !kind.is_empty() => {
                     let kw = g.measure(&kind, Font::Small);
-                    g.text(&kind, R::new(row.r - 12.0 - kw, row.t, row.r - 12.0, row.b), Font::Small, t.faint);
+                    g.text(&kind, R::new(row.r - 12.0 - kw, row.t, row.r - 12.0, row.b), Font::Small, t.dim);
                     row.r - 12.0 - kw - 12.0
                 }
                 None => row.r - 12.0,
@@ -432,20 +440,6 @@ impl App {
         }
         g.unclip();
 
-        // 아래: 키 안내
-        let foot = R::new(r.l + 16.0, r.b - CMD_FOOT_H, r.r - 16.0, r.b);
-        g.fill(R::new(r.l, foot.t, r.r, foot.t + 1.0), t.border);
-        let cy = (foot.t + foot.b) / 2.0;
-        let mut x = foot.l;
-        for (k, label) in [("Enter", if typed { "열기·실행" } else { "열기" }), ("Alt+Enter", "옆 칸"), ("Ctrl+Enter", "새 탭")] {
-            x = palette::kbd(g, &t, x, cy, k) + 6.0;
-            let lw = g.measure(label, Font::Small);
-            if x + lw > foot.r {
-                break;
-            }
-            g.text(label, R::new(x, foot.t, x + lw + 2.0, foot.b), Font::Small, t.dim);
-            x += lw + 16.0;
-        }
         if pushed {
             g.pop_fade();
         }

@@ -6,7 +6,7 @@ pub use crate::draw::Color;
 /// 둥글기: 팝업, 파일 줄·메뉴 줄, 단추 (칸 카드는 app.rs RADIUS, 칩·고르기 판은 알약)
 pub const R_PANE: f32 = 10.0;
 pub const R_ROW: f32 = 6.0;
-pub const R_CTRL: f32 = 8.0;
+pub const R_CTRL: f32 = 10.0;
 /// 키보드 포커스 테두리 두께
 pub const FOCUS_W: f32 = 1.25;
 

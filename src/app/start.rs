@@ -1,4 +1,5 @@
-//! 새 탭 시작 화면 ("어디로 이동할까요?"): 고정한 폴더(이 공간에 고정한 것과 즐겨찾기) 카드, 최근 위치, 드라이브(내 PC 포함).
+//! 새 탭 시작 화면 ("어디로 이동할까요?"): 고정한 폴더(이 공간에 고정한 것과 즐겨찾기) 칸, 최근 위치, 드라이브(내 PC 포함).
+//! 칸과 줄에는 이름만 보인다. 경로는 마우스를 올리거나 키보드로 고른 줄에, 남은 용량은 말풍선에 보인다.
 //! 칩 줄·경로 줄은 다른 위치와 같고, 그 아래(머리글·목록 자리)를 이 화면이 쓴다.
 //! 자리는 `start_layout` 한 곳에서 정해 그리기·누르기·키보드·스크롤이 같이 쓴다.
 //! 키보드 초점 테두리는 화살표·Enter·필터 글자로 키보드를 쓴 뒤에만 보인다 (탭을 열자마자 첫 카드에 테두리가 생기지 않게)
@@ -11,17 +12,19 @@ const RECENT_SHOWN: usize = 8;
 /// 내용 좌우 여백과 가장 넓을 때의 폭 (넓은 칸에서 카드가 한없이 늘어나지 않게)
 const PAD: f32 = 16.0;
 const MAX_W: f32 = 760.0;
-const CARD_MIN_W: f32 = 150.0;
-const CARD_H: f32 = 64.0;
+const CARD_MIN_W: f32 = 148.0;
+/// 칸: 아이콘과 이름 한 줄 (드라이브는 아래에 사용량 막대)
+const CARD_H: f32 = 40.0;
 const CARD_GAP: f32 = 12.0;
-const CARD_R: f32 = 12.0;
-const LINE_H: f32 = 32.0;
-const TITLE_H: f32 = 36.0;
+const CARD_R: f32 = R_CTRL;
+/// 최근 위치 줄: 파일 목록과 같은 높이
+const LINE_H: f32 = 28.0;
+const TITLE_H: f32 = 20.0;
 /// 시작 화면 영역이 이보다 낮으면 제목을 그리지 않는다
 const TITLE_MIN_AREA_H: f32 = 360.0;
-const SECTION_H: f32 = 24.0;
+const SECTION_H: f32 = 16.0;
 const SECTION_GAP: f32 = 24.0;
-const NOTE_H: f32 = 22.0;
+const NOTE_H: f32 = 20.0;
 const G_COMPUTER: u16 = 0xEC4E;
 
 /// 시작 화면에서 고를 수 있는 것
@@ -109,17 +112,8 @@ impl StartView {
         if self.title.h() > 0.0 {
             g.text("어디로 이동할까요?", self.title, Font::Title, t.text);
         }
-        // 최근 위치: 이름 열 폭을 맞춰 경로가 같은 자리에서 시작하게
-        let name_col = self
-            .items
-            .iter()
-            .filter_map(|(it, r)| match it {
-                StartItem::Recent(path) => Some((g.measure(recent_label(path), Font::Normal) + 4.0).min(r.w() * 0.45)),
-                _ => None,
-            })
-            .fold(0.0f32, f32::max);
         for (label, r) in &self.heads {
-            g.text(label, *r, Font::Small, t.faint);
+            g.text(label, *r, Font::Label, t.faint);
         }
         for (s, r) in &self.notes {
             g.text(s, *r, Font::Small, t.faint);
@@ -131,37 +125,39 @@ impl StartView {
                 continue;
             }
             let hot = hovered == Some(i);
+            let iy = r.t + (r.h() - 16.0) / 2.0;
+            let ic = R::new(r.l + 12.0, iy, r.l + 28.0, iy + 16.0);
             let radius = if let StartItem::Recent(path) = it {
                 if hot {
-                    g.fill_round(r, R_ROW, t.hover);
+                    g.fill_round(r, R_ROW, super::sidebar::hover_fill(t));
                 }
                 // 드라이브 자체(C: 등)는 드라이브 아이콘, 나머지는 폴더 아이콘
                 let drive = places.drives.iter().find(|d| d.path.trim_end_matches('\\').eq_ignore_ascii_case(path.trim_end_matches('\\')));
-                let iy = r.t + (r.h() - 16.0) / 2.0;
-                g.icon(drive.map_or(folder_icon, |d| d.icon), R::new(r.l + 12.0, iy, r.l + 28.0, iy + 16.0));
+                g.icon(drive.map_or(folder_icon, |d| d.icon), ic);
                 let name = recent_label(path);
-                g.text(name, R::new(r.l + 36.0, r.t, r.l + 36.0 + name_col, r.b), Font::Normal, t.text);
-                // 이름 뒤에 어디 있는 폴더인지 흐리게 (길면 가운데를 줄인다)
-                if let Some(parent) = util::parent(path) {
-                    g.text(&parent, R::new(r.l + 36.0 + name_col + 16.0, r.t, r.r - 8.0, r.b), Font::Path, t.faint);
+                let nw = (g.measure(name, Font::Normal) + 4.0).min(r.w() * 0.6);
+                g.text(name, R::new(r.l + 36.0, r.t, r.l + 36.0 + nw, r.b), Font::Normal, t.text);
+                // 어디 있는 폴더인지는 마우스를 올리거나 키보드로 고른 줄에만 (길면 가운데를 줄인다)
+                if (hot || focus == Some(i))
+                    && let Some(parent) = util::parent(path)
+                {
+                    g.text(&parent, R::new(r.l + 36.0 + nw + 12.0, r.t, r.r - 8.0, r.b), Font::Path, t.faint);
                 }
                 R_ROW
             } else {
-                // 카드: 옅은 면과 테두리, 올리면 한 단계 진한 면. 첫 줄 아이콘·이름, 둘째 줄 위치나 남은 용량
+                // 칸: 옅은 면에 아이콘과 이름 한 줄, 올리면 한 단계 진한 면 (고대비에서는 테두리)
+                g.fill_round(r, CARD_R, super::sidebar::seg_track(t));
                 if hot {
                     g.fill_round(r, CARD_R, super::sidebar::hover_fill(t));
                 }
-                g.stroke_round(r.inset(0.5, 0.5), CARD_R, t.border, 1.0);
-                let ic = R::new(r.l + 12.0, r.t + 13.0, r.l + 28.0, r.t + 29.0);
-                let name_r = R::new(r.l + 36.0, r.t + 10.0, r.r - 10.0, r.t + 32.0);
-                let sub_r = R::new(r.l + 36.0, r.t + 32.0, r.r - 10.0, r.t + 50.0);
+                if t.high_contrast {
+                    g.stroke_round(r.inset(0.5, 0.5), CARD_R, t.border, 1.0);
+                }
+                let name_r = R::new(r.l + 36.0, r.t, r.r - 12.0, r.b);
                 match it {
-                    StartItem::Fav { name, path } => {
+                    StartItem::Fav { name, .. } => {
                         g.icon(folder_icon, ic);
                         g.text(name, name_r, Font::Normal, t.text);
-                        if let Some(parent) = util::parent(path) {
-                            g.text(&parent, sub_r, Font::Path, t.faint);
-                        }
                     }
                     StartItem::Computer => {
                         if places.computer_icon >= 0 {
@@ -176,11 +172,9 @@ impl StartView {
                             g.icon(d.icon, ic);
                             g.text(&d.name, name_r, Font::Normal, t.text);
                             if d.total > 0 {
-                                let free = format!("{} 남음", format_size(d.free));
-                                g.text(&free, sub_r, Font::Small, t.faint);
-                                // 쓴 만큼 채운 막대. 거의 찼으면(90% 넘게) 빨간색
+                                // 쓴 만큼 채운 막대 (남은 용량 숫자는 말풍선에). 거의 찼으면(90% 넘게) 빨간색
                                 let used = (1.0 - d.free as f32 / d.total as f32).clamp(0.0, 1.0);
-                                let bar = R::new(r.l + 12.0, r.b - 10.0, r.r - 12.0, r.b - 6.0);
+                                let bar = R::new(r.l + 12.0, r.b - 8.0, r.r - 12.0, r.b - 4.0);
                                 g.fill_round(bar, 2.0, alpha(t.text, 0.10));
                                 let fill = if used > 0.9 { Color { r: 0.80, g: 0.20, b: 0.16, a: 1.0 } } else { t.faint };
                                 g.fill_round(R::new(bar.l, bar.t, bar.l + bar.w() * used, bar.b), 2.0, fill);
@@ -228,7 +222,7 @@ impl App {
         let mut y = top + 16.0;
         let title = if area.h() >= TITLE_MIN_AREA_H { R::new(x0, y, x0 + w, y + TITLE_H) } else { R::new(x0, y, x0 + w, y) };
         if title.h() > 0.0 {
-            y += TITLE_H + 6.0;
+            y += TITLE_H + 12.0;
         }
         let cols = (((w + CARD_GAP) / (CARD_MIN_W + CARD_GAP)).floor() as usize).clamp(1, 4);
         let card_w = ((w - CARD_GAP * (cols - 1) as f32) / cols as f32).max(0.0);
@@ -335,13 +329,16 @@ impl App {
         }
     }
 
-    /// 마우스를 올려 두면 보여 줄 경로
+    /// 마우스를 올려 두면 보여 줄 것: 경로, 드라이브는 남은 용량
     pub(super) fn start_tip(&self, p: usize, i: usize) -> Option<(R, String)> {
         let v = self.start_view(p)?;
         let (it, r) = v.items.get(i)?;
         let text = match it {
             StartItem::Fav { path, .. } | StartItem::Recent(path) => path.clone(),
-            StartItem::Drive(d) => self.places.drives.get(*d)?.path.clone(),
+            StartItem::Drive(d) => {
+                let d = self.places.drives.get(*d)?;
+                if d.total > 0 { format!("{} 남음", format_size(d.free)) } else { d.path.clone() }
+            }
             StartItem::Computer => return None,
         };
         (r.b > v.area.t && r.t < v.area.b).then_some((*r, text))

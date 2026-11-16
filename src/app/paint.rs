@@ -29,12 +29,15 @@ impl App {
         // 설정 창은 창 전체를 덮으니 그 아래는 그리지 않는다
         if self.settings.is_some() {
             self.paint_settings();
+            self.paint_app_icon();
             self.paint_caption();
+            self.paint_tip();
             self.gfx.end();
             return;
         }
         self.paint_bar();
         self.paint_workbar();
+        self.paint_app_icon();
         self.paint_caption();
         let mut missing = Vec::new();
         for (p, r) in self.pane_rects() {
@@ -108,7 +111,7 @@ impl App {
         }
     }
 
-    /// 칸 영역 위 도구 막대: 뒤로·앞으로·위로, 폴더 이름, 칸 나누기·보기 방식, 새 폴더, 자동 미리 보기(눈), 검색, `…`.
+    /// 칸 영역 위 도구 막대: 뒤로·앞으로·위로, 폴더 이름, 칸 나누기·보기 방식, 새 폴더, 자동 미리 보기(눈), 검색.
     /// 창 단추는 paint_caption
     pub(super) fn paint_workbar(&self) {
         let m = self.toolbar();
@@ -125,7 +128,6 @@ impl App {
             Hit::NewFolder(_) => ToolbarHover::NewFolder,
             Hit::PreviewButton => ToolbarHover::Preview,
             Hit::SearchButton => ToolbarHover::Search,
-            Hit::More => ToolbarHover::More,
             _ => ToolbarHover::None,
         };
         let open = self.view_menu.map(|v| v.kind);
@@ -153,8 +155,16 @@ impl App {
 
     /// 단추에 잠시 올려 두면 보여 줄 (버튼 자리, 이름과 단축키)
     pub(super) fn tip(&self) -> Option<(R, String)> {
-        if self.view_menu.is_some() || self.settings.is_some() || self.cmd.is_some() || !matches!(self.drag, Drag::None) {
+        if self.view_menu.is_some() || !matches!(self.drag, Drag::None) {
             return None;
+        }
+        // 명령 메뉴: 여는 방법
+        if self.cmd.is_some() {
+            return self.cmd_tip();
+        }
+        // 설정 창: 줄의 설명
+        if self.settings.is_some() {
+            return self.settings_tip();
         }
         use crate::keys::Action;
         // "이름 (단축키)". 단축키를 비워 두었으면 이름만
@@ -184,10 +194,9 @@ impl App {
             Hit::Rail(i) => (self.rail().spaces.iter().find(|(k, _)| *k == i)?.1, self.workspaces.list.get(i)?.name.clone()),
             Hit::RailAdd => (self.rail().add, "새 작업 공간 (지금 화면으로)".to_string()),
             Hit::SidePin => (self.side_pin_rect()?, (if self.side_floating() { "고정해 두기" } else { "고정 풀기" }).to_string()),
-            Hit::More => (self.toolbar().more, "도움말·설정".to_string()),
             Hit::PalClose => (self.pal_close_rect(), "검색 닫기".to_string()),
             Hit::Start(p, i) => return self.start_tip(p, i),
-            Hit::PreviewPin | Hit::PreviewOpen => return self.preview_tip(),
+            Hit::PreviewPin | Hit::PreviewOpen | Hit::PreviewHead => return self.preview_tip(),
             Hit::CardExpand | Hit::CardClose => return self.card_tip(),
             _ => return None,
         })

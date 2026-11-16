@@ -21,15 +21,11 @@ use windows::core::{GUID, Interface, PWSTR};
 
 pub(super) const PREVIEW_W: f32 = 340.0;
 pub(super) const TIMER_PREVIEW: usize = 30;
-/// 머리: 이름표·단추 줄, 이름 줄, 고정 칩·종류 줄
-const HEAD_H: f32 = 108.0;
-const BAR_H: f32 = 44.0;
+/// 머리: 아이콘, 이름과 그 아래 종류·크기, 오른쪽에 고정·열기 단추 (자동 미리 보기 카드의 아래 줄과 같은 구성).
+/// 그림 크기·수정한 날짜·위치는 이름에 마우스를 올리면 말풍선으로 보인다
+const HEAD_H: f32 = 56.0;
 const BTN: f32 = 28.0;
 const G_OPEN: u16 = 0xE8A7;
-const CHIP_PINNED: &str = "파일 고정";
-const CHIP_FOLLOW: &str = "선택 따라가기";
-/// 아래 정보 줄 (수정한 날짜·위치) 높이
-const INFO_H: f32 = 76.0;
 /// 정보 카드의 그림 크기(DIP)
 const INFO_IMG: f32 = 128.0;
 /// 이 크기 이하면 확장자를 몰라도 텍스트인지 열어 본다
@@ -174,18 +170,19 @@ fn spawn_dims(hwnd: HWND, seq: u64, path: String) {
     });
 }
 
-/// 머리 첫 줄의 단추: (고정, 기본 앱으로 열기)
+/// 머리의 단추: (고정, 기본 앱으로 열기)
 fn head_buttons(pr: R) -> (R, R) {
-    let open = R::new(pr.r - 12.0 - BTN, pr.t + 8.0, pr.r - 12.0, pr.t + 8.0 + BTN);
+    let t = pr.t + (HEAD_H - BTN) / 2.0;
+    let open = R::new(pr.r - 12.0 - BTN, t, pr.r - 12.0, t + BTN);
     let pin = R::new(open.l - 4.0 - BTN, open.t, open.l - 4.0, open.b);
     (pin, open)
 }
 
-/// 고정 칩 (이름 아래 줄 왼쪽)
-fn chip_rect(gfx: &Gfx, pr: R) -> R {
-    let w = gfx.measure(CHIP_PINNED, Font::Small).max(gfx.measure(CHIP_FOLLOW, Font::Small)) + 22.0;
-    let t = pr.t + BAR_H + 28.0;
-    R::new(pr.l + 16.0, t, (pr.l + 16.0 + w).min(pr.r - 16.0), t + 24.0)
+/// 머리의 글자 자리: (이름, 그 아래 종류·크기)
+fn head_text(pr: R) -> (R, R) {
+    let (pin, _) = head_buttons(pr);
+    let (l, r) = (pr.l + 40.0, pin.l - 8.0);
+    (R::new(l, pr.t + 10.0, r, pr.t + 30.0), R::new(l, pr.t + 30.0, r, pr.t + 46.0))
 }
 
 /// 그림 파일 확장자인지 (즐겨찾기 카드의 작은 그림)
@@ -311,11 +308,11 @@ impl App {
         Some(R::new(self.w - MARGIN - self.preview_w(), WORKBAR_H, self.w - MARGIN, (self.h - MARGIN).max(WORKBAR_H + 100.0)))
     }
 
-    /// 머리(아이콘·이름·종류)와 아래 정보 줄 사이
+    /// 머리(아이콘·이름·종류) 아래 전부
     fn preview_body(&self) -> Option<R> {
         self.preview_rect().map(|pr| {
-            let t = pr.t + HEAD_H + 16.0;
-            R::new(pr.l + 16.0, t, pr.r - 16.0, (pr.b - INFO_H - 16.0).max(t + 40.0))
+            let t = pr.t + HEAD_H;
+            R::new(pr.l + 16.0, t, pr.r - 16.0, (pr.b - 16.0).max(t + 40.0))
         })
     }
 
@@ -633,7 +630,7 @@ impl App {
         }
     }
 
-    /// 미리 보기 머리의 단추·칩 (그 밖의 미리 보기 자리는 None: 지금처럼 아무것도 누르지 않는다)
+    /// 미리 보기 머리의 단추와 이름 자리 (그 밖의 미리 보기 자리는 None: 지금처럼 아무것도 누르지 않는다)
     pub(super) fn preview_hit(&self, x: f32, y: f32) -> Option<Hit> {
         let pr = self.preview_rect().filter(|r| r.contains(x, y))?;
         let pv = self.preview.as_ref()?;
@@ -644,8 +641,9 @@ impl App {
         if open.contains(x, y) {
             return Some(Hit::PreviewOpen);
         }
-        if pv.target.is_some() && chip_rect(&self.gfx, pr).contains(x, y) {
-            return Some(Hit::PreviewChip);
+        // 머리의 나머지(아이콘·이름): 누르면 아무 일도 없고, 올려 두면 자세한 정보가 뜬다
+        if pv.target.is_some() && y < pr.t + HEAD_H {
+            return Some(Hit::PreviewHead);
         }
         None
     }
@@ -653,12 +651,25 @@ impl App {
     pub(super) fn preview_tip(&self) -> Option<(R, String)> {
         let pr = self.preview_rect()?;
         let pv = self.preview.as_ref()?;
-        pv.target.as_ref()?;
+        let target = pv.target.as_ref()?;
         let (pin, open) = head_buttons(pr);
         match self.hover {
             Hit::PreviewPin if pv.pin.is_some() => Some((pin, "고정 풀기 · 다시 선택을 따라가요".to_string())),
             Hit::PreviewPin => Some((pin, "이 파일을 고정 · 다른 파일을 골라도 계속 보여요".to_string())),
-            Hit::PreviewOpen => Some((open, if pv.target.as_ref().is_some_and(|t| t.kind == Kind::File) { "기본 앱으로 열기" } else { "열기" }.to_string())),
+            Hit::PreviewOpen => Some((open, if target.kind == Kind::File { "기본 앱으로 열기" } else { "열기" }.to_string())),
+            // 이름: 머리에 늘어놓지 않는 것들 (그림 크기, 수정한 날짜, 위치)
+            Hit::PreviewHead => {
+                let mut parts = Vec::new();
+                if let Some((w, h)) = pv.dims {
+                    parts.push(format!("{w} × {h}"));
+                }
+                let modified = format_time(target.modified);
+                if target.kind != Kind::Drive && !modified.is_empty() {
+                    parts.push(modified);
+                }
+                parts.extend(util::parent(&target.path));
+                (!parts.is_empty()).then(|| (head_text(pr).0, parts.join(" · ")))
+            }
             _ => None,
         }
     }
@@ -700,7 +711,7 @@ impl App {
         let t = self.theme;
         let scale = self.scale();
         let hover = self.hover;
-        let (hwnd, short_dates) = (self.hwnd, self.look.dates != "full");
+        let hwnd = self.hwnd;
         let App { gfx, preview, thumb_failed, .. } = self;
         let Some(pv) = preview.as_mut() else { return };
         if !t.high_contrast && !t.dark {
@@ -710,73 +721,43 @@ impl App {
         if t.high_contrast || t.dark {
             gfx.stroke_round(pr.inset(0.5, 0.5), RADIUS, t.pane_border, 1.0);
         }
-        // 머리 첫 줄: 이름표, 고정(핀)·열기 단추. 고정했으면 핀이 켜진 모양
+        // 머리: 고정(핀)·열기 단추. 고정했으면 핀 단추가 옅은 강조 색으로 켜진다
         let pinned = pv.pin.is_some();
         let (pin_r, open_r) = head_buttons(pr);
-        gfx.text("미리 보기", R::new(pr.l + 16.0, pr.t, pin_r.l - 8.0, pr.t + 44.0), Font::Small, t.faint);
         let has = pv.target.is_some();
         let button_bg = |gfx: &Gfx, r: R, hovered: bool| -> Color {
             if hovered && has {
-                gfx.fill_round(r, R_CTRL, t.hover);
+                gfx.fill_round(r, R_CTRL, sidebar::hover_fill(&t));
             }
             if !has { t.faint } else if hovered { t.text } else { t.dim }
         };
-        let c = button_bg(gfx, pin_r, hover == Hit::PreviewPin);
-        sidebar::draw_pin(gfx, pin_r, pinned, c);
+        if pinned && has && !t.high_contrast {
+            gfx.fill_round(pin_r, R_CTRL, t.accent_soft);
+            sidebar::draw_pin(gfx, pin_r, true, t.chip_text);
+        } else {
+            let c = button_bg(gfx, pin_r, hover == Hit::PreviewPin);
+            sidebar::draw_pin(gfx, pin_r, pinned, c);
+        }
         let c = button_bg(gfx, open_r, hover == Hit::PreviewOpen);
         gfx.glyph(G_OPEN, open_r, false, c);
         let Some(target) = &pv.target else {
-            gfx.text("파일을 선택하면\n여기에서 미리 봐요", R::new(pr.l + 16.0, pr.t + BAR_H + 8.0, pr.r - 16.0, pr.t + BAR_H + 88.0), Font::Hint, t.faint);
+            gfx.text("파일을 선택하면\n여기에서 미리 봐요", R::new(pr.l + 16.0, pr.t + HEAD_H + 8.0, pr.r - 16.0, pr.t + HEAD_H + 88.0), Font::Hint, t.faint);
             return;
         };
-        // 이름 줄: 아이콘, 이름
-        let nt = pr.t + BAR_H;
-        gfx.icon(target.icon, R::new(pr.l + 16.0, nt + 3.0, pr.l + 32.0, nt + 19.0));
-        gfx.text(&target.name, R::new(pr.l + 42.0, nt, pr.r - 16.0, nt + 22.0), Font::Strong, t.text);
-        // 고정 칩(누르면 고정·풀기)과 종류 · 크기 (그림이면 가로×세로까지)
-        let chip = chip_rect(gfx, pr);
-        let chip_hot = hover == Hit::PreviewChip;
-        // 고정됨: 흰 면 + 가는 선 (켜짐 상태는 작업 줄 단추와 같은 모양), 마우스를 대면 옅게 겹친다
-        gfx.fill_round(chip, chip.h() / 2.0, if pinned { t.pane } else { t.field });
-        if chip_hot {
-            gfx.fill_round(chip, chip.h() / 2.0, sidebar::hover_fill(&t));
-        }
-        if t.high_contrast || pinned {
-            gfx.stroke_round(chip.inset(0.5, 0.5), chip.h() / 2.0, t.border, 1.0);
-        }
-        gfx.text(if pinned { CHIP_PINNED } else { CHIP_FOLLOW }, R::new(chip.l + 11.0, chip.t, chip.r - 6.0, chip.b), Font::Small, if pinned { t.text } else { t.dim });
+        // 아이콘, 이름, 그 아래 종류 · 크기 (좁으면 크기만)
+        let (name_r, sub_r) = head_text(pr);
+        gfx.icon(target.icon, R::new(pr.l + 16.0, pr.t + 20.0, pr.l + 32.0, pr.t + 36.0));
+        gfx.text(&target.name, name_r, Font::Strong, t.text);
         let size = matches!(target.kind, Kind::File).then(|| format_size(target.size));
-        let dims = pv.dims.map(|(w, h)| format!("{w} × {h}"));
-        let sub_r = R::new(chip.r + 10.0, chip.t, pr.r - 16.0, chip.b);
-        let join = |parts: &[Option<&str>]| parts.iter().flatten().copied().collect::<Vec<_>>().join(" · ");
-        let tries = [
-            join(&[Some(&target.type_name), size.as_deref(), dims.as_deref()]),
-            join(&[Some(&target.type_name), size.as_deref()]),
-            join(&[size.as_deref().or(Some(&target.type_name))]),
-        ];
-        let sub = tries.iter().find(|s| gfx.measure(s, Font::Small) <= sub_r.w()).unwrap_or(&tries[2]);
-        gfx.text(sub, sub_r, Font::Small, t.dim);
-        gfx.fill(R::new(pr.l, pr.t + HEAD_H - 1.0, pr.r, pr.t + HEAD_H), t.border);
-
-        // 아래 정보 줄: 수정한 날짜, 위치
-        let info = R::new(pr.l, pr.b - INFO_H, pr.r, pr.b);
-        gfx.fill(R::new(pr.l, info.t, pr.r, info.t + 1.0), t.border);
-        let label_w = gfx.measure("수정한 날짜", Font::Small) + 14.0;
-        let mut y = info.t + 16.0;
-        let mut row = |label: &str, value: &str| {
-            if value.is_empty() {
-                return;
-            }
-            gfx.text(label, R::new(info.l + 16.0, y, info.l + 16.0 + label_w, y + 20.0), Font::Small, t.faint);
-            gfx.text(value, R::new(info.l + 16.0 + label_w, y, info.r - 16.0, y + 20.0), Font::Path, t.text);
-            y += 24.0;
+        let both = match &size {
+            Some(s) => format!("{} · {s}", target.type_name),
+            None => target.type_name.clone(),
         };
-        if target.kind != Kind::Drive {
-            let full = format_time(target.modified);
-            let short = if short_dates && target.modified != 0 { crate::listing::format_time_short(target.modified, crate::listing::now_filetime()) } else { String::new() };
-            row("수정한 날짜", &if short.is_empty() || short == full { full } else { format!("{short} · {full}") });
-        }
-        row("위치", &util::parent(&target.path).unwrap_or_default());
+        let sub = match size {
+            Some(s) if gfx.measure(&both, Font::Small) > sub_r.w() => s,
+            _ => both,
+        };
+        gfx.text(&sub, sub_r, Font::Small, t.dim);
 
         // 그림이 있으면 그리고, 없으면 요청 목록에 넣는다
         let mut image = |gfx: &mut Gfx, r: R, px: u32| -> bool {
@@ -808,7 +789,7 @@ impl App {
                 }
             }
             Content::Text(s) => {
-                gfx.fill_round(body, 4.0, t.field);
+                gfx.fill_round(body, R_CTRL, t.field);
                 let w = body.w() - 24.0;
                 if pv.layout.as_ref().is_none_or(|(lw, _)| (*lw - w).abs() > 0.5) {
                     pv.layout = gfx.layout(s, Font::Mono, w).map(|l| (w, l));

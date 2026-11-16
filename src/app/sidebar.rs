@@ -13,8 +13,8 @@ use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, ra
 use sakadu::ui::{SIDE_HEADER_H, SIDE_LABEL_H, side_common_top, side_row_bg};
 
 pub(super) use sakadu::ui::{BAR_W, SIDE_ROW_H, draw_pin, hover_fill, seg_on, seg_track, well};
-/// 레일 첫 아이콘의 위쪽 (도구 막대 단추와 같은 높이)
-const RAIL_TOP: f32 = 10.0;
+/// 레일 첫 아이콘의 위쪽: 도구 막대 높이 아래 (맥과 같다). 그 위는 앱 아이콘 자리다
+const RAIL_TOP: f32 = WORKBAR_H;
 const ROW_L: f32 = 8.0;
 /// 작은 단추 (머리 줄의 핀, '모든 공간' 줄의 추가·정렬·새 그룹)
 const MINI: f32 = 24.0;
@@ -151,9 +151,11 @@ impl App {
         BAR_W + MARGIN + if self.side_pinned.is_some() { self.side_w_shown() } else { 0.0 }
     }
 
-    /// 창이 좁을 때 패널이 차지할 수 있는 가장 넓은 너비: 칸 나누기 판(166)과 작업 줄 오른쪽 단추·창 단추(약 260)가 겹치지 않게
+    /// 창이 좁을 때 패널이 차지할 수 있는 가장 넓은 너비: 패널 오른쪽에서 시작하는 도구 막대에 단추와 폴더 이름(48) 자리가 남게
     pub(super) fn side_w_max(&self) -> f32 {
-        (self.w - BAR_W - MARGIN - 166.0 - 270.0).clamp(session::SIDE_W_RANGE.0, session::SIDE_W_RANGE.1)
+        // 패널 자리(panes_left)가 이 값에 달려 있으므로 왼쪽 끝은 묻지 않는다
+        let spec = self.toolbar_spec_at(0.0);
+        (spec.right - BAR_W - MARGIN - toolbar_need(&spec) - 48.0).clamp(session::SIDE_W_RANGE.0, session::SIDE_W_RANGE.1)
     }
 
     /// 지금 창에서 실제로 보이는 패널 너비 (저장한 너비는 그대로 두고, 창이 좁으면 줄여 보인다)
@@ -955,7 +957,7 @@ impl App {
                 g.fill_round(er, R_ROW, t.pane);
                 g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
             } else {
-                g.text(&name, tr, Font::Strong, t.text);
+                g.text(&name, tr, Font::Title, t.text);
             }
         }
         let mini_btn = |g: &Gfx, r: R, glyph: u16, hovered: bool| {
@@ -1012,7 +1014,7 @@ impl App {
                 Side::CommonHead => {
                     let ly = r.t - COMMON_GAP / 2.0;
                     g.fill(R::new(r.l + 10.0, ly - 0.5, r.r - 2.0, ly + 0.5), if t.high_contrast { t.border } else { alpha(t.text, 0.08) });
-                    g.text("모든 공간", R::new(r.l + 10.0, r.t, r.r - 8.0, r.b), Font::Small, t.faint);
+                    g.text("모든 공간", R::new(r.l + 10.0, r.t, r.r - 8.0, r.b), Font::Label, t.faint);
                     for (m, mr) in &minis {
                         let glyph = match m {
                             Side::FavSort => G_SORT,
@@ -1147,27 +1149,6 @@ pub(super) fn show_side_menu(hwnd: HWND, side: Side, pt: POINT) {
             a.close_peek();
         });
     }
-}
-
-/// 작업 줄 오른쪽 `…` 메뉴: 도움말·설정·정보 (예전 사이드바 아래쪽 줄을 대신한다)
-pub(super) fn show_more_menu(hwnd: HWND, pt: POINT) {
-    use crate::keys::Action;
-    let Some((help, settings)) = with_app(|a| {
-        let label = |act: Action, name: &str| match a.keys.get(act) {
-            Some(c) => format!("{name}\t{}", c.label()),
-            None => name.to_string(),
-        };
-        (label(Action::Help, "도움말"), label(Action::Settings, "설정"))
-    }) else {
-        return;
-    };
-    let cmd = fav_ui::popup_menu(hwnd, pt, &[(1, &help), (2, &settings), (0, ""), (3, "Sakadu 정보")]);
-    with_app(|a| match cmd {
-        1 => a.toggle_settings(settings_ui::Page::Help),
-        2 => a.toggle_settings(settings_ui::Page::General),
-        3 => a.toggle_settings(settings_ui::Page::About),
-        _ => {}
-    });
 }
 
 /// 줄 안에서 이름이 시작하는 x (아이콘·접기 표시 다음). 그룹 안 항목은 들여 쓴다

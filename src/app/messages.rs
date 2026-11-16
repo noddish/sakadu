@@ -458,12 +458,12 @@ impl App {
         if dbl && matches!(hit, Hit::Side(s) if !matches!(s, Side::Fav(_))) {
             return;
         }
-        // 레일 아이콘·핀·`…`·검색 패널 단추도 두 번째 누름은 무시한다 (첫 누름이 연 것을 바로 닫지 않게)
+        // 레일 아이콘·핀·검색 패널 단추도 두 번째 누름은 무시한다 (첫 누름이 연 것을 바로 닫지 않게)
         if dbl
             && matches!(
                 hit,
-                Hit::Rail(_) | Hit::RailAdd | Hit::SidePin | Hit::More | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder
-                    | Hit::PreviewPin | Hit::PreviewChip | Hit::PreviewOpen | Hit::PreviewButton | Hit::CardExpand | Hit::CardClose | Hit::Card
+                Hit::Rail(_) | Hit::RailAdd | Hit::SidePin | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder
+                    | Hit::PreviewPin | Hit::PreviewOpen | Hit::PreviewButton | Hit::CardExpand | Hit::CardClose | Hit::Card
             )
         {
             return;
@@ -515,7 +515,7 @@ impl App {
             Hit::PreviewButton => self.toggle_auto_preview(),
             Hit::CardExpand | Hit::Card => self.toggle_card_large(),
             Hit::CardClose => self.close_card(),
-            Hit::PreviewPin | Hit::PreviewChip => self.toggle_preview_pin(),
+            Hit::PreviewPin => self.toggle_preview_pin(),
             Hit::PreviewOpen => self.preview_open(),
             Hit::SettingsButton => self.toggle_settings(settings_ui::Page::General),
             Hit::Rail(i) => self.rail_click(i),
@@ -523,11 +523,6 @@ impl App {
             Hit::SidePin => self.side_toggle_pin(),
             Hit::SidePanel => {}
             Hit::SideResize => capture(self, Drag::SideW { start_x: x, start_w: self.side_w }),
-            Hit::More => {
-                let r = self.toolbar().more;
-                let pt = self.to_screen(r.l, r.b + 2.0);
-                self.pending.push(Deferred::MoreMenu { pt });
-            }
             Hit::View(p) => self.toggle_view_menu(p),
             Hit::SplitX => capture(self, Drag::SplitX),
             Hit::SplitY => capture(self, Drag::SplitY),

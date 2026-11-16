@@ -1,4 +1,4 @@
-//! 설정 창: 왼쪽에 분류, 오른쪽에 "제목·설명 + 조작" 줄을 카드로 묶어 보여 준다.
+//! 설정 창: 왼쪽에 분류, 오른쪽에 "이름 + 조작" 줄을 카드로 묶어 보여 준다. 설명은 줄에 마우스를 올리면 말풍선으로 보인다.
 //! 창 전체를 덮고 Esc나 ←로 닫는다. F1은 도움말 쪽을 바로 연다
 
 use super::*;
@@ -11,6 +11,16 @@ const SIDE_W_COMPACT: f32 = 60.0;
 const CONTENT_W: f32 = 680.0;
 /// 줄 제목에 남겨 둘 최소 폭. 조작이 이보다 넓게 차지하면 조작을 제목 아래로 내린다
 const LABEL_MIN_W: f32 = 140.0;
+/// 왼쪽 분류가 시작하는 높이: 창 위쪽 빈 자리(앱 아이콘) 아래. 기본 화면의 사이드바와 같은 높이다
+const NAV_TOP: f32 = WORKBAR_H;
+/// 카드 안 줄 높이: 한 줄(이름과 조작), 두 줄(이름과 본문)
+const SET_ROW_H: f32 = 44.0;
+const SET_ROW_H2: f32 = 60.0;
+/// 조작(단추, 고르기 판, 키 칩)의 높이
+const CTL_H: f32 = 28.0;
+/// 스위치
+const TOGGLE_W: f32 = 36.0;
+const TOGGLE_H: f32 = 20.0;
 const ZOOMS: [u32; 5] = [90, 100, 110, 125, 150];
 const THEMES: [(&str, &str); 3] = [("system", "시스템"), ("light", "밝게"), ("dark", "어둡게")];
 /// 글자 표시 (gfx::TextLook의 키)
@@ -70,6 +80,8 @@ pub enum Ctl {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum SetHit {
     Panel,
+    /// 카드 안의 줄 (조작이 아닌 곳). 누르면 아무 일도 없고, 올려 두면 설명이 뜬다
+    Row(usize),
     Back,
     Nav(Page),
     /// 조작과 그 안의 몇 번째 칸(테마·색·크기 버튼, 폴더 줄)
@@ -100,7 +112,8 @@ enum Item {
     Header(R, String),
     Card(R),
     Divider(R),
-    Label { title: R, desc: R, t: String, d: String },
+    /// 줄의 글자. row는 줄 전체 자리(마우스를 올리면 설명이 뜬다), index는 그 쪽에서 몇 번째 줄인지
+    Label { title: R, desc: R, t: String, d: String, status: String, body: bool, row: R, index: usize },
     Toggle { r: R, on: bool, hit: SetHit },
     Seg { r: R, label: String, on: bool, hit: SetHit },
     SegFrame(R),
@@ -123,7 +136,11 @@ enum Widget {
 
 struct Row {
     title: String,
+    /// 설명. 줄에 마우스를 올리면 말풍선으로 보인다 (body면 이름 아래 둘째 줄에 늘 보인다)
     desc: String,
+    /// 이름 옆에 늘 보이는 상태 (훑는 중, 연결 안 됨처럼 지금 어떤지)
+    status: String,
+    body: bool,
     widget: Widget,
 }
 
@@ -133,7 +150,17 @@ struct Card {
 }
 
 fn row(title: impl Into<String>, desc: impl Into<String>, widget: Widget) -> Row {
-    Row { title: title.into(), desc: desc.into(), widget }
+    Row { title: title.into(), desc: desc.into(), status: String::new(), body: false, widget }
+}
+
+/// 상태가 이름 옆에 보이는 줄
+fn row_status(title: impl Into<String>, status: impl Into<String>, desc: impl Into<String>, widget: Widget) -> Row {
+    Row { status: status.into(), ..row(title, desc, widget) }
+}
+
+/// 설명이 곧 내용인 줄 (도움말, 정보): 이름 아래 둘째 줄에 늘 보인다
+fn row_body(title: impl Into<String>, desc: impl Into<String>, widget: Widget) -> Row {
+    Row { body: true, ..row(title, desc, widget) }
 }
 
 impl App {
@@ -255,7 +282,7 @@ impl App {
                         header: String::new(),
                         rows: vec![
                             row("테마", "시스템은 Windows의 앱 모드를 따라가요", Widget::Seg(THEMES.iter().map(|t| t.1.to_string()).collect(), theme, Ctl::Theme)),
-                            row("강조 색", ACCENTS[accent].1, Widget::Swatches(colors, accent)),
+                            row_status("강조 색", ACCENTS[accent].1, "", Widget::Swatches(colors, accent)),
                             row("글꼴", "목록·메뉴·검색 창에 쓰는 글꼴", Widget::Drop(font, Ctl::Font)),
                             row("글자 표시", "흐리면 선명하게, 색 번짐이 거슬리면 회색", Widget::Seg(TEXT_LOOKS.iter().map(|t| t.1.to_string()).collect(), text, Ctl::Text)),
                             row("크기", "화면 전체를 크게 또는 작게", Widget::Seg(ZOOMS.iter().map(|z| format!("{z}%")).collect(), zoom, Ctl::Zoom)),
@@ -271,20 +298,21 @@ impl App {
                     .into_iter()
                     .enumerate()
                     .map(|(i, (path, state))| {
-                        let state = match state {
-                            crate::folders::State::Scanning => "훑는 중".to_string(),
-                            crate::folders::State::Ready(n) => format!("항목 {}개", util::grouped(n as u64)),
-                            crate::folders::State::Offline => "연결 안 됨 · 5분마다 다시 시도해요".to_string(),
+                        // 지금 어떤지(훑는 중, 연결 안 됨)만 이름 옆에 두고, 개수는 말풍선으로
+                        let (status, desc) = match state {
+                            crate::folders::State::Scanning => ("훑는 중", String::new()),
+                            crate::folders::State::Ready(n) => ("", format!("항목 {}개", util::grouped(n as u64))),
+                            crate::folders::State::Offline => ("연결 안 됨", "5분마다 다시 시도해요".to_string()),
                         };
-                        row(path, state, Widget::Button("빼기".into(), Ctl::FolderRemove, i))
+                        row_status(path, status, desc, Widget::Button("빼기".into(), Ctl::FolderRemove, i))
                     })
                     .collect();
-                folders.extend(s.candidates.iter().enumerate().map(|(i, p)| row(p.as_str(), "열어 둔 폴더 · 아직 검색 범위 밖", Widget::Button("넣기".into(), Ctl::FolderAdd, i))));
+                folders.extend(s.candidates.iter().enumerate().map(|(i, p)| row_status(p.as_str(), "아직 검색 범위 밖", "열어 둔 폴더", Widget::Button("넣기".into(), Ctl::FolderAdd, i))));
                 if folders.is_empty() {
-                    folders.push(row("넣은 폴더가 없어요", "공유폴더나 USB를 아무 칸에나 열어 두면 여기서 넣을 수 있어요", Widget::None));
+                    folders.push(row_body("넣은 폴더가 없어요", "공유폴더나 USB를 아무 칸에나 열어 두면 여기서 넣을 수 있어요", Widget::None));
                 }
                 let service = if s.service {
-                    row("검색 서비스", "설치됨 · 이 PC의 NTFS 디스크 전체를 이름으로 바로 찾아요", Widget::Button("제거…".into(), Ctl::Service, 0))
+                    row_status("검색 서비스", "설치됨", "이 PC의 NTFS 디스크 전체를 이름으로 바로 찾아요", Widget::Button("제거…".into(), Ctl::Service, 0))
                 } else {
                     row("검색 서비스", "설치하면 디스크 전체를 바로 찾아요 · 관리자 승인이 한 번 필요해요", Widget::Button("설치…".into(), Ctl::Service, 0))
                 };
@@ -301,7 +329,7 @@ impl App {
                 };
                 let mut actions: Vec<Row> = ACTIONS
                     .iter()
-                    .map(|(a, _, name, _)| row(*name, "", Widget::Key(self.key_label(*a), capturing(Ctl::Key(*a)), Ctl::Key(*a))))
+                    .map(|(a, _, name, _)| row(*name, "누르고 새 키를 누르세요 · Esc 취소 · Backspace 지우기", Widget::Key(self.key_label(*a), capturing(Ctl::Key(*a)), Ctl::Key(*a))))
                     .collect();
                 actions.push(row("기본값으로 되돌리기", "바꾼 단축키를 모두 처음대로", Widget::Button("되돌리기".into(), Ctl::KeysReset, 0)));
                 (
@@ -311,13 +339,13 @@ impl App {
                             header: "어디서든".into(),
                             rows: vec![row("검색 창 띄우기", global_desc, Widget::Key(global, capturing(Ctl::Global), Ctl::Global))],
                         },
-                        Card { header: "Sakadu 안에서 · 줄을 누르고 새 키를 누르세요 (Esc 취소 · Backspace 지우기)".into(), rows: actions },
+                        Card { header: "Sakadu 안에서".into(), rows: actions },
                     ],
                 )
             }
             Page::Help => {
                 let k = |a: Action| self.keys.get(a).map(Combo::label).unwrap_or_else(|| "단축키 없음".into());
-                let tip = |t: &str, d: String| row(t, d, Widget::None);
+                let tip = |t: &str, d: String| row_body(t, d, Widget::None);
                 (
                     "도움말",
                     vec![
@@ -342,7 +370,7 @@ impl App {
                                 tip("새 탭", format!("{} · 즐겨찾기 폴더·최근 위치·드라이브에서 고르기 · 글자를 치고 Enter로 바로", k(Action::NewTab))),
                                 tip("칸 이동", format!("Tab · Shift+Tab, 칸 나누기는 {}", layout_keys(&self.keys))),
                                 tip("되돌리기", format!("{} · 이름 바꾸기·이동·복사·휴지통 삭제를 마지막 것부터 · 작업 뒤 알림의 되돌리기 단추로도", k(Action::Undo))),
-                                tip("명령 메뉴", format!("{} · 열린 탭·즐겨찾기·최근 위치로 가고, 명령을 이름이나 초성으로 찾아 실행해요", k(Action::Commands))),
+                                tip("명령 메뉴", format!("{} · 열린 탭·즐겨찾기·최근 위치로 가고, 명령을 이름이나 초성으로 찾아 실행해요 · Alt+Enter 옆 칸, Ctrl+Enter 새 탭", k(Action::Commands))),
                                 tip("작업 공간", "왼쪽 레일의 공간 아이콘 · 공간마다 화면(칸·탭·패널·미리 보기·검색어)과 고정한 곳, 색을 따로 기억해요 · +로 새 공간, 우클릭으로 이름·색 바꾸기".into()),
                                 tip("자동 미리 보기", format!("그림이나 글 파일을 고르면 다른 칸 아래쪽에 카드로 보여요 · 도구 막대의 눈으로 끄고 켜기 · PDF·Office 문서는 미리 보기 창({})에서", k(Action::Preview))),
                                 tip("미리 보기 고정", format!("{}로 연 미리 보기의 핀 · 다른 파일을 골라도 그 파일을 계속 보고, 같은 드라이브 안에서 이름이 바뀌거나 옮겨져도 따라가요", k(Action::Preview))),
@@ -365,10 +393,10 @@ impl App {
                 vec![Card {
                     header: String::new(),
                     rows: vec![
-                        row(format!("Sakadu {}", env!("CARGO_PKG_VERSION")), "가볍고 빠른 Windows 멀티뷰 파일 관리자", Widget::Button("GitHub".into(), Ctl::GitHub, 0)),
-                        row("새 버전", "새 버전이 나왔는지 릴리스 페이지에서 확인해요", Widget::Button("릴리스 열기".into(), Ctl::Releases, 0)),
-                        row("설정 파일", "%APPDATA%\\Sakadu · 세션·즐겨찾기·단축키", Widget::Button("폴더 열기".into(), Ctl::DataFolder, 0)),
-                        row("라이선스", "GPL-3.0-or-later", Widget::None),
+                        row_body(format!("Sakadu {}", env!("CARGO_PKG_VERSION")), "가볍고 빠른 Windows 멀티뷰 파일 관리자", Widget::Button("GitHub".into(), Ctl::GitHub, 0)),
+                        row_body("새 버전", "새 버전이 나왔는지 릴리스 페이지에서 확인해요", Widget::Button("릴리스 열기".into(), Ctl::Releases, 0)),
+                        row_body("설정 파일", "%APPDATA%\\Sakadu · 세션·즐겨찾기·단축키", Widget::Button("폴더 열기".into(), Ctl::DataFolder, 0)),
+                        row_body("라이선스", "GPL-3.0-or-later", Widget::None),
                     ],
                 }],
             ),
@@ -387,11 +415,11 @@ impl App {
         let Some(s) = &self.settings else { return (items, 0.0) };
         let g = &self.gfx;
         let side = self.side_w();
-        // 왼쪽 분류
-        items.push(Item::Back(R::new(10.0, 12.0, side - 10.0, 44.0)));
+        // 왼쪽 분류: 창 위쪽 빈 자리 아래에서 시작한다. 줄은 사이드바와 같은 높이(28)
+        items.push(Item::Back(R::new(8.0, NAV_TOP + 2.0, side - 8.0, NAV_TOP + 30.0)));
         for (i, (page, label, glyph)) in PAGES.iter().enumerate() {
-            let y = 60.0 + i as f32 * 38.0;
-            items.push(Item::Nav { r: R::new(10.0, y, side - 10.0, y + 34.0), label, glyph: *glyph, on: s.page == *page, hit: SetHit::Nav(*page) });
+            let y = NAV_TOP + 40.0 + i as f32 * 32.0;
+            items.push(Item::Nav { r: R::new(8.0, y, side - 8.0, y + 28.0), label, glyph: *glyph, on: s.page == *page, hit: SetHit::Nav(*page) });
         }
         // 오른쪽 내용: 창이 좁아도(크기 150% 등) 오른쪽으로 넘치지 않게 여백부터 줄인다
         let avail = self.w - side;
@@ -399,93 +427,97 @@ impl App {
         let w = CONTENT_W.min(avail - 2.0 * margin).max(200.0);
         let l = side + ((avail - w) / 2.0).max(margin);
         let r = l + w;
-        let mut y = 32.0 - s.scroll;
+        let mut y = 16.0 - s.scroll;
         let (title, cards) = self.settings_cards(s);
-        items.push(Item::Title(R::new(l + 4.0, y, r, y + 36.0), title.to_string()));
-        y += 52.0;
+        items.push(Item::Title(R::new(l + 4.0, y, r, y + 20.0), title.to_string()));
+        y += 32.0;
         if let Some(note) = &s.note {
-            items.push(Item::Note(R::new(l, y, r, y + 34.0), note.clone()));
-            y += 46.0;
+            items.push(Item::Note(R::new(l, y, r, y + 32.0), note.clone()));
+            y += 44.0;
         }
+        let mut index = 0;
         for card in cards {
             if !card.header.is_empty() {
-                items.push(Item::Header(R::new(l + 4.0, y, r, y + 26.0), card.header));
-                y += 30.0;
+                items.push(Item::Header(R::new(l + 4.0, y, r, y + 16.0), card.header));
+                y += 20.0;
             }
             let top = y;
             let mut parts = Vec::new();
             for (i, rw) in card.rows.into_iter().enumerate() {
-                let label_h = if rw.desc.is_empty() { 48.0 } else { 62.0 };
+                let two = rw.body && !rw.desc.is_empty();
+                let label_h = if two { SET_ROW_H2 } else { SET_ROW_H };
                 if i > 0 {
                     parts.push(Item::Divider(R::new(l + 16.0, y, r - 16.0, y + 1.0)));
                 }
                 let cr = r - 16.0;
                 let tl = l + 16.0;
-                // 조작이 제목 자리를 너무 많이 먹으면 제목 아래 줄로 내린다
+                // 조작이 이름 자리를 너무 많이 먹으면 이름 아래 줄로 내린다
                 let (ww, wh) = widget_size(g, &rw.widget);
-                let stacked = ww > 0.0 && (cr - tl) - ww - 14.0 < LABEL_MIN_W;
-                let h = if stacked { label_h + wh + 10.0 } else { label_h };
+                let stacked = ww > 0.0 && (cr - tl) - ww - 16.0 < LABEL_MIN_W;
+                let h = if stacked { label_h + wh + 8.0 } else { label_h };
                 let cy = if stacked { y + label_h + wh / 2.0 - 4.0 } else { y + h / 2.0 };
+                let half = CTL_H / 2.0;
                 // 오른쪽 조작부터 놓고 남은 폭을 글자에 준다
                 let mut wl = cr;
                 match rw.widget {
                     Widget::None => {}
                     Widget::Toggle(on, ctl) => {
-                        let tr = R::new(cr - 40.0, cy - 11.0, cr, cy + 11.0);
+                        let tr = R::new(cr - TOGGLE_W, cy - TOGGLE_H / 2.0, cr, cy + TOGGLE_H / 2.0);
                         wl = tr.l;
                         parts.push(Item::Toggle { r: tr, on, hit: SetHit::Ctl(ctl, 0) });
                     }
                     Widget::Seg(labels, on, ctl) => {
-                        let widths: Vec<f32> = labels.iter().map(|t| g.measure(t, Font::Normal) + 26.0).collect();
+                        let widths: Vec<f32> = labels.iter().map(|t| g.measure(t, Font::Normal) + 24.0).collect();
                         let mut x = cr - widths.iter().sum::<f32>();
                         wl = x;
-                        parts.push(Item::SegFrame(R::new(x, cy - 15.0, cr, cy + 15.0)));
+                        parts.push(Item::SegFrame(R::new(x, cy - half, cr, cy + half)));
                         for (k, (label, sw)) in labels.into_iter().zip(widths).enumerate() {
-                            parts.push(Item::Seg { r: R::new(x, cy - 15.0, x + sw, cy + 15.0), label, on: k == on, hit: SetHit::Ctl(ctl, k) });
+                            parts.push(Item::Seg { r: R::new(x, cy - half, x + sw, cy + half), label, on: k == on, hit: SetHit::Ctl(ctl, k) });
                             x += sw;
                         }
                     }
                     Widget::Swatches(colors, on) => {
                         let n = colors.len() as f32;
-                        let mut x = cr - n * 24.0 - (n - 1.0) * 10.0;
+                        let mut x = cr - n * 24.0 - (n - 1.0) * 12.0;
                         wl = x;
                         for (k, color) in colors.into_iter().enumerate() {
                             parts.push(Item::Swatch { r: R::new(x, cy - 12.0, x + 24.0, cy + 12.0), color, on: k == on, hit: SetHit::Ctl(Ctl::Accent, k) });
-                            x += 34.0;
+                            x += 36.0;
                         }
                     }
                     Widget::Drop(label, ctl) => {
-                        let bw = (g.measure(&label, Font::Normal) + 44.0).clamp(110.0, 260.0);
-                        let br = R::new(cr - bw, cy - 15.0, cr, cy + 15.0);
+                        let bw = (g.measure(&label, Font::Normal) + 44.0).clamp(108.0, 260.0);
+                        let br = R::new(cr - bw, cy - half, cr, cy + half);
                         wl = br.l;
                         parts.push(Item::Button { r: br, label, chevron: true, hit: SetHit::Ctl(ctl, 0) });
                     }
                     Widget::Button(label, ctl, k) => {
-                        let bw = g.measure(&label, Font::Normal) + 30.0;
-                        let br = R::new(cr - bw, cy - 15.0, cr, cy + 15.0);
+                        let bw = g.measure(&label, Font::Normal) + 32.0;
+                        let br = R::new(cr - bw, cy - half, cr, cy + half);
                         wl = br.l;
                         parts.push(Item::Button { r: br, label, chevron: false, hit: SetHit::Ctl(ctl, k) });
                     }
                     Widget::Key(label, capturing, ctl) => {
                         let shown = if capturing { "키를 누르세요…".to_string() } else { label.clone() };
                         let bw = (g.measure(&shown, Font::Normal) + 28.0).max(96.0);
-                        let br = R::new(cr - bw, cy - 14.0, cr, cy + 14.0);
+                        let br = R::new(cr - bw, cy - half, cr, cy + half);
                         wl = br.l;
                         parts.push(Item::Key { r: br, label: shown, capturing, empty: label == "없음", hit: SetHit::Ctl(ctl, 0) });
                     }
                 }
-                let tr = if stacked { cr } else { (wl - 14.0).max(tl + 60.0) };
-                let (title, desc) = if rw.desc.is_empty() {
-                    (R::new(tl, y, tr, y + label_h), R::new(tl, y, tl, y))
+                let tr = if stacked { cr } else { (wl - 16.0).max(tl + 60.0) };
+                let (title, desc) = if two {
+                    (R::new(tl, y + 12.0, tr, y + 32.0), R::new(tl, y + 32.0, tr, y + 48.0))
                 } else {
-                    (R::new(tl, y + 10.0, tr, y + 32.0), R::new(tl, y + 32.0, tr, y + 52.0))
+                    (R::new(tl, y, tr, y + label_h), R::new(tl, y, tl, y))
                 };
-                parts.push(Item::Label { title, desc, t: rw.title, d: rw.desc });
+                parts.push(Item::Label { title, desc, t: rw.title, d: rw.desc, status: rw.status, body: two, row: R::new(l, y, r, y + h), index });
+                index += 1;
                 y += h;
             }
             items.push(Item::Card(R::new(l, top, r, y)));
             items.extend(parts);
-            y += 22.0;
+            y += 20.0;
         }
         (items, y + s.scroll + 20.0)
     }
@@ -511,7 +543,47 @@ impl App {
                 return hit;
             }
         }
+        if content {
+            for item in &items {
+                if let Item::Label { row, index, .. } = item
+                    && row.contains(x, y)
+                {
+                    return SetHit::Row(*index);
+                }
+            }
+        }
         SetHit::Panel
+    }
+
+    /// 줄에 마우스를 올리면(키보드 초점이 그 줄의 조작에 있어도) 보여 줄 설명: (줄 이름 자리, 설명)
+    pub(super) fn settings_tip(&self) -> Option<(R, String)> {
+        let s = self.settings.as_ref()?;
+        if s.capture.is_some() {
+            return None;
+        }
+        let (items, _) = self.settings_items();
+        // 마우스가 가리키는 것이 먼저, 없으면 키보드 초점이 있는 조작
+        let target = match self.hover {
+            Hit::Set(h @ (SetHit::Row(_) | SetHit::Ctl(..))) => h,
+            _ => s.focus.filter(|f| matches!(f, SetHit::Ctl(..)))?,
+        };
+        let at = items.iter().find_map(|item| match item {
+            Item::Label { row, index, .. } if target == SetHit::Row(*index) => Some(*row),
+            Item::Toggle { r, hit, .. } | Item::Seg { r, hit, .. } | Item::Swatch { r, hit, .. } | Item::Button { r, hit, .. } | Item::Key { r, hit, .. } if *hit == target => Some(*r),
+            _ => None,
+        })?;
+        let (cx, cy) = ((at.l + at.r) / 2.0, (at.t + at.b) / 2.0);
+        items.iter().find_map(|item| match item {
+            Item::Label { title, desc, t: name, d, body, row, .. } if row.contains(cx, cy) && !d.is_empty() => {
+                // 본문으로 늘 보이는 설명은 잘렸을 때만 말풍선으로 다 보여 준다
+                if *body && self.gfx.measure(d, Font::Small) <= desc.w() {
+                    return None;
+                }
+                let w = self.gfx.measure(name, Font::Normal).min(title.w());
+                Some((R::new(title.l, row.t + 8.0, title.l + w, row.b - 8.0), d.clone()))
+            }
+            _ => None,
+        })
     }
 
     pub(super) fn settings_wheel(&mut self, dy: f32) {
@@ -541,7 +613,7 @@ impl App {
                 s.note = None;
                 self.refresh_settings();
             }
-            SetHit::Panel => {}
+            SetHit::Panel | SetHit::Row(_) => {}
             SetHit::Ctl(ctl, i) => self.settings_ctl(ctl, i, x, y),
         }
         self.invalidate();
@@ -734,58 +806,84 @@ impl App {
         let (items, _) = self.settings_items();
         g.fill(R::new(0.0, 0.0, self.w, self.h), t.window);
         let side = self.side_w();
-        g.fill(R::new(0.0, 0.0, side, self.h), t.strip);
-        g.fill(R::new(side - 1.0, 0.0, side, self.h), t.border);
+        // 왼쪽 분류는 기본 화면의 사이드바처럼 창 바탕 위에 그대로 놓는다 (고대비에서만 선으로 가른다)
+        if t.high_contrast {
+            g.fill(R::new(side - 1.0, 0.0, side, self.h), t.border);
+        }
+        let track = super::sidebar::seg_track(&t);
+        let hover_bg = super::sidebar::hover_fill(&t);
         // 내용 먼저(스크롤되어 위로 넘어가도 분류를 가리지 않게 잘라서), 분류는 그 위에
         g.clip(R::new(side, 0.0, self.w, self.h));
         for item in &items {
             match item {
                 Item::Title(r, text) => g.text(text, *r, Font::Title, t.text),
-                Item::Header(r, text) => g.text(text, *r, Font::Small, t.dim),
+                Item::Header(r, text) => g.text(text, *r, Font::Label, t.faint),
                 Item::Note(r, text) => {
-                    g.fill_round(*r, 8.0, super::sidebar::well(&t));
-                    g.text(text, R::new(r.l + 14.0, r.t, r.r - 10.0, r.b), Font::Normal, t.text);
+                    g.fill_round(*r, R_CTRL, super::sidebar::well(&t));
+                    g.text(text, R::new(r.l + 12.0, r.t, r.r - 12.0, r.b), Font::Normal, t.text);
                 }
                 Item::Card(r) => {
                     if !t.high_contrast && !t.dark {
-                        super::soft_shadow(g, *r, 12.0, 6.0, 0.06, false);
+                        super::soft_shadow(g, *r, RADIUS, 6.0, 0.06, false);
                     }
-                    g.fill_round(*r, 12.0, t.pane);
+                    g.fill_round(*r, RADIUS, t.pane);
                     if t.high_contrast || t.dark {
-                        g.stroke_round(r.inset(0.5, 0.5), 12.0, t.border, 1.0);
+                        g.stroke_round(r.inset(0.5, 0.5), RADIUS, t.border, 1.0);
                     }
                 }
-                Item::Divider(r) => g.fill(*r, t.border),
-                Item::Label { title, desc, t: tt, d } => {
+                Item::Divider(r) => g.fill(*r, if t.high_contrast { t.border } else { alpha(t.text, 0.07) }),
+                Item::Label { title, desc, t: tt, d, status, body, .. } => {
                     g.text(tt, *title, Font::Normal, t.text);
-                    if !d.is_empty() {
+                    // 상태는 이름 바로 옆에 (자리가 없으면 그리지 않는다)
+                    if !status.is_empty() {
+                        let x = title.l + g.measure(tt, Font::Normal) + 12.0;
+                        if x + 24.0 < title.r {
+                            g.text(status, R::new(x, title.t, title.r, title.b), Font::Small, t.dim);
+                        }
+                    }
+                    if *body && !d.is_empty() {
                         g.text(d, *desc, Font::Small, t.dim);
                     }
                 }
                 Item::Toggle { r, on, hit } => {
-                    let knob = 8.0;
-                    if *on {
-                        g.fill_round(*r, 11.0, if hot(*hit) { alpha(t.accent, 0.85) } else { t.accent });
-                        g.fill_round(R::new(r.r - 11.0 - knob, r.t + 3.0, r.r - 11.0 + knob, r.b - 3.0), knob, Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+                    let h = hot(*hit);
+                    let knob = |x: f32, c: Color| g.fill_round(R::new(x - 8.0, r.t + 2.0, x + 8.0, r.b - 2.0), 8.0, c);
+                    let radius = r.h() / 2.0;
+                    if t.high_contrast {
+                        // 고대비: 켠 것은 강조 색 면, 끈 것은 테두리
+                        if *on {
+                            g.fill_round(*r, radius, t.accent);
+                            knob(r.r - radius, t.sel_text);
+                        } else {
+                            g.fill_round(*r, radius, if h { t.hover } else { t.field });
+                            g.stroke_round(r.inset(0.5, 0.5), radius, t.border, 1.0);
+                            knob(r.l + radius, t.text);
+                        }
+                    } else if *on {
+                        // 켠 것: 옅은 강조 색 바탕에 강조 색 손잡이 (진하게 채우지 않는다)
+                        g.fill_round(*r, radius, t.accent_soft);
+                        if h {
+                            g.fill_round(*r, radius, alpha(t.accent, 0.14));
+                        }
+                        knob(r.r - radius, t.accent);
                     } else {
-                        g.fill_round(*r, 11.0, if hot(*hit) { t.hover } else { t.field });
-                        g.stroke_round(r.inset(0.5, 0.5), 11.0, t.thumb, 1.0);
-                        g.fill_round(R::new(r.l + 11.0 - knob, r.t + 3.0, r.l + 11.0 + knob, r.b - 3.0), knob, t.dim);
+                        g.fill_round(*r, radius, alpha(t.text, if h { 0.16 } else { 0.10 }));
+                        knob(r.l + radius, if t.dark { t.dim } else { Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } });
                     }
                 }
-                // 칸 나누기 판과 같은 모양: 들어간 판 위에 고른 것만 흰 면 + 가는 선
+                // 칸 나누기 판과 같은 모양: 들어간 판 위에 고른 것만 흰 면
                 Item::SegFrame(r) => {
-                    g.fill_round(*r, r.h() / 2.0, super::sidebar::seg_track(&t));
+                    g.fill_round(*r, R_CTRL, track);
                     if t.high_contrast {
-                        g.stroke_round(r.inset(0.5, 0.5), r.h() / 2.0, t.border, 1.0);
+                        g.stroke_round(r.inset(0.5, 0.5), R_CTRL, t.border, 1.0);
                     }
                 }
                 Item::Seg { r, label, on, hit } => {
                     let sr = r.inset(2.0, 2.0);
                     if *on {
-                        super::sidebar::seg_on(g, sr, sr.h() / 2.0, &t);
+                        super::sidebar::seg_on(g, sr, R_CTRL - 2.0, &t);
                     } else if hot(*hit) {
-                        g.fill_round(sr, sr.h() / 2.0, super::sidebar::hover_fill(&t));
+                        g.fill_round(sr, R_CTRL - 2.0, hover_bg);
                     }
                     g.text(label, *r, Font::Hint, if *on { t.text } else { t.dim });
                 }
@@ -795,25 +893,31 @@ impl App {
                     }
                     g.fill_round(*r, 12.0, *color);
                 }
+                // 단추: 테두리 없이 옅은 바탕 (고대비에서는 테두리)
                 Item::Button { r, label, chevron, hit } => {
-                    g.fill_round(*r, R_CTRL, t.pane);
+                    g.fill_round(*r, R_CTRL, if t.high_contrast { t.pane } else { track });
                     if hot(*hit) {
-                        g.fill_round(*r, R_CTRL, super::sidebar::hover_fill(&t));
+                        g.fill_round(*r, R_CTRL, hover_bg);
                     }
-                    g.stroke_round(r.inset(0.5, 0.5), R_CTRL, t.border, 1.0);
+                    if t.high_contrast {
+                        g.stroke_round(r.inset(0.5, 0.5), R_CTRL, t.border, 1.0);
+                    }
                     if *chevron {
-                        g.text(label, R::new(r.l + 12.0, r.t, r.r - 26.0, r.b), Font::Normal, t.text);
-                        g.glyph(G_CHEVRON_DOWN, R::new(r.r - 26.0, r.t, r.r - 8.0, r.b), true, t.dim);
+                        g.text(label, R::new(r.l + 12.0, r.t, r.r - 24.0, r.b), Font::Normal, t.text);
+                        g.glyph(G_CHEVRON_DOWN, R::new(r.r - 24.0, r.t, r.r - 8.0, r.b), true, t.dim);
                     } else {
                         g.text(label, *r, Font::Hint, t.text);
                     }
                 }
                 Item::Key { r, label, capturing, empty, hit } => {
-                    g.fill_round(*r, 6.0, if hot(*hit) { t.hover } else { t.field });
+                    g.fill_round(*r, R_CTRL, if t.high_contrast { t.field } else { track });
+                    if hot(*hit) {
+                        g.fill_round(*r, R_CTRL, hover_bg);
+                    }
                     if *capturing {
-                        g.stroke_round(r.inset(0.75, 0.75), 6.0, t.accent, 1.5);
-                    } else {
-                        g.stroke_round(r.inset(0.5, 0.5), 6.0, t.border, 1.0);
+                        g.stroke_round(r.inset(0.75, 0.75), R_CTRL, t.accent, 1.5);
+                    } else if t.high_contrast {
+                        g.stroke_round(r.inset(0.5, 0.5), R_CTRL, t.border, 1.0);
                     }
                     g.text(label, *r, Font::Hint, if *capturing { t.accent } else if *empty { t.faint } else { t.text });
                 }
@@ -827,28 +931,30 @@ impl App {
             match item {
                 Item::Back(r) => {
                     if hot(SetHit::Back) {
-                        g.fill_round(*r, R_CTRL, super::sidebar::hover_fill(&t));
+                        g.fill_round(*r, sakadu::ui::R_SIDE_ROW, hover_bg);
                     }
                     if compact {
                         g.glyph(G_BACK, *r, false, t.text);
                     } else {
-                        g.glyph(G_BACK, R::new(r.l + 6.0, r.t, r.l + 30.0, r.b), false, t.text);
+                        g.glyph(G_BACK, R::new(r.l + 8.0, r.t, r.l + 28.0, r.b), false, t.text);
                         g.text("설정", R::new(r.l + 36.0, r.t, r.r, r.b), Font::Strong, t.text);
                     }
                 }
+                // 분류 줄은 사이드바 줄과 같은 모습: 지금 쪽은 떠 있는 흰 줄
                 Item::Nav { r, label, glyph, on, hit } => {
-                    if *on {
-                        g.fill_round(*r, R_ROW, t.sel_inactive);
-                    } else if hot(*hit) {
-                        g.fill_round(*r, R_ROW, super::sidebar::hover_fill(&t));
-                    }
-                    // 아이콘은 글자와 어울리는 도구 아이콘 크기(16px). 작은 크기는 글자 옆에서 흐릿하게 보인다
-                    let fg = if *on { t.text } else { t.dim };
+                    sakadu::ui::side_row_bg(g, &t, *r, *on, hot(*hit));
+                    let fg = if !*on {
+                        t.dim
+                    } else if t.high_contrast {
+                        t.text
+                    } else {
+                        t.chip_text
+                    };
                     if compact {
                         g.glyph(*glyph, *r, false, fg);
                     } else {
-                        g.glyph(*glyph, R::new(r.l + 8.0, r.t, r.l + 30.0, r.b), false, fg);
-                        g.text(label, R::new(r.l + 38.0, r.t, r.r - 6.0, r.b), Font::Normal, t.text);
+                        g.glyph(*glyph, R::new(r.l + 8.0, r.t, r.l + 28.0, r.b), false, fg);
+                        g.text(label, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
                     }
                 }
                 _ => {}
@@ -861,7 +967,7 @@ impl App {
             } else if r.h() <= 24.0 && r.w() > r.h() {
                 (3.0, r.h() / 2.0 + 3.0)
             } else {
-                (3.0, 9.0)
+                (3.0, R_CTRL + 3.0)
             };
             g.stroke_round(r.inset(-pad, -pad), radius, t.focus, 2.0);
         }
@@ -977,6 +1083,7 @@ impl App {
                 self.settings_scroll_into_view(r);
             }
         }
+        self.update_tip();
         self.invalidate();
         true
     }
@@ -1031,17 +1138,17 @@ fn layout_keys(keys: &Keymap) -> String {
 fn widget_size(g: &Gfx, w: &Widget) -> (f32, f32) {
     match w {
         Widget::None => (0.0, 0.0),
-        Widget::Toggle(..) => (40.0, 22.0),
-        Widget::Seg(labels, ..) => (labels.iter().map(|t| g.measure(t, Font::Normal) + 26.0).sum(), 30.0),
+        Widget::Toggle(..) => (TOGGLE_W, TOGGLE_H),
+        Widget::Seg(labels, ..) => (labels.iter().map(|t| g.measure(t, Font::Normal) + 24.0).sum(), CTL_H),
         Widget::Swatches(colors, _) => {
             let n = colors.len() as f32;
-            (n * 24.0 + (n - 1.0).max(0.0) * 10.0, 24.0)
+            (n * 24.0 + (n - 1.0).max(0.0) * 12.0, 24.0)
         }
-        Widget::Drop(label, _) => ((g.measure(label, Font::Normal) + 44.0).clamp(110.0, 260.0), 30.0),
-        Widget::Button(label, ..) => (g.measure(label, Font::Normal) + 30.0, 30.0),
+        Widget::Drop(label, _) => ((g.measure(label, Font::Normal) + 44.0).clamp(108.0, 260.0), CTL_H),
+        Widget::Button(label, ..) => (g.measure(label, Font::Normal) + 32.0, CTL_H),
         Widget::Key(label, capturing, _) => {
             let shown = if *capturing { "키를 누르세요…" } else { label.as_str() };
-            ((g.measure(shown, Font::Normal) + 28.0).max(96.0), 28.0)
+            ((g.measure(shown, Font::Normal) + 28.0).max(96.0), CTL_H)
         }
     }
 }
