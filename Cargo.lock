@@ -240,6 +240,7 @@ name = "sakadu"
 version = "0.8.0"
 dependencies = [
  "dispatch2",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",

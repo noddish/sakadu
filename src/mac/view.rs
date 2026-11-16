@@ -39,6 +39,8 @@ thread_local! {
     static SAME_VOLUME: RefCell<Option<(String, String, bool)>> = const { RefCell::new(None) };
     /// 파일 작업을 하는 뒷줄로 가는 길 (처음 맡길 때 그 줄을 만든다)
     static OPS: OnceCell<std::sync::mpsc::Sender<crate::fileops::Op>> = const { OnceCell::new() };
+    /// 폴더 감시 (처음 쓸 때 띄운다). 띄우지 못했으면 None: 그때는 창이 다시 앞으로 올 때와 파일 작업 뒤에만 다시 읽는다
+    static WATCH: OnceCell<Option<crate::watch::Watcher>> = const { OnceCell::new() };
 }
 
 /// 가장 나중에 낸 미리 보기 카드 요청의 번호. 뒷줄이 그림을 읽기 직전에 보고, 그 사이 다른 요청이 나왔으면 읽지 않는다
@@ -351,6 +353,8 @@ define_class!(
         #[unsafe(method(draggingExited:))]
         fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
             with_app(App::drag_exit);
+            // 끌려 온 것이 위에 있는 동안 미뤄 둔 다시 읽기가 있으면 읽는다
+            pump();
             self.setNeedsDisplay(true);
         }
 
@@ -368,6 +372,7 @@ define_class!(
         #[unsafe(method(draggingEnded:))]
         fn dragging_ended(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) {
             with_app(App::drag_exit);
+            pump();
             SAME_VOLUME.with(|v| v.borrow_mut().take());
             self.setNeedsDisplay(true);
         }
@@ -650,6 +655,7 @@ fn pump() {
         return;
     };
     run_ops(ops);
+    watch_dirs();
     // Finder에서 보기: Finder를 앞으로 불러 그 항목들을 고른다
     if !reveal.is_empty() {
         let urls: Vec<Retained<NSURL>> = reveal.iter().map(|f| NSURL::fileURLWithPath(&NSString::from_str(f))).collect();
@@ -738,6 +744,25 @@ fn run_ops(ops: Vec<crate::fileops::Op>) {
             if tx.send(op).is_err() {
                 sakadu::diag::log(|| "file ops: worker is gone".to_string());
             }
+        }
+    });
+}
+
+/// 보이는 폴더가 달라졌으면 감시할 폴더를 거기에 맞춘다. 감시하던 폴더가 바뀌면 감시하는 줄이 알려 오고,
+/// 메인 줄에서 App에 넘겨 그 폴더를 다시 읽는다
+fn watch_dirs() {
+    let Some(dirs) = with_app(|a| a.take_watch_dirs()).flatten() else { return };
+    WATCH.with(|cell| {
+        let watcher = cell.get_or_init(|| {
+            crate::watch::Watcher::start(|dir| {
+                DispatchQueue::main().exec_async(move || {
+                    with_app(|a| a.on_dir_changed(&dir));
+                    pump();
+                });
+            })
+        });
+        if let Some(w) = watcher {
+            w.set(dirs);
         }
     });
 }

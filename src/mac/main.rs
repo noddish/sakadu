@@ -13,6 +13,8 @@ mod gfx;
 mod render;
 #[cfg(target_os = "macos")]
 mod view;
+#[cfg(target_os = "macos")]
+mod watch;
 
 #[cfg(target_os = "macos")]
 fn main() {
