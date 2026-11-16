@@ -20,8 +20,8 @@ pub enum Job {
     /// file_id는 목록에서 본 src의 파일 번호 (클립보드로 받아 모르면 0: 그때는 그 경로에 지금 있는 것을 복사한다)
     Copy { src: String, dir: String, file_id: u64 },
     /// src(전체 경로)를 폴더 dir 안으로 옮긴다 (같은 디스크 안에서만). 같은 이름이 있으면 덮어쓰지 않고 번호를 붙인다.
-    /// file_id는 Copy와 같다
-    Move { src: String, dir: String, file_id: u64 },
+    /// file_id는 Copy와 같다. or_copy면 다른 디스크일 때 옮기는 대신 복사한다 (끌어다 놓기: 원본은 그대로 남는다)
+    Move { src: String, dir: String, file_id: u64, or_copy: bool },
     /// 앞서 한 작업을 되돌린다
     Undo(Undo),
 }
@@ -117,10 +117,10 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             guard(dir);
             copy_item(src, dir, *file_id)
         }
-        Job::Move { src, dir, file_id } => {
+        Job::Move { src, dir, file_id, or_copy } => {
             guard(src);
             guard(dir);
-            move_item(src, dir, *file_id)
+            move_item(src, dir, *file_id, *or_copy)
         }
         // 옮기기를 되돌린다: 옮긴 곳의 그것이 그때 그 항목일 때만, 원래 자리가 비어 있을 때만 하나씩 되돌린다.
         // 되돌리지 못한 것은 원래 전체 경로로 돌려준다 (서로 다른 폴더에서 온 같은 이름의 항목을 가릴 수 있게)
@@ -263,8 +263,9 @@ fn same_dir(a: &str, b: &str) -> bool {
 }
 
 /// 항목 하나를 폴더 dir 안으로 옮긴다: 덮어쓰지 않는 이름 바꾸기 한 번이라 같은 디스크 안에서만 된다 (복사하고 원본을 치우는
-/// 일은 하지 않는다). 같은 이름이 있으면 번호를 붙인다. 옮겨도 같은 파일이라 파일 번호와 확장 속성은 그대로다
-fn move_item(src: &str, dir: &str, file_id: u64) -> Result<Done, Fail> {
+/// 일은 하지 않는다). 같은 이름이 있으면 번호를 붙인다. 옮겨도 같은 파일이라 파일 번호와 확장 속성은 그대로다.
+/// 다른 디스크인지는 미리 묻지 않고 이름 바꾸기가 그렇게 실패하는 것으로 안다: or_copy면 그때 복사한다 (원본은 그대로 둔다)
+fn move_item(src: &str, dir: &str, file_id: u64, or_copy: bool) -> Result<Done, Fail> {
     let meta = match std::fs::symlink_metadata(src) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Fail::Changed),
@@ -292,6 +293,7 @@ fn move_item(src: &str, dir: &str, file_id: u64) -> Result<Done, Fail> {
         match fileops::rename_excl(src, &util::join(dir, &final_name)) {
             Ok(()) => return Ok(Done::Moved { name: final_name, file_id: id, renamed: n > 1 }),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices && or_copy => return copy_item(src, dir, file_id),
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => return stay("다른 디스크로는 아직 옮길 수 없어요. 복사한 뒤 원본을 휴지통으로 보내 주세요"),
             Err(e) => return Err(other(e)),
         }
@@ -386,11 +388,20 @@ pub fn fake_trash() -> String {
     util::join(&util::normalize(&temp.to_string_lossy()), &format!("sakadu-fake-trash-{}", std::process::id()))
 }
 
-/// 시험에서는 임시 폴더 밖의 경로를 건드리려 하면 바로 멈춘다 (시험이 잘못 짜여도 실제 파일에 닿지 않게)
+/// 시험에서는 임시 폴더 밖의 경로를 건드리려 하면 바로 멈춘다 (시험이 잘못 짜여도 실제 파일에 닿지 않게).
+/// 다른 디스크와 주고받는 시험을 위해 폴더 하나를 더 허락할 수 있다 (CI가 SAKADU_TEST_OTHER_VOLUME으로 알려 준다)
 #[cfg(test)]
 fn guard(path: &str) {
     let temp = std::fs::canonicalize(std::env::temp_dir()).expect("임시 폴더");
-    assert!(std::path::Path::new(path).starts_with(&temp), "시험이 임시 폴더 밖을 건드리려 함: {path}");
+    let path = std::path::Path::new(path);
+    assert!(path.starts_with(&temp) || other_volume().is_some_and(|other| path.starts_with(other)), "시험이 임시 폴더 밖을 건드리려 함: {}", path.display());
+}
+
+/// 시험용으로 허락한, 임시 폴더와 다른 디스크에 있는 폴더 (없으면 None: 그런 시험은 건너뛴다)
+#[cfg(test)]
+fn other_volume() -> Option<String> {
+    let dir = std::fs::canonicalize(std::env::var_os("SAKADU_TEST_OTHER_VOLUME")?).ok()?;
+    Some(util::normalize(&dir.to_string_lossy()))
 }
 
 #[cfg(not(test))]
@@ -633,7 +644,7 @@ mod tests {
         std::fs::write(&src, b"report").unwrap();
         set_xattr(&src, "com.example.note", "사카두");
         let file = id(&src);
-        let job = |src: &str, dir: &str, file_id: u64| run(&Job::Move { src: src.to_string(), dir: dir.to_string(), file_id });
+        let job = |src: &str, dir: &str, file_id: u64| run(&Job::Move { src: src.to_string(), dir: dir.to_string(), file_id, or_copy: false });
         // 목록에서 본 것이 아니면 옮기지 않는다
         assert_eq!(job(&src, &to, id(&from)), Err(Fail::Changed));
         // 같은 폴더로, 자기 자신 안으로는 옮기지 않는다
@@ -665,6 +676,44 @@ mod tests {
         // 한 번 더 되돌리면: 폴더는 옮긴 곳에 더는 없다
         let Ok(Done::Undone { left }) = run(&Job::Undo(Undo::Move { to: to.clone(), items })) else { panic!("되돌리기") };
         assert_eq!(left.len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 다른 디스크로: 옮기기는 하지 않고 알리며, 끌어다 놓기(or_copy)는 복사한다 (원본은 그대로 남는다).
+    /// 임시 폴더와 다른 디스크의 폴더를 CI가 알려 줄 때만 돈다 (디스크가 하나뿐이면 볼 것이 없다)
+    #[test]
+    fn another_volume_is_copied_to_not_moved_to() {
+        let Some(other) = other_volume() else { return };
+        let dir = temp("volumes");
+        let far = util::join(&other, &format!("sakadu-other-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&far);
+        std::fs::create_dir_all(&far).unwrap();
+        let src = util::join(&dir, "보고서.docx");
+        std::fs::write(&src, b"report").unwrap();
+        let move_to = |or_copy: bool| run(&Job::Move { src: src.clone(), dir: far.clone(), file_id: 0, or_copy });
+        // 같은 디스크였다면 이 시험은 볼 것이 없다 (옮겨졌으면 되돌려 놓고 끝낸다)
+        match move_to(false) {
+            Err(Fail::Other(why)) => assert!(why.contains("다른 디스크"), "{why}"),
+            other => {
+                assert_eq!(other, Ok(Done::Moved { name: "보고서.docx".into(), file_id: id(&util::join(&far, "보고서.docx")), renamed: false }));
+                std::fs::remove_dir_all(&far).unwrap();
+                std::fs::remove_dir_all(&dir).unwrap();
+                return;
+            }
+        }
+        assert_eq!(std::fs::read(&src).unwrap(), b"report", "nothing moved");
+        assert!(std::fs::read_dir(&far).unwrap().next().is_none(), "and nothing arrived");
+        // 끌어다 놓기: 복사된다. 원본은 그대로다
+        assert!(matches!(move_to(true), Ok(Done::Copied { name, renamed: false, .. }) if name == "보고서.docx"));
+        assert_eq!((std::fs::read(&src).unwrap(), std::fs::read(util::join(&far, "보고서.docx")).unwrap()), (b"report".to_vec(), b"report".to_vec()));
+        // 폴더도 속까지 복사된다
+        let folder = util::join(&dir, "자료");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(util::join(&folder, "안.txt"), b"in").unwrap();
+        assert!(matches!(run(&Job::Move { src: folder.clone(), dir: far.clone(), file_id: 0, or_copy: true }), Ok(Done::Copied { name, .. }) if name == "자료"));
+        assert_eq!(std::fs::read(util::join(&util::join(&far, "자료"), "안.txt")).unwrap(), b"in");
+        assert!(std::fs::metadata(&folder).unwrap().is_dir());
+        std::fs::remove_dir_all(&far).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
