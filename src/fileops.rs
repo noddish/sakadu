@@ -109,6 +109,8 @@ pub enum Undo {
     Trash { dir: String, items: Vec<Trashed> },
     /// dir 안에 복사본들(이름, 파일 번호)을 만들었다. 되돌리면 그 복사본들을 휴지통으로 보낸다
     Copy { dir: String, items: Vec<(String, u64)> },
+    /// 항목들을 폴더 to로 옮겼다: (원래 전체 경로, to 안에서의 지금 이름, 파일 번호). 되돌리면 원래 자리로 옮긴다
+    Move { to: String, items: Vec<(String, String, u64)> },
 }
 
 impl Undo {
@@ -119,6 +121,7 @@ impl Undo {
             Undo::NewFolder { name, .. } => format!("만든 폴더 ‘{name}’을(를) 휴지통으로 보냈어요"),
             Undo::Trash { items, .. } => format!("{}개를 휴지통에서 되돌려 놓았어요", items.len()),
             Undo::Copy { items, .. } => format!("복사본 {}개를 휴지통으로 보냈어요", items.len()),
+            Undo::Move { items, .. } => format!("{}개를 원래 자리로 되돌려 놓았어요", items.len()),
         }
     }
 }
@@ -317,6 +320,7 @@ mod tests {
         assert_eq!(numbered_name(".gitignore", 2, false), ".gitignore 2");
         assert_eq!(numbered_name("자료.d", 2, true), "자료.d 2");
         assert!(Undo::Copy { dir: "/t".into(), items: vec![("a".into(), 1)] }.label().contains("복사본 1개"));
+        assert!(Undo::Move { to: "/t".into(), items: vec![("/s/a".into(), "a".into(), 1)] }.label().contains("원래 자리"));
         assert_eq!(stem_units("보고서.xlsx", false), 3);
         assert_eq!(stem_units("archive.tar.gz", false), 11);
         assert_eq!(stem_units("README", false), 6);

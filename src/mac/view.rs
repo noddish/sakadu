@@ -29,6 +29,8 @@ use std::time::Duration;
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
     static VIEW: OnceCell<Retained<SakaduView>> = const { OnceCell::new() };
+    /// 잘라 둔 것을 클립보드에 담은 직후의 클립보드 번호. 붙여넣을 때 번호가 그대로면(그 사이 다른 것이 담기지 않았으면) 옮긴다
+    static CUT: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
     /// 파일 작업을 하는 뒷줄로 가는 길 (처음 맡길 때 그 줄을 만든다)
     static OPS: OnceCell<std::sync::mpsc::Sender<crate::fileops::Op>> = const { OnceCell::new() };
 }
@@ -219,13 +221,20 @@ define_class!(
             self.after_input();
         }
 
-        /// 편집 메뉴의 붙여넣기(⌘V): 클립보드의 파일들을 지금 칸의 폴더로 복사한다. 누르고 있어도 한 번만 한다
+        /// 편집 메뉴의 오려두기(⌘X): 고른 항목들을 잘라 둔다. 붙여넣을 때 옮겨지고, 그 전까지 파일은 그대로다
+        #[unsafe(method(cut:))]
+        fn cut(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            with_app(App::cut_selected);
+            self.after_input();
+        }
+
+        /// 편집 메뉴의 붙여넣기(⌘V): 클립보드의 파일들을 지금 칸의 폴더로 복사한다 (잘라 둔 것이면 옮긴다). 누르고 있어도 한 번만 한다
         #[unsafe(method(paste:))]
         fn paste(&self, _sender: Option<&objc2::runtime::AnyObject>) {
             if held_key(self.mtm()) {
                 return;
             }
-            with_app(App::ask_paste);
+            with_app(|a| a.ask_paste(false));
             self.after_input();
         }
 
@@ -407,20 +416,26 @@ fn held_key(mtm: MainThreadMarker) -> bool {
     NSApplication::sharedApplication(mtm).currentEvent().is_some_and(|e| e.r#type() == NSEventType::KeyDown && e.isARepeat())
 }
 
-/// 파일들을 클립보드에 파일 주소로 담는다 (Finder나 다른 앱에 붙여넣을 수 있다)
-fn write_clipboard(paths: &[String]) {
+/// 파일들을 클립보드에 파일 주소로 담는다 (Finder나 다른 앱에 붙여넣을 수 있다).
+/// cut이면 잘라 둔 것으로 기억한다: 다른 앱에는 보통의 복사로 보이고, 사카두에서 붙여넣을 때만 옮긴다
+fn write_clipboard(paths: &[String], cut: bool) {
     let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> =
         paths.iter().map(|p| ProtocolObject::from_retained(NSURL::fileURLWithPath(&NSString::from_str(p)))).collect();
     let board = NSPasteboard::generalPasteboard();
     board.clearContents();
-    if !board.writeObjects(&NSArray::from_retained_slice(&items)) {
+    let written = board.writeObjects(&NSArray::from_retained_slice(&items));
+    if !written {
         sakadu::diag::log(|| "clipboard: write failed".to_string());
     }
+    CUT.set((cut && written).then(|| board.changeCount()));
 }
 
-/// 클립보드에 담긴 파일들의 경로 (Finder에서 복사한 것도 읽는다). 파일이 아닌 것(글자, 그림)만 있으면 비어 있다
-fn read_clipboard() -> Vec<String> {
-    let Some(items) = NSPasteboard::generalPasteboard().pasteboardItems() else { return Vec::new() };
+/// 클립보드에 담긴 파일들의 경로 (Finder에서 복사한 것도 읽는다)와, 그것이 사카두에서 잘라 둔 것 그대로인지.
+/// 파일이 아닌 것(글자, 그림)만 있으면 비어 있다
+fn read_clipboard() -> (Vec<String>, bool) {
+    let board = NSPasteboard::generalPasteboard();
+    let cut = CUT.get() == Some(board.changeCount());
+    let Some(items) = board.pasteboardItems() else { return (Vec::new(), false) };
     let mut out = Vec::new();
     for item in items.iter() {
         let Some(text) = item.stringForType(unsafe { NSPasteboardTypeFileURL }) else { continue };
@@ -431,7 +446,7 @@ fn read_clipboard() -> Vec<String> {
             out.push(sakadu::util::normalize(&path.to_string()));
         }
     }
-    out
+    (out, cut)
 }
 
 /// 뒷줄 결과를 받은 뒤 (메인 줄에서): 입력 상자를 App 상태에 맞추고 다시 그려 달라고 한다.
@@ -449,13 +464,18 @@ fn redraw() {
 /// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다). 미리 보기 카드의 그림과 글도 뒷줄에서 읽는다
 fn pump() {
     // 클립보드: 담아 달라는 것을 담고, 붙여넣어 달라고 했으면 읽어서 넘긴다 (그러면 아래에서 맡길 작업이 생긴다)
-    if let Some((out, wanted)) = with_app(|a| (a.clip_out.take(), std::mem::take(&mut a.clip_in))) {
+    if let Some((out, cut, wanted)) = with_app(|a| (a.clip_out.take(), std::mem::take(&mut a.clip_cut), a.clip_in.take())) {
         if let Some(paths) = out {
-            write_clipboard(&paths);
+            write_clipboard(&paths, cut);
         }
-        if wanted {
-            let paths = read_clipboard();
-            with_app(|a| a.paste_paths(paths));
+        if let Some(force_move) = wanted {
+            let (paths, was_cut) = read_clipboard();
+            let started = with_app(|a| a.paste_paths(paths, force_move || was_cut)).unwrap_or(false);
+            // 잘라 둔 것을 옮기기 시작했으면 클립보드를 비운다: 한 번 더 붙여넣으면 이미 옮겨 간 것을 또 옮기려 하게 된다
+            if started && was_cut {
+                NSPasteboard::generalPasteboard().clearContents();
+                CUT.set(None);
+            }
         }
     }
     let Some((reqs, probes, previews, files, ops, reveal)) =
@@ -605,6 +625,7 @@ fn key_of(code: u16) -> Option<Key> {
         0x25 => Key::Char('l'),
         0x2D => Key::Char('n'),
         0x02 => Key::Char('d'),
+        0x09 => Key::Char('v'),
         0x05 => Key::Char('g'),
         0x1F => Key::Char('o'),
         0x0F => Key::Char('r'),
