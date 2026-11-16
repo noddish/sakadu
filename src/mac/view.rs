@@ -465,6 +465,8 @@ impl SakaduView {
     /// 받지 않는 끌기: 앞서 강조해 둔 놓일 곳이 있으면 지운다 (끄는 중에 누른 키가 바뀌면 받던 끌기가 받지 않는 끌기가 된다)
     fn refuse_drag(&self) {
         with_app(App::drag_exit);
+        // 끌려 온 것이 위에 있는 동안 미뤄 둔 다시 읽기가 있으면 읽는다
+        pump();
         self.setNeedsDisplay(true);
     }
 
