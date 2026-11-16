@@ -43,6 +43,9 @@ pub struct Entry {
     /// 시스템 이미지 목록 인덱스. -1이면 확장자 기준 아이콘을 쓴다
     pub icon: i32,
     pub selected: bool,
+    /// 항목 자체의 파일 번호 (맥의 inode. 링크면 링크의 번호). 모르면 0이고 Windows에서는 늘 0이다.
+    /// 목록을 읽은 뒤 그 이름의 항목이 다른 것으로 바뀌지 않았는지 볼 때 쓴다
+    pub file_id: u64,
 }
 
 impl Entry {
@@ -61,6 +64,7 @@ impl Entry {
             target: None,
             icon: -1,
             selected: false,
+            file_id: 0,
         }
     }
 
@@ -275,6 +279,7 @@ pub fn filetime_of(t: std::time::SystemTime) -> u64 {
 }
 
 /// 폴더 열거 (맥·리눅스). 심볼릭 링크는 가리키는 대상의 종류·크기를 쓰고, 대상이 없으면 링크 자체를 쓴다.
+/// 파일 번호(file_id)만은 늘 항목 자체의 것이다 (이름 바꾸기 같은 작업은 링크 자체에 한다).
 /// 숨김: 이름이 점으로 시작하거나, 맥 Finder의 '숨김' 표시(UF_HIDDEN)가 있는 항목
 #[cfg(not(windows))]
 pub fn list_dir(dir: &str) -> Result<Vec<Entry>, String> {
@@ -294,9 +299,22 @@ pub fn list_dir(dir: &str) -> Result<Vec<Entry>, String> {
             e.size = meta.len();
         }
         e.modified = meta.modified().map(filetime_of).unwrap_or(0);
+        e.file_id = own_id(&item, &meta);
         out.push(e);
     }
     Ok(out)
+}
+
+/// 항목 자체의 파일 번호. meta는 링크를 따라가 읽은 것이라, 링크면 링크 자체를 다시 읽는다 (읽지 못하면 0)
+#[cfg(unix)]
+fn own_id(item: &std::fs::DirEntry, meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    if item.file_type().is_ok_and(|t| t.is_symlink()) { std::fs::symlink_metadata(item.path()).map(|m| m.ino()).unwrap_or(0) } else { meta.ino() }
+}
+
+#[cfg(all(not(windows), not(unix)))]
+fn own_id(_item: &std::fs::DirEntry, _meta: &std::fs::Metadata) -> u64 {
+    0
 }
 
 #[cfg(target_os = "macos")]
@@ -560,6 +578,24 @@ mod tests {
         assert!(entries.iter().any(|e| e.kind == Kind::Dir && e.name_string() == "sub" && !e.is_hidden()));
         assert!(entries.iter().any(|e| e.name_string() == ".숨김" && e.is_hidden()));
         assert!(list_dir("/__sakadu_does_not_exist__").is_err());
+    }
+
+    /// 파일 번호: 항목마다 다르고, 그 경로를 따로 읽은 번호와 같다. 폴더를 가리키는 링크는 폴더로 보이되 번호는 링크 자체의 것이다
+    #[cfg(unix)]
+    #[test]
+    fn file_ids_are_the_entries_own() {
+        let dir = std::env::temp_dir().join(format!("sakadu-test-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("진짜")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        std::os::unix::fs::symlink(dir.join("진짜"), dir.join("링크")).unwrap();
+        let entries = list_dir(dir.to_str().unwrap()).unwrap();
+        let id = |name: &str| entries.iter().find(|e| e.name_string() == name).unwrap().file_id;
+        let own = |name: &str| crate::fileops::inode(dir.join(name).to_str().unwrap()).unwrap();
+        assert_eq!([id("a.txt"), id("진짜"), id("링크")], [own("a.txt"), own("진짜"), own("링크")]);
+        assert!(id("a.txt") != 0 && id("링크") != id("진짜"));
+        assert_eq!(entries.iter().find(|e| e.name_string() == "링크").unwrap().kind, Kind::Dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 날짜 일련번호와 그 거꾸로가 맞고, FILETIME 변환과 현지 시각이 말이 된다

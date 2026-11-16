@@ -5,6 +5,7 @@
 pub mod diag;
 pub mod draw;
 pub mod favorites;
+pub mod fileops;
 pub mod index;
 pub mod keys;
 pub mod listing;

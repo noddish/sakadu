@@ -23,24 +23,10 @@ impl App {
     }
 
     pub(super) fn rename_rect(&self, p: usize) -> Option<R> {
-        let (list, grid) = self.grid(p)?;
+        let list = self.list_rect(p)?;
         let pane = &self.panes[p];
         let tab = pane.tab();
-        let it = grid.item(tab.cursor, tab.scroll);
-        if it.t < list.t - 1.0 || it.b > list.b + 1.0 || it.l < list.l - 1.0 || it.r > list.r + 1.0 {
-            return None;
-        }
-        match grid.cell {
-            CellKind::Tile(thumb) => {
-                // 그림 아래 이름 자리
-                let y = it.t + 8.0 + thumb + 6.0;
-                return Some(R::new(it.l + 4.0, y, it.r - 8.0, y + 24.0));
-            }
-            CellKind::Icon => return Some(R::new(it.l + 24.0, it.t + 2.0, it.r - 6.0, it.b - 2.0)),
-            CellKind::Row => {}
-        }
-        let cols = columns(list, pane.cols);
-        Some(R::new(cols.name.0 + 24.0, it.t + 2.0, cols.name.1 - 4.0, it.b - 2.0))
+        name_edit_rect(list, pane.view, pane.cols, tab.cursor, tab.scroll)
     }
 
     /// 실제 Win32 입력 상자(한글 IME 지원)를 그려 둔 자리 위에 맞춘다.

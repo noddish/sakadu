@@ -74,7 +74,7 @@ fn write_demo_previews(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 열한 가지 × 밝은·어두운 테마를 out에 그린다.
+/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 열두 가지 × 밝은·어두운 테마를 out에 그린다.
 /// 작업 공간은 셋: 업무(파랑, 두 칸), 사진 정리(보라, 네 칸), 개인(주황, 세 칸). 공간마다 고정한 것이 다르고,
 /// 아래 '모든 공간'(바로가기와 즐겨찾기)은 어느 공간에서나 같다.
 /// 미리 보기 카드 장면에 쓸 그림과 글 파일은 demo의 사진/제주살이에 직접 만든다
@@ -179,6 +179,12 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         a.commit_address_for_render(0, "/없는/경로");
         a.begin_address(1);
         shots.push(("address", a));
+
+        // 이름 바꾸기: 왼쪽 칸에서 파일 하나를 고르고 Return을 누른 모습 (그 줄에 이름 상자, 확장자 앞까지 골라 둔다)
+        let mut a = base(favs.clone(), true);
+        a.tab_mut(0).select_only(1);
+        a.begin_item_rename(0);
+        shots.push(("rename", a));
 
         // 자동 미리 보기: 왼쪽 칸에서 그림을 하나 고르면 오른쪽 칸 아래에 카드가 뜬다 (그림은 settle이 바로 읽는다)
         let preview = |file: &str| {
