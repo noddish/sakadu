@@ -83,14 +83,33 @@ pub fn inode(path: &str) -> io::Result<u64> {
     Ok(std::fs::symlink_metadata(path)?.ino())
 }
 
-/// 두 경로가 같은 항목을 가리키는가 (같은 볼륨의 같은 파일 번호)
+/// 두 경로가 같은 폴더 안의 같은 항목을 가리키는가: 대소문자를 가리지 않는 볼륨에서 대소문자만 다른 두 이름이 그렇다.
+/// 같은 파일(같은 볼륨의 같은 파일 번호)이어도 두 이름이 폴더 목록에 따로 나오면 서로 다른 항목이다 (한 파일에 붙은 두 이름,
+/// 하드 링크). 그런 둘 사이의 이름 바꾸기는 아무것도 바꾸지 않으면서 성공했다고 하므로, 같은 항목으로 보지 않는다
 #[cfg(unix)]
 fn same_entry(a: &str, b: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
-    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
-        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
-        _ => false,
+    let same_file = matches!((std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino());
+    same_file && !listed_apart(a, b)
+}
+
+/// 두 경로의 이름이 저마다 폴더 목록에 글자 그대로 나오는가. 서로 다른 폴더에 있거나 목록을 읽지 못하면 그렇다고 본다
+/// (모를 때는 덮어쓰지 않는 쪽으로)
+#[cfg(unix)]
+fn listed_apart(a: &str, b: &str) -> bool {
+    let (Some(dir), Some(other)) = (util::parent(a), util::parent(b)) else { return true };
+    if dir != other {
+        return true;
     }
+    let Ok(items) = std::fs::read_dir(&dir) else { return true };
+    let (name_a, name_b) = (util::file_name(a), util::file_name(b));
+    let (mut has_a, mut has_b) = (false, false);
+    for item in items.flatten() {
+        let name = item.file_name();
+        has_a |= name == name_a;
+        has_b |= name == name_b;
+    }
+    has_a && has_b
 }
 
 #[cfg(target_os = "macos")]
@@ -119,7 +138,7 @@ pub fn rename_excl(from: &str, to: &str) -> io::Result<()> {
     let err = io::Error::last_os_error();
     if err.kind() == io::ErrorKind::AlreadyExists && same_entry(from, to) {
         // '이미 있다'는 그 이름이 바로 자기 자신이다: 대소문자를 가리지 않는 볼륨에서 대소문자만 바꾸는 경우.
-        // 같은 항목끼리의 이름 바꾸기는 아무것도 덮어쓰지 않는다
+        // 같은 항목의 이름 바꾸기는 아무것도 덮어쓰지 않는다 (한 파일에 붙은 다른 이름은 same_entry가 걸러 낸다)
         return std::fs::rename(from, to);
     }
     if err.raw_os_error() == Some(ENOTSUP) {
@@ -274,6 +293,27 @@ mod tests {
         assert_eq!((inode(&p("새 링크")).unwrap(), inode(&p("진짜")).unwrap()), (link, real));
         assert_eq!(std::fs::read(util::join(&p("진짜"), "안.txt")).unwrap(), b"in");
         assert_eq!(names(&dir), ["새 링크", "진짜"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 한 파일에 이름이 둘 붙어 있을 때(하드 링크): 한 이름을 다른 이름으로 바꾸지 않는다.
+    /// 파일 번호가 같다고 '대소문자만 바꾸기'로 보면, 아무것도 바뀌지 않았는데 바꿨다고 하게 된다
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn another_name_of_the_same_file_is_not_a_case_only_rename() {
+        let dir = temp("hardlink");
+        let p = |n: &str| util::join(&dir, n);
+        std::fs::write(p("원본.txt"), b"one").unwrap();
+        std::fs::hard_link(p("원본.txt"), p("다른 이름.txt")).unwrap();
+        assert_eq!(inode(&p("원본.txt")).unwrap(), inode(&p("다른 이름.txt")).unwrap());
+        assert_eq!(rename_excl(&p("원본.txt"), &p("다른 이름.txt")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(rename_checked(&p("원본.txt"), &p("다른 이름.txt")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(names(&dir), ["다른 이름.txt", "원본.txt"]);
+        // 다른 폴더에 있는 같은 파일의 이름 위로도 가지 않는다
+        std::fs::create_dir(p("폴더")).unwrap();
+        std::fs::hard_link(p("원본.txt"), util::join(&p("폴더"), "원본.txt")).unwrap();
+        assert_eq!(rename_excl(&p("원본.txt"), &util::join(&p("폴더"), "원본.txt")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(names(&dir), ["다른 이름.txt", "원본.txt", "폴더"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

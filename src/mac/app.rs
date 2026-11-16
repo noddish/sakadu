@@ -1315,7 +1315,7 @@ impl App {
                 if waiting {
                     self.edit = Editing::None;
                 }
-                self.deselect_file(*file_id);
+                self.deselect_file(dir, *file_id);
                 if let Some(p) = here(self, dir) {
                     self.select_after(p, to);
                 }
@@ -1356,13 +1356,14 @@ impl App {
         tab.restore = Some(Restore { scroll: tab.scroll, cursor_index: tab.cursor, ..Restore::select(name) });
     }
 
-    /// 이름이 바뀐 항목을 모든 탭의 고른 것에서 뺀다: 아직 다시 읽지 않은 목록에 고른 채 남은 옛 이름이,
-    /// 나중에 그 이름을 갖게 된 다른 항목의 선택으로 되살아나지 않게
-    fn deselect_file(&mut self, file_id: u64) {
+    /// 폴더 dir 안의 이름이 바뀐 항목을, 그 폴더를 보이는 모든 탭의 고른 것에서 뺀다: 아직 다시 읽지 않은 목록에 고른 채 남은
+    /// 옛 이름이, 나중에 그 이름을 갖게 된 다른 항목의 선택으로 되살아나지 않게.
+    /// 파일 번호는 한 볼륨 안에서만 서로 다르므로 그 폴더를 보이는 탭에서만 찾는다 (다른 볼륨의 파일이 같은 번호일 수 있다)
+    fn deselect_file(&mut self, dir: &str, file_id: u64) {
         if file_id == 0 {
             return;
         }
-        for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+        for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()).filter(|tab| tab.loc.dir() == Some(dir)) {
             for e in tab.entries.iter_mut().filter(|e| e.file_id == file_id) {
                 e.selected = false;
             }
@@ -3920,6 +3921,28 @@ mod tests {
         a.activate_tab(0, 0);
         a.settle();
         assert!(names(&a, 0).contains(&"예산 최종.csv".to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 파일 번호는 한 볼륨 안에서만 서로 다르다: 이름이 바뀐 항목을 고른 것에서 뺄 때, 다른 폴더를 보이는 탭의 항목은
+    /// 번호가 같아도 건드리지 않는다
+    #[test]
+    fn a_rename_does_not_deselect_items_of_other_folders() {
+        let (root, home) = demo();
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        let (mut a, g) = app(&work);
+        a.navigate(1, Location::Dir(downloads), None);
+        a.settle();
+        click_name(&mut a, &g, 1, "사진.jpg", Mods::default());
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        // 다른 볼륨의 파일이 우연히 같은 번호인 경우를 흉내 낸다
+        let id = a.pane(0).tab().cursor_entry().unwrap().file_id;
+        a.tab_mut(1).entries.iter_mut().for_each(|e| e.file_id = id);
+        a.key(Key::Return, Mods::default());
+        a.commit_address("예산 최종.csv");
+        a.settle();
+        assert_eq!(picked(&a, 0).0, ["예산 최종.csv"]);
+        assert_eq!(picked(&a, 1).0, ["사진.jpg"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
