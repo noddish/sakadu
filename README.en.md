@@ -4,7 +4,7 @@
 
 A Windows file manager that keeps several folders open side by side and finds any file on your disk as you type its name.
 
-![Two panes with the favorites panel, thumbnails and the preview pane](docs/screenshot-main.png)
+![The workspace rail, two panes, thumbnails and the preview card for the selected photo](docs/screenshot-main.png)
 
 **[Download the latest release](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · a single exe, no installer · free and open source
 
@@ -12,16 +12,16 @@ A Windows file manager that keeps several folders open side by side and finds an
 
 ## Features
 
-- **Instant search**: press Ctrl+F, type a few letters, and results from the whole disk show up right away (10–20 ms over 1.8 million entries). Results stay in the left panel with their dates and sizes. Add a shared folder or USB drive and it's searched too.
+- **Instant search**: press Ctrl+F, type a few letters, and results from the whole disk show up right away (10–20 ms over 1.8 million entries). Results stay in the left panel so you can open them one by one. Add a shared folder or USB drive and it's searched too.
 - **Several folders in one window**: split into 2, 3 or 4 panes, each with its own tabs. Drag a tab to move it to another pane.
-- **Ctrl+K command menu**: jump to an open tab, favorite or recent location, or find and run a command by name (Korean initial consonants work too).
+- **Ctrl+K command menu**: jump to an open tab, pinned place or recent location, or find and run a command by name (Korean initial consonants work too).
 - **Works like Explorer**: right-click menus, the copy progress dialog and drag and drop behave as they do in Explorer. Moved something by mistake? Use the **되돌리기** (undo) button on the notice, or Ctrl+Z.
-- **Look before you open**: thumbnails and a preview pane show photos, PDFs and text. Pin a reference file in the preview to keep it in view.
-- **Workspaces**: keep panes, tabs, the search query and the preview as named workspaces and switch between them. A new tab opens on your favorites and recent locations.
+- **Look before you open**: select a picture or text file and a preview card appears at the bottom of the neighbouring pane. PDFs and Office documents open in the preview pane (Alt+P), where you can pin a reference file to keep it in view.
+- **Workspaces**: switch workspaces from the rail on the left. Each one remembers its own layout (panes and tabs), pinned places and color. A new tab opens on your pinned places and recent locations.
 - **NAS**: shares that need a sign-in open through the Windows sign-in dialog, and a dropped connection shows the last list you saw.
 - **Light**: no runtime or web view; it's Rust drawing with Direct2D. Dark mode follows your Windows setting.
 
-![Search results kept in the search panel and a photo pinned in the preview](docs/screenshot-search.png)
+![The search field grown out of the toolbar, the results panel and the preview card for a text file](docs/screenshot-search.png)
 
 ![Dark theme with four panes and the new tab start page](docs/screenshot-dark.png)
 
@@ -29,9 +29,9 @@ A Windows file manager that keeps several folders open side by side and finds an
 
 1. Grab `Sakadu-<version>-windows-x64.zip` from [Releases](https://github.com/noddish/sakadu/releases/latest) and unzip it.
 2. Run `sakadu.exe`. If Windows shows "Windows protected your PC", click **More info → Run anyway** (the exe isn't code-signed yet).
-3. For whole-disk search, press **검색 서비스 설치** (install search service) in the search panel (Ctrl+F) once and approve the admin prompt.
+3. For whole-disk search, open search (Ctrl+F), press **검색 서비스 설치** (install search service) once and approve the admin prompt.
 
-In Settings (gear) you can use Sakadu as the default file manager, keep it in the tray so the search hotkey works after closing the window, and change the theme and shortcuts. Press F1 for usage tips.
+In Settings (the gear at the bottom left) you can use Sakadu as the default file manager, keep it in the tray so the search hotkey works after closing the window, and change the theme and shortcuts. Press F1 for usage tips.
 
 ## Keys you'll use most
 
@@ -44,7 +44,7 @@ In Settings (gear) you can use Sakadu as the default file manager, keep it in th
 | Tab / Shift+Tab | Next / previous pane |
 | Ctrl+T / Ctrl+W | New tab / close tab |
 | Alt+P | Preview pane |
-| Ctrl+B / Ctrl+D | Go to favorites / add to favorites |
+| Ctrl+B / Ctrl+D | Go to the sidebar list / pin to this workspace |
 | Ctrl+Z | Undo the last file operation |
 
 All other shortcuts are listed (and can be changed) in Settings → **단축키** (Shortcuts).
