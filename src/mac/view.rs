@@ -47,6 +47,9 @@ thread_local! {
 static LATEST_PREVIEW: AtomicU64 = AtomicU64::new(0);
 /// 그림을 읽기 전에 잠깐 기다리는 시간 (화살표 키를 누르고 있을 때 지나가는 사진을 하나하나 읽지 않게)
 const PREVIEW_SETTLE: Duration = Duration::from_millis(60);
+/// 폴더를 읽기 전에 그 폴더의 감시가 걸리기를 기다리는 한도. 보통은 곧 걸린다. 꺼진 네트워크 폴더처럼 여는 데
+/// 오래 걸리면 이만큼만 기다리고 읽는다
+const WATCH_WAIT: Duration = Duration::from_secs(2);
 
 fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> Option<T> {
     APP.with(|a| a.borrow_mut().as_mut().map(f))
@@ -453,6 +456,8 @@ impl SakaduView {
         let paths = board_paths(&sender.draggingPasteboard());
         let p = self.convertPoint_fromView(sender.draggingLocation(), None);
         let dir = with_app(|a| a.drag_over(&self.ivars().measure, p.x as f32, p.y as f32, &paths)).flatten();
+        // 놓일 곳이 다른 칸으로 옮겨 갔으면, 앞의 칸에서 미뤄 둔 다시 읽기가 생길 수 있다
+        pump();
         self.setNeedsDisplay(true);
         let (Some(dir), Some(first)) = (dir, paths.first()) else { return NSDragOperation::None };
         match how {
@@ -725,7 +730,12 @@ fn pump() {
         });
     }
     for r in reqs {
+        let watch = WATCH.with(|cell| cell.get().and_then(|w| w.as_ref()).map(crate::watch::Watcher::handle));
         std::thread::spawn(move || {
+            // 감시가 걸린 뒤에 읽는다: 감시보다 먼저 읽으면 읽은 뒤부터 감시가 걸리기까지의 변화를 놓친다
+            if let Some(watch) = &watch {
+                watch.wait_watched(&r.dir, WATCH_WAIT);
+            }
             let result = sakadu::listing::list_dir(&r.dir);
             DispatchQueue::main().exec_async(move || {
                 with_app(|a| a.on_listed(r.tab, r.generation, result));

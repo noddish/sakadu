@@ -769,6 +769,11 @@ pub struct App {
     stale: HashSet<u64>,
     /// 읽기를 맡기고 아직 결과를 받지 못한 탭
     reading: HashSet<u64>,
+    /// 같은 폴더를 다시 읽는 중인 탭 (refresh): 다 읽으면 그때의 고른 것·커서·스크롤을 되살린다
+    rereading: HashSet<u64>,
+    /// 다 읽었지만 아직 적용하지 않은 다시 읽기 결과 (탭, 세대 번호, 결과): 그 탭의 줄을 마우스로 다루는 동안에는
+    /// 목록을 바꾸지 않고, 손을 뗄 때 적용한다 (after_pointer)
+    held: Vec<(u64, u64, Result<Vec<Entry>, String>)>,
     /// 창 쪽에 감시해 달라고 내준 폴더: 보이는 칸의 폴더 (take_watch_dirs)
     watched: Vec<String>,
     /// 맡기고 아직 결과를 받지 못한 파일 작업의 수
@@ -868,6 +873,8 @@ impl App {
             name_next: None,
             stale: HashSet::new(),
             reading: HashSet::new(),
+            rereading: HashSet::new(),
+            held: Vec::new(),
             watched: Vec::new(),
             ops_running: 0,
             undos: UndoStack::default(),
@@ -961,6 +968,8 @@ impl App {
     fn load(&mut self, p: usize) {
         let tab = self.panes[p].tab_mut();
         tab.generation += 1;
+        // 새로 읽는다: 같은 폴더를 다시 읽는 것이면 refresh가 다시 적어 둔다
+        self.rereading.remove(&tab.id);
         if tab.state != LoadState::Ready {
             tab.state = LoadState::Loading;
         }
@@ -985,7 +994,14 @@ impl App {
         if !current {
             return;
         }
+        // 다시 읽은 결과가 그 탭의 줄을 마우스로 다루는 동안에 왔다: 지금은 목록을 바꾸지 않는다 (after_pointer가 적용한다).
+        // 누른 줄과 놓일 줄은 줄 번호로 기억하므로, 손 밑의 줄이 바뀌면 다른 항목이 골라지거나 다른 폴더에 놓인다
+        if self.rereading.contains(&tab_id) && self.pointer_on(tab_id) {
+            self.held.push((tab_id, generation, result));
+            return;
+        }
         self.reading.remove(&tab_id);
+        let rereading = self.rereading.remove(&tab_id);
         // 세션에서 연 탭인지는 그 탭의 첫 읽기 결과에서만, 그리고 아직 저장한 그 폴더에 있을 때만 본다
         let saved = self.restored.remove(&tab_id);
         let home = self.home.clone();
@@ -993,6 +1009,11 @@ impl App {
         let restored = saved.is_some_and(|d| tab.loc.dir() == Some(d.as_str()));
         match result {
             Ok(entries) => {
+                // 같은 폴더를 다시 읽었다: 읽기를 시작한 때가 아니라 지금의 고른 것·커서·스크롤을 되살린다
+                // (읽는 사이에 고르거나 스크롤한 것을 되돌리지 않는다). 읽은 뒤 고를 것을 따로 정해 둔 때는 그것을 따른다
+                if rereading && tab.restore.is_none() {
+                    tab.restore = Some(tab.snapshot());
+                }
                 let restore = tab.set_entries(entries, sort, hidden);
                 // 스크롤은 다 읽은 그 탭에 맞춘다 (그 사이 다른 탭으로 옮겼어도 보고 있는 탭은 그대로)
                 if let Some(list) = list {
@@ -1601,14 +1622,16 @@ impl App {
     pub fn drag_over(&mut self, g: &Gfx, x: f32, y: f32, paths: &[String]) -> Option<String> {
         let target = self.drop_target(g, x, y, paths);
         self.drop = target.as_ref().map(|(at, ..)| *at);
+        // 놓일 곳이 다른 칸으로 옮겨 갔으면, 앞의 칸에서 미뤄 둔 것을 한다
+        self.after_pointer();
         target.map(|(_, dir, _)| dir)
     }
 
     /// 끌려 온 것이 창을 벗어났거나 끌기가 끝났다: 강조를 지운다
     pub fn drag_exit(&mut self) {
         self.drop = None;
-        // 끌려 온 것이 위에 있는 동안 미뤄 둔 다시 읽기
-        self.reload_stale();
+        // 끌려 온 것이 위에 있는 동안 미뤄 둔 것
+        self.after_pointer();
     }
 
     /// (x, y)에 놓았다: 그곳의 폴더로 옮기거나 복사하기 시작한다 (how가 Drop이면 같은 디스크는 옮기고 다른 디스크는 복사).
@@ -1616,7 +1639,7 @@ impl App {
     pub fn drop_paths(&mut self, g: &Gfx, x: f32, y: f32, paths: Vec<String>, how: Paste) -> bool {
         self.drop = None;
         self.flash = None;
-        // 놓을 곳은 끄는 동안 보던 그 목록에서 찾는다 (미뤄 둔 다시 읽기는 그다음에 한다)
+        // 놓을 곳은 끄는 동안 보던 그 목록에서 찾는다 (미뤄 둔 읽기 결과와 다시 읽기는 그다음에 한다)
         let started = match self.drop_target(g, x, y, &paths) {
             Some((at, dir, tab)) => {
                 if let DropAt::Pane(p) | DropAt::Row(p, _) = at {
@@ -1627,7 +1650,7 @@ impl App {
             }
             None => false,
         };
-        self.reload_stale();
+        self.after_pointer();
         started
     }
 
@@ -2077,20 +2100,33 @@ impl App {
 
     /// 보이는 칸의 탭 가운데 다시 읽기로 해 둔 것을 읽는다. 다음 때는 미루고, 그 일이 끝날 때 다시 부른다:
     /// - 읽는 중일 때: 잇달아 바뀌는 폴더에서 읽던 것을 버리고 새로 읽기만 되풀이하지 않게, 다 읽은 뒤 한 번 더 읽는다
-    /// - 마우스로 줄을 누르고 있거나 끌려 온 것이 놓일 곳 위에 있을 때: 손 밑의 줄이 바뀌지 않게
+    /// - 그 탭의 줄을 마우스로 다루는 중일 때 (pointer_on): 손 밑의 줄이 바뀌지 않게
     /// - 복사·옮기기 묶음이 그 폴더에 넣고 있을 때: 복사하는 중인 임시 이름이 목록에 보이지 않게 (묶음이 끝나면 읽는다)
     fn reload_stale(&mut self) {
-        if self.press.is_some() || self.drop.is_some() {
-            return;
-        }
         for p in 0..self.layout.count() {
             let tab = self.panes[p].tab();
-            let id = tab.id;
+            let (id, ready) = (tab.id, tab.state == LoadState::Ready);
             let filling = self.batch.as_ref().is_some_and(|b| tab.loc.dir() == Some(b.dir.as_str()));
-            if tab.state == LoadState::Ready && !filling && !self.reading.contains(&id) && self.stale.remove(&id) {
+            if ready && !filling && !self.reading.contains(&id) && !self.pointer_on(id) && self.stale.remove(&id) {
                 self.refresh(p);
             }
         }
+    }
+
+    /// 그 탭의 줄을 마우스로 다루는 중인지: 그 탭이 보이는 칸에서 줄을 누르고 있거나, 끌려 온 것이 그 칸의 목록 위에 있다.
+    /// 누른 줄과 놓일 줄은 줄 번호로 기억하므로, 그동안에는 그 목록을 바꾸지 않는다
+    fn pointer_on(&self, tab_id: u64) -> bool {
+        let shows = |p: usize| p < self.layout.count() && self.panes[p].tab().id == tab_id;
+        self.press.as_ref().is_some_and(|press| shows(press.pane)) || matches!(self.drop, Some(DropAt::Pane(p) | DropAt::Row(p, _)) if shows(p))
+    }
+
+    /// 마우스로 다루던 것이 끝났거나 다른 칸으로 옮겨 갔다: 그동안 미뤄 둔 읽기 결과를 적용하고, 미뤄 둔 다시 읽기를 한다
+    fn after_pointer(&mut self) {
+        // 아직 다루는 중인 탭의 것은 on_listed가 다시 미뤄 둔다
+        for (tab, generation, result) in std::mem::take(&mut self.held) {
+            self.on_listed(tab, generation, result);
+        }
+        self.reload_stale();
     }
 
     // ---------- 세션 ----------
@@ -2139,6 +2175,8 @@ impl App {
         // 탭을 새로 만든다: 옛 탭에 걸어 둔 표시는 버린다
         self.stale.clear();
         self.reading.clear();
+        self.rereading.clear();
+        self.held.clear();
         self.name_next = None;
         self.layout = Layout::ALL[(s.layout as usize).min(4)];
         self.split = (s.split.0.clamp(0.15, 0.85), s.split.1.clamp(0.15, 0.85));
@@ -2410,12 +2448,11 @@ impl App {
         self.open_files.extend(files);
     }
 
+    /// 칸 p의 지금 탭을 다시 읽는다 (같은 폴더). 고른 것·커서·스크롤은 다 읽었을 때의 것을 그대로 둔다 (on_listed)
     pub fn refresh(&mut self, p: usize) {
-        let tab = self.panes[p].tab_mut();
-        if tab.restore.is_none() {
-            tab.restore = Some(tab.snapshot());
-        }
         self.load(p);
+        let id = self.panes[p].tab().id;
+        self.rereading.insert(id);
     }
 
     // ---------- 탭·칸 ----------
@@ -2439,6 +2476,7 @@ impl App {
         let closed = pane.tabs.remove(i);
         self.stale.remove(&closed.id);
         self.reading.remove(&closed.id);
+        self.rereading.remove(&closed.id);
         if pane.active > i || pane.active >= pane.tabs.len() {
             pane.active = pane.active.saturating_sub(1);
         }
@@ -3279,8 +3317,8 @@ impl App {
                 tab.select_only(press.row);
             }
         }
-        // 누르고 있는 동안 미뤄 둔 다시 읽기
-        self.reload_stale();
+        // 누르고 있는 동안 미뤄 둔 것
+        self.after_pointer();
     }
 
     /// 마우스 올림이 바뀌었으면 true (다시 그린다)
@@ -5592,6 +5630,100 @@ mod tests {
         a.settle();
         assert!(std::fs::metadata(util::join(&util::join(&work, "2026 4분기"), "사진.jpg")).is_ok(), "it went into the folder under the pointer");
         assert!(names(&a, 0).contains(&"나.txt".to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 다시 읽은 결과가 마우스로 줄을 누르고 있는 동안이나 끌려 온 것이 그 목록 위에 있는 동안에 오면, 그 목록은 손을 뗄 때까지
+    /// 그대로 둔다: 뗀 줄은 누른 그 줄이고, 놓은 것은 강조돼 있던 그 폴더로 간다
+    #[test]
+    fn a_read_that_ends_under_the_pointer_is_applied_afterwards() {
+        let (root, home) = demo();
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        let (mut a, g) = app(&work);
+        let listed = |a: &mut App, reqs: &[Request]| {
+            for r in reqs {
+                a.on_listed(r.tab, r.generation, listing::list_dir(&r.dir));
+            }
+        };
+        // 두 칸 모두 업무를 본다. 맨 위에 올 폴더가 생겨 줄이 하나씩 밀리게 된다
+        a.select_all();
+        std::fs::create_dir(util::join(&work, "0 맨 위")).unwrap();
+        a.on_dir_changed(&work);
+        let reqs = a.take_requests();
+        assert_eq!(reqs.len(), 2);
+        // 결과가 오기 전에 왼쪽 칸에서 회의록.md를 누른다 (여럿을 고른 것 가운데 하나)
+        let vi = names(&a, 0).iter().position(|n| n == "회의록.md").unwrap();
+        let (x, y) = row_point(&a, 0, vi);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        listed(&mut a, &reqs);
+        assert!(!names(&a, 0).contains(&"0 맨 위".to_string()), "the list under the pressed row is left alone");
+        assert_eq!(names(&a, 1)[0], "0 맨 위", "the other pane is not held back");
+        a.mouse_up();
+        assert_eq!(picked(&a, 0).0, ["회의록.md"], "the row that was pressed, not the one that slid under the pointer");
+        assert_eq!(names(&a, 0)[0], "0 맨 위", "and then the list is brought up to date");
+        assert!(a.take_requests().is_empty());
+        // 끌려 온 것이 오른쪽 칸의 폴더 줄 '2026 4분기' 위에 있는 동안, 그 줄 자리에 올 폴더가 생긴다
+        let dragged = vec![util::join(&downloads, "사진.jpg")];
+        let (x, y) = row_point(&a, 1, 1);
+        std::fs::create_dir(util::join(&work, "1 사이")).unwrap();
+        a.on_dir_changed(&work);
+        let reqs = a.take_requests();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(a.drag_over(&g, x, y, &dragged), Some(util::join(&work, "2026 4분기")));
+        listed(&mut a, &reqs);
+        assert_eq!(names(&a, 1)[1], "2026 4분기", "the list under the hovering drop is left alone");
+        assert_eq!(names(&a, 0)[1], "1 사이");
+        // 놓는다: 강조돼 있던 폴더로 가고, 그다음에 목록이 맞춰진다
+        assert!(a.drop_paths(&g, x, y, dragged, Paste::Drop));
+        a.settle();
+        assert!(std::fs::metadata(util::join(&util::join(&work, "2026 4분기"), "사진.jpg")).is_ok(), "it went into the folder that was highlighted");
+        assert!(std::fs::metadata(util::join(&util::join(&work, "1 사이"), "사진.jpg")).is_err());
+        assert_eq!(names(&a, 1)[1], "1 사이");
+        // 끌려 온 것이 다른 칸으로 옮겨 가면, 앞의 칸에서 미뤄 둔 것은 그때 적용한다
+        let dragged = vec![util::join(&downloads, "없는 파일")];
+        let (x, y) = row_point(&a, 0, 0);
+        std::fs::create_dir(util::join(&work, "00 더 위")).unwrap();
+        a.on_dir_changed(&work);
+        let reqs = a.take_requests();
+        assert!(a.drag_over(&g, x, y, &dragged).is_some());
+        listed(&mut a, &reqs);
+        assert!(!names(&a, 0).contains(&"00 더 위".to_string()) && names(&a, 1).contains(&"00 더 위".to_string()));
+        let (x1, y1) = row_point(&a, 1, 0);
+        assert!(a.drag_over(&g, x1, y1, &dragged).is_some());
+        assert!(names(&a, 0).contains(&"00 더 위".to_string()));
+        a.drag_exit();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 다시 읽는 사이에 고른 것을 바꾸면, 다 읽었을 때 그 바꾼 것이 남는다 (읽기를 시작한 때의 선택으로 되돌리지 않는다:
+    /// 되돌리면 방금 고른 것과 다른 파일에 다음 작업이 간다)
+    #[test]
+    fn a_read_keeps_what_is_selected_when_it_ends() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        a.set_layout(Layout::ALL[0]);
+        click_name(&mut a, &g, 0, "회의록.md", Mods::default());
+        std::fs::write(util::join(&work, "새 파일.txt"), b"x").unwrap();
+        a.on_dir_changed(&work);
+        let reqs = a.take_requests();
+        assert_eq!(reqs.len(), 1);
+        // 읽는 사이에 다른 파일을 고른다
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        a.on_listed(reqs[0].tab, reqs[0].generation, listing::list_dir(&reqs[0].dir));
+        assert!(names(&a, 0).contains(&"새 파일.txt".to_string()));
+        assert_eq!(picked(&a, 0), (vec!["예산.csv".to_string()], "예산.csv".to_string()));
+        // ⌘R로 다시 읽을 때도 같다
+        a.refresh(0);
+        let reqs = a.take_requests();
+        a.select_all();
+        a.on_listed(reqs[0].tab, reqs[0].generation, listing::list_dir(&reqs[0].dir));
+        assert_eq!(a.pane(0).tab().selection_stats().0, 4);
+        // 읽은 뒤 고를 것을 정해 둔 작업(새 폴더)은 그것을 따른다
+        a.clear_selection();
+        assert!(a.key(Key::Char('n'), Mods { cmd: true, shift: true, ..Default::default() }));
+        a.settle();
+        assert_eq!(picked(&a, 0).0, ["새 폴더"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

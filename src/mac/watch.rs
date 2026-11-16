@@ -3,7 +3,9 @@
 //! (홈 폴더를 볼 때 그 아래 어디선가 파일이 바뀔 때마다 다시 읽지 않는다). 있는 파일의 내용만 바뀐 것(크기, 고친 날짜)도
 //! 오지 않는다: 그것은 창이 다시 앞으로 올 때의 다시 읽기가 맡는다.
 //! 기다리는 일은 뒷줄 하나가 하고, 폴더를 여는 일은 폴더마다 따로 띄운 줄이 한다: 꺼진 네트워크 폴더를 여느라
-//! 오래 걸려도 창도, 다른 폴더의 감시도 멈추지 않는다
+//! 오래 걸려도 창도, 다른 폴더의 감시도 멈추지 않는다.
+//! 폴더를 읽는 쪽은 읽기 전에 그 폴더의 감시가 걸리기를 기다린다 (Handle::wait_watched): 감시보다 먼저 읽으면
+//! 읽은 뒤부터 감시가 걸리기까지의 변화를 놓친다
 
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -24,16 +26,49 @@ enum Cmd {
     Set(Vec<String>),
     /// 따로 띄운 줄이 폴더를 열었다 (또는 열지 못했다)
     Opened(String, std::io::Result<File>),
+    /// 그 폴더의 감시가 걸리면 (또는 걸 수 없다고 정해지면) 답한다
+    Ready(String, Sender<()>),
     Stop,
     /// 앞서 보낸 것을 다 처리하고 여는 중인 폴더가 없을 때 답한다 (시험에서 기다린다)
     #[cfg(test)]
     Sync(Sender<()>),
 }
 
-/// 폴더 감시. 없애면 감시하는 줄도 끝난다
-pub struct Watcher {
+/// 시험에서 폴더 열기를 이만큼(밀리초) 늦춘다: 감시가 걸리기를 기다리는 쪽이 정말 기다리는지 본다
+#[cfg(test)]
+static OPEN_DELAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 감시하는 줄에 말을 거는 손잡이. 다른 줄(폴더를 읽는 줄)로 넘겨 쓸 수 있다
+#[derive(Clone)]
+pub struct Handle {
     kq: Arc<OwnedFd>,
     tx: Sender<Cmd>,
+}
+
+impl Handle {
+    /// 보냈으면 true (감시하는 줄이 끝났으면 false)
+    fn send(&self, cmd: Cmd) -> bool {
+        let sent = self.tx.send(cmd).is_ok();
+        if sent {
+            wake(&self.kq);
+        }
+        sent
+    }
+
+    /// 폴더 dir의 감시가 걸릴 때까지 기다린다. 걸 수 없다고 정해져도(열지 못했다, 감시해 달라고 한 폴더가 아니다) 돌아온다.
+    /// 폴더는 이 뒤에 읽는다: 그래야 읽는 사이와 그 뒤의 변화가 모두 알림으로 온다.
+    /// 여는 데 오래 걸리면(꺼진 네트워크 폴더) limit까지만 기다린다
+    pub fn wait_watched(&self, dir: &str, limit: Duration) {
+        let (tx, rx) = channel();
+        if self.send(Cmd::Ready(dir.to_string(), tx)) {
+            let _ = rx.recv_timeout(limit);
+        }
+    }
+}
+
+/// 폴더 감시. 없애면 감시하는 줄도 끝난다
+pub struct Watcher {
+    handle: Handle,
 }
 
 impl Watcher {
@@ -59,32 +94,30 @@ impl Watcher {
             sakadu::diag::log(|| format!("watch: no thread: {e}"));
             return None;
         }
-        Some(Watcher { kq, tx })
+        Some(Watcher { handle: Handle { kq, tx } })
     }
 
     /// 감시할 폴더를 이 목록으로 맞춘다
     pub fn set(&self, dirs: Vec<String>) {
-        self.send(Cmd::Set(dirs));
+        self.handle.send(Cmd::Set(dirs));
     }
 
-    fn send(&self, cmd: Cmd) {
-        if self.tx.send(cmd).is_ok() {
-            wake(&self.kq);
-        }
+    pub fn handle(&self) -> Handle {
+        self.handle.clone()
     }
 
     /// 앞서 보낸 것을 감시하는 줄이 다 처리할 때까지 기다린다
     #[cfg(test)]
     fn sync(&self) {
         let (tx, rx) = channel();
-        self.send(Cmd::Sync(tx));
+        self.handle.send(Cmd::Sync(tx));
         rx.recv_timeout(Duration::from_secs(10)).expect("the watcher thread answers");
     }
 }
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        self.send(Cmd::Stop);
+        self.handle.send(Cmd::Stop);
     }
 }
 
@@ -118,6 +151,8 @@ struct State {
     open: Vec<(String, File)>,
     /// 여는 중인 폴더
     opening: Vec<String>,
+    /// 폴더의 감시가 걸리기를 기다리는 쪽 (폴더, 답할 곳)
+    ready: Vec<(String, Sender<()>)>,
 }
 
 impl State {
@@ -129,6 +164,10 @@ impl State {
         self.opening.push(dir.clone());
         let (kq, tx) = (self.kq.clone(), self.tx.clone());
         let opener = std::thread::Builder::new().name("watch-open".to_string()).spawn(move || {
+            #[cfg(test)]
+            {
+                std::thread::sleep(Duration::from_millis(OPEN_DELAY.load(std::sync::atomic::Ordering::Relaxed)));
+            }
             let result = open_dir(&dir);
             if tx.send(Cmd::Opened(dir, result)).is_ok() {
                 wake(&kq);
@@ -136,7 +175,28 @@ impl State {
         });
         if let Err(e) = opener {
             sakadu::diag::log(|| format!("watch: no opener thread: {e}"));
-            self.opening.pop();
+            if let Some(dir) = self.opening.pop() {
+                self.answer(&dir);
+            }
+        }
+    }
+
+    /// 폴더 dir의 감시가 걸리기를 기다리던 쪽에 답한다 (걸지 못했어도: 더 기다릴 것이 없다)
+    fn answer(&mut self, dir: &str) {
+        self.ready.retain(|(d, done)| {
+            if d == dir {
+                let _ = done.send(());
+            }
+            d != dir
+        });
+    }
+
+    /// 폴더 dir의 감시가 걸리면 done에 답한다. 여는 중이 아니면(이미 걸렸거나, 걸 수 없거나, 감시할 폴더가 아니면) 바로 답한다
+    fn wait(&mut self, dir: String, done: Sender<()>) {
+        if self.opening.contains(&dir) {
+            self.ready.push((dir, done));
+        } else {
+            let _ = done.send(());
         }
     }
 
@@ -152,24 +212,25 @@ impl State {
     fn opened(&mut self, dir: String, result: std::io::Result<File>) {
         self.opening.retain(|d| *d != dir);
         // 여는 사이 그 폴더를 더는 보지 않게 됐으면 그대로 닫는다
-        if !self.want.contains(&dir) || self.open.iter().any(|(d, _)| *d == dir) {
-            return;
-        }
-        match result {
-            Ok(file) => {
-                if change(&self.kq, kev(file.as_raw_fd() as usize, libc::EVFILT_VNODE, libc::EV_ADD | libc::EV_CLEAR, WATCHED)) {
-                    self.open.push((dir, file));
-                } else {
-                    sakadu::diag::log(|| format!("watch: cannot watch {dir}: {}", std::io::Error::last_os_error()));
+        if self.want.contains(&dir) && !self.open.iter().any(|(d, _)| *d == dir) {
+            match result {
+                Ok(file) => {
+                    if change(&self.kq, kev(file.as_raw_fd() as usize, libc::EVFILT_VNODE, libc::EV_ADD | libc::EV_CLEAR, WATCHED)) {
+                        self.open.push((dir.clone(), file));
+                    } else {
+                        sakadu::diag::log(|| format!("watch: cannot watch {dir}: {}", std::io::Error::last_os_error()));
+                    }
                 }
+                Err(e) => sakadu::diag::log(|| format!("watch: cannot open {dir}: {e}")),
             }
-            Err(e) => sakadu::diag::log(|| format!("watch: cannot open {dir}: {e}")),
         }
+        // 감시를 건 다음에 답한다: 기다리던 쪽은 이제 그 폴더를 읽는다
+        self.answer(&dir);
     }
 }
 
 fn run(kq: Arc<OwnedFd>, tx: Sender<Cmd>, rx: Receiver<Cmd>, on_change: impl Fn(String)) {
-    let mut st = State { kq, tx, want: Vec::new(), open: Vec::new(), opening: Vec::new() };
+    let mut st = State { kq, tx, want: Vec::new(), open: Vec::new(), opening: Vec::new(), ready: Vec::new() };
     // 바뀌었다고 알릴 폴더 (모으는 중)와 알릴 때
     let mut dirty: Vec<String> = Vec::new();
     let mut due: Option<Instant> = None;
@@ -217,6 +278,7 @@ fn run(kq: Arc<OwnedFd>, tx: Sender<Cmd>, rx: Receiver<Cmd>, on_change: impl Fn(
             match rx.try_recv() {
                 Ok(Cmd::Set(dirs)) => st.set(dirs),
                 Ok(Cmd::Opened(dir, result)) => st.opened(dir, result),
+                Ok(Cmd::Ready(dir, done)) => st.wait(dir, done),
                 #[cfg(test)]
                 Ok(Cmd::Sync(done)) => waiting.push(done),
                 Ok(Cmd::Stop) | Err(TryRecvError::Disconnected) => return,
@@ -373,6 +435,38 @@ mod tests {
         std::fs::write(root.join("old").join("y"), b"y").unwrap();
         assert!(rx.recv_timeout(QUIET).is_err(), "the folder that moved away is not");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 읽기 전에 감시가 걸리기를 기다린다: 폴더를 여는 동안에는 돌아오지 않고, 걸리면 돌아온다. 바로 그 뒤의 변화도 알림으로 온다.
+    /// 오래 걸리면 정한 시간까지만 기다리고, 열 수 없는 폴더와 감시해 달라고 하지 않은 폴더는 기다릴 것이 없어 곧 돌아온다
+    #[test]
+    fn waits_until_a_folder_is_watched() {
+        use std::sync::atomic::Ordering;
+        let dir = temp("ready");
+        let (name, missing) = (text(&dir), text(&dir.join("not-here")));
+        let (tx, rx) = channel();
+        let w = Watcher::start(move |dir| {
+            let _ = tx.send(dir);
+        })
+        .expect("kqueue");
+        let handle = w.handle();
+        OPEN_DELAY.store(1000, Ordering::Relaxed);
+        let began = Instant::now();
+        w.set(vec![name.clone(), missing.clone()]);
+        handle.wait_watched(&name, Duration::from_millis(50));
+        let gave_up = began.elapsed();
+        handle.wait_watched(&name, SOON);
+        let watched = began.elapsed();
+        OPEN_DELAY.store(0, Ordering::Relaxed);
+        assert!(gave_up < Duration::from_millis(800), "waits no longer than the limit: {gave_up:?}");
+        assert!(watched >= Duration::from_millis(1000), "came back before the folder was opened: {watched:?}");
+        std::fs::write(dir.join("x"), b"x").unwrap();
+        assert_eq!(rx.recv_timeout(SOON).as_deref(), Ok(name.as_str()), "a change right after the wait is told");
+        let began = Instant::now();
+        handle.wait_watched(&missing, SOON);
+        handle.wait_watched("/sakadu/never/asked", SOON);
+        assert!(began.elapsed() < SOON / 2, "nothing to wait for: {:?}", began.elapsed());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 없는 폴더를 보라고 해도 멈추지 않고, 다른 폴더는 그대로 본다
