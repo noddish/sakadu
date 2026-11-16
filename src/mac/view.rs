@@ -176,10 +176,12 @@ define_class!(
             self.setNeedsDisplay(true);
         }
 
+        /// 떼기: 여럿을 고른 것 가운데 하나를 눌렀다 떼면 이때 그 줄만 남는다. 고른 것이 바뀌므로 입력 뒤처럼 처리한다
+        /// (새로 고른 파일의 미리 보기를 읽기 시작한다)
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _e: &NSEvent) {
             with_app(App::mouse_up);
-            self.setNeedsDisplay(true);
+            self.after_input();
         }
 
         #[unsafe(method(mouseMoved:))]

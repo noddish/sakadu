@@ -1526,11 +1526,18 @@ impl App {
         if let Some(p) = pane.filter(|_| !names.is_empty()) {
             self.select_after(p, &names);
         }
+        // 되돌리기 기록은 한 번의 붙여넣기·놓기에 하나: 옮긴 것과 복사한 것이 섞였으면 묶어서 함께 되돌린다
+        let mut records = Vec::new();
         if !copied.is_empty() {
-            self.undos.push(Undo::Copy { dir: b.dir.clone(), items: copied });
+            records.push(Undo::Copy { dir: b.dir.clone(), items: copied });
         }
         if !moved.is_empty() {
-            self.undos.push(Undo::Move { to: b.dir, items: moved });
+            records.push(Undo::Move { to: b.dir, items: moved });
+        }
+        if records.len() > 1 {
+            self.undos.push(Undo::Group(records));
+        } else if let Some(one) = records.pop() {
+            self.undos.push(one);
         }
         self.flash = Some((pane.unwrap_or(self.active), note));
         self.refresh_changed();
@@ -1538,7 +1545,7 @@ impl App {
 
     /// 끌려 온 것(paths)을 (x, y)에 놓으면 어디로 가는지: 놓을 곳, 받는 폴더, 그 묶음을 맡을 탭.
     /// 폴더 줄 위면 그 폴더 안으로, 그 밖의 목록 자리면 그 칸이 보이는 폴더로, 사이드바의 폴더 줄이면 그 폴더로.
-    /// 놓을 수 없는 곳(도구 막대, 파일 줄뿐인 사이드바 줄)이나 놓아도 달라질 것이 없는 곳(이미 그 폴더에 있다,
+    /// 놓을 수 없는 곳(도구 막대, 탭, 파일을 가리키는 사이드바 줄)이나 놓아도 달라질 것이 없는 곳(이미 그 폴더에 있다,
     /// 끌고 있는 폴더 자신이나 그 안)이면 None
     fn drop_target(&self, g: &Gfx, x: f32, y: f32, paths: &[String]) -> Option<(DropAt, String, u64)> {
         // 미리 보기 카드는 없는 것으로 보고 그 아래 칸을 찾는다
@@ -1549,7 +1556,8 @@ impl App {
                 let row = rows.get(i).filter(|row| row.is_dir)?;
                 (DropAt::Side(i), row.path.clone()?, self.panes[self.active].tab().id)
             }
-            Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) | Hit::Tab(p, _) | Hit::TabClose(p, _) | Hit::TabAdd(p) | Hit::Crumb(p, _) | Hit::CrumbEmpty(p) | Hit::Star(p) => {
+            // 탭 위는 놓을 곳이 아니다 (다른 탭 위에 놓았는데 지금 탭의 폴더로 가면 엉뚱한 곳에 놓인다). 경로 줄은 지금 탭의 것이다
+            Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) | Hit::Crumb(p, _) | Hit::CrumbEmpty(p) | Hit::Star(p) => {
                 let tab = self.panes[p].tab();
                 let here = tab.loc.dir()?.to_string();
                 // 폴더 줄 위면 그 폴더 안으로. 끌고 있는 항목 자신의 줄은 그 칸의 폴더로 본다
@@ -1816,60 +1824,12 @@ impl App {
                 Some(note)
             }
             (Job::Undo(undo), Ok(Done::Undone { left })) => {
-                match undo {
-                    Undo::Rename { dir, from, to, file_id } => {
-                        self.deselect_file(dir, *file_id);
-                        self.tabs_moved(&util::join(dir, to), &util::join(dir, from));
-                        if let Some(p) = here(self, dir) {
-                            self.select_after(p, std::slice::from_ref(from));
-                        }
-                    }
-                    Undo::NewFolder { dir, name, file_id } => {
-                        self.deselect_file(dir, *file_id);
-                        self.tabs_left(&util::join(dir, name), dir);
-                    }
-                    Undo::Trash { dir, items } => {
-                        // 원래 자리로 돌아온 것들을 고른다
-                        let back: Vec<String> = items.iter().filter(|t| !left.iter().any(|(name, _)| *name == t.name)).map(|t| t.name.clone()).collect();
-                        if let Some(p) = here(self, dir).filter(|_| !back.is_empty()) {
-                            self.select_after(p, &back);
-                        }
-                    }
-                    Undo::Copy { dir, items } => {
-                        // 휴지통으로 간 복사본만: 고른 것에서 빼고, 그 안을 보던 탭은 남아 있는 위 폴더로 올린다
-                        for (name, file_id) in items {
-                            if left.iter().any(|(kept, _)| kept == name) {
-                                continue;
-                            }
-                            self.deselect_file(dir, *file_id);
-                            self.tabs_left(&util::join(dir, name), dir);
-                        }
-                    }
-                    Undo::Move { to, items } => {
-                        // 원래 자리로 돌아간 것만: 옮긴 곳의 고른 것에서 빼고, 그 안을 보던 탭은 원래 경로로 따라가게 한다
-                        let mut back = Vec::new();
-                        for (orig, now, file_id) in items {
-                            // 되돌리지 못한 것은 원래 전체 경로로 온다 (다른 폴더에서 온 같은 이름의 항목과 헷갈리지 않는다)
-                            if left.iter().any(|(path, _)| path == orig) {
-                                continue;
-                            }
-                            self.deselect_file(to, *file_id);
-                            self.tabs_moved(&util::join(to, now), orig);
-                            back.push(orig);
-                        }
-                        // 한 폴더에서 온 것들이면 그 폴더를 보이는 칸에서 고른다
-                        if let Some(from) = back.first().and_then(|orig| util::parent(orig))
-                            && let Some(p) = here(self, &from)
-                        {
-                            let names: Vec<String> = back.iter().filter(|orig| util::parent(orig).as_deref() == Some(from.as_str())).map(|orig| util::file_name(orig).to_string()).collect();
-                            self.select_after(p, &names);
-                        }
-                    }
-                }
+                self.after_undo(op.tab, undo, &left);
                 Some(match (undo, left.as_slice()) {
                     (_, []) => undo.label(),
                     (Undo::Copy { .. }, [(name, why), ..]) => format!("복사본 {}개는 그대로 뒀어요: {name} · {why}", left.len()),
                     (Undo::Move { .. }, [(path, why), ..]) => format!("{}개는 옮긴 자리에 그대로 있어요: {} · {why}", left.len(), util::file_name(path)),
+                    (Undo::Group(_), [(name, why), ..]) => format!("{}개는 되돌리지 못했어요: {} · {why}", left.len(), util::file_name(name)),
                     (_, [(name, why)]) => format!("‘{name}’은(는) 휴지통에 그대로 있어요: {why}"),
                     (_, [(_, why), ..]) => format!("{}개는 휴지통에 그대로 있어요: {why}", left.len()),
                 })
@@ -1910,6 +1870,66 @@ impl App {
         }
         // 잘 끝났든 아니든 다시 읽는다 (하지 못한 까닭이 낡은 목록일 수 있다)
         self.refresh_changed();
+    }
+
+    /// 되돌리기가 끝난 뒤의 뒷정리: 되돌려진 것을 고르거나 고른 것에서 빼고, 그 안을 보던 탭을 맞는 곳으로 옮긴다.
+    /// tab은 되돌리기를 낸 탭, left는 되돌리지 못해 그대로 둔 것 (그것들은 건드리지 않는다)
+    fn after_undo(&mut self, tab: u64, undo: &Undo, left: &[(String, String)]) {
+        match undo {
+            Undo::Rename { dir, from, to, file_id } => {
+                self.deselect_file(dir, *file_id);
+                self.tabs_moved(&util::join(dir, to), &util::join(dir, from));
+                if let Some(p) = self.pane_showing(tab, dir) {
+                    self.select_after(p, std::slice::from_ref(from));
+                }
+            }
+            Undo::NewFolder { dir, name, file_id } => {
+                self.deselect_file(dir, *file_id);
+                self.tabs_left(&util::join(dir, name), dir);
+            }
+            Undo::Trash { dir, items } => {
+                // 원래 자리로 돌아온 것들을 고른다
+                let back: Vec<String> = items.iter().filter(|t| !left.iter().any(|(name, _)| *name == t.name)).map(|t| t.name.clone()).collect();
+                if let Some(p) = self.pane_showing(tab, dir).filter(|_| !back.is_empty()) {
+                    self.select_after(p, &back);
+                }
+            }
+            Undo::Copy { dir, items } => {
+                // 휴지통으로 간 복사본만: 고른 것에서 빼고, 그 안을 보던 탭은 남아 있는 위 폴더로 올린다
+                for (name, file_id) in items {
+                    if left.iter().any(|(kept, _)| kept == name) {
+                        continue;
+                    }
+                    self.deselect_file(dir, *file_id);
+                    self.tabs_left(&util::join(dir, name), dir);
+                }
+            }
+            Undo::Move { to, items } => {
+                // 원래 자리로 돌아간 것만: 옮긴 곳의 고른 것에서 빼고, 그 안을 보던 탭은 원래 경로로 따라가게 한다
+                let mut back = Vec::new();
+                for (orig, now, file_id) in items {
+                    // 되돌리지 못한 것은 원래 전체 경로로 온다 (다른 폴더에서 온 같은 이름의 항목과 헷갈리지 않는다)
+                    if left.iter().any(|(path, _)| path == orig) {
+                        continue;
+                    }
+                    self.deselect_file(to, *file_id);
+                    self.tabs_moved(&util::join(to, now), orig);
+                    back.push(orig);
+                }
+                // 한 폴더에서 온 것들이면 그 폴더를 보이는 칸에서 고른다
+                if let Some(from) = back.first().and_then(|orig| util::parent(orig))
+                    && let Some(p) = self.pane_showing(tab, &from)
+                {
+                    let names: Vec<String> = back.iter().filter(|orig| util::parent(orig).as_deref() == Some(from.as_str())).map(|orig| util::file_name(orig).to_string()).collect();
+                    self.select_after(p, &names);
+                }
+            }
+            Undo::Group(list) => {
+                for undo in list {
+                    self.after_undo(tab, undo, left);
+                }
+            }
+        }
     }
 
     /// 칸 p를 다음에 읽은 뒤 그 이름들을 고르고 첫 이름이 보이게 한다 (스크롤은 지금 자리에서)
@@ -5214,6 +5234,17 @@ mod tests {
         let (x, y) = mid(a.toolbar().view);
         assert_eq!(a.drag_over(&g, x, y, &dragged), None);
         assert_eq!(a.drop, None);
+        // 탭 위도 놓을 곳이 아니다: 다른 탭 위에 놓았는데 지금 탭의 폴더로 가지 않게
+        a.new_tab(1);
+        a.settle();
+        let gm = geom(a.pane_rects()[1].1);
+        let (tabs, _) = a.chips(&g, 1, &gm);
+        for tab in &tabs {
+            let (x, y) = mid(*tab);
+            assert_eq!(a.drag_over(&g, x, y, &dragged), None);
+            assert!(!a.drop_paths(&g, x, y, dragged.clone(), Paste::Drop));
+        }
+        assert!(std::fs::metadata(&dragged[0]).is_ok());
         a.drag_over(&g, l1.l + 60.0, l1.b - 10.0, &dragged);
         a.drag_exit();
         assert_eq!(a.drop, None);
@@ -5270,6 +5301,34 @@ mod tests {
         let (x, y) = mid(a.toolbar().view);
         assert!(!a.drop_paths(&g, x, y, vec![src.clone()], Paste::Drop));
         assert_eq!(a.copy_progress(), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 한 번의 놓기가 옮긴 것과 복사한 것으로 갈렸어도(다른 디스크의 것이 섞였을 때) ⌘Z 한 번으로 모두 되돌린다
+    #[test]
+    fn one_drop_is_one_undo_even_when_it_moved_and_copied() {
+        let (root, home) = demo();
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        let (mut a, _g) = app(&work);
+        a.navigate(1, Location::Dir(downloads.clone()), None);
+        a.settle();
+        a.activate_pane(1);
+        // 하나는 복사하고 하나는 옮긴 뒤, 그 두 기록을 한 번의 놓기가 남기는 것처럼 묶는다 (시험에는 디스크가 하나뿐이다)
+        assert!(a.paste_paths(vec![util::join(&work, "예산.csv")], Paste::Copy));
+        a.settle();
+        assert!(a.paste_paths(vec![util::join(&work, "회의록.md")], Paste::Move));
+        a.settle();
+        let (moved, copied) = (a.undos.pop().unwrap(), a.undos.pop().unwrap());
+        assert!(matches!(moved, Undo::Move { .. }) && matches!(copied, Undo::Copy { .. }));
+        a.undos.push(Undo::Group(vec![copied, moved]));
+        assert_eq!(names(&a, 1), ["사진.jpg", "예산.csv", "회의록.md"]);
+        a.undo();
+        a.settle();
+        assert_eq!(names(&a, 1), ["사진.jpg"], "the copy went to the Trash and the moved file went back");
+        assert_eq!(names(&a, 0), ["2026 4분기", "예산.csv", "회의록.md"]);
+        assert!(noted(&a, "복사본 1개") && noted(&a, "원래 자리"), "{:?}", a.flash);
+        a.undo();
+        assert!(noted(&a, "되돌릴 작업이 없어요"), "{:?}", a.flash);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5363,11 +5422,13 @@ mod tests {
         (root, util::join(&home, "미리 보기"))
     }
 
-    /// 칸 p에서 그 이름의 줄을 누른다 (자세히 보기)
+    /// 칸 p에서 그 이름의 줄을 누른다 (자세히 보기): 눌렀다 뗀다.
+    /// 여럿을 고른 것 가운데 하나를 누르면 뗄 때 그 줄만 남으므로, 떼기까지 해야 누른 것이다
     fn click_name(a: &mut App, g: &Gfx, p: usize, name: &str, m: Mods) {
         let vi = names(a, p).iter().position(|n| n == name).unwrap_or_else(|| panic!("no row named {name}"));
         let (x, y) = row_point(a, p, vi);
         a.mouse_down(g, x, y, m, 1);
+        a.mouse_up();
     }
 
     fn pane_rect(a: &App, p: usize) -> R {

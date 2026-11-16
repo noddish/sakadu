@@ -141,6 +141,25 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             }
             Ok(Done::Undone { left })
         }
+        // 한 번에 한 일의 기록들을 함께 되돌린다 (끌어다 놓은 것의 옮긴 것과 복사한 것). 되돌리지 못한 것은 모아서 돌려준다
+        Job::Undo(Undo::Group(list)) => {
+            let mut left = Vec::new();
+            for undo in list {
+                match run(&Job::Undo(undo.clone())) {
+                    Ok(Done::Undone { left: more }) => left.extend(more),
+                    Ok(_) => {}
+                    Err(fail) => {
+                        let why = match fail {
+                            Fail::Exists => "같은 이름이 이미 있어요".to_string(),
+                            Fail::Changed => "그 사이 없어졌거나 다른 것으로 바뀌었어요".to_string(),
+                            Fail::Other(msg) => msg,
+                        };
+                        left.push((undo.label(), why));
+                    }
+                }
+            }
+            Ok(Done::Undone { left })
+        }
         // 복사를 되돌린다: 복사본이 그때 만든 그것일 때만 하나씩 휴지통으로 보낸다
         Job::Undo(Undo::Copy { dir, items }) => {
             let mut left = Vec::new();
@@ -676,6 +695,16 @@ mod tests {
         // 한 번 더 되돌리면: 폴더는 옮긴 곳에 더는 없다
         let Ok(Done::Undone { left }) = run(&Job::Undo(Undo::Move { to: to.clone(), items })) else { panic!("되돌리기") };
         assert_eq!(left.len(), 2);
+        // 한 번의 놓기가 옮긴 것과 복사한 것으로 갈렸을 때: 묶은 기록 하나로 둘 다 되돌린다
+        let (a, b) = (util::join(&from, "옮길 것.txt"), util::join(&from, "복사할 것.txt"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let Ok(Done::Moved { name: moved_name, file_id: moved_id, .. }) = job(&a, &to, 0) else { panic!("옮기기") };
+        let Ok(Done::Copied { name: copied_name, file_id: copied_id, .. }) = run(&Job::Copy { src: b.clone(), dir: to.clone(), file_id: 0 }) else { panic!("복사") };
+        let group = Undo::Group(vec![Undo::Copy { dir: to.clone(), items: vec![(copied_name.clone(), copied_id)] }, Undo::Move { to: to.clone(), items: vec![(a.clone(), moved_name, moved_id)] }]);
+        assert_eq!(run(&Job::Undo(group)), Ok(Done::Undone { left: Vec::new() }));
+        assert_eq!((std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()), (b"a".to_vec(), b"b".to_vec()));
+        assert!(std::fs::symlink_metadata(util::join(&to, &copied_name)).is_err() && std::fs::symlink_metadata(util::join(&to, "옮길 것.txt")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
