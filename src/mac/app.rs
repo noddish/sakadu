@@ -388,8 +388,6 @@ pub struct Request {
 pub struct Probe {
     pub pane: usize,
     pub tab: u64,
-    /// 확인을 시작할 때 그 탭의 세대 번호 (그 사이 다른 곳으로 옮기면 바뀐다)
-    pub generation: u64,
     /// 그 칸의 경로 확인 요청 번호 (나중에 낸 요청이 이긴다)
     pub seq: u64,
     pub text: String,
@@ -808,6 +806,9 @@ pub struct App {
     probes: Vec<Probe>,
     /// 칸마다 마지막으로 낸 경로 확인 요청 번호
     probe_seq: [u64; 4],
+    /// 칸마다 가장 나중에 낸 경로 확인이 기다리는 자리: (탭, 그 탭의 세대 번호). 그 탭이 다른 곳으로 옮기면 세대 번호가
+    /// 달라져 그 확인은 버려진다. 같은 폴더를 다시 읽는 것은 옮긴 것이 아니므로 refresh가 번호를 따라 올린다
+    probe_at: [(u64, u64); 4],
     /// 저장한 세션에서 연 탭과 그 폴더. 그 폴더의 첫 읽기가 실패하면 home으로 바꾼다
     /// (그 사이 다른 곳으로 옮겼으면 그곳의 오류는 그대로 보인다)
     restored: std::collections::HashMap<u64, String>,
@@ -891,6 +892,7 @@ impl App {
             flash: None,
             probes: Vec::new(),
             probe_seq: [0; 4],
+            probe_at: [(0, 0); 4],
             restored: std::collections::HashMap::new(),
             home: home.to_string(),
             side_scroll: 0.0,
@@ -1278,7 +1280,8 @@ impl App {
             Editing::Address(p) => {
                 let (tab, generation) = (self.panes[p].tab().id, self.panes[p].tab().generation);
                 self.probe_seq[p] += 1;
-                self.probes.push(Probe { pane: p, tab, generation, seq: self.probe_seq[p], text: text.to_string() });
+                self.probe_at[p] = (tab, generation);
+                self.probes.push(Probe { pane: p, tab, seq: self.probe_seq[p], text: text.to_string() });
             }
             Editing::None | Editing::Item(_) => {}
         }
@@ -1296,11 +1299,12 @@ impl App {
     }
 
     /// 경로 확인 결과. 그 사이 그 칸의 지금 탭이 바뀌었거나, 그 탭이 다른 곳으로 옮겼거나, 더 나중에 낸 경로 입력이
-    /// 있으면 버린다 (확인이 늦게 끝난 순서대로 옮겨 다니지 않게)
+    /// 있으면 버린다 (확인이 늦게 끝난 순서대로 옮겨 다니지 않게). 그 사이 같은 폴더를 다시 읽은 것(폴더 감시, ⌘R,
+    /// 파일 작업 뒤)은 옮긴 것이 아니라서 버리지 않는다
     pub fn on_probed(&mut self, probe: &Probe, result: Result<(String, Option<String>), String>) {
         let p = probe.pane;
         let tab = self.panes[p].tab();
-        if tab.id != probe.tab || tab.generation != probe.generation || self.probe_seq[p] != probe.seq {
+        if tab.id != probe.tab || self.probe_at[p] != (tab.id, tab.generation) || self.probe_seq[p] != probe.seq {
             return;
         }
         match result {
@@ -2450,9 +2454,15 @@ impl App {
 
     /// 칸 p의 지금 탭을 다시 읽는다 (같은 폴더). 고른 것·커서·스크롤은 다 읽었을 때의 것을 그대로 둔다 (on_listed)
     pub fn refresh(&mut self, p: usize) {
+        let before = self.panes[p].tab().generation;
         self.load(p);
-        let id = self.panes[p].tab().id;
+        let tab = self.panes[p].tab();
+        let (id, now) = (tab.id, tab.generation);
         self.rereading.insert(id);
+        // 같은 폴더를 다시 읽는 것은 다른 곳으로 옮긴 것이 아니다: 확인 중인 경로 입력이 버려지지 않게 기다리는 번호를 따라 올린다
+        if self.probe_at[p] == (id, before) {
+            self.probe_at[p] = (id, now);
+        }
     }
 
     // ---------- 탭·칸 ----------
@@ -5724,6 +5734,42 @@ mod tests {
         assert!(a.key(Key::Char('n'), Mods { cmd: true, shift: true, ..Default::default() }));
         a.settle();
         assert_eq!(picked(&a, 0).0, ["새 폴더"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 경로를 입력해 확인하는 사이에 지금 폴더가 다시 읽혀도(폴더 감시) 그 입력은 버려지지 않는다.
+    /// 그 사이 다른 곳으로 옮겼으면 전과 같이 버린다
+    #[test]
+    fn a_read_does_not_drop_an_address_that_is_being_checked() {
+        let (root, home) = demo();
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        let quarter = util::join(&work, "2026 4분기");
+        let (mut a, _g) = app(&work);
+        a.begin_address(0);
+        a.commit_address(&downloads);
+        let probes = a.take_probes();
+        assert_eq!(probes.len(), 1);
+        // 확인이 끝나기 전에 지금 폴더가 바뀌어 다시 읽힌다 (두 번)
+        std::fs::write(util::join(&work, "새 파일.txt"), b"x").unwrap();
+        a.on_dir_changed(&work);
+        a.settle();
+        a.on_dir_changed(&work);
+        a.settle();
+        assert!(names(&a, 0).contains(&"새 파일.txt".to_string()));
+        a.on_probed(&probes[0], resolve_input(&probes[0].text, &home));
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(downloads.clone()), "the typed folder is opened");
+        // 확인하는 사이에 다른 곳으로 옮겼으면 그 입력은 버린다 (옮긴 뒤에 다시 읽혀도)
+        a.begin_address(0);
+        a.commit_address(&work);
+        let probes = a.take_probes();
+        a.navigate(0, Location::Dir(quarter.clone()), None);
+        a.settle();
+        a.on_dir_changed(&quarter);
+        a.settle();
+        a.on_probed(&probes[0], resolve_input(&probes[0].text, &home));
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(quarter.clone()), "the address typed before moving on is dropped");
         std::fs::remove_dir_all(root).unwrap();
     }
 
