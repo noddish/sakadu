@@ -237,6 +237,17 @@ struct ListTarget {
     at: (f32, f32),
 }
 
+/// 붙여넣기의 종류
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Paste {
+    /// 복사한다 (⌘C 뒤 ⌘V)
+    Copy,
+    /// 복사해 둔 것을 옮긴다 (⌥⌘V)
+    Move,
+    /// 잘라 둔 것을 옮긴다 (⌘X 뒤 ⌘V). 끝나면 옮겨 간 것을 클립보드에서 뺀다
+    Cut,
+}
+
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
 /// 그래서 몇 개 중 몇 개인지 보이고, 항목 사이에서 그만둘 수 있다
 struct Batch {
@@ -247,7 +258,7 @@ struct Batch {
     todo: VecDeque<(String, u64)>,
     total: usize,
     /// 만든 복사본이나 옮긴 것 (받는 폴더에서의 이름, 파일 번호)과 그것의 원래 전체 경로 (같은 순서),
-    /// 그 가운데 번호를 붙인 개수, 하지 못한 것 (이름, 까닭)
+    /// 그 가운데 번호를 붙인 개수, 하지 못한 것 (원래 전체 경로, 까닭)
     made: Vec<(String, u64)>,
     sources: Vec<String>,
     renamed: usize,
@@ -256,6 +267,8 @@ struct Batch {
     duplicate: bool,
     /// 복사가 아니라 옮기기 (잘라낸 것을 붙여넣기, ⌥⌘V)
     moving: bool,
+    /// 잘라 둔 것을 옮기는 묶음: 끝나면 옮기지 못한 것만 잘라 둔 채로 남긴다
+    cut: bool,
     cancelled: bool,
 }
 
@@ -741,6 +754,9 @@ pub struct App {
     /// 클립보드의 파일들을 붙여넣어 달라는 표시 (창 쪽이 클립보드를 읽어 paste_paths로 넘긴다).
     /// Some(true)면 잘라낸 것이 아니어도 옮긴다 (⌥⌘V)
     pub clip_in: Option<bool>,
+    /// 잘라 둔 것을 옮기는 묶음이 끝난 뒤 옮기지 못하고 남은 것들의 경로 (창 쪽이 클립보드를 이것만 잘라 둔 것으로 고친다.
+    /// 비어 있으면 모두 옮겨 간 것이라 클립보드를 비운다). 옮겨 가지 않은 것은 다른 곳에 다시 붙여넣을 수 있다
+    pub clip_left: Option<Vec<String>>,
     /// 칸 p의 칩 줄 오른쪽에 잠깐 보일 알림 (다음 입력 때 지운다)
     flash: Option<(usize, String)>,
     probes: Vec<Probe>,
@@ -818,6 +834,7 @@ impl App {
             clip_out: None,
             clip_cut: false,
             clip_in: None,
+            clip_left: None,
             flash: None,
             probes: Vec::new(),
             probe_seq: [0; 4],
@@ -1357,8 +1374,8 @@ impl App {
         }
     }
 
-    /// 클립보드에서 읽은 파일들(전체 경로)을 지금 칸의 폴더로 복사하거나(moving이 아니면) 옮긴다. 시작했으면 true
-    pub fn paste_paths(&mut self, paths: Vec<String>, moving: bool) -> bool {
+    /// 클립보드에서 읽은 파일들(전체 경로)을 지금 칸의 폴더로 복사하거나 옮긴다. 시작했으면 true
+    pub fn paste_paths(&mut self, paths: Vec<String>, how: Paste) -> bool {
         let tab = self.panes[self.active].tab();
         let Some(dir) = tab.loc.dir().map(str::to_string) else { return false };
         if paths.is_empty() {
@@ -1366,7 +1383,7 @@ impl App {
             return false;
         }
         let tab = tab.id;
-        self.start_copy(tab, dir, paths.into_iter().map(|path| (path, 0)).collect(), false, moving)
+        self.start_copy(tab, dir, paths.into_iter().map(|path| (path, 0)).collect(), false, how)
     }
 
     /// 칸 p에서 고른 항목들을 같은 폴더에 복제한다 (⌘D). 이름에 번호가 붙는다
@@ -1375,11 +1392,11 @@ impl App {
         let Some(dir) = tab.loc.dir().map(str::to_string) else { return };
         let items: VecDeque<(String, u64)> = (0..tab.view.len()).filter_map(|vi| tab.entry_at(vi)).filter(|e| e.selected).map(|e| (util::join(&dir, &e.name_string()), e.file_id)).collect();
         let tab = tab.id;
-        self.start_copy(tab, dir, items, true, false);
+        self.start_copy(tab, dir, items, true, Paste::Copy);
     }
 
     /// 항목들(전체 경로, 목록에서 본 파일 번호)을 폴더 dir로 복사하거나 옮기기 시작한다. 하나씩 맡긴다. 시작했으면 true
-    fn start_copy(&mut self, tab: u64, dir: String, items: VecDeque<(String, u64)>, duplicate: bool, moving: bool) -> bool {
+    fn start_copy(&mut self, tab: u64, dir: String, items: VecDeque<(String, u64)>, duplicate: bool, how: Paste) -> bool {
         if items.is_empty() {
             return false;
         }
@@ -1387,7 +1404,20 @@ impl App {
             self.flash = Some((self.active, "앞의 복사가 끝난 뒤에 해 주세요".to_string()));
             return false;
         }
-        self.batch = Some(Batch { tab, dir, total: items.len(), todo: items, made: Vec::new(), sources: Vec::new(), renamed: 0, failed: Vec::new(), duplicate, moving, cancelled: false });
+        self.batch = Some(Batch {
+            tab,
+            dir,
+            total: items.len(),
+            todo: items,
+            made: Vec::new(),
+            sources: Vec::new(),
+            renamed: 0,
+            failed: Vec::new(),
+            duplicate,
+            moving: how != Paste::Copy,
+            cut: how == Paste::Cut,
+            cancelled: false,
+        });
         self.feed_batch();
         true
     }
@@ -1409,12 +1439,16 @@ impl App {
     fn finish_batch(&mut self) {
         let Some(b) = self.batch.take() else { return };
         let (did, did_and, did_not, nothing) = if b.moving { ("옮겼어요", "옮겼고", "옮기지 못했어요", "옮긴 것이 없어요") } else { ("복사했어요", "복사했고", "복사하지 못했어요", "복사한 것이 없어요") };
-        let mut note = match (b.made.len(), b.failed.first()) {
+        let mut note = match (b.made.len(), b.failed.first().map(|(src, why)| (util::file_name(src), why))) {
             (0, None) => nothing.to_string(),
             (n, None) => format!("{n}개를 {did}"),
             (0, Some((name, why))) => format!("{did_not}: {name} · {why}"),
             (n, Some((name, why))) => format!("{n}개를 {did_and} {}개는 하지 못했어요: {name} · {why}", b.failed.len()),
         };
+        // 잘라 둔 것 가운데 옮기지 못한 것(하지 못한 것, 그만둬서 하지 않은 것)은 잘라 둔 채로 남긴다
+        if b.cut {
+            self.clip_left = Some(b.failed.iter().map(|(src, _)| src.clone()).chain(b.todo.iter().map(|(src, _)| src.clone())).collect());
+        }
         if b.renamed > 0 && !b.duplicate {
             note.push_str(&format!(" · 같은 이름이 있던 {}개에는 번호를 붙였어요", b.renamed));
         }
@@ -1598,7 +1632,7 @@ impl App {
                             Fail::Changed => "그 사이 없어졌거나 다른 것으로 바뀌었어요".to_string(),
                             Fail::Other(msg) => msg,
                         };
-                        b.failed.push((util::file_name(src).to_string(), why));
+                        b.failed.push((src.clone(), why));
                     }
                 }
             }
@@ -1683,7 +1717,8 @@ impl App {
                         // 원래 자리로 돌아간 것만: 옮긴 곳의 고른 것에서 빼고, 그 안을 보던 탭은 원래 경로로 따라가게 한다
                         let mut back = Vec::new();
                         for (orig, now, file_id) in items {
-                            if left.iter().any(|(name, _)| name == util::file_name(orig)) {
+                            // 되돌리지 못한 것은 원래 전체 경로로 온다 (다른 폴더에서 온 같은 이름의 항목과 헷갈리지 않는다)
+                            if left.iter().any(|(path, _)| path == orig) {
                                 continue;
                             }
                             self.deselect_file(to, *file_id);
@@ -1702,7 +1737,7 @@ impl App {
                 Some(match (undo, left.as_slice()) {
                     (_, []) => undo.label(),
                     (Undo::Copy { .. }, [(name, why), ..]) => format!("복사본 {}개는 그대로 뒀어요: {name} · {why}", left.len()),
-                    (Undo::Move { .. }, [(name, why), ..]) => format!("{}개는 옮긴 자리에 그대로 있어요: {name} · {why}", left.len()),
+                    (Undo::Move { .. }, [(path, why), ..]) => format!("{}개는 옮긴 자리에 그대로 있어요: {} · {why}", left.len(), util::file_name(path)),
                     (_, [(name, why)]) => format!("‘{name}’은(는) 휴지통에 그대로 있어요: {why}"),
                     (_, [(_, why), ..]) => format!("{}개는 휴지통에 그대로 있어요: {why}", left.len()),
                 })
@@ -2430,7 +2465,7 @@ impl App {
             }
             Some(act @ (RowAct::Cut | RowAct::Copy)) => self.copy_out(t.items.iter().map(|(name, ..)| path(name)).collect(), *act == RowAct::Cut),
             Some(RowAct::Duplicate) => {
-                self.start_copy(t.tab, t.dir.clone(), t.items.iter().map(|(name, id, _)| (path(name), *id)).collect(), true, false);
+                self.start_copy(t.tab, t.dir.clone(), t.items.iter().map(|(name, id, _)| (path(name), *id)).collect(), true, Paste::Copy);
             }
             Some(RowAct::Trash) => self.trash_items(t.tab, t.dir.clone(), t.items.iter().map(|(name, id, _)| (name.clone(), *id)).collect()),
             None => {}
@@ -4782,7 +4817,7 @@ mod tests {
         a.activate_pane(1);
         a.ask_paste(false);
         assert_eq!(a.clip_in.take(), Some(false));
-        a.paste_paths(clip.clone(), false);
+        a.paste_paths(clip.clone(), Paste::Copy);
         assert_eq!(a.copy_progress(), Some((1, 2)), "one item at a time");
         a.settle();
         assert_eq!(a.copy_progress(), None);
@@ -4795,7 +4830,7 @@ mod tests {
         assert_eq!(std::fs::read(util::join(&work, "예산.csv")).unwrap(), b"x");
         // 한 번 더 붙여넣으면 덮어쓰지 않고 번호를 붙이고, 그렇게 했다고 알린다
         std::fs::write(util::join(&downloads, "예산.csv"), b"mine").unwrap();
-        a.paste_paths(clip.clone(), false);
+        a.paste_paths(clip.clone(), Paste::Copy);
         a.settle();
         assert_eq!(names(&a, 1).len(), 5);
         assert!(names(&a, 1).contains(&"2026 4분기 2".to_string()) && names(&a, 1).contains(&"예산 2.csv".to_string()));
@@ -4809,7 +4844,7 @@ mod tests {
         assert_eq!(std::fs::read(util::join(&downloads, "예산.csv")).unwrap(), b"mine");
         assert!(noted(&a, "복사본 2개를 휴지통으로 보냈어요"), "{:?}", a.flash);
         // 클립보드에 파일이 없으면 알림만 뜬다
-        a.paste_paths(Vec::new(), false);
+        a.paste_paths(Vec::new(), Paste::Copy);
         assert!(noted(&a, "붙여넣을 파일이") && a.copy_progress().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4834,10 +4869,10 @@ mod tests {
         a.navigate(1, Location::Dir(downloads.clone()), None);
         a.settle();
         a.activate_pane(1);
-        a.paste_paths(clip, false);
+        a.paste_paths(clip, Paste::Copy);
         assert_eq!(a.copy_progress(), Some((1, 4)));
         // 복사 중에는 다른 붙여넣기를 받지 않는다
-        a.paste_paths(vec![util::join(&work, "회의록.md")], false);
+        a.paste_paths(vec![util::join(&work, "회의록.md")], Paste::Copy);
         assert!(noted(&a, "앞의 복사가 끝난 뒤"), "{:?}", a.flash);
         assert!(a.key(Key::Esc, Mods::default()));
         a.settle();
@@ -4848,7 +4883,7 @@ mod tests {
         let quarter = util::join(&work, "2026 4분기");
         a.navigate(1, Location::Dir(quarter.clone()), None);
         a.settle();
-        a.paste_paths(vec![quarter.clone()], false);
+        a.paste_paths(vec![quarter.clone()], Paste::Copy);
         a.settle();
         assert!(noted(&a, "복사하지 못했어요") && noted(&a, "자기 안"), "{:?}", a.flash);
         assert_eq!(names(&a, 1), ["보고서.docx"]);
@@ -4878,16 +4913,19 @@ mod tests {
         assert!(std::mem::take(&mut a.clip_cut) && noted(&a, "2개를 잘라 뒀어요"), "{:?}", a.flash);
         // 잘라 두기만 해서는 아무것도 옮겨지지 않는다
         assert!(std::fs::metadata(&quarter).unwrap().is_dir() && std::fs::metadata(util::join(&work, "예산.csv")).is_ok());
-        // 같은 폴더에 붙여넣으면 옮길 것이 없다
-        assert!(a.paste_paths(clip.clone(), true));
+        // 같은 폴더에 붙여넣으면 옮길 것이 없다. 옮기지 못한 것은 잘라 둔 채로 남아, 다른 곳에 다시 붙여넣을 수 있다
+        assert!(a.paste_paths(clip.clone(), Paste::Cut));
+        assert_eq!(a.clip_left, None, "nothing is decided until the batch ends");
         a.settle();
         assert!(noted(&a, "옮기지 못했어요") && noted(&a, "이미 이 폴더에 있어요"), "{:?}", a.flash);
         assert_eq!(names(&a, 0), ["2026 4분기", "예산.csv", "회의록.md"]);
-        // 다른 칸에 붙여넣는다: 하나씩 옮겨진다
+        assert_eq!(a.clip_left.take(), Some(clip.clone()));
+        // 다른 칸에 붙여넣는다: 하나씩 옮겨진다. 모두 옮겨 갔으면 잘라 둔 것은 남지 않는다
         a.activate_pane(1);
-        assert!(a.paste_paths(clip.clone(), true));
+        assert!(a.paste_paths(clip.clone(), Paste::Cut));
         assert_eq!(a.copy_progress(), Some((1, 2)));
         a.settle();
+        assert_eq!(a.clip_left.take(), Some(Vec::new()));
         assert_eq!(names(&a, 1), ["2026 4분기", "사진.jpg", "예산.csv"]);
         assert_eq!(picked(&a, 1).0, ["2026 4분기", "예산.csv"], "what was moved is selected");
         assert_eq!(names(&a, 0), ["회의록.md"]);
@@ -4911,8 +4949,9 @@ mod tests {
         // 옮기는 곳에 같은 이름이 있으면 덮어쓰지 않고 번호를 붙인다
         std::fs::write(util::join(&downloads, "예산.csv"), b"mine").unwrap();
         a.activate_pane(1);
-        assert!(a.paste_paths(vec![util::join(&work, "예산.csv")], true));
+        assert!(a.paste_paths(vec![util::join(&work, "예산.csv")], Paste::Move));
         a.settle();
+        assert_eq!(a.clip_left, None, "items that were only copied stay on the clipboard as they are");
         assert_eq!(std::fs::read(util::join(&downloads, "예산.csv")).unwrap(), b"mine");
         assert_eq!(std::fs::read(util::join(&downloads, "예산 2.csv")).unwrap(), b"x");
         assert!(noted(&a, "1개를 옮겼어요") && noted(&a, "1개에는 번호를 붙였어요"), "{:?}", a.flash);
@@ -4922,6 +4961,45 @@ mod tests {
         a.settle();
         assert!(noted(&a, "옮긴 자리에 그대로 있어요"), "{:?}", a.flash);
         assert_eq!((std::fs::read(util::join(&work, "예산.csv")).unwrap(), std::fs::read(util::join(&downloads, "예산 2.csv")).unwrap()), (b"newcomer".to_vec(), b"x".to_vec()));
+        // 잘라 둔 것 가운데 일부만 옮겨졌으면, 옮기지 못한 것만 잘라 둔 채로 남는다
+        let (stay, go) = (util::join(&downloads, "사진.jpg"), util::join(&work, "회의록.md"));
+        assert!(a.paste_paths(vec![stay.clone(), go], Paste::Cut));
+        a.settle();
+        assert!(noted(&a, "1개를 옮겼고 1개는 하지 못했어요"), "{:?}", a.flash);
+        assert_eq!(a.clip_left.take(), Some(vec![stay]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 서로 다른 폴더에서 온 같은 이름의 폴더를 옮겼다가 되돌릴 때, 하나만 되돌려지면 그 하나의 안을 보던 칸만 따라간다
+    #[test]
+    fn undo_of_a_move_tells_same_named_items_apart() {
+        let (root, home) = demo();
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        let (one, two) = (util::join(&work, "자료"), util::join(&downloads, "자료"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(util::join(&one, "하나.txt"), b"1").unwrap();
+        std::fs::write(util::join(&two, "둘.txt"), b"2").unwrap();
+        let (mut a, _g) = app(&home);
+        // 두 폴더를 홈으로 옮긴다: 둘째에는 번호가 붙는다
+        assert!(a.paste_paths(vec![one.clone(), two.clone()], Paste::Move));
+        a.settle();
+        let (moved_one, moved_two) = (util::join(&home, "자료"), util::join(&home, "자료 2"));
+        assert!(noted(&a, "2개를 옮겼어요") && noted(&a, "1개에는 번호를 붙였어요"), "{:?}", a.flash);
+        // 오른쪽 칸은 옮겨 온 둘째 폴더 안을 보고 있다
+        a.navigate(1, Location::Dir(moved_two.clone()), None);
+        a.settle();
+        assert_eq!(names(&a, 1), ["둘.txt"]);
+        // 첫째의 원래 자리에 다른 것이 생겼다: 되돌리면 첫째는 그대로 남고 둘째만 돌아간다
+        std::fs::create_dir(&one).unwrap();
+        a.undo();
+        a.settle();
+        assert!(noted(&a, "1개는 옮긴 자리에 그대로 있어요"), "{:?}", a.flash);
+        assert_eq!(std::fs::read(util::join(&moved_one, "하나.txt")).unwrap(), b"1");
+        assert_eq!(std::fs::read(util::join(&two, "둘.txt")).unwrap(), b"2");
+        // 돌아간 둘째의 안을 보던 칸은 원래 경로로 따라간다 (이름이 같은 첫째 때문에 빠지지 않는다)
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(two.clone()));
+        assert_eq!(names(&a, 1), ["둘.txt"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

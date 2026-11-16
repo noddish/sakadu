@@ -4,7 +4,7 @@
 //! 클립보드에는 파일 주소로 담고 읽는다 (Finder와 주고받을 수 있다).
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
 
-use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods};
+use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods, Paste};
 use sakadu::ui::ROW_H;
 use crate::gfx::Gfx;
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -465,18 +465,32 @@ fn redraw() {
 /// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다). 미리 보기 카드의 그림과 글도 뒷줄에서 읽는다
 fn pump() {
     // 클립보드: 담아 달라는 것을 담고, 붙여넣어 달라고 했으면 읽어서 넘긴다 (그러면 아래에서 맡길 작업이 생긴다)
-    if let Some((out, cut, wanted)) = with_app(|a| (a.clip_out.take(), std::mem::take(&mut a.clip_cut), a.clip_in.take())) {
+    if let Some((out, cut, wanted, left)) = with_app(|a| (a.clip_out.take(), std::mem::take(&mut a.clip_cut), a.clip_in.take(), a.clip_left.take())) {
+        // 잘라 둔 것을 옮기는 묶음이 끝났다: 옮겨 간 것은 클립보드에서 빼고, 옮기지 못한 것만 잘라 둔 채로 남긴다
+        // (다른 곳에 다시 붙여넣을 수 있게). 그 사이 클립보드에 다른 것이 담겼으면 건드리지 않는다
+        if let Some(left) = left
+            && CUT.get() == Some(NSPasteboard::generalPasteboard().changeCount())
+        {
+            if left.is_empty() {
+                NSPasteboard::generalPasteboard().clearContents();
+                CUT.set(None);
+            } else {
+                write_clipboard(&left, true);
+            }
+        }
         if let Some(paths) = out {
             write_clipboard(&paths, cut);
         }
         if let Some(force_move) = wanted {
             let (paths, was_cut) = read_clipboard();
-            let started = with_app(|a| a.paste_paths(paths, force_move || was_cut)).unwrap_or(false);
-            // 잘라 둔 것을 옮기기 시작했으면 클립보드를 비운다: 한 번 더 붙여넣으면 이미 옮겨 간 것을 또 옮기려 하게 된다
-            if started && was_cut {
-                NSPasteboard::generalPasteboard().clearContents();
-                CUT.set(None);
-            }
+            let how = if was_cut {
+                Paste::Cut
+            } else if force_move {
+                Paste::Move
+            } else {
+                Paste::Copy
+            };
+            with_app(|a| a.paste_paths(paths, how));
         }
     }
     let Some((reqs, probes, previews, files, ops, reveal)) =

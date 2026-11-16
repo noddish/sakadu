@@ -42,7 +42,8 @@ pub enum Done {
     Renamed,
     /// 휴지통으로 보낸 것과, 보내지 못해 그대로 둔 것(이름, 까닭)
     Trashed { moved: Vec<Trashed>, failed: Vec<(String, String)> },
-    /// 되돌렸다. left는 되돌리지 못해 그대로 둔 것(이름, 까닭): 휴지통에서 꺼내지 못한 항목, 휴지통으로 보내지 못한 복사본
+    /// 되돌렸다. left는 되돌리지 못해 그대로 둔 것(이름, 까닭): 휴지통에서 꺼내지 못한 항목, 휴지통으로 보내지 못한 복사본.
+    /// 옮기기를 되돌릴 때만 이름 대신 원래 전체 경로다
     Undone { left: Vec<(String, String)> },
     /// 복사했다: 복사본의 이름과 파일 번호. renamed는 같은 이름이 있어 번호를 붙였는지
     Copied { name: String, file_id: u64, renamed: bool },
@@ -121,7 +122,8 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             guard(dir);
             move_item(src, dir, *file_id)
         }
-        // 옮기기를 되돌린다: 옮긴 곳의 그것이 그때 그 항목일 때만, 원래 자리가 비어 있을 때만 하나씩 되돌린다
+        // 옮기기를 되돌린다: 옮긴 곳의 그것이 그때 그 항목일 때만, 원래 자리가 비어 있을 때만 하나씩 되돌린다.
+        // 되돌리지 못한 것은 원래 전체 경로로 돌려준다 (서로 다른 폴더에서 온 같은 이름의 항목을 가릴 수 있게)
         Job::Undo(Undo::Move { to, items }) => {
             let mut left = Vec::new();
             for (orig, now, file_id) in items {
@@ -134,7 +136,7 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
                         Fail::Changed => "그 사이 없어졌거나 다른 것으로 바뀌었어요".to_string(),
                         Fail::Other(msg) => msg,
                     };
-                    left.push((util::file_name(orig).to_string(), why));
+                    left.push((orig.clone(), why));
                 }
             }
             Ok(Done::Undone { left })
@@ -653,7 +655,7 @@ mod tests {
         let items = vec![(src.clone(), "보고서.docx".to_string(), file), (folder.clone(), "자료 2".to_string(), folder_id)];
         let Ok(Done::Undone { left }) = run(&Job::Undo(Undo::Move { to: to.clone(), items: items.clone() })) else { panic!("되돌리기") };
         assert_eq!(left.len(), 1);
-        assert!(left[0].0 == "보고서.docx" && left[0].1.contains("같은 이름"), "{left:?}");
+        assert!(left[0].0 == src && left[0].1.contains("같은 이름"), "{left:?}");
         assert_eq!((std::fs::read(&src).unwrap(), std::fs::read(&moved).unwrap()), (b"newcomer".to_vec(), b"report".to_vec()));
         assert_eq!((id(&folder), std::fs::read(util::join(&folder, "안.txt")).unwrap()), (folder_id, b"in".to_vec()));
         // 한 번 더 되돌리면: 폴더는 옮긴 곳에 더는 없다
