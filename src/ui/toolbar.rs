@@ -14,6 +14,8 @@ const TOOL_GAP: f32 = 8.0;
 const PICK_W: f32 = 52.0;
 /// 단추 묶음의 모서리
 const TOOL_R: f32 = 10.0;
+/// 검색 입력 칸의 가장 좁은 폭 (자리가 모자라면 다른 단추를 먼저 덜어 낸다)
+pub const SEARCH_MIN_W: f32 = 120.0;
 
 /// 무엇을 둘지 (OS마다 다르다)
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +30,9 @@ pub struct ToolbarSpec {
     pub preview: bool,
     /// 검색 (누르면 검색 패널이 열린다)
     pub search: bool,
+    /// 검색이 열려 있을 때 입력 칸의 바라는 폭. 0이면 돋보기 단추만 둔다.
+    /// 입력 칸은 돋보기 자리에서 왼쪽으로 늘어나고, 남는 자리만큼만 넓어진다
+    pub search_w: f32,
 }
 
 /// 단추 자리. 폭이 0인 것은 없는 단추다 (그리지도 누르지도 않는다)
@@ -52,13 +57,25 @@ pub struct ToolbarGeom {
 pub fn toolbar_need(s: &ToolbarSpec) -> f32 {
     let nav = TOOL_W * if s.up { 3.0 } else { 2.0 };
     let tools = TOOL_W * (s.new_folder as u8 + s.preview as u8) as f32;
-    let search = s.search as u8 as f32;
-    let gaps = TOOL_GAP * (2.0 + (tools > 0.0) as u8 as f32 + search);
-    nav + PICK_W * 2.0 + tools + TOOL_W * search + gaps
+    let search = if !s.search {
+        0.0
+    } else if s.search_w > 0.0 {
+        SEARCH_MIN_W
+    } else {
+        TOOL_W
+    };
+    let gaps = TOOL_GAP * (2.0 + (tools > 0.0) as u8 as f32 + s.search as u8 as f32);
+    nav + PICK_W * 2.0 + tools + search + gaps
+}
+
+/// 검색 입력 칸의 부분: (돋보기, 글자 자리, 닫기 단추). 돋보기 단추만 있을 때는 None
+pub fn search_field_parts(m: &ToolbarGeom) -> Option<(R, R, R)> {
+    let r = m.search;
+    (r.w() > TOOL_W).then(|| (R::new(r.l + 4.0, r.t, r.l + 32.0, r.b), R::new(r.l + 32.0, r.t, r.r - 32.0, r.b), R::new(r.r - 30.0, r.t + 2.0, r.r - 2.0, r.b - 2.0)))
 }
 
 /// 좁아서 다 들어가지 않으면 미리 보기, 새 폴더, 검색, 위로 순으로 덜어 낸다 (모두 단축키나 메뉴로 된다).
-/// 뒤로·앞으로와 칸 나누기·보기 방식은 늘 남는다
+/// 뒤로·앞으로와 칸 나누기·보기 방식은 늘 남는다. 입력 칸으로 열려 있는 검색도 덜어 내지 않는다 (치던 글자가 사라지지 않게)
 pub fn toolbar_geom(spec: &ToolbarSpec) -> ToolbarGeom {
     let mut s = *spec;
     for drop in 0..4 {
@@ -68,7 +85,7 @@ pub fn toolbar_geom(spec: &ToolbarSpec) -> ToolbarGeom {
         match drop {
             0 => s.preview = false,
             1 => s.new_folder = false,
-            2 => s.search = false,
+            2 => s.search = s.search_w > 0.0,
             _ => s.up = false,
         }
     }
@@ -79,7 +96,15 @@ pub fn toolbar_geom(spec: &ToolbarSpec) -> ToolbarGeom {
     let nav = R::new(back.l, t, up.r, b);
     // 오른쪽 끝부터 왼쪽으로 놓는다
     let mut x = s.right;
-    let search = R::new(x - if s.search { TOOL_W } else { 0.0 }, t, x, b);
+    // 입력 칸은 다른 단추를 놓고 남는 자리만큼, 바라는 폭까지 늘어난다
+    let search_w = if !s.search {
+        0.0
+    } else if s.search_w > 0.0 {
+        (SEARCH_MIN_W + (s.right - s.left - toolbar_need(&s)).max(0.0)).min(s.search_w.max(SEARCH_MIN_W))
+    } else {
+        TOOL_W
+    };
+    let search = R::new(x - search_w, t, x, b);
     if s.search {
         x = search.l - TOOL_GAP;
     }
@@ -108,6 +133,8 @@ pub enum ToolbarHover {
     NewFolder,
     Preview,
     Search,
+    /// 검색 입력 칸의 닫기 단추
+    SearchClose,
 }
 
 /// 도구 막대를 그리는 데 필요한 것 (앱이 자기 상태로 채운다)
@@ -127,6 +154,8 @@ pub struct ToolbarScene<'a> {
     pub preview_on: bool,
     /// 검색 패널이 열려 있다
     pub search_on: bool,
+    /// 키보드가 검색 입력 칸에 있다 (테두리를 옅은 강조 색으로)
+    pub search_focus: bool,
     /// 칸 나누기·보기 방식 메뉴가 열려 있다
     pub layout_open: bool,
     pub view_open: bool,
@@ -207,7 +236,21 @@ pub fn paint_toolbar(g: &impl Canvas, t: &Theme, s: &ToolbarScene) {
             g.glyph(G_EYE, m.preview, false, c);
         }
     }
-    if m.search.w() > 0.0 {
+    if let Some((icon, _, close)) = search_field_parts(m) {
+        // 입력 칸으로 늘어난 검색: 들어간 상자에 돋보기와 닫기. 글자는 앱이 그 자리에 입력 상자를 놓는다
+        g.fill_round(m.search, TOOL_R, if t.high_contrast { t.window } else { t.field });
+        let (c, w) = if !s.search_focus {
+            (t.border, 1.0)
+        } else if t.high_contrast {
+            (t.focus, 1.5)
+        } else {
+            (alpha(t.accent, 0.55), 1.5)
+        };
+        g.stroke_round(m.search.inset(w / 2.0, w / 2.0), TOOL_R, c, w);
+        g.glyph(G_SEARCH, icon, false, t.dim);
+        let c = button(close, true, s.hover == ToolbarHover::SearchClose);
+        g.glyph(G_CLOSE, close, true, c);
+    } else if m.search.w() > 0.0 {
         // 검색 패널이 열려 있으면 옅은 강조 색 바탕
         g.fill_round(m.search, TOOL_R, if s.search_on { t.accent_soft } else { track });
         let c = if s.search_on { t.chip_text } else { button(m.search, true, s.hover == ToolbarHover::Search) };
@@ -267,7 +310,7 @@ mod tests {
     use super::*;
 
     fn spec(left: f32, right: f32) -> ToolbarSpec {
-        ToolbarSpec { left, right, up: true, new_folder: true, preview: true, search: true }
+        ToolbarSpec { left, right, up: true, new_folder: true, preview: true, search: true, search_w: 0.0 }
     }
 
     /// 넓은 창: 모든 단추가 있고 왼쪽부터 순서대로 겹치지 않는다
@@ -297,6 +340,28 @@ mod tests {
         assert!(m.preview.w() == 0.0 && m.new_folder.w() > 0.0 && m.back.w() > 0.0);
         let m = toolbar_geom(&spec(0.0, 280.0));
         assert!(m.tools.w() == 0.0 && m.search.w() > 0.0, "search outlives new folder and preview");
+    }
+
+    /// 검색이 열리면 돋보기 자리에서 입력 칸이 왼쪽으로 늘어난다. 좁으면 줄어들 뿐 사라지지 않는다
+    #[test]
+    fn open_search_grows_into_a_field_that_is_never_dropped() {
+        let open = |left: f32, right: f32| toolbar_geom(&ToolbarSpec { search_w: 240.0, ..spec(left, right) });
+        let closed = toolbar_geom(&spec(300.0, 1200.0));
+        assert!(search_field_parts(&closed).is_none());
+        let m = open(300.0, 1200.0);
+        assert_eq!((m.search.w(), m.search.r), (240.0, closed.search.r));
+        let (icon, text, close) = search_field_parts(&m).unwrap();
+        assert!(icon.l >= m.search.l && icon.r <= text.l && text.r <= close.l && close.r <= m.search.r);
+        // 다른 단추는 입력 칸 왼쪽으로 밀리고 겹치지 않는다
+        let order = [m.back, m.fwd, m.up, m.title, m.layout, m.view, m.new_folder, m.preview, m.search];
+        assert!(order.windows(2).all(|w| w[0].r <= w[1].l));
+        for w in [520.0, 440.0, 400.0, 360.0, 330.0] {
+            let m = open(100.0, 100.0 + w);
+            assert!(m.search.w() >= SEARCH_MIN_W, "w={w}: {}", m.search.w());
+            let kept: Vec<R> = [m.back, m.fwd, m.up, m.layout, m.view, m.new_folder, m.preview, m.search].into_iter().filter(|r| r.w() > 0.0).collect();
+            assert!(kept.windows(2).all(|p| p[0].r <= p[1].l), "w={w}");
+            assert!(kept.iter().all(|r| r.l >= 100.0 && r.r <= 100.0 + w), "w={w}");
+        }
     }
 
     #[test]

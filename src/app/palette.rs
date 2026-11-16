@@ -1,5 +1,5 @@
-//! 검색 패널(Ctrl+F, 막대의 검색 아이콘): 검색 서비스(인덱스)와 검색에 넣은 폴더에서 이름으로 바로 찾는다.
-//! 아이콘 막대 옆에 고정해 열리는 패널이라 결과를 둔 채 칸에서 일할 수 있다. 위치 열기(Ctrl+Enter)는 지금 칸에서 그 폴더를 열고
+//! 검색(Ctrl+F, 도구 막대의 돋보기): 검색 서비스(인덱스)와 검색에 넣은 폴더에서 이름으로 바로 찾는다.
+//! 입력 칸은 도구 막대의 돋보기 자리에서 늘어나고, 결과는 레일 옆에 고정해 열리는 패널에 보인다. 결과를 둔 채 칸에서 일할 수 있다. 위치 열기(Ctrl+Enter)는 지금 칸에서 그 폴더를 열고
 //! 파일을 골라 두며, 폴더가 바뀌거나 파일 작업이 끝나면 같은 검색어로 다시 찾는다
 
 use super::*;
@@ -7,18 +7,15 @@ use crate::service::{self, SearchError, SearchResponse};
 use windows::Win32::UI::Controls::EM_GETSEL;
 use windows::Win32::UI::Shell::ShellExecuteW;
 
-/// 패널 머리(40) 아래 입력 줄
-const S_INPUT_T: f32 = 48.0;
-const S_INPUT_H: f32 = 32.0;
-/// 범위 칩 줄 (PC 전체 · 현재 폴더)
-const S_CHIP_T: f32 = 88.0;
-const S_CHIP_H: f32 = 28.0;
-const S_CHIP_W: f32 = 78.0;
+/// 범위 고르기 판 (PC 전체 · 지금 폴더): 패널 맨 위
+const S_SCOPE_T: f32 = 4.0;
+const S_SCOPE_H: f32 = 28.0;
 /// 결과 목록 시작
-const S_LIST_T: f32 = 124.0;
-const S_FOOT_H: f32 = 32.0;
-/// 결과 한 줄: 이름, 그 아래 상위 폴더
-const PAL_ROW_H: f32 = 48.0;
+const S_LIST_T: f32 = 40.0;
+/// 아래 한 줄: 지금 줄의 위치와 날짜 (찾는 중이면 그 상태)
+const S_FOOT_H: f32 = 28.0;
+/// 결과 한 줄: 아이콘과 이름 (파일 목록과 같은 높이)
+const PAL_ROW_H: f32 = 28.0;
 const G_CHECK: u16 = 0xE73E;
 const PAL_LIMIT: usize = 200;
 pub(super) use sakadu::ui::glyph::G_SEARCH;
@@ -338,34 +335,47 @@ impl App {
         R::new(r.l + 8.0, r.t + S_LIST_T, r.r - 8.0, (r.b - S_FOOT_H).max(r.t + S_LIST_T))
     }
 
-    /// 입력 줄의 들어간 상자 (실제 입력은 그 위에 놓인 EDIT)
-    fn pal_input_box(&self) -> R {
-        let r = self.pal_rect();
-        R::new(r.l + 8.0, r.t + S_INPUT_T, r.r - 8.0, r.t + S_INPUT_T + S_INPUT_H)
-    }
-
+    /// 입력 상자 자리: 도구 막대에서 늘어난 검색 입력 칸의 글자 자리
     pub(super) fn pal_input_rect(&self) -> R {
-        let b = self.pal_input_box();
-        R::new(b.l + 30.0, b.t + 8.0, b.r - 8.0, b.b - 4.0)
+        search_field_parts(&self.toolbar()).map_or(R::new(0.0, 0.0, 0.0, 0.0), |p| p.1)
     }
 
-    /// 범위 칩: PC 전체(false), 현재 폴더(true)
+    /// 범위 고르기 판 (패널 폭에 맞춘 두 칸)
+    fn pal_scope_track(&self) -> R {
+        let r = self.pal_rect();
+        R::new(r.l + 8.0, r.t + S_SCOPE_T, r.r - 8.0, r.t + S_SCOPE_T + S_SCOPE_H)
+    }
+
+    /// 범위 칸: PC 전체(false), 지금 폴더(true)
     fn pal_scope_rect(&self, here: bool) -> R {
-        let r = self.pal_rect();
-        let x = r.l + 8.0 + 3.0 + if here { S_CHIP_W } else { 0.0 };
-        R::new(x, r.t + S_CHIP_T + 3.0, x + S_CHIP_W, r.t + S_CHIP_T + S_CHIP_H - 3.0)
+        let inner = self.pal_scope_track().inset(2.0, 2.0);
+        let w = inner.w() / 2.0;
+        let l = inner.l + if here { w } else { 0.0 };
+        R::new(l, inner.t, l + w, inner.b)
     }
 
-    /// 머리 오른쪽 닫기 (다른 패널의 핀 자리)
+    /// 검색 닫기: 도구 막대 입력 칸의 오른쪽 끝
     pub(super) fn pal_close_rect(&self) -> R {
-        let r = self.pal_rect();
-        R::new(r.r - 8.0 - 28.0, r.t + 8.0, r.r - 8.0, r.t + 36.0)
+        search_field_parts(&self.toolbar()).map_or(R::new(0.0, 0.0, 0.0, 0.0), |p| p.2)
+    }
+
+    /// 범위 칸에 마우스를 올리면 보여 줄 개수 (전에는 패널 아래에 늘 적혀 있었다)
+    pub(super) fn pal_count_tip(&self) -> Option<(R, String)> {
+        let n = |v: usize| util::grouped(v as u64);
+        let text = match &self.pal_status {
+            PalStatus::Done { total, .. } if *total > self.pal_results.len() => format!("{}개 중 {}개", n(*total), n(self.pal_results.len())),
+            PalStatus::Done { .. } => format!("{}개 결과", n(self.pal_results.len())),
+            PalStatus::Ready(count) if self.folders.entry_count() > 0 => format!("인덱스 {}개 · 넣은 폴더 {}개", n(*count), n(self.folders.entry_count())),
+            PalStatus::Ready(count) => format!("인덱스 {}개", n(*count)),
+            _ => return None,
+        };
+        Some((self.pal_scope_track(), text))
     }
 
     fn pal_install_button(&self) -> R {
         let list = self.pal_list();
         let cx = (list.l + list.r) / 2.0;
-        R::new(cx - 80.0, list.t + 150.0, cx + 80.0, list.t + 182.0)
+        R::new(cx - 80.0, list.t + 148.0, cx + 80.0, list.t + 176.0)
     }
 
     /// 찾은 게 없고 보이는 칸에 검색 범위 밖 폴더가 열려 있으면 "이 폴더도 검색하기" 버튼을 보인다
@@ -375,9 +385,6 @@ impl App {
 
     /// 검색 패널 안에서 누를 수 있는 것 (패널 자리 안이라고 확인한 뒤 부른다). 빈 곳은 SidePanel
     pub(super) fn pal_hit(&self, x: f32, y: f32) -> Hit {
-        if self.pal_close_rect().contains(x, y) {
-            return Hit::PalClose;
-        }
         for here in [false, true] {
             if self.pal_scope_rect(here).contains(x, y) {
                 return Hit::PalScope(here);
@@ -462,7 +469,7 @@ impl App {
     }
 
     /// 키보드를 검색 상자로. 지난 검색어는 통째로 선택한다: 새로 치면 바뀌고, 이어 쓰려면 End. 결과가 없으면 다시 찾아 채운다
-    fn pal_focus_input(&mut self) {
+    pub(super) fn pal_focus_input(&mut self) {
         self.fav_blur();
         self.pal_focus = true;
         self.hover = Hit::None;
@@ -980,9 +987,8 @@ impl App {
         let t = self.theme;
         let r = self.pal_rect();
         let list = self.pal_list();
-        let input = self.pal_input_box();
         let install = self.pal_install_button();
-        let close = self.pal_close_rect();
+        let track = self.pal_scope_track();
         let scopes = [(false, self.pal_scope_rect(false)), (true, self.pal_scope_rect(true))];
         let here = self.pal_here;
         let here_ok = self.panes[self.active].tab().loc.dir().is_some();
@@ -990,9 +996,7 @@ impl App {
         let status = self.pal_status.clone();
         let query = edit_text(self.search_edit);
         let add_folder = if self.pal_shows_add_folder() { self.pal_outside.clone() } else { None };
-        let folder_entries = self.folders.entry_count();
         let picks = self.pal_pick_count();
-        let help = self.keys.get(crate::keys::Action::Help).map(crate::keys::Combo::label);
         // 입력을 바꿨는데 새 결과가 아직이면 이전 결과는 흐리게 (열거나 복사할 수 없음).
         // 결과가 곧(0.15초 안에) 오면 흐리게 하지 않는다: 치는 동안 목록이 깜빡이지 않게
         let stale = !self.pal_current() && !self.pal_results.is_empty();
@@ -1021,33 +1025,21 @@ impl App {
         let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
         let App { gfx, pal_results, pal_picked, types, pal_meta, .. } = self;
 
-        // 머리: 제목, 닫기
-        gfx.text("검색", R::new(r.l + 18.0, r.t, close.l - 4.0, r.t + 44.0), Font::Strong, t.text);
-        if hover == Hit::PalClose {
-            gfx.fill_round(close, R_CTRL, sidebar::hover_fill(&t));
+        // 범위 고르기: PC 전체 · 지금 폴더 (칸에 폴더가 없으면 지금 폴더는 흐리게, 전체로 찾는다)
+        gfx.fill_round(track, R_CTRL, sidebar::seg_track(&t));
+        if t.high_contrast {
+            gfx.stroke_round(track.inset(0.5, 0.5), R_CTRL, t.border, 1.0);
         }
-        gfx.glyph(G_CLOSE, close, true, if hover == Hit::PalClose { t.text } else { t.dim });
-
-        // 입력 줄: 들어간 상자 (실제 입력은 위에 놓인 EDIT). 키보드가 여기 있으면 강조 테두리
-        gfx.fill_round(input, R_CTRL, if t.high_contrast { t.window } else { t.field });
-        gfx.stroke_round(input.inset(0.75, 0.75), R_CTRL, if focus { t.accent } else { t.border }, if focus { 1.5 } else { 1.0 });
-        gfx.glyph_font(G_SEARCH, R::new(input.l + 8.0, input.t, input.l + 28.0, input.b), Font::GlyphMid, t.dim);
-
-        // 범위 칩: PC 전체 · 현재 폴더 (칸에 폴더가 없으면 현재 폴더는 흐리게, 전체로 찾는다)
-        let track = R::new(scopes[0].1.l - 3.0, scopes[0].1.t - 3.0, scopes[1].1.r + 3.0, scopes[1].1.b + 3.0);
-        gfx.fill_round(track, track.h() / 2.0, sidebar::seg_track(&t));
         for (h, cr) in scopes {
             let enabled = !h || here_ok;
             let on = if here_ok { h == here } else { !h };
             if on {
-                sidebar::seg_on(gfx, cr, cr.h() / 2.0, &t);
+                sidebar::seg_on(gfx, cr, R_CTRL - 2.0, &t);
             } else if hover == Hit::PalScope(h) && enabled {
-                gfx.fill_round(cr, cr.h() / 2.0, sidebar::hover_fill(&t));
+                gfx.fill_round(cr, R_CTRL - 2.0, sidebar::hover_fill(&t));
             }
-            let label = if h { "지금 폴더" } else { "PC 전체" };
-            let w = gfx.measure(label, Font::Small);
             let fg = if on { t.text } else if enabled { t.dim } else { t.faint };
-            gfx.text(label, R::new(cr.l + (cr.w() - w) / 2.0, cr.t, cr.r, cr.b), Font::Small, fg);
+            gfx.text(if h { "지금 폴더" } else { "PC 전체" }, cr, Font::Hint, fg);
         }
 
         gfx.clip(list);
@@ -1072,10 +1064,8 @@ impl App {
             )),
             PalStatus::Done { .. } if pal_results.is_empty() && here && here_ok => Some(format!("지금 폴더 아래에는 ‘{}’ 검색 결과가 없어요", query.trim())),
             PalStatus::Done { .. } if pal_results.is_empty() => Some(format!("‘{}’ 검색 결과가 없어요", query.trim())),
-            PalStatus::Idle | PalStatus::Ready(_) if query.trim().is_empty() => Some(format!(
-                "파일·폴더 이름을 입력하세요\n띄어 쓰면 모두 포함 · | 는 또는 · 끝에 \\ 는 경로{}",
-                help.as_deref().map(|h| format!(" · 자세히는 {h}")).unwrap_or_default()
-            )),
+            // 찾는 방법(띄어쓰기, |, \\)은 입력 칸의 말풍선과 도움말에 있다
+            PalStatus::Idle | PalStatus::Ready(_) if query.trim().is_empty() => Some("파일·폴더 이름을 입력하세요".to_string()),
             _ => None,
         };
         if let Some(m) = message {
@@ -1086,10 +1076,18 @@ impl App {
             (_, Some(_)) => Some(("이 폴더도 검색하기", Hit::PalAddFolder)),
             _ => None,
         };
+        // 단추: 진하게 채우지 않고 옅은 강조 색 바탕에 강조 색 글자 (고대비에서는 강조 색 면)
         if let Some((label, h)) = button {
-            let k = if hover == h { 0.88 } else { 1.0 };
-            gfx.fill_round(install, 8.0, Color { r: t.accent.r * k, g: t.accent.g * k, b: t.accent.b * k, a: 1.0 });
-            gfx.text(label, install, Font::Hint, if t.dark { t.window } else { Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } });
+            if t.high_contrast {
+                gfx.fill_round(install, R_CTRL, if hover == h { t.focus } else { t.accent });
+                gfx.text(label, install, Font::Hint, t.sel_text);
+            } else {
+                gfx.fill_round(install, R_CTRL, t.accent_soft);
+                if hover == h {
+                    gfx.fill_round(install, R_CTRL, alpha(t.accent, 0.14));
+                }
+                gfx.text(label, install, Font::Hint, t.chip_text);
+            }
         }
         for i in first..(first + count).min(pal_results.len()) {
             let (is_dir, path) = &pal_results[i];
@@ -1116,32 +1114,10 @@ impl App {
             let ext = if *is_dir { String::new() } else { name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default() };
             let key = if *is_dir { "\\dir".to_string() } else { ext.clone() };
             let icon = types.entry(key).or_insert_with(|| shell::type_info(&ext, *is_dir)).1;
-            gfx.icon(icon, R::new(row.l + 10.0, y + 8.0, row.l + 26.0, y + 24.0));
-            let (font, fg) = (Font::Normal, if current && !t.high_contrast { t.sel_text } else { t.text });
-            gfx.text(name, R::new(row.l + 36.0, y + 6.0, text_r, y + 25.0), font, fg);
-            // 둘째 줄 오른쪽: 수정한 날짜(파일이면 크기도). 같은 이름이 여러 개면 최신본을 고르기 쉽게
-            // 좁은 패널에서 폴더 경로 자리가 120보다 좁아지면 크기는 빼고 날짜만
-            let (meta, mw) = match pal_meta.get(path) {
-                Some(Some((modified, size))) => {
-                    let date = if short_dates { crate::listing::format_time_short(*modified, now) } else { crate::listing::format_time(*modified) };
-                    let full = if *is_dir { date.clone() } else { format!("{date} · {}", format_size(*size)) };
-                    let fw = gfx.measure(&full, Font::Small);
-                    if text_r - (row.l + 36.0) - fw - 8.0 >= 120.0 {
-                        (full, fw)
-                    } else {
-                        let dw = gfx.measure(&date, Font::Small);
-                        (date, dw)
-                    }
-                }
-                _ => (String::new(), 0.0),
-            };
-            if mw > 0.0 {
-                gfx.text(&meta, R::new(text_r - mw, y + 25.0, text_r, y + 43.0), Font::Small, t.faint);
-            }
-            // 같은 이름의 파일을 폴더로 구별할 수 있게 경로는 흐린 색이 아닌 보조 글자색으로 (넘치면 가운데를 줄인다)
-            let parent = util::parent(path).unwrap_or_default();
-            let path_r = if mw > 0.0 { text_r - mw - 8.0 } else { text_r };
-            gfx.text(&parent, R::new(row.l + 36.0, y + 25.0, path_r.max(row.l + 60.0), y + 43.0), Font::Path, t.dim);
+            // 한 줄: 아이콘과 이름. 위치와 날짜는 지금 줄 것만 패널 아래에 보인다
+            gfx.icon(icon, R::new(row.l + 8.0, y + 6.0, row.l + 24.0, y + 22.0));
+            let fg = if current && !t.high_contrast { t.sel_text } else { t.text };
+            gfx.text(name, R::new(row.l + 32.0, y, text_r, y + PAL_ROW_H), Font::Normal, fg);
         }
         if dim {
             gfx.fill(list, alpha(t.pane, 0.6));
@@ -1155,36 +1131,39 @@ impl App {
             gfx.fill_round(R::new(list.r + 2.0, top, list.r + 6.0, top + h), 2.0, t.thumb);
         }
 
-        // 아래: 결과 수 (왼쪽), 키 안내 (오른쪽, 자리가 있을 때)
-        let foot = R::new(r.l + 18.0, r.b - S_FOOT_H, r.r - 12.0, r.b);
-        gfx.fill(R::new(r.l + 8.0, foot.t, r.r - 8.0, foot.t + 1.0), t.border);
-        let left = match &status {
-            _ if dim => "찾는 중…".to_string(),
-            PalStatus::Done { ready: false, .. } => format!("준비 중 · {}개 먼저", util::grouped(pal_results.len() as u64)),
-            PalStatus::Done { total, failed, .. } => {
-                let shown = pal_results.len();
-                let skipped = if failed.is_empty() { String::new() } else { format!(" · {} 빠짐", drive_list(failed)) };
-                let (total_s, shown_s) = (util::grouped(*total as u64), util::grouped(shown as u64));
-                if *total > shown { format!("{total_s}개 중 {shown_s}개{skipped}") } else { format!("{shown_s}개 결과{skipped}") }
-            }
-            PalStatus::Searching => "찾는 중…".to_string(),
-            PalStatus::Ready(n) if folder_entries > 0 => format!("인덱스 {}개 · 넣은 폴더 {}개", util::grouped(*n as u64), util::grouped(folder_entries as u64)),
-            PalStatus::Ready(n) => format!("인덱스 {}개", util::grouped(*n as u64)),
-            _ => String::new(),
+        // 아래 한 줄: 지금 어떤지(고른 개수, 찾는 중, 준비 중)가 먼저, 아니면 지금 줄의 위치와 날짜.
+        // 결과 수와 인덱스 크기는 범위 칸의 말풍선에, 여는 키는 도움말에 있다
+        let foot = R::new(r.l + 16.0, r.b - S_FOOT_H, r.r - 12.0, r.b);
+        gfx.fill(R::new(r.l + 8.0, foot.t, r.r - 8.0, foot.t + 1.0), if t.high_contrast { t.border } else { alpha(t.text, 0.08) });
+        let state = match &status {
+            _ if picks > 0 => Some(format!("{picks}개 고름")),
+            _ if dim => Some("찾는 중…".to_string()),
+            PalStatus::Searching => Some("찾는 중…".to_string()),
+            PalStatus::Done { ready: false, .. } => Some("준비 중".to_string()),
+            _ => None,
         };
-        let left = if picks > 0 { format!("{picks}개 고름") } else { left };
-        let lw = gfx.measure(&left, Font::Small);
-        gfx.text(&left, R::new(foot.l, foot.t, foot.l + lw + 2.0, foot.b), Font::Small, if picks > 0 { t.dim } else { t.faint });
-        // 키 안내: 고른 게 있으면 Enter 모두 열기, 아니면 Ctrl+Enter 위치 열기
-        let (keys, label): (Vec<&str>, &str) = if picks > 0 { (vec!["Enter"], "모두 열기") } else { (vec!["Ctrl+Enter"], "위치 열기") };
-        let need = keys.iter().map(|k| gfx.measure(k, Font::Small) + 14.0).sum::<f32>() + gfx.measure(label, Font::Small) + 6.0;
-        if foot.l + lw + 16.0 + need <= foot.r {
-            let cy = (foot.t + foot.b) / 2.0;
-            let mut x = foot.r - need;
-            for k in &keys {
-                x = kbd(gfx, &t, x, cy, k) + 4.0;
+        if let Some(s) = state {
+            gfx.text(&s, foot, Font::Small, if picks > 0 { t.dim } else { t.faint });
+        } else if let Some((_, path)) = pal_results.get(sel) {
+            // 오른쪽: 읽지 못한 드라이브가 있으면 그것, 아니면 수정한 날짜
+            let right = match (&status, pal_meta.get(path)) {
+                (PalStatus::Done { failed, .. }, _) if !failed.is_empty() => format!("{} 빠짐", drive_list(failed)),
+                (_, Some(Some((modified, _)))) => {
+                    if short_dates {
+                        crate::listing::format_time_short(*modified, now)
+                    } else {
+                        crate::listing::format_time(*modified)
+                    }
+                }
+                _ => String::new(),
+            };
+            let rw = if right.is_empty() { 0.0 } else { gfx.measure(&right, Font::Small) + 8.0 };
+            // 위치가 들어갈 자리가 너무 좁으면 오른쪽 글자는 뺀다
+            let rw = if foot.w() - rw >= 80.0 { rw } else { 0.0 };
+            if rw > 0.0 {
+                gfx.text(&right, R::new(foot.r - rw + 8.0, foot.t, foot.r, foot.b), Font::Small, t.faint);
             }
-            gfx.text(label, R::new(x + 2.0, foot.t, foot.r + 2.0, foot.b), Font::Small, t.dim);
+            gfx.text(&util::parent(path).unwrap_or_default(), R::new(foot.l, foot.t, foot.r - rw, foot.b), Font::Path, t.dim);
         }
     }
 }

@@ -128,6 +128,7 @@ impl App {
             Hit::NewFolder(_) => ToolbarHover::NewFolder,
             Hit::PreviewButton => ToolbarHover::Preview,
             Hit::SearchButton => ToolbarHover::Search,
+            Hit::PalClose => ToolbarHover::SearchClose,
             _ => ToolbarHover::None,
         };
         let open = self.view_menu.map(|v| v.kind);
@@ -146,6 +147,7 @@ impl App {
                 view_ok: !start,
                 preview_on: self.auto_preview,
                 search_on: self.pal_shown(),
+                search_focus: self.pal_focus,
                 layout_open: open == Some(view_menu::MenuKind::Layout),
                 view_open: open == Some(view_menu::MenuKind::View),
                 hover,
@@ -195,6 +197,9 @@ impl App {
             Hit::RailAdd => (self.rail().add, "새 작업 공간 (지금 화면으로)".to_string()),
             Hit::SidePin => (self.side_pin_rect()?, (if self.side_floating() { "고정해 두기" } else { "고정 풀기" }).to_string()),
             Hit::PalClose => (self.pal_close_rect(), "검색 닫기".to_string()),
+            // 검색 입력 칸: 찾는 방법 (전에는 빈 패널에 늘 적혀 있었다)
+            Hit::SearchField => (self.toolbar().search, "띄어 쓰면 모두 포함 · | 는 또는 · 끝에 \\ 는 경로".to_string()),
+            Hit::PalScope(_) => return self.pal_count_tip(),
             Hit::Start(p, i) => return self.start_tip(p, i),
             Hit::PreviewPin | Hit::PreviewOpen | Hit::PreviewHead => return self.preview_tip(),
             Hit::CardExpand | Hit::CardClose => return self.card_tip(),
