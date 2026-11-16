@@ -22,8 +22,7 @@ pub fn mac_name_problem(name: &str, show_hidden: bool) -> Option<String> {
     if let Some(c) = name.chars().find(|c| matches!(c, '/' | ':') || (*c as u32) < 0x20) {
         return Some(if (c as u32) < 0x20 { "이름에 쓸 수 없는 제어 문자가 들어 있어요".to_string() } else { format!("이름에는 {c} 문자를 쓸 수 없어요") });
     }
-    // 맥(APFS)의 이름 길이 한도는 UTF-8로 255바이트
-    if name.len() > 255 {
+    if name.len() > NAME_MAX {
         return Some("이름이 너무 길어요".to_string());
     }
     if name.starts_with('.') && !show_hidden {
@@ -47,6 +46,26 @@ pub fn numbered_name(name: &str, n: usize, is_dir: bool) -> String {
         Some(i) if i > 0 && !is_dir => format!("{} {n}{}", &name[..i], &name[i..]),
         _ => format!("{name} {n}"),
     }
+}
+
+/// 이름 하나의 길이 한도 (맥의 APFS: UTF-8로 255바이트)
+pub const NAME_MAX: usize = 255;
+
+/// 복사하는 동안 받는 쪽에 두는 임시 이름의 꼬리. 다 복사한 뒤에 제 이름으로 바꾼다:
+/// 하다 만 복사가 다 된 것처럼 제 이름으로 남지 않게
+const COPYING: &str = ".sakadu-copying";
+
+/// 복사하는 동안 쓸 임시 이름: 원래 이름에 꼬리를 붙인다 (무엇을 복사하는 중인지 보이게). n이 2부터는 번호도 붙인다.
+/// 원래 이름이 길어 꼬리를 붙이면 길이 한도를 넘을 때는 이름의 앞부분만 쓴다: 제 이름으로는 들어가는 파일이
+/// 임시 이름 때문에 복사되지 않는 일이 없게
+pub fn staging_name(name: &str, n: usize) -> String {
+    // 번호(" 999")가 붙을 자리까지 남긴다
+    let room = NAME_MAX - COPYING.len() - 4;
+    let mut end = name.len().min(room);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    numbered(&format!("{}{COPYING}", &name[..end]), n)
 }
 
 /// 이름을 고칠 때 미리 골라 둘 앞부분의 길이 (UTF-16 단위: 맥과 Windows 입력 상자가 쓰는 단위).
@@ -317,6 +336,15 @@ mod tests {
         assert_eq!(numbered_name(".gitignore", 2, false), ".gitignore 2");
         assert_eq!(numbered_name("자료.d", 2, true), "자료.d 2");
         assert!(Undo::Copy { dir: "/t".into(), items: vec![("a".into(), 1)] }.label().contains("복사본 1개"));
+        // 복사하는 동안의 임시 이름: 원래 이름에 꼬리. 긴 이름은 앞부분만 써서 늘 길이 한도 안에 든다
+        assert_eq!([1, 2].map(|n| staging_name("보고서.docx", n)), ["보고서.docx.sakadu-copying", "보고서.docx.sakadu-copying 2"]);
+        for long in ["a".repeat(250), "가".repeat(85), format!("{}.docx", "가".repeat(83))] {
+            assert!(long.len() <= NAME_MAX);
+            for n in [1, 2, 999] {
+                let staged = staging_name(&long, n);
+                assert!(staged.len() <= NAME_MAX && staged.contains(".sakadu-copying") && staged.starts_with(&long[..3]), "{} bytes", staged.len());
+            }
+        }
         assert_eq!(stem_units("보고서.xlsx", false), 3);
         assert_eq!(stem_units("archive.tar.gz", false), 11);
         assert_eq!(stem_units("README", false), 6);
