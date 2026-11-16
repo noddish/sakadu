@@ -493,8 +493,12 @@ mod tests {
         for name in ["a".repeat(fileops::NAME_MAX), format!("{}.txt", "가".repeat(83)), "끝에 공백 ".to_string()] {
             let long = util::join(&from, &name);
             std::fs::write(&long, b"long").unwrap();
-            assert!(matches!(run(&Job::Copy { src: long, dir: to.clone(), file_id: 0 }), Ok(Done::Copied { name: made, renamed: false, .. }) if made == name), "{} bytes", name.len());
+            assert!(matches!(run(&Job::Copy { src: long.clone(), dir: to.clone(), file_id: 0 }), Ok(Done::Copied { name: made, renamed: false, .. }) if made == name), "{} bytes", name.len());
             assert_eq!(std::fs::read(util::join(&to, &name)).unwrap(), b"long");
+            // 한 번 더: 번호를 붙인 이름도 길이 한도 안에 들어 복사된다
+            let Ok(Done::Copied { name: second, renamed: true, .. }) = run(&Job::Copy { src: long, dir: to.clone(), file_id: 0 }) else { panic!("{name}") };
+            assert!(second != name && second.len() <= fileops::NAME_MAX, "{second}");
+            assert_eq!(std::fs::read(util::join(&to, &second)).unwrap(), b"long");
         }
         assert!(!names(&to).iter().any(|n| n.contains("sakadu-copying")));
         std::fs::remove_dir_all(&dir).unwrap();

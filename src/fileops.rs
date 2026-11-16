@@ -37,15 +37,22 @@ pub fn numbered(base: &str, n: usize) -> String {
 }
 
 /// 같은 이름이 있을 때 n번째로 시도할 이름: 처음은 그대로, 그다음부터 번호를 붙인다.
-/// 파일은 확장자 앞에 붙이고("보고서 2.docx"), 폴더와 확장자 없는 이름·점으로 시작하는 이름은 끝에 붙인다
+/// 파일은 확장자 앞에 붙이고("보고서 2.docx"), 폴더와 확장자 없는 이름·점으로 시작하는 이름은 끝에 붙인다.
+/// 번호를 붙이면 길이 한도를 넘는 긴 이름은 앞부분을 줄인다 (확장자는 지킨다)
 pub fn numbered_name(name: &str, n: usize, is_dir: bool) -> String {
     if n <= 1 {
         return name.to_string();
     }
-    match name.rfind('.') {
-        Some(i) if i > 0 && !is_dir => format!("{} {n}{}", &name[..i], &name[i..]),
-        _ => format!("{name} {n}"),
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 && !is_dir => name.split_at(i),
+        _ => (name, ""),
+    };
+    let tail = format!(" {n}{ext}");
+    let mut end = stem.len().min(NAME_MAX.saturating_sub(tail.len()));
+    while !stem.is_char_boundary(end) {
+        end -= 1;
     }
+    format!("{}{tail}", &stem[..end])
 }
 
 /// 이름 하나의 길이 한도 (맥의 APFS: UTF-8로 255바이트)
@@ -336,6 +343,13 @@ mod tests {
         assert_eq!(numbered_name(".gitignore", 2, false), ".gitignore 2");
         assert_eq!(numbered_name("자료.d", 2, true), "자료.d 2");
         assert!(Undo::Copy { dir: "/t".into(), items: vec![("a".into(), 1)] }.label().contains("복사본 1개"));
+        // 길이 한도에 닿는 이름에 번호를 붙일 때: 앞부분을 줄여 한도 안에 들고, 번호와 확장자는 그대로 붙는다
+        let full = "a".repeat(NAME_MAX);
+        assert_eq!(numbered_name(&full, 2, false), format!("{} 2", "a".repeat(NAME_MAX - 2)));
+        let korean = format!("{}.docx", "가".repeat(83));
+        let second = numbered_name(&korean, 12, false);
+        assert!(second.len() <= NAME_MAX && second.starts_with("가") && second.ends_with(" 12.docx"), "{} bytes", second.len());
+        assert_eq!(numbered_name(&"가".repeat(85), 2, true), format!("{} 2", "가".repeat(84)));
         // 복사하는 동안의 임시 이름: 원래 이름에 꼬리. 긴 이름은 앞부분만 써서 늘 길이 한도 안에 든다
         assert_eq!([1, 2].map(|n| staging_name("보고서.docx", n)), ["보고서.docx.sakadu-copying", "보고서.docx.sakadu-copying 2"]);
         for long in ["a".repeat(250), "가".repeat(85), format!("{}.docx", "가".repeat(83))] {
