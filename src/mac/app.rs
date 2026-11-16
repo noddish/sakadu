@@ -244,8 +244,10 @@ pub enum Paste {
     Copy,
     /// 복사해 둔 것을 옮긴다 (⌥⌘V)
     Move,
-    /// 잘라 둔 것을 옮긴다 (⌘X 뒤 ⌘V). 끝나면 옮겨 간 것을 클립보드에서 뺀다
-    Cut,
+    /// 잘라 둔 것을 옮긴다 (⌘X 뒤 ⌘V). 끝나면 옮겨 간 것을 클립보드에서 뺀다.
+    /// 수는 창 쪽이 준 표식(잘라 둘 때의 클립보드 번호)이다: 끝났을 때 그대로 돌려줘서, 그 사이 다른 것을 잘라 뒀으면
+    /// 그 새것을 건드리지 않게 한다
+    Cut(i64),
 }
 
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
@@ -267,8 +269,8 @@ struct Batch {
     duplicate: bool,
     /// 복사가 아니라 옮기기 (잘라낸 것을 붙여넣기, ⌥⌘V)
     moving: bool,
-    /// 잘라 둔 것을 옮기는 묶음: 끝나면 옮기지 못한 것만 잘라 둔 채로 남긴다
-    cut: bool,
+    /// 잘라 둔 것을 옮기는 묶음(그 표식): 끝나면 옮기지 못한 것만 잘라 둔 채로 남긴다
+    cut: Option<i64>,
     cancelled: bool,
 }
 
@@ -754,9 +756,10 @@ pub struct App {
     /// 클립보드의 파일들을 붙여넣어 달라는 표시 (창 쪽이 클립보드를 읽어 paste_paths로 넘긴다).
     /// Some(true)면 잘라낸 것이 아니어도 옮긴다 (⌥⌘V)
     pub clip_in: Option<bool>,
-    /// 잘라 둔 것을 옮기는 묶음이 끝난 뒤 옮기지 못하고 남은 것들의 경로 (창 쪽이 클립보드를 이것만 잘라 둔 것으로 고친다.
-    /// 비어 있으면 모두 옮겨 간 것이라 클립보드를 비운다). 옮겨 가지 않은 것은 다른 곳에 다시 붙여넣을 수 있다
-    pub clip_left: Option<Vec<String>>,
+    /// 잘라 둔 것을 옮기는 묶음이 끝난 뒤: 그 묶음의 표식(Paste::Cut)과 옮기지 못하고 남은 것들의 경로.
+    /// 창 쪽이 클립보드를 이것만 잘라 둔 것으로 고친다 (비어 있으면 모두 옮겨 간 것이라 클립보드를 비운다).
+    /// 옮겨 가지 않은 것은 다른 곳에 다시 붙여넣을 수 있다
+    pub clip_left: Option<(i64, Vec<String>)>,
     /// 칸 p의 칩 줄 오른쪽에 잠깐 보일 알림 (다음 입력 때 지운다)
     flash: Option<(usize, String)>,
     probes: Vec<Probe>,
@@ -1415,7 +1418,10 @@ impl App {
             failed: Vec::new(),
             duplicate,
             moving: how != Paste::Copy,
-            cut: how == Paste::Cut,
+            cut: match how {
+                Paste::Cut(mark) => Some(mark),
+                _ => None,
+            },
             cancelled: false,
         });
         self.feed_batch();
@@ -1446,8 +1452,8 @@ impl App {
             (n, Some((name, why))) => format!("{n}개를 {did_and} {}개는 하지 못했어요: {name} · {why}", b.failed.len()),
         };
         // 잘라 둔 것 가운데 옮기지 못한 것(하지 못한 것, 그만둬서 하지 않은 것)은 잘라 둔 채로 남긴다
-        if b.cut {
-            self.clip_left = Some(b.failed.iter().map(|(src, _)| src.clone()).chain(b.todo.iter().map(|(src, _)| src.clone())).collect());
+        if let Some(mark) = b.cut {
+            self.clip_left = Some((mark, b.failed.iter().map(|(src, _)| src.clone()).chain(b.todo.iter().map(|(src, _)| src.clone())).collect()));
         }
         if b.renamed > 0 && !b.duplicate {
             note.push_str(&format!(" · 같은 이름이 있던 {}개에는 번호를 붙였어요", b.renamed));
@@ -4924,18 +4930,18 @@ mod tests {
         // 잘라 두기만 해서는 아무것도 옮겨지지 않는다
         assert!(std::fs::metadata(&quarter).unwrap().is_dir() && std::fs::metadata(util::join(&work, "예산.csv")).is_ok());
         // 같은 폴더에 붙여넣으면 옮길 것이 없다. 옮기지 못한 것은 잘라 둔 채로 남아, 다른 곳에 다시 붙여넣을 수 있다
-        assert!(a.paste_paths(clip.clone(), Paste::Cut));
+        assert!(a.paste_paths(clip.clone(), Paste::Cut(7)));
         assert_eq!(a.clip_left, None, "nothing is decided until the batch ends");
         a.settle();
         assert!(noted(&a, "옮기지 못했어요") && noted(&a, "이미 이 폴더에 있어요"), "{:?}", a.flash);
         assert_eq!(names(&a, 0), ["2026 4분기", "예산.csv", "회의록.md"]);
-        assert_eq!(a.clip_left.take(), Some(clip.clone()));
+        assert_eq!(a.clip_left.take(), Some((7, clip.clone())), "with the mark of the cut it belongs to");
         // 다른 칸에 붙여넣는다: 하나씩 옮겨진다. 모두 옮겨 갔으면 잘라 둔 것은 남지 않는다
         a.activate_pane(1);
-        assert!(a.paste_paths(clip.clone(), Paste::Cut));
+        assert!(a.paste_paths(clip.clone(), Paste::Cut(7)));
         assert_eq!(a.copy_progress(), Some((1, 2)));
         a.settle();
-        assert_eq!(a.clip_left.take(), Some(Vec::new()));
+        assert_eq!(a.clip_left.take(), Some((7, Vec::new())));
         assert_eq!(names(&a, 1), ["2026 4분기", "사진.jpg", "예산.csv"]);
         assert_eq!(picked(&a, 1).0, ["2026 4분기", "예산.csv"], "what was moved is selected");
         assert_eq!(names(&a, 0), ["회의록.md"]);
@@ -4973,10 +4979,10 @@ mod tests {
         assert_eq!((std::fs::read(util::join(&work, "예산.csv")).unwrap(), std::fs::read(util::join(&downloads, "예산 2.csv")).unwrap()), (b"newcomer".to_vec(), b"x".to_vec()));
         // 잘라 둔 것 가운데 일부만 옮겨졌으면, 옮기지 못한 것만 잘라 둔 채로 남는다
         let (stay, go) = (util::join(&downloads, "사진.jpg"), util::join(&work, "회의록.md"));
-        assert!(a.paste_paths(vec![stay.clone(), go], Paste::Cut));
+        assert!(a.paste_paths(vec![stay.clone(), go], Paste::Cut(9)));
         a.settle();
         assert!(noted(&a, "1개를 옮겼고 1개는 하지 못했어요"), "{:?}", a.flash);
-        assert_eq!(a.clip_left.take(), Some(vec![stay]));
+        assert_eq!(a.clip_left.take(), Some((9, vec![stay])));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -430,12 +430,12 @@ fn write_clipboard(paths: &[String], cut: bool) {
     CUT.set((cut && written).then(|| board.changeCount()));
 }
 
-/// 클립보드에 담긴 파일들의 경로 (Finder에서 복사한 것도 읽는다)와, 그것이 사카두에서 잘라 둔 것 그대로인지.
-/// 파일이 아닌 것(글자, 그림)만 있으면 비어 있다
-fn read_clipboard() -> (Vec<String>, bool) {
+/// 클립보드에 담긴 파일들의 경로 (Finder에서 복사한 것도 읽는다)와, 그것이 사카두에서 잘라 둔 것 그대로이면 그때의
+/// 클립보드 번호. 파일이 아닌 것(글자, 그림)만 있으면 비어 있다
+fn read_clipboard() -> (Vec<String>, Option<isize>) {
     let board = NSPasteboard::generalPasteboard();
-    let cut = CUT.get() == Some(board.changeCount());
-    let Some(items) = board.pasteboardItems() else { return (Vec::new(), false) };
+    let cut = CUT.get().filter(|count| *count == board.changeCount());
+    let Some(items) = board.pasteboardItems() else { return (Vec::new(), None) };
     let mut out = Vec::new();
     for item in items.iter() {
         let Some(text) = item.stringForType(unsafe { NSPasteboardTypeFileURL }) else { continue };
@@ -467,9 +467,11 @@ fn pump() {
     // 클립보드: 담아 달라는 것을 담고, 붙여넣어 달라고 했으면 읽어서 넘긴다 (그러면 아래에서 맡길 작업이 생긴다)
     if let Some((out, cut, wanted, left)) = with_app(|a| (a.clip_out.take(), std::mem::take(&mut a.clip_cut), a.clip_in.take(), a.clip_left.take())) {
         // 잘라 둔 것을 옮기는 묶음이 끝났다: 옮겨 간 것은 클립보드에서 빼고, 옮기지 못한 것만 잘라 둔 채로 남긴다
-        // (다른 곳에 다시 붙여넣을 수 있게). 그 사이 클립보드에 다른 것이 담겼으면 건드리지 않는다
-        if let Some(left) = left
-            && CUT.get() == Some(NSPasteboard::generalPasteboard().changeCount())
+        // (다른 곳에 다시 붙여넣을 수 있게). 클립보드가 그 묶음을 시작할 때의 그것 그대로일 때만 한다:
+        // 그 사이 다른 것이 담겼거나 다른 것을 새로 잘라 뒀으면(번호가 다르다) 건드리지 않는다
+        if let Some((mark, left)) = left
+            && CUT.get() == Some(mark as isize)
+            && NSPasteboard::generalPasteboard().changeCount() == mark as isize
         {
             if left.is_empty() {
                 NSPasteboard::generalPasteboard().clearContents();
@@ -483,8 +485,8 @@ fn pump() {
         }
         if let Some(force_move) = wanted {
             let (paths, was_cut) = read_clipboard();
-            let how = if was_cut {
-                Paste::Cut
+            let how = if let Some(mark) = was_cut {
+                Paste::Cut(mark as i64)
             } else if force_move {
                 Paste::Move
             } else {
