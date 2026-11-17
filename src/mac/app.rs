@@ -274,6 +274,15 @@ struct Press {
     collapse: bool,
 }
 
+/// 줄을 한 번 눌렀을 때 그 줄의 항목: 이어서 두 번째로 누르면(두 번 누르기) 이 항목을 연다.
+/// 두 번 사이에 목록이 바뀌어 손 밑에 다른 줄이 와 있을 수 있어서, 줄 번호가 아니라 항목으로 기억한다
+struct Clicked {
+    pane: usize,
+    tab: u64,
+    file_id: u64,
+    name: String,
+}
+
 /// 누른 채 이만큼 넘게 움직여야 끌기로 본다 (누르다가 손이 조금 떨린 것은 끌기가 아니다)
 const DRAG_START: f32 = 4.0;
 
@@ -835,6 +844,8 @@ pub struct App {
     card: Card,
     /// 마지막 누름(두 번 누르기의 첫 누름)이 미리 보기 카드 위였는가. 그랬으면 이어지는 둘째 누름은 버리고, 아니었으면 카드 아래 것이 받는다
     press_on_card: bool,
+    /// 방금 한 번 누른 줄의 항목 (두 번 누르기의 첫 번째)
+    clicked: Option<Clicked>,
     /// 읽어 둔 그림: 최근에 본 몇 개만 남긴다 (맨 뒤가 가장 최근)
     pics: Vec<CachedPic>,
     previews: Vec<PreviewRequest>,
@@ -906,6 +917,7 @@ impl App {
             auto_preview: true,
             card: Card::new(),
             press_on_card: false,
+            clicked: None,
             pics: Vec::new(),
             previews: Vec::new(),
             preview_seq: 0,
@@ -1004,6 +1016,11 @@ impl App {
         }
         self.reading.remove(&tab_id);
         let rereading = self.rereading.remove(&tab_id);
+        // 이 탭에서 이름을 고치는 중인 항목 (파일 번호, 이름)
+        let editing = match &self.edit {
+            Editing::Item(e) if e.tab == tab_id => Some((e.file_id, e.name.clone())),
+            _ => None,
+        };
         // 세션에서 연 탭인지는 그 탭의 첫 읽기 결과에서만, 그리고 아직 저장한 그 폴더에 있을 때만 본다
         let saved = self.restored.remove(&tab_id);
         let home = self.home.clone();
@@ -1020,7 +1037,10 @@ impl App {
                 // 스크롤은 다 읽은 그 탭에 맞춘다 (그 사이 다른 탭으로 옮겼어도 보고 있는 탭은 그대로)
                 if let Some(list) = list {
                     clamp_tab(tab, list, view);
-                    if restore.is_some_and(|r| r.reveal) {
+                    // 이름을 고치는 중인 줄은 목록이 바뀌어 밀려도 계속 보이게 한다: 화면 밖으로 밀리면 이름 상자가 닫혀
+                    // 치던 이름을 잃는다. 그 항목이 없어졌으면 스크롤하지 않는다 (그때는 고치기가 끝난다)
+                    let editing_row = editing.is_some_and(|(id, name)| tab.cursor_entry().is_some_and(|e| e.file_id == id && e.name_string() == name));
+                    if restore.is_some_and(|r| r.reveal) || editing_row {
                         reveal(tab, list, view);
                     }
                 }
@@ -3220,6 +3240,8 @@ impl App {
         self.edit = Editing::None;
         self.flash = None;
         self.press = None;
+        // 두 번 누르기의 첫 번째에 누른 항목 (한 번 누르기면 아래에서 새로 적는다)
+        let first = self.clicked.take();
         // ⌃-누르기는 오른쪽 단추와 같다
         if mods.ctrl && self.ask_menu(hit, x, y) {
             return;
@@ -3229,6 +3251,20 @@ impl App {
                 self.activate_pane(p)
             }
             _ => {}
+        }
+        // 두 번 누르기는 처음 누른 그 항목을 연다. 두 번 사이에 목록이 바뀌어(폴더 감시) 손 밑에 다른 줄이나 빈 곳이 와 있어도
+        // 그것을 열지 않는다. 처음 누른 항목이 그 사이 없어졌으면 아무것도 열지 않는다
+        if clicks >= 2
+            && let Some(first) = first
+            && let Hit::Row(p, _) | Hit::List(p) = hit
+            && first.pane == p
+        {
+            let tab = self.panes[p].tab();
+            let row = (0..tab.view.len()).find(|vi| tab.entry_at(*vi).is_some_and(|e| e.file_id == first.file_id && e.name_string() == first.name));
+            if let Some(vi) = row.filter(|_| tab.id == first.tab) {
+                self.open_row(p, vi);
+            }
+            return;
         }
         match hit {
             Hit::CrumbEmpty(p) => self.begin_address(p),
@@ -3283,10 +3319,12 @@ impl App {
                     }
                     (false, false) => tab.select_only(vi),
                 }
+                let clicked = tab.entry_at(vi).map(|e| Clicked { pane: p, tab: tab.id, file_id: e.file_id, name: e.name_string() });
                 // 고른 줄을 누른 채 움직이면 고른 항목들을 끌어 낸다
                 if tab.is_selected(vi) {
                     self.press = Some(Press { pane: p, row: vi, x, y, collapse: keep });
                 }
+                self.clicked = clicked;
             }
             Hit::List(p) => {
                 if !mods.cmd {
@@ -5706,6 +5744,96 @@ mod tests {
         assert!(a.drag_over(&g, x1, y1, &dragged).is_some());
         assert!(names(&a, 0).contains(&"00 더 위".to_string()));
         a.drag_exit();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 두 번 누르기는 처음 누른 그 항목을 연다: 두 번 사이에 목록이 바뀌어 손 밑에 다른 줄이 와 있어도 그것을 열지 않는다.
+    /// 처음 누른 항목이 그 사이 없어졌으면 아무것도 열지 않는다
+    #[test]
+    fn a_double_click_opens_the_item_first_clicked() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        a.set_layout(Layout::ALL[0]);
+        // 읽는 사이에 예산.csv를 누른다. 읽은 결과(맨 위에 폴더가 하나 생겼다)는 떼는 순간 적용되어 줄이 하나씩 밀린다
+        std::fs::create_dir(util::join(&work, "0 맨 위")).unwrap();
+        a.on_dir_changed(&work);
+        let reqs = a.take_requests();
+        let vi = names(&a, 0).iter().position(|n| n == "예산.csv").unwrap();
+        let (x, y) = row_point(&a, 0, vi);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.on_listed(reqs[0].tab, reqs[0].generation, listing::list_dir(&reqs[0].dir));
+        a.mouse_up();
+        assert_eq!(names(&a, 0)[vi], "2026 4분기", "a folder is under the pointer now");
+        // 둘째 누름: 손 밑에 온 폴더가 아니라 처음 누른 파일이 열린다
+        a.mouse_down(&g, x, y, Mods::default(), 2);
+        a.mouse_up();
+        assert_eq!(a.open_files, [util::join(&work, "예산.csv")]);
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(work.clone()), "the folder that slid under the pointer is not opened");
+        // 처음 누른 항목이 두 번 사이에 없어졌으면: 그 자리에 무엇이 와 있든 아무것도 열지 않는다
+        a.clear_selection();
+        let vi = names(&a, 0).iter().position(|n| n == "2026 4분기").unwrap();
+        let (x, y) = row_point(&a, 0, vi);
+        std::fs::rename(util::join(&work, "2026 4분기"), util::join(&home, "옮긴 폴더")).unwrap();
+        a.on_dir_changed(&work);
+        let reqs = a.take_requests();
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.on_listed(reqs[0].tab, reqs[0].generation, listing::list_dir(&reqs[0].dir));
+        a.mouse_up();
+        assert_eq!(names(&a, 0)[vi], "예산.csv");
+        a.mouse_down(&g, x, y, Mods::default(), 2);
+        a.mouse_up();
+        assert_eq!(a.open_files.len(), 1, "what was clicked is gone, and what took its place is not opened");
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(work.clone()));
+        // 목록이 그대로면 전과 같다: 폴더를 두 번 누르면 그 폴더로 들어간다
+        let vi = names(&a, 0).iter().position(|n| n == "0 맨 위").unwrap();
+        let (x, y) = row_point(&a, 0, vi);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_up();
+        a.mouse_down(&g, x, y, Mods::default(), 2);
+        a.mouse_up();
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(util::join(&work, "0 맨 위")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 이름을 고치는 중에 목록이 저절로 바뀌어 그 줄이 화면 밖으로 밀리면, 그 줄이 보이게 스크롤한다:
+    /// 이름 상자가 닫혀 치던 이름을 잃는 일이 없다
+    #[test]
+    fn a_name_being_edited_stays_in_view_when_the_list_changes() {
+        let (root, home) = demo();
+        let long = util::join(&home, "긴 폴더");
+        for i in 0..100 {
+            std::fs::create_dir_all(util::join(&long, &format!("sub_{i:03}"))).unwrap();
+        }
+        let (mut a, g) = app(&long);
+        a.set_layout(Layout::ALL[0]);
+        // 화면에 다 보이는 줄 가운데 아래쪽 줄(맨 아래에서 둘째)에서 이름을 고친다
+        let last = (a.list_rect(0).unwrap().h() / ROW_H) as usize - 2;
+        let name = format!("sub_{last:03}");
+        click_name(&mut a, &g, 0, &name, Mods::default());
+        a.key(Key::Return, Mods::default());
+        assert!(matches!(&a.edit, Editing::Item(e) if e.name == name));
+        assert_eq!(a.pane(0).tab().scroll, 0.0);
+        // 그 줄보다 앞에 올 폴더가 여럿 생긴다: 그 줄은 다섯 줄 아래로 밀린다
+        for i in 0..5 {
+            std::fs::create_dir(util::join(&long, &format!("a_{i}"))).unwrap();
+        }
+        a.on_dir_changed(&long);
+        a.settle();
+        a.sync_edit();
+        assert!(matches!(&a.edit, Editing::Item(e) if e.name == name), "the name is still being edited");
+        assert!(a.pane(0).tab().scroll > 0.0, "the list scrolled to keep the row in view");
+        let (list, rect) = (a.list_rect(0).unwrap(), a.address_rect().unwrap());
+        assert!(rect.t >= list.t && rect.b <= list.b, "{rect:?} in {list:?}");
+        // 고치던 항목이 없어지면 따라가지 않고 고치기가 끝난다
+        let scroll = a.pane(0).tab().scroll;
+        std::fs::rename(util::join(&long, &name), util::join(&home, "옮긴 것")).unwrap();
+        a.on_dir_changed(&long);
+        a.settle();
+        a.sync_edit();
+        assert_eq!(a.edit, Editing::None);
+        assert_eq!(a.pane(0).tab().scroll, scroll);
         std::fs::remove_dir_all(root).unwrap();
     }
 
