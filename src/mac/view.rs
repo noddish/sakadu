@@ -176,6 +176,8 @@ define_class!(
             })
             .flatten();
             if let Some(paths) = drag {
+                // 끌기를 시작하면서 App이 누르는 동안 미뤄 둔 읽기 결과를 적용했을 수 있다: 이어서 읽을 것이 있으면 보낸다
+                pump();
                 self.begin_drag(&paths, e);
             }
             self.setNeedsDisplay(true);
@@ -332,13 +334,15 @@ define_class!(
             NSDragOperation(NSDragOperation::Copy.0 | NSDragOperation::Move.0 | NSDragOperation::Generic.0)
         }
 
-        /// 끌기가 끝났다 (다른 앱에 놓았으면 그 앱이 옮기거나 복사했다): 보이는 칸을 다시 읽는다
+        /// 끌어 낸 것의 끌기가 끝났다. 어딘가에 놓였으면(다른 앱에 놓았으면 그 앱이 옮기거나 복사했다) 보이는 칸을 다시 읽는다.
+        /// 놓이지 않고 취소됐어도, 끄는 동안 미뤄 둔 읽기 결과와 다시 읽기는 여기서 한다 (창 밖에서 취소되면 다른 알림이 오지 않는다)
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]
         fn drag_ended(&self, _session: &NSDraggingSession, _point: NSPoint, operation: NSDragOperation) {
             if operation != NSDragOperation::None {
                 with_app(App::refresh_shown);
-                self.after_input();
             }
+            with_app(App::drag_exit);
+            self.after_input();
         }
     }
 

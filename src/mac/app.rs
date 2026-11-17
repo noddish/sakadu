@@ -2099,7 +2099,8 @@ impl App {
                 self.stale.insert(tab.id);
             }
         }
-        self.reload_stale();
+        // 미뤄 둔 읽기 결과가 남아 있으면 함께 본다 (마우스로 다루던 것이 끝났다는 것을 놓쳤어도 여기서 풀린다)
+        self.after_pointer();
     }
 
     /// 보이는 칸의 탭 가운데 다시 읽기로 해 둔 것을 읽는다. 다음 때는 미루고, 그 일이 끝날 때 다시 부른다:
@@ -3305,6 +3306,9 @@ impl App {
             if !paths.is_empty() {
                 self.drag_out = Some(paths);
             }
+            // 이제 누르고 있는 것이 아니다: 누르는 동안 미뤄 둔 것을 한다. 끌려 나가는 것은 위에서 정했으므로 목록이 바뀌어도 된다.
+            // 맥의 끌기가 어떻게 끝나든(창 밖에서 취소되면 떼기도 놓기도 오지 않는다) 미뤄 둔 결과가 남지 않게 여기서 한다
+            self.after_pointer();
             return;
         }
         let a = self.area();
@@ -5702,6 +5706,36 @@ mod tests {
         assert!(a.drag_over(&g, x1, y1, &dragged).is_some());
         assert!(names(&a, 0).contains(&"00 더 위".to_string()));
         a.drag_exit();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 누르고 있던 줄을 끌어 내기 시작하면, 누르는 동안 미뤄 둔 읽기 결과를 그때 적용한다: 끌기가 창 밖에서 취소돼도
+    /// 그 탭이 읽는 중으로 남아 다시는 저절로 읽히지 않는 일이 없다
+    #[test]
+    fn starting_a_drag_applies_what_was_held_while_pressing() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        a.set_layout(Layout::ALL[0]);
+        std::fs::write(util::join(&work, "가.txt"), b"x").unwrap();
+        a.on_dir_changed(&work);
+        let reqs = a.take_requests();
+        assert_eq!(reqs.len(), 1);
+        // 읽는 사이에 예산.csv를 누르고, 누르고 있는 동안 결과가 온다
+        let vi = names(&a, 0).iter().position(|n| n == "예산.csv").unwrap();
+        let (x, y) = row_point(&a, 0, vi);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.on_listed(reqs[0].tab, reqs[0].generation, listing::list_dir(&reqs[0].dir));
+        assert!(!names(&a, 0).contains(&"가.txt".to_string()));
+        // 끌기 시작: 끌려 나가는 것은 누른 그 파일이고, 미뤄 둔 결과는 이때 적용된다
+        a.mouse_dragged(x + 12.0, y + 6.0);
+        assert_eq!(a.take_drag(), Some(vec![util::join(&work, "예산.csv")]));
+        assert!(names(&a, 0).contains(&"가.txt".to_string()));
+        assert_eq!(picked(&a, 0).0, ["예산.csv"]);
+        // 떼기도 놓기도 오지 않았어도(창 밖에서 취소) 그 뒤의 변화는 다시 읽힌다
+        std::fs::write(util::join(&work, "나.txt"), b"x").unwrap();
+        a.on_dir_changed(&work);
+        assert_eq!(a.take_requests().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
