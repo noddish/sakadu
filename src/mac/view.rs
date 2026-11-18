@@ -39,12 +39,17 @@ thread_local! {
     static SAME_VOLUME: RefCell<Option<(String, String, bool)>> = const { RefCell::new(None) };
     /// 파일 작업을 하는 뒷줄로 가는 길 (처음 맡길 때 그 줄을 만든다)
     static OPS: OnceCell<std::sync::mpsc::Sender<crate::fileops::Op>> = const { OnceCell::new() };
+    /// 폴더 감시 (처음 쓸 때 띄운다). 띄우지 못했으면 None: 그때는 창이 다시 앞으로 올 때와 파일 작업 뒤에만 다시 읽는다
+    static WATCH: OnceCell<Option<crate::watch::Watcher>> = const { OnceCell::new() };
 }
 
 /// 가장 나중에 낸 미리 보기 카드 요청의 번호. 뒷줄이 그림을 읽기 직전에 보고, 그 사이 다른 요청이 나왔으면 읽지 않는다
 static LATEST_PREVIEW: AtomicU64 = AtomicU64::new(0);
 /// 그림을 읽기 전에 잠깐 기다리는 시간 (화살표 키를 누르고 있을 때 지나가는 사진을 하나하나 읽지 않게)
 const PREVIEW_SETTLE: Duration = Duration::from_millis(60);
+/// 폴더를 읽기 전에 그 폴더의 감시가 걸리기를 기다리는 한도. 보통은 곧 걸린다. 꺼진 네트워크 폴더처럼 여는 데
+/// 오래 걸리면 이만큼만 기다리고 읽는다
+const WATCH_WAIT: Duration = Duration::from_secs(2);
 
 fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> Option<T> {
     APP.with(|a| a.borrow_mut().as_mut().map(f))
@@ -171,6 +176,8 @@ define_class!(
             })
             .flatten();
             if let Some(paths) = drag {
+                // 끌기를 시작하면서 App이 누르는 동안 미뤄 둔 읽기 결과를 적용했을 수 있다: 이어서 읽을 것이 있으면 보낸다
+                pump();
                 self.begin_drag(&paths, e);
             }
             self.setNeedsDisplay(true);
@@ -327,13 +334,15 @@ define_class!(
             NSDragOperation(NSDragOperation::Copy.0 | NSDragOperation::Move.0 | NSDragOperation::Generic.0)
         }
 
-        /// 끌기가 끝났다 (다른 앱에 놓았으면 그 앱이 옮기거나 복사했다): 보이는 칸을 다시 읽는다
+        /// 끌어 낸 것의 끌기가 끝났다. 어딘가에 놓였으면(다른 앱에 놓았으면 그 앱이 옮기거나 복사했다) 보이는 칸을 다시 읽는다.
+        /// 놓이지 않고 취소됐어도, 끄는 동안 미뤄 둔 읽기 결과와 다시 읽기는 여기서 한다 (창 밖에서 취소되면 다른 알림이 오지 않는다)
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]
         fn drag_ended(&self, _session: &NSDraggingSession, _point: NSPoint, operation: NSDragOperation) {
             if operation != NSDragOperation::None {
                 with_app(App::refresh_shown);
-                self.after_input();
             }
+            with_app(App::drag_exit);
+            self.after_input();
         }
     }
 
@@ -351,6 +360,8 @@ define_class!(
         #[unsafe(method(draggingExited:))]
         fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
             with_app(App::drag_exit);
+            // 끌려 온 것이 위에 있는 동안 미뤄 둔 다시 읽기가 있으면 읽는다
+            pump();
             self.setNeedsDisplay(true);
         }
 
@@ -376,6 +387,7 @@ define_class!(
         #[unsafe(method(draggingEnded:))]
         fn dragging_ended(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) {
             with_app(App::drag_exit);
+            pump();
             SAME_VOLUME.with(|v| v.borrow_mut().take());
             self.setNeedsDisplay(true);
         }
@@ -448,6 +460,8 @@ impl SakaduView {
         let paths = board_paths(&sender.draggingPasteboard());
         let p = self.convertPoint_fromView(sender.draggingLocation(), None);
         let dir = with_app(|a| a.drag_over(&self.ivars().measure, p.x as f32, p.y as f32, &paths)).flatten();
+        // 놓일 곳이 다른 칸으로 옮겨 갔으면, 앞의 칸에서 미뤄 둔 다시 읽기가 생길 수 있다
+        pump();
         self.setNeedsDisplay(true);
         let (Some(dir), Some(first)) = (dir, paths.first()) else { return NSDragOperation::None };
         match how {
@@ -460,6 +474,8 @@ impl SakaduView {
     /// 받지 않는 끌기: 앞서 강조해 둔 놓일 곳이 있으면 지운다 (끄는 중에 누른 키가 바뀌면 받던 끌기가 받지 않는 끌기가 된다)
     fn refuse_drag(&self) {
         with_app(App::drag_exit);
+        // 끌려 온 것이 위에 있는 동안 미뤄 둔 다시 읽기가 있으면 읽는다
+        pump();
         self.setNeedsDisplay(true);
     }
 
@@ -672,6 +688,7 @@ fn pump() {
         return;
     };
     run_ops(ops);
+    watch_dirs();
     // Finder에서 보기: Finder를 앞으로 불러 그 항목들을 고른다
     if !reveal.is_empty() {
         let urls: Vec<Retained<NSURL>> = reveal.iter().map(|f| NSURL::fileURLWithPath(&NSString::from_str(f))).collect();
@@ -717,7 +734,12 @@ fn pump() {
         });
     }
     for r in reqs {
+        let watch = WATCH.with(|cell| cell.get().and_then(|w| w.as_ref()).map(crate::watch::Watcher::handle));
         std::thread::spawn(move || {
+            // 감시가 걸린 뒤에 읽는다: 감시보다 먼저 읽으면 읽은 뒤부터 감시가 걸리기까지의 변화를 놓친다
+            if let Some(watch) = &watch {
+                watch.wait_watched(&r.dir, WATCH_WAIT);
+            }
             let result = sakadu::listing::list_dir(&r.dir);
             DispatchQueue::main().exec_async(move || {
                 with_app(|a| a.on_listed(r.tab, r.generation, result));
@@ -760,6 +782,25 @@ fn run_ops(ops: Vec<crate::fileops::Op>) {
             if tx.send(op).is_err() {
                 sakadu::diag::log(|| "file ops: worker is gone".to_string());
             }
+        }
+    });
+}
+
+/// 보이는 폴더가 달라졌으면 감시할 폴더를 거기에 맞춘다. 감시하던 폴더가 바뀌면 감시하는 줄이 알려 오고,
+/// 메인 줄에서 App에 넘겨 그 폴더를 다시 읽는다
+fn watch_dirs() {
+    let Some(dirs) = with_app(|a| a.take_watch_dirs()).flatten() else { return };
+    WATCH.with(|cell| {
+        let watcher = cell.get_or_init(|| {
+            crate::watch::Watcher::start(|dir| {
+                DispatchQueue::main().exec_async(move || {
+                    with_app(|a| a.on_dir_changed(&dir));
+                    pump();
+                });
+            })
+        });
+        if let Some(w) = watcher {
+            w.set(dirs);
         }
     });
 }
