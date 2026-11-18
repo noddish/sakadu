@@ -164,3 +164,62 @@ jobs:
         with:
           name: mac-app-checks
           path: dist/check/
+
+  # 맥 미리 보기: main에 합칠 때마다, 모든 작업(창 시험 포함)을 통과한 맥 앱을 '맥 미리 보기' 릴리즈에 올린다.
+  # 태그 mac-preview의 pre-release라 Latest가 되지 않는다 (Windows 릴리즈와 앱의 '릴리스' 링크는 그대로).
+  # 링크는 늘 같고 파일만 새 것으로 바뀐다:
+  #   https://github.com/noddish/sakadu/releases/tag/mac-preview
+  #   https://github.com/noddish/sakadu/releases/download/mac-preview/Sakadu-mac.zip
+  # 릴리즈에 쓰는 권한은 이 작업에만 준다 (PR 빌드의 작업들은 읽기만 한다)
+  mac-preview:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, core-macos, mac-app]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # 잇달아 합쳐도 하나씩 올린다. 차례는 지켜지지 않아서, 옛 커밋이 새 것을 덮지 않게 올리기 전에 따로 본다
+    concurrency:
+      group: mac-preview
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: Sakadu-mac
+          path: dist
+      - name: Publish to the mac-preview pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # 이 커밋보다 새것(또는 같은 것)이 이미 올라가 있으면 그대로 둔다. 앞서 합친 것의 작업이 늦게 끝나 뒤에 올 수 있다.
+          # 올린 커밋은 릴리즈 글 끝에 숨겨 적어 둔다
+          published=$(gh release view mac-preview --json body --jq .body 2>/dev/null | grep -oE 'mac-preview-commit: [0-9a-f]{40}' | tail -1 | cut -d' ' -f2 || true)
+          if [ -n "$published" ]; then
+            order=$(gh api "repos/${GH_REPO}/compare/${published}...${GITHUB_SHA}" --jq .status 2>/dev/null || echo unknown)
+            if [ "$order" = behind ] || [ "$order" = identical ]; then
+              echo "mac-preview already has ${published} (this commit is ${order}). Leaving it."
+              exit 0
+            fi
+          fi
+          zip=$(ls dist/Sakadu-*-mac-prototype.zip | head -1)
+          cp "$zip" dist/Sakadu-mac.zip
+          (cd dist && sha256sum Sakadu-mac.zip > Sakadu-mac.zip.sha256)
+          short=$(echo "$GITHUB_SHA" | cut -c1-7)
+          cat > notes.md <<EOF
+          사카두 맥 미리 보기예요. main에 합칠 때마다 이 파일이 저절로 새 것으로 바뀌어요 (링크는 그대로예요).
+
+          - **지금 파일**: main [\`${short}\`](https://github.com/${GH_REPO}/commit/${GITHUB_SHA})에서 $(date -u +%Y-%m-%d) 만들었어요. 모든 시험(실제 창 시험 포함)을 통과한 것만 올라와요.
+          - **받기**: \`Sakadu-mac.zip\`을 받아 풀고 \`Sakadu.app\`을 열어요. macOS 13 이상, Apple Silicon과 Intel 맥 모두 돼요.
+          - **처음 열 때**: Apple 서명이 없어서 막혀요. 시스템 설정 → 개인정보 보호 및 보안에서 **그래도 열기**를 눌러요. 새로 받을 때마다 한 번씩이에요.
+          - **아직 미리 보기예요**: 파일을 만들고 바꾸는 기능은 시험용 폴더에서 먼저 써 보세요. 확인할 것은 [docs/macos-test.md](https://github.com/${GH_REPO}/blob/main/docs/macos-test.md)에 있어요.
+
+          Windows 버전은 [Latest 릴리즈](https://github.com/${GH_REPO}/releases/latest)를 받으세요.
+
+          <!-- mac-preview-commit: ${GITHUB_SHA} -->
+          EOF
+          if ! gh release view mac-preview >/dev/null 2>&1; then
+            gh release create mac-preview --prerelease --target "$GITHUB_SHA" --title "Sakadu 맥 미리 보기" --notes-file notes.md
+          fi
+          gh release upload mac-preview dist/Sakadu-mac.zip dist/Sakadu-mac.zip.sha256 --clobber
+          gh release edit mac-preview --prerelease --notes-file notes.md
