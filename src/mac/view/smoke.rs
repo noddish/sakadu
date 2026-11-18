@@ -160,6 +160,15 @@ fn script(dir: &str) -> usize {
     // 이름 바꾸기: Return으로 이름 상자를 열고, 상자에 치고 Return을 누른다
     if run.select("메모.txt") {
         key(RETURN, false);
+        // 어디까지 됐는지: 앱이 고치기를 시작했는지, 상자가 보이는지, 상자가 키를 받는지, 앱의 알림
+        let state = on_main(|| {
+            let s = with_app(|a| a.seen());
+            let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().field.get().cloned()));
+            let shown = field.as_ref().is_some_and(|f| !f.isHidden());
+            let typing = field.as_ref().is_some_and(|f| f.currentEditor().is_some());
+            format!("editing {:?}, field shown {shown}, field has the keyboard {typing}, note {:?}", s.as_ref().map(|s| s.editing.clone()), s.and_then(|s| s.flash))
+        });
+        println!("note after Return: {state}");
         run.wait("Return opens the name field on the row", 5, || field_text().as_deref() == Some("메모.txt"));
         let typed = on_main(|| {
             let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().field.get().cloned())).ok_or("no name field")?;
@@ -171,12 +180,16 @@ fn script(dir: &str) -> usize {
             Ok::<(), &'static str>(())
         });
         run.check("typing a name and Return in the field", typed.is_ok(), || format!("{typed:?}"));
-        run.wait("the file is renamed on disk", 5, || exists(dir, "메모 바뀜.txt") && !exists(dir, "메모.txt"));
-        run.wait("the field closes and the renamed row is selected", 5, || seen().is_some_and(|s| s.editing.is_none() && s.cursor == "메모 바뀜.txt"));
-        // 되돌리기: 편집 메뉴의 실행 취소(⌘Z)가 보내는 undo:
-        // SAFETY: 이 뷰의 undo: (편집 메뉴가 보내는 그대로)
-        act(|v| unsafe { msg_send![v, undo: None::<&AnyObject>] });
-        run.wait("undo: brings the old name back", 5, || exists(dir, "메모.txt") && !exists(dir, "메모 바뀜.txt"));
+        if run.wait("the file is renamed on disk", 5, || exists(dir, "메모 바뀜.txt") && !exists(dir, "메모.txt")) {
+            run.wait("the field closes and the renamed row is selected", 5, || seen().is_some_and(|s| s.editing.is_none() && s.cursor == "메모 바뀜.txt"));
+            // 되돌리기: 편집 메뉴의 실행 취소(⌘Z)가 보내는 undo:
+            // SAFETY: 이 뷰의 undo: (편집 메뉴가 보내는 그대로)
+            act(|v| unsafe { msg_send![v, undo: None::<&AnyObject>] });
+            run.wait("undo: brings the old name back", 5, || exists(dir, "메모.txt") && !exists(dir, "메모 바뀜.txt"));
+        } else {
+            // 다음 걸음이 이 파일을 쓰므로, 이름을 고치다 만 상태를 치운다
+            on_main(|| with_app(App::cancel_address));
+        }
     }
 
     // 복사와 붙여넣기: 편집 메뉴의 copy:와 paste:, 맥의 클립보드
@@ -198,21 +211,34 @@ fn script(dir: &str) -> usize {
     // 휴지통: ⌘⌫, 그리고 되돌리기로 다시 꺼낸다
     if run.select("메모 2.txt") {
         key(DELETE, true);
-        run.wait("cmd-delete sends the file to the Trash", 5, || !exists(dir, "메모 2.txt"));
-        // SAFETY: 이 뷰의 undo:
-        act(|v| unsafe { msg_send![v, undo: None::<&AnyObject>] });
-        run.wait("undo: puts it back from the Trash", 5, || exists(dir, "메모 2.txt"));
+        if run.wait("cmd-delete sends the file to the Trash", 5, || !exists(dir, "메모 2.txt")) {
+            // SAFETY: 이 뷰의 undo:
+            act(|v| unsafe { msg_send![v, undo: None::<&AnyObject>] });
+            run.wait("undo: puts it back from the Trash", 5, || exists(dir, "메모 2.txt"));
+        }
     }
 
     // 훑어보기: ⌘Y로 열고 닫는다 (글 파일이라 스페이스는 카드를 크게 한다)
     if run.select("가나다.txt") {
         key(Y, true);
-        run.wait("cmd-Y opens the Quick Look panel", 10, || on_main(|| look_shown() && LOOK_ON.get()));
+        let opened = run.wait("cmd-Y opens the Quick Look panel", 10, || on_main(|| look_shown() && LOOK_ON.get()));
+        // 어디까지 됐는지: 창의 클래스를 찾았는지, 창이 있는지, 떠 있는지, 이 뷰가 내용을 맡았는지, 앱의 알림
+        let state = on_main(|| {
+            let cls = LOOK_CLASS.with(|cell| cell.get().copied().flatten()).is_some();
+            let panel = look_panel(false);
+            // SAFETY: NSWindow의 isVisible과 isKeyWindow
+            let (visible, key) = panel.as_ref().map_or((false, false), |p| unsafe { (msg_send![&**p, isVisible], msg_send![&**p, isKeyWindow]) });
+            let flash = with_app(|a| a.seen().flash).flatten();
+            format!("class {cls}, panel {}, visible {visible}, panel is key {key}, view controls it {}, note {flash:?}", panel.is_some(), LOOK_ON.get())
+        });
+        println!("note quick look: {state}");
         let items = on_main(|| LOOK.with(|l| l.borrow().clone()));
         let want = (vec![sakadu::util::join(dir, "가나다.txt")], 0);
         run.check("the panel is given the selected file", items == want, || format!("{items:?}"));
-        key(Y, true);
-        run.wait("cmd-Y closes it", 5, || on_main(|| !look_shown()));
+        if opened {
+            key(Y, true);
+            run.wait("cmd-Y closes it", 5, || on_main(|| !look_shown()));
+        }
     }
     run.failed
 }

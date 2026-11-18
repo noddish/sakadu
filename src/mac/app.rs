@@ -301,6 +301,8 @@ pub struct Seen {
     pub ready: bool,
     /// 이름을 고치는 중인 항목
     pub editing: Option<String>,
+    /// 칩 줄에 떠 있는 알림
+    pub flash: Option<String>,
 }
 
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
@@ -979,6 +981,7 @@ impl App {
                 Editing::Item(e) => Some(e.name.clone()),
                 _ => None,
             },
+            flash: self.flash.as_ref().map(|(_, note)| note.clone()),
         }
     }
 

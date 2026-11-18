@@ -38,6 +38,8 @@ thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
     /// 창 시험을 하는 중이면 그 시험 폴더 (창을 이 폴더로 열고, 창이 뜨면 시험을 시작한다)
     static SMOKE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// 입력 상자를 App 상태에 맞추는 중 (sync_field). 그동안 상자의 편집이 끝났다는 알림은 이쪽이 한 일이라 받지 않는다
+    static SYNCING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static VIEW: OnceCell<Retained<SakaduView>> = const { OnceCell::new() };
     /// 잘라 둔 것을 클립보드에 담은 직후의 클립보드 번호. 붙여넣을 때 번호가 그대로면(그 사이 다른 것이 담기지 않았으면) 옮긴다
     static CUT: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
@@ -375,7 +377,8 @@ define_class!(
         /// 다른 곳을 눌러 입력을 마치면 취소
         #[unsafe(method(controlTextDidEndEditing:))]
         fn did_end_editing(&self, _n: &NSNotification) {
-            if with_app(App::end_editing).unwrap_or(false) {
+            // 상자를 맞추는 중(띄우기, 옮기기, 감추기)에 맥이 편집을 끝냈다 다시 시작하는 것은 사용자가 입력을 그만둔 것이 아니다
+            if !SYNCING.get() && with_app(App::end_editing).unwrap_or(false) {
                 self.after_input();
             }
         }
@@ -597,6 +600,12 @@ impl SakaduView {
 
     /// 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 자리(칸의 경로 자리, 사이드바의 공간 이름 자리, 목록 줄의 이름 자리)에 보이고 키 입력을 받는다
     fn sync_field(&self) {
+        SYNCING.set(true);
+        self.place_field();
+        SYNCING.set(false);
+    }
+
+    fn place_field(&self) {
         let Some(field) = self.ivars().field.get() else { return };
         let Some((rect, text, color, pane, pad, select)) = with_app(|a| {
             // 이름을 고치던 항목이 그 자리에 없으면 여기서 고치기가 끝난다
@@ -617,10 +626,11 @@ impl SakaduView {
                     self.ivars().field_pane.set(pane);
                     field.setStringValue(&NSString::from_str(&text));
                     field.setHidden(false);
+                    // 키를 받게 하면 글 전체가 골라진다. selectText:를 따로 부르지 않는다: 이미 편집 중인 상자에 부르면 편집을 한 번
+                    // 끝냈다가 다시 시작해서, 그 '끝남' 알림이 막 연 입력을 닫았다 (창 시험에서 이름 상자가 뜨자마자 닫혔다)
                     if let Some(w) = self.window() {
                         w.makeFirstResponder(Some(field));
                     }
-                    unsafe { field.selectText(None) };
                     // 항목 이름은 확장자 앞까지만 골라 둔다 (바로 치면 이름만 바뀐다)
                     if let (Some(n), Some(editor)) = (select, field.currentEditor()) {
                         editor.setSelectedRange(NSRange::new(0, n));
@@ -712,9 +722,11 @@ fn board_paths(board: &NSPasteboard) -> Vec<String> {
         let Some(url) = NSURL::URLWithString(&text) else { continue };
         // Finder는 파일 번호로 된 주소를 줄 때가 있다: 경로로 된 주소로 바꿔 읽는다
         let url = url.filePathURL().unwrap_or(url);
-        // 경로는 받은 글자 그대로 쓴다 (사용자가 친 경로처럼 다듬으면 이름 끝의 공백이나 따옴표가 잘려 다른 파일이 된다)
+        // 경로는 받은 글자 그대로 쓴다 (사용자가 친 경로처럼 다듬으면 이름 끝의 공백이나 따옴표가 잘려 다른 파일이 된다).
+        // 다만 한글은 모아 쓴 꼴(NFC)로 바꾼다: 파일 주소의 경로는 자모를 풀어 쓴 꼴(NFD)로 와서, 그대로 복사하면 복사본의
+        // 이름이 풀어 쓴 꼴로 생기고 목록에서 엉뚱한 자리에 선다 (창 시험에서 찾았다). 맥의 디스크는 두 꼴을 같은 이름으로 찾는다
         if let Some(path) = url.path() {
-            out.push(path.to_string());
+            out.push(path.precomposedStringWithCanonicalMapping().to_string());
         }
     }
     out
