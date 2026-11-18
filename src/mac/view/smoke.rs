@@ -1,6 +1,8 @@
 //! 창 시험 (`sakadu-mac --smoke`): 맥 러너에서 실제 창을 열고, 실제 창이 입력을 받는 길(뷰의 keyDown:, 편집 메뉴가 보내는
 //! copy:·paste:·undo:, 이름 상자의 Return)로 폴더 감시, 이름 바꾸기, 되돌리기, 복사·붙여넣기, 휴지통, 훑어보기를 끝까지 돌려 본다.
-//! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 흉내 낼 수 없어 하지 않는다.
+//! 경로 입력(⌘L), 새 폴더(⇧⌘N), 잘라내기·붙여넣기(옮기기)도 같은 길로 해 본다.
+//! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
+//! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
 //! 걸음마다 `ok`나 `FAIL`을 찍고, 하나라도 실패하면 1로, 메인 줄이 답하지 않으면 2로 끝난다
 
@@ -12,10 +14,56 @@ use std::time::Instant;
 
 /// 키 번호 (맥 가상 키 코드)
 const HOME: u16 = 0x73;
+const UP: u16 = 0x7E;
 const DOWN: u16 = 0x7D;
 const RETURN: u16 = 0x24;
 const DELETE: u16 = 0x33;
 const Y: u16 = 0x10;
+const L: u16 = 0x25;
+const N: u16 = 0x2D;
+
+/// 흉내 낸 끌기 정보: 끌려 온 것을 담은 붙여넣기 판, 창 좌표의 마우스 자리, 끌어 낸 쪽이 허락한 일
+struct DragIvars {
+    board: Retained<NSPasteboard>,
+    at: NSPoint,
+    allowed: NSDragOperation,
+}
+
+define_class!(
+    /// 맥이 끌기 중에 받는 쪽에 주는 정보(NSDraggingInfo)를 흉내 낸 것. 뷰가 묻는 세 가지만 답한다
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SakaduSmokeDrag"]
+    #[ivars = DragIvars]
+    struct FakeDrag;
+
+    unsafe impl NSObjectProtocol for FakeDrag {}
+
+    unsafe impl NSDraggingInfo for FakeDrag {
+        #[unsafe(method_id(draggingPasteboard))]
+        fn dragging_pasteboard(&self) -> Retained<NSPasteboard> {
+            self.ivars().board.clone()
+        }
+
+        #[unsafe(method(draggingLocation))]
+        fn dragging_location(&self) -> NSPoint {
+            self.ivars().at
+        }
+
+        #[unsafe(method(draggingSourceOperationMask))]
+        fn dragging_source_operation_mask(&self) -> NSDragOperation {
+            self.ivars().allowed
+        }
+    }
+);
+
+impl FakeDrag {
+    fn new(mtm: MainThreadMarker, board: Retained<NSPasteboard>, at: NSPoint, allowed: NSDragOperation) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(DragIvars { board, at, allowed });
+        // SAFETY: NSObject의 init
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 /// 시험 폴더를 새로 만든다: 폴더 하나, 글 파일 둘
 pub(super) fn make_folder() -> std::io::Result<String> {
@@ -60,10 +108,13 @@ fn seen() -> Option<Seen> {
 
 /// 키 하나를 실제 창이 키를 받는 길(뷰의 keyDown:)로 보낸다
 fn key(code: u16, cmd: bool) {
+    key_with(code, if cmd { NSEventModifierFlags::Command } else { NSEventModifierFlags::empty() });
+}
+
+fn key_with(code: u16, flags: NSEventModifierFlags) {
     on_main(move || {
         let Some(view) = VIEW.with(|v| v.get().cloned()) else { return };
         let number = view.window().map_or(0, |w| w.windowNumber());
-        let flags = if cmd { NSEventModifierFlags::Command } else { NSEventModifierFlags::empty() };
         let none = NSString::from_str("");
         let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             NSEventType::KeyDown,
@@ -175,15 +226,7 @@ fn script(dir: &str) -> usize {
         });
         println!("note after Return: {state}");
         run.wait("Return opens the name field on the row", 5, || field_text().as_deref() == Some("메모.txt"));
-        let typed = on_main(|| {
-            let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().field.get().cloned())).ok_or("no name field")?;
-            let editor = field.currentEditor().ok_or("the name field does not have the keyboard")?;
-            editor.setString(&NSString::from_str("메모 바뀜.txt"));
-            // Return을 누르면 필드 편집기가 하는 그대로: 명령(insertNewline:)을 먼저 그 위임(이름 상자, 그리고 이 뷰)에 묻는다
-            // SAFETY: NSResponder의 doCommandBySelector:
-            let _: () = unsafe { msg_send![&*editor, doCommandBySelector: sel!(insertNewline:)] };
-            Ok::<(), &'static str>(())
-        });
+        let typed = type_in_field("메모 바뀜.txt");
         run.check("typing a name and Return in the field", typed.is_ok(), || format!("{typed:?}"));
         if run.wait("the file is renamed on disk", 5, || exists(dir, "메모 바뀜.txt") && !exists(dir, "메모.txt")) {
             // 이름 상자는 앱이 그 결과를 받을 때 닫힌다. 되돌리기는 그 뒤에 보낸다
@@ -247,7 +290,117 @@ fn script(dir: &str) -> usize {
             run.wait("cmd-Y closes it", 5, || on_main(|| !look_shown()));
         }
     }
+
+    // 경로 입력: ⌘L로 상자를 열고 하위 폴더의 경로를 쳐서 Return. ⌘↑로 돌아오면 그 폴더가 골라져 있다
+    let sub = sakadu::util::join(dir, "폴더");
+    key(L, true);
+    if run.wait("cmd-L opens the path field with the folder", 5, || field_text().as_deref() == Some(dir)) {
+        let typed = type_in_field(&sub);
+        run.check("typing a path and Return in the field", typed.is_ok(), || format!("{typed:?}"));
+        let at_sub = sub.clone();
+        if run.wait("the pane goes to the typed folder", 5, move || seen().is_some_and(|s| s.ready && s.dir == at_sub)) {
+            key(UP, true);
+            run.wait("cmd-up goes back with the folder selected", 5, || seen().is_some_and(|s| s.ready && s.dir == dir && s.cursor == "폴더"));
+        }
+    } else {
+        on_main(|| with_app(App::cancel_address));
+    }
+
+    // 새 폴더: ⇧⌘N으로 만들면 그 줄에 이름 상자가 뜬다. 이름을 쳐서 Return
+    key_with(N, NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
+    if run.wait("shift-cmd-N makes a folder and opens its name field", 5, || field_text().as_deref() == Some("새 폴더")) {
+        let typed = type_in_field("자료");
+        run.check("naming the new folder", typed.is_ok(), || format!("{typed:?}"));
+        run.wait("the new folder has that name", 5, || {
+            std::fs::metadata(Path::new(dir).join("자료")).is_ok_and(|m| m.is_dir()) && !exists(dir, "새 폴더") && seen().is_some_and(|s| s.editing.is_none() && !s.busy)
+        });
+    } else {
+        on_main(|| with_app(App::cancel_address));
+    }
+
+    // 잘라내기와 붙여넣기: cut:으로 잘라 두고, 하위 폴더에 들어가 paste:로 옮긴다. undo:로 돌아온다
+    if run.select("새 파일.txt") {
+        // SAFETY: 이 뷰의 cut:
+        act(|v| unsafe { msg_send![v, cut: None::<&AnyObject>] });
+        if run.select("폴더") {
+            // ⌘↓: 고른 폴더로 들어간다
+            key(DOWN, true);
+            let at_sub = sub.clone();
+            if run.wait("cmd-down opens the folder", 5, move || seen().is_some_and(|s| s.ready && s.dir == at_sub)) {
+                // SAFETY: 이 뷰의 paste:
+                act(|v| unsafe { msg_send![v, paste: None::<&AnyObject>] });
+                let moved = run.wait("paste: after cut: moves the file", 5, || {
+                    exists(&sub, "새 파일.txt") && !exists(dir, "새 파일.txt") && seen().is_some_and(|s| !s.busy)
+                });
+                if moved {
+                    // SAFETY: 이 뷰의 undo:
+                    act(|v| unsafe { msg_send![v, undo: None::<&AnyObject>] });
+                    run.wait("undo: moves it back", 5, || exists(dir, "새 파일.txt") && !exists(&sub, "새 파일.txt") && seen().is_some_and(|s| !s.busy));
+                }
+                key(UP, true);
+                run.wait("cmd-up goes back", 5, || seen().is_some_and(|s| s.ready && s.dir == dir));
+            }
+        }
+    }
+
+    // 끌어다 놓기 (받는 쪽): 다른 폴더의 파일을 '폴더' 줄 위로 끌어 와 놓는다. 같은 디스크라 옮겨진다. undo:로 돌아간다
+    let outside = std::env::temp_dir().join(format!("sakadu-smoke-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    let made = std::fs::create_dir_all(&outside).and_then(|_| std::fs::write(outside.join("밖.txt"), b"x")).is_ok();
+    let src = sakadu::util::normalize(&std::fs::canonicalize(&outside).unwrap_or(outside.clone()).to_string_lossy());
+    let src_file = sakadu::util::join(&src, "밖.txt");
+    run.check("a file is made in another folder", made, String::new);
+    if made && run.wait("the 폴더 row is in the list", 5, || seen().is_some_and(|s| s.ready && !s.busy && s.names.iter().any(|n| n == "폴더"))) {
+        let file = src_file.clone();
+        let (hover, dropped) = on_main(move || drop_on_row(&file, "폴더"));
+        run.check("a drag over the 폴더 row offers a move", hover == Some(NSDragOperation::Move), || format!("{hover:?}"));
+        run.check("dropping it starts the move", dropped, String::new);
+        let moved = run.wait("the file is moved into 폴더", 5, || exists(&sub, "밖.txt") && !exists(&src, "밖.txt") && seen().is_some_and(|s| !s.busy));
+        if moved {
+            // SAFETY: 이 뷰의 undo:
+            act(|v| unsafe { msg_send![v, undo: None::<&AnyObject>] });
+            run.wait("undo: moves it back out", 5, || exists(&src, "밖.txt") && !exists(&sub, "밖.txt"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&outside);
     run.failed
+}
+
+/// 이름 상자(경로 입력도 같은 상자)에 글을 넣고 Return을 누른다: 필드 편집기가 Return을 받았을 때 하는 그대로
+/// 명령(insertNewline:)을 먼저 그 위임(상자, 그리고 이 뷰)에 묻는다
+fn type_in_field(text: &str) -> Result<(), &'static str> {
+    let text = text.to_string();
+    on_main(move || {
+        let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().field.get().cloned())).ok_or("no name field")?;
+        let editor = field.currentEditor().ok_or("the field does not have the keyboard")?;
+        editor.setString(&NSString::from_str(&text));
+        // SAFETY: NSResponder의 doCommandBySelector:
+        let _: () = unsafe { msg_send![&*editor, doCommandBySelector: sel!(insertNewline:)] };
+        Ok(())
+    })
+}
+
+/// 파일 path를 지금 칸의 row 줄 위로 끌어 와 놓는다 (메인 줄에서): 맥이 하는 순서대로 draggingEntered:, performDragOperation:,
+/// draggingEnded:를 뷰에 보낸다. 끌어 낸 쪽은 Finder처럼 모든 일을 허락한다. (그 줄 위에서 받은 답, 놓기를 시작했는지)
+fn drop_on_row(path: &str, row: &str) -> (Option<NSDragOperation>, bool) {
+    let Some(view) = VIEW.with(|v| v.get().cloned()) else { return (None, false) };
+    let Some((x, y)) = with_app(|a| a.row_center(row)).flatten() else { return (None, false) };
+    let at = view.convertPoint_toView(NSPoint::new(x as f64, y as f64), None);
+    let board = NSPasteboard::pasteboardWithUniqueName();
+    board.clearContents();
+    let item: Retained<ProtocolObject<dyn NSPasteboardWriting>> = ProtocolObject::from_retained(NSURL::fileURLWithPath(&NSString::from_str(path)));
+    if !board.writeObjects(&NSArray::from_retained_slice(&[item])) {
+        return (None, false);
+    }
+    let allowed = NSDragOperation(NSDragOperation::Copy.0 | NSDragOperation::Move.0 | NSDragOperation::Generic.0 | NSDragOperation::Link.0);
+    let drag = FakeDrag::new(view.mtm(), board, at, allowed);
+    // SAFETY: 이 뷰의 NSDraggingDestination 메서드들 (맥이 끌기 중에 부르는 그대로)
+    unsafe {
+        let hover: NSDragOperation = msg_send![&*view, draggingEntered: &*drag];
+        let dropped: bool = msg_send![&*view, performDragOperation: &*drag];
+        let _: () = msg_send![&*view, draggingEnded: &*drag];
+        (Some(hover), dropped)
+    }
 }
 
 /// 이름 상자가 보이면 그 글

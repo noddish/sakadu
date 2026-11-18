@@ -988,6 +988,15 @@ impl App {
         }
     }
 
+    /// 창 시험: 지금 칸에서 그 이름의 줄 가운데 (뷰 좌표, 위가 0). 그 줄이 목록에 없으면 None
+    pub fn row_center(&self, name: &str) -> Option<(f32, f32)> {
+        let p = self.active;
+        let tab = self.panes[p].tab();
+        let vi = (0..tab.view.len()).find(|vi| tab.entry_at(*vi).is_some_and(|e| e.name_string() == name))?;
+        let r = Grid::of(self.list_rect(p)?, self.panes[p].view).item(vi, tab.scroll);
+        Some(((r.l + r.r) / 2.0, (r.t + r.b) / 2.0))
+    }
+
     /// 창 제목: 지금 칸의 지금 탭
     pub fn title(&self) -> String {
         format!("{} - Sakadu", self.panes[self.active].tab().loc.title())
