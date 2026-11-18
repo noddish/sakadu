@@ -19,6 +19,9 @@ pub enum Job {
     /// src(전체 경로)를 폴더 dir 안으로 복사한다. 같은 이름이 있으면 덮어쓰지 않고 번호를 붙인다.
     /// file_id는 목록에서 본 src의 파일 번호 (클립보드로 받아 모르면 0: 그때는 그 경로에 지금 있는 것을 복사한다)
     Copy { src: String, dir: String, file_id: u64 },
+    /// src(전체 경로)를 폴더 dir 안으로 옮긴다 (같은 디스크 안에서만). 같은 이름이 있으면 덮어쓰지 않고 번호를 붙인다.
+    /// file_id는 Copy와 같다
+    Move { src: String, dir: String, file_id: u64 },
     /// 앞서 한 작업을 되돌린다
     Undo(Undo),
 }
@@ -39,10 +42,13 @@ pub enum Done {
     Renamed,
     /// 휴지통으로 보낸 것과, 보내지 못해 그대로 둔 것(이름, 까닭)
     Trashed { moved: Vec<Trashed>, failed: Vec<(String, String)> },
-    /// 되돌렸다. left는 되돌리지 못해 그대로 둔 것(이름, 까닭): 휴지통에서 꺼내지 못한 항목, 휴지통으로 보내지 못한 복사본
+    /// 되돌렸다. left는 되돌리지 못해 그대로 둔 것(이름, 까닭): 휴지통에서 꺼내지 못한 항목, 휴지통으로 보내지 못한 복사본.
+    /// 옮기기를 되돌릴 때만 이름 대신 원래 전체 경로다
     Undone { left: Vec<(String, String)> },
     /// 복사했다: 복사본의 이름과 파일 번호. renamed는 같은 이름이 있어 번호를 붙였는지
     Copied { name: String, file_id: u64, renamed: bool },
+    /// 옮겼다: 옮긴 곳에서의 이름과 파일 번호(옮겨도 그대로다). renamed는 Copied와 같다
+    Moved { name: String, file_id: u64, renamed: bool },
 }
 
 /// 하지 못한 까닭. 어느 경우든 파일은 바뀌지 않았다
@@ -110,6 +116,30 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             guard(src);
             guard(dir);
             copy_item(src, dir, *file_id)
+        }
+        Job::Move { src, dir, file_id } => {
+            guard(src);
+            guard(dir);
+            move_item(src, dir, *file_id)
+        }
+        // 옮기기를 되돌린다: 옮긴 곳의 그것이 그때 그 항목일 때만, 원래 자리가 비어 있을 때만 하나씩 되돌린다.
+        // 되돌리지 못한 것은 원래 전체 경로로 돌려준다 (서로 다른 폴더에서 온 같은 이름의 항목을 가릴 수 있게)
+        Job::Undo(Undo::Move { to, items }) => {
+            let mut left = Vec::new();
+            for (orig, now, file_id) in items {
+                let cur = util::join(to, now);
+                guard(&cur);
+                guard(orig);
+                if let Err(fail) = same_item(&cur, *file_id).and_then(|()| rename(&cur, orig)) {
+                    let why = match fail {
+                        Fail::Exists => "원래 자리에 같은 이름이 있어요".to_string(),
+                        Fail::Changed => "그 사이 없어졌거나 다른 것으로 바뀌었어요".to_string(),
+                        Fail::Other(msg) => msg,
+                    };
+                    left.push((orig.clone(), why));
+                }
+            }
+            Ok(Done::Undone { left })
         }
         // 복사를 되돌린다: 복사본이 그때 만든 그것일 때만 하나씩 휴지통으로 보낸다
         Job::Undo(Undo::Copy { dir, items }) => {
@@ -221,6 +251,51 @@ fn copy_item(src: &str, dir: &str, file_id: u64) -> Result<Done, Fail> {
         }
     }
     let _ = to_trash(&temp, is_dir);
+    Err(Fail::Exists)
+}
+
+/// 두 경로가 같은 폴더인지 (링크와 대소문자를 풀어 실제 경로로 본다. 읽지 못하면 글자 그대로 비교한다)
+fn same_dir(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// 항목 하나를 폴더 dir 안으로 옮긴다: 덮어쓰지 않는 이름 바꾸기 한 번이라 같은 디스크 안에서만 된다 (복사하고 원본을 치우는
+/// 일은 하지 않는다). 같은 이름이 있으면 번호를 붙인다. 옮겨도 같은 파일이라 파일 번호와 확장 속성은 그대로다
+fn move_item(src: &str, dir: &str, file_id: u64) -> Result<Done, Fail> {
+    let meta = match std::fs::symlink_metadata(src) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Fail::Changed),
+        Err(e) => return Err(other(e)),
+    };
+    let id = std::os::unix::fs::MetadataExt::ino(&meta);
+    if file_id != 0 && id != file_id {
+        return Err(Fail::Changed);
+    }
+    let is_dir = meta.is_dir();
+    let stay = |why: &str| Err(Fail::Other(why.to_string()));
+    let Some(parent) = util::parent(src) else { return stay("이 항목은 옮길 수 없어요") };
+    if same_dir(&parent, dir) {
+        return stay("이미 이 폴더에 있어요");
+    }
+    if is_dir && inside(dir, src) {
+        return stay("폴더를 자기 안에 넣을 수 없어요");
+    }
+    if fileops::is_mount_point(src) {
+        return stay("디스크는 옮길 수 없어요");
+    }
+    let name = util::file_name(src);
+    for n in 1..10_000 {
+        let final_name = fileops::numbered_name(name, n, is_dir);
+        match fileops::rename_excl(src, &util::join(dir, &final_name)) {
+            Ok(()) => return Ok(Done::Moved { name: final_name, file_id: id, renamed: n > 1 }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => return stay("다른 디스크로는 아직 옮길 수 없어요. 복사한 뒤 원본을 휴지통으로 보내 주세요"),
+            Err(e) => return Err(other(e)),
+        }
+    }
     Err(Fail::Exists)
 }
 
@@ -541,6 +616,55 @@ mod tests {
         assert_eq!(undo(id(&twin)), Ok(Done::Undone { left: Vec::new() }));
         assert!(std::fs::symlink_metadata(&twin).is_err());
         assert_eq!(std::fs::read(util::join(&p("자료"), "메모.txt")).unwrap(), b"memo", "the original is untouched");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 옮기기: 같은 파일이 그대로 간다 (파일 번호와 확장 속성). 받는 쪽의 것을 덮어쓰지 않고 번호를 붙이고,
+    /// 같은 폴더로, 자기 안으로는 옮기지 않는다. 되돌리면 원래 자리로 오되, 그 자리에 다른 것이 생겼으면 그대로 둔다
+    #[test]
+    fn move_keeps_the_same_file_and_never_replaces() {
+        let dir = temp("move");
+        let p = |n: &str| util::join(&dir, n);
+        let (from, to) = (p("원본"), p("받는 곳"));
+        std::fs::create_dir_all(util::join(&from, "자료")).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(util::join(&util::join(&from, "자료"), "안.txt"), b"in").unwrap();
+        let src = util::join(&from, "보고서.docx");
+        std::fs::write(&src, b"report").unwrap();
+        set_xattr(&src, "com.example.note", "사카두");
+        let file = id(&src);
+        let job = |src: &str, dir: &str, file_id: u64| run(&Job::Move { src: src.to_string(), dir: dir.to_string(), file_id });
+        // 목록에서 본 것이 아니면 옮기지 않는다
+        assert_eq!(job(&src, &to, id(&from)), Err(Fail::Changed));
+        // 같은 폴더로, 자기 자신 안으로는 옮기지 않는다
+        assert!(matches!(job(&src, &from, file), Err(Fail::Other(why)) if why.contains("이미 이 폴더")));
+        let folder = util::join(&from, "자료");
+        assert!(matches!(job(&folder, &folder, 0), Err(Fail::Other(why)) if why.contains("자기 안")));
+        assert_eq!(names(&from), ["보고서.docx", "자료"]);
+        // 옮긴다: 같은 파일이 그대로 간다
+        assert_eq!(job(&src, &to, file), Ok(Done::Moved { name: "보고서.docx".into(), file_id: file, renamed: false }));
+        let moved = util::join(&to, "보고서.docx");
+        assert_eq!((id(&moved), std::fs::read(&moved).unwrap(), xattr(&moved, "com.example.note")), (file, b"report".to_vec(), Some("사카두".to_string())));
+        assert!(std::fs::symlink_metadata(&src).is_err());
+        // 폴더는 속까지 그대로. 받는 쪽에 같은 이름이 있으면 번호를 붙이고, 먼저 있던 것은 그대로다
+        std::fs::create_dir(util::join(&to, "자료")).unwrap();
+        std::fs::write(util::join(&util::join(&to, "자료"), "먼저 있던 것.txt"), b"old").unwrap();
+        let folder_id = id(&folder);
+        assert_eq!(job(&folder, &to, 0), Ok(Done::Moved { name: "자료 2".into(), file_id: folder_id, renamed: true }));
+        assert_eq!(std::fs::read(util::join(&util::join(&to, "자료 2"), "안.txt")).unwrap(), b"in");
+        assert_eq!(names(&util::join(&to, "자료")), ["먼저 있던 것.txt"]);
+        assert!(names(&from).is_empty());
+        // 되돌리기: 원래 자리에 다른 것이 생긴 것은 그대로 두고, 나머지만 되돌린다
+        std::fs::write(&src, b"newcomer").unwrap();
+        let items = vec![(src.clone(), "보고서.docx".to_string(), file), (folder.clone(), "자료 2".to_string(), folder_id)];
+        let Ok(Done::Undone { left }) = run(&Job::Undo(Undo::Move { to: to.clone(), items: items.clone() })) else { panic!("되돌리기") };
+        assert_eq!(left.len(), 1);
+        assert!(left[0].0 == src && left[0].1.contains("같은 이름"), "{left:?}");
+        assert_eq!((std::fs::read(&src).unwrap(), std::fs::read(&moved).unwrap()), (b"newcomer".to_vec(), b"report".to_vec()));
+        assert_eq!((id(&folder), std::fs::read(util::join(&folder, "안.txt")).unwrap()), (folder_id, b"in".to_vec()));
+        // 한 번 더 되돌리면: 폴더는 옮긴 곳에 더는 없다
+        let Ok(Done::Undone { left }) = run(&Job::Undo(Undo::Move { to: to.clone(), items })) else { panic!("되돌리기") };
+        assert_eq!(left.len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
