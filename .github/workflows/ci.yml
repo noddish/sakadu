@@ -46,6 +46,11 @@ jobs:
           hdiutil detach "$RUNNER_TEMP/case"
       - name: Build mac prototype
         run: cargo build --features mac-app --bin sakadu-mac --locked
+      # 실제 창을 열고 키와 편집 메뉴 동작으로 폴더 감시, 이름 바꾸기, 되돌리기, 복사·붙여넣기, 휴지통, 훑어보기를 돌려 본다.
+      # 임시 폴더에 시험 폴더를 만들어 그 안에서만 한다 (src/mac/view/smoke.rs)
+      - name: Window smoke test
+        timeout-minutes: 3
+        run: ./target/debug/sakadu-mac --smoke
       - name: Render screens
         run: |
           # README 데모와 같은 한글 이름의 빈 파일 (개인 파일 없음). 날짜는 고정해 목록의 짧은 날짜가 늘 같게

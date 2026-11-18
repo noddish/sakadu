@@ -1,7 +1,8 @@
 //! 사카두 맥 시제품 (모양 2: 사이드바가 창 위까지, 신호등은 그 안).
 //! 인자 없이 실행하면 창을 띄운다. CI 확인용으로 두 가지가 더 있다:
 //! `--render <데모 폴더> --out <출력 폴더>`는 창 없이 여러 상태를 PNG로 그리고,
-//! `--snapshot <PNG> --start <폴더>`는 실제 창을 열어 창 틀(신호등 포함)까지 그린 뒤 끝낸다
+//! `--snapshot <PNG> --start <폴더>`는 실제 창을 열어 창 틀(신호등 포함)까지 그린 뒤 끝낸다.
+//! `--smoke`는 실제 창을 열고 임시 시험 폴더에서 키와 편집 메뉴 동작으로 파일 작업을 끝까지 돌려 본다 (결과를 찍고 끝낸다)
 
 #[cfg(target_os = "macos")]
 mod app;
@@ -27,6 +28,10 @@ fn main() {
         for path in render::render_all(&demo, &out).unwrap_or_else(|e| panic!("그림: {e}")) {
             println!("{}", path.display());
         }
+        return;
+    }
+    if args.iter().any(|a| a == "--smoke") {
+        view::smoke().unwrap_or_else(|e| panic!("창 시험: {e}"));
         return;
     }
     if let Some(out) = arg("--snapshot") {

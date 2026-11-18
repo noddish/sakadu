@@ -286,6 +286,23 @@ struct Clicked {
 /// 누른 채 이만큼 넘게 움직여야 끌기로 본다 (누르다가 손이 조금 떨린 것은 끌기가 아니다)
 const DRAG_START: f32 = 4.0;
 
+/// 창 시험(`sakadu-mac --smoke`)이 보는 앱의 상태: 지금 칸의 지금 탭
+#[derive(Debug)]
+pub struct Seen {
+    /// 그 탭의 폴더
+    pub dir: String,
+    /// 목록의 이름 (보이는 순서)
+    pub names: Vec<String>,
+    /// 커서 줄의 이름
+    pub cursor: String,
+    /// 고른 줄의 이름 (보이는 순서)
+    pub selected: Vec<String>,
+    /// 다 읽었는지
+    pub ready: bool,
+    /// 이름을 고치는 중인 항목
+    pub editing: Option<String>,
+}
+
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
 /// 그래서 몇 개 중 몇 개인지 보이고, 항목 사이에서 그만둘 수 있다
 struct Batch {
@@ -946,6 +963,23 @@ impl App {
     fn new_tab_at(&mut self, loc: Location) -> Tab {
         self.next_id += 1;
         Tab::new(self.next_id, loc)
+    }
+
+    /// 창 시험이 보는 것 (Seen)
+    pub fn seen(&self) -> Seen {
+        let tab = self.panes[self.active].tab();
+        let rows = || (0..tab.view.len()).filter_map(|vi| tab.entry_at(vi));
+        Seen {
+            dir: tab.loc.dir().unwrap_or_default().to_string(),
+            names: rows().map(Entry::name_string).collect(),
+            cursor: tab.cursor_entry().map(Entry::name_string).unwrap_or_default(),
+            selected: rows().filter(|e| e.selected).map(Entry::name_string).collect(),
+            ready: tab.state == LoadState::Ready,
+            editing: match &self.edit {
+                Editing::Item(e) => Some(e.name.clone()),
+                _ => None,
+            },
+        }
     }
 
     /// 창 제목: 지금 칸의 지금 탭

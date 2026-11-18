@@ -5,7 +5,8 @@
 //! 끌어서 놓기도 파일 주소로 한다: 고른 줄을 끌어 내면 맥의 끌기를 시작하고(Finder나 다른 칸에 놓을 수 있다),
 //! 끌려 온 파일은 App에 어디에 놓일지 묻고 놓는다.
 //! 훑어보기(스페이스, ⌘Y)는 맥의 훑어보기 창(QLPreviewPanel)에 고른 파일을 띄운다. 그 창의 내용은 이 뷰가 댄다.
-//! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
+//! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다.
+//! 창 시험(smoke)은 이 창을 그대로 열고 실제 입력의 길로 파일 작업을 돌려 본다 (CI의 맥 러너에서)
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods, Paste};
 use sakadu::ui::ROW_H;
@@ -31,8 +32,12 @@ use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+mod smoke;
+
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    /// 창 시험을 하는 중이면 그 시험 폴더 (창을 이 폴더로 열고, 창이 뜨면 시험을 시작한다)
+    static SMOKE: RefCell<Option<String>> = const { RefCell::new(None) };
     static VIEW: OnceCell<Retained<SakaduView>> = const { OnceCell::new() };
     /// 잘라 둔 것을 클립보드에 담은 직후의 클립보드 번호. 붙여넣을 때 번호가 그대로면(그 사이 다른 것이 담기지 않았으면) 옮긴다
     static CUT: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
@@ -1103,12 +1108,16 @@ define_class!(
             let mtm = self.mtm();
             let app = NSApplication::sharedApplication(mtm);
             main_menu(mtm, &app);
-            let window = open_window(mtm, None);
+            let smoke = SMOKE.with(|s| s.borrow().clone());
+            let window = open_window(mtm, smoke.clone());
             window.setDelegate(Some(ProtocolObject::from_ref(self)));
             let _ = self.ivars().window.set(window);
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
             #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
+            if let Some(dir) = smoke {
+                smoke::start(dir);
+            }
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
@@ -1264,6 +1273,16 @@ pub fn snapshot(out: &std::path::Path, start: String) -> Result<(), String> {
     frame_view.cacheDisplayInRect_toBitmapImageRep(b, &rep);
     let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }.ok_or("PNG로 바꾸지 못함")?;
     std::fs::write(out, data.to_vec()).map_err(|e| e.to_string())
+}
+
+/// 창 시험: 임시 폴더에 시험 폴더를 만들고, 보통 실행과 같은 길로 창을 그 폴더에 연 뒤 시험 대본을 돌린다 (smoke.rs).
+/// 화면 상태와 작업 공간은 읽지도 저장하지도 않는다. 다 하면 결과에 따라 0이나 1로 끝난다
+pub fn smoke() -> Result<(), String> {
+    let dir = smoke::make_folder().map_err(|e| format!("시험 폴더: {e}"))?;
+    println!("smoke folder: {dir}");
+    SMOKE.with(|s| *s.borrow_mut() = Some(dir));
+    run();
+    Ok(())
 }
 
 /// 창을 띄우고 앱을 돌린다 (창을 닫으면 끝난다)
