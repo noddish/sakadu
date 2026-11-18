@@ -181,7 +181,8 @@ fn script(dir: &str) -> usize {
         });
         run.check("typing a name and Return in the field", typed.is_ok(), || format!("{typed:?}"));
         if run.wait("the file is renamed on disk", 5, || exists(dir, "메모 바뀜.txt") && !exists(dir, "메모.txt")) {
-            run.wait("the field closes and the renamed row is selected", 5, || seen().is_some_and(|s| s.editing.is_none() && s.cursor == "메모 바뀜.txt"));
+            // 이름 상자는 앱이 그 결과를 받을 때 닫힌다. 되돌리기는 그 뒤에 보낸다
+            run.wait("the field closes and the renamed row is selected", 5, || seen().is_some_and(|s| s.editing.is_none() && s.cursor == "메모 바뀜.txt" && !s.busy));
             // 되돌리기: 편집 메뉴의 실행 취소(⌘Z)가 보내는 undo:
             // SAFETY: 이 뷰의 undo: (편집 메뉴가 보내는 그대로)
             act(|v| unsafe { msg_send![v, undo: None::<&AnyObject>] });
@@ -211,7 +212,8 @@ fn script(dir: &str) -> usize {
     // 휴지통: ⌘⌫, 그리고 되돌리기로 다시 꺼낸다
     if run.select("메모 2.txt") {
         key(DELETE, true);
-        if run.wait("cmd-delete sends the file to the Trash", 5, || !exists(dir, "메모 2.txt")) {
+        // 디스크에서 사라진 것만으로는 앱이 그 결과를 받았는지(되돌리기 기록이 생겼는지) 모른다: 앱이 결과를 다 받을 때까지 기다린다
+        if run.wait("cmd-delete sends the file to the Trash", 5, || !exists(dir, "메모 2.txt") && seen().is_some_and(|s| !s.busy)) {
             // SAFETY: 이 뷰의 undo:
             act(|v| unsafe { msg_send![v, undo: None::<&AnyObject>] });
             run.wait("undo: puts it back from the Trash", 5, || exists(dir, "메모 2.txt"));

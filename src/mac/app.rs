@@ -303,6 +303,8 @@ pub struct Seen {
     pub editing: Option<String>,
     /// 칩 줄에 떠 있는 알림
     pub flash: Option<String>,
+    /// 맡긴 파일 작업의 결과를 아직 다 받지 않았다 (그동안은 되돌리기를 받지 않는다)
+    pub busy: bool,
 }
 
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
@@ -982,6 +984,7 @@ impl App {
                 _ => None,
             },
             flash: self.flash.as_ref().map(|(_, note)| note.clone()),
+            busy: self.ops_running > 0 || self.batch.is_some(),
         }
     }
 
