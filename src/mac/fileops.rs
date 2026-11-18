@@ -2,7 +2,7 @@
 //! 시험에서는 App::settle이 그 자리에서 부른다.
 //! 대상은 줄 번호가 아니라 경로와 파일 번호로 받아, 실행 직전에 그 경로의 항목이 목록을 읽을 때의 그 항목인지 다시 본다
 //! (맥 버전에는 아직 폴더 감시가 없어 목록이 낡았을 수 있다). 덮어쓰지 않고, 파일을 없애는 호출은 두지 않는다:
-//! 지우기는 휴지통으로 보내기뿐이고, 만든 폴더를 되돌릴 때도 휴지통으로 보낸다
+//! 지우기는 휴지통으로 보내기뿐이고, 만든 폴더나 복사본을 되돌릴 때도, 하다 만 복사를 치울 때도 휴지통으로 보낸다
 
 use sakadu::fileops::{self, Trashed, Undo};
 use sakadu::util;
@@ -16,6 +16,9 @@ pub enum Job {
     Rename { dir: String, from: String, to: String, file_id: u64 },
     /// dir 안의 항목들(이름, 목록에서 본 파일 번호)을 휴지통으로 보낸다
     Trash { dir: String, items: Vec<(String, u64)> },
+    /// src(전체 경로)를 폴더 dir 안으로 복사한다. 같은 이름이 있으면 덮어쓰지 않고 번호를 붙인다.
+    /// file_id는 목록에서 본 src의 파일 번호 (클립보드로 받아 모르면 0: 그때는 그 경로에 지금 있는 것을 복사한다)
+    Copy { src: String, dir: String, file_id: u64 },
     /// 앞서 한 작업을 되돌린다
     Undo(Undo),
 }
@@ -36,8 +39,10 @@ pub enum Done {
     Renamed,
     /// 휴지통으로 보낸 것과, 보내지 못해 그대로 둔 것(이름, 까닭)
     Trashed { moved: Vec<Trashed>, failed: Vec<(String, String)> },
-    /// 되돌렸다. left는 휴지통에서 꺼내지 못해 그대로 둔 것(이름, 까닭)
+    /// 되돌렸다. left는 되돌리지 못해 그대로 둔 것(이름, 까닭): 휴지통에서 꺼내지 못한 항목, 휴지통으로 보내지 못한 복사본
     Undone { left: Vec<(String, String)> },
+    /// 복사했다: 복사본의 이름과 파일 번호. renamed는 같은 이름이 있어 번호를 붙였는지
+    Copied { name: String, file_id: u64, renamed: bool },
 }
 
 /// 하지 못한 까닭. 어느 경우든 파일은 바뀌지 않았다
@@ -101,6 +106,23 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             }
             Ok(Done::Trashed { moved, failed })
         }
+        Job::Copy { src, dir, file_id } => {
+            guard(src);
+            guard(dir);
+            copy_item(src, dir, *file_id)
+        }
+        // 복사를 되돌린다: 복사본이 그때 만든 그것일 때만 하나씩 휴지통으로 보낸다
+        Job::Undo(Undo::Copy { dir, items }) => {
+            let mut left = Vec::new();
+            for (name, file_id) in items {
+                let path = util::join(dir, name);
+                guard(&path);
+                if let Err(why) = trash_item(&path, *file_id) {
+                    left.push((name.clone(), why));
+                }
+            }
+            Ok(Done::Undone { left })
+        }
         // 이름 바꾸기를 되돌린다: 지금 이름(to)의 항목이 그때 그 항목일 때만, 원래 이름이 비어 있을 때만
         Job::Undo(Undo::Rename { dir, from, to, file_id }) => {
             let (now, back) = (util::join(dir, to), util::join(dir, from));
@@ -134,6 +156,84 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             Ok(Done::Undone { left })
         }
     }
+}
+
+/// dir이 폴더 folder 자신이거나 그 안인지 (링크와 대소문자를 풀어 실제 경로로 본다). 받는 폴더를 읽지 못하면 아니라고 본다
+/// (그때는 복사가 제 오류로 실패한다)
+fn inside(dir: &str, folder: &str) -> bool {
+    match (std::fs::canonicalize(dir), std::fs::canonicalize(folder)) {
+        (Ok(d), Ok(f)) => d.starts_with(&f),
+        _ => false,
+    }
+}
+
+/// 항목 하나를 폴더 dir 안으로 복사한다. 받는 쪽에 있는 것은 무엇도 덮어쓰지 않는다: 임시 이름으로 복사한 뒤,
+/// 비어 있는 이름(그 이름, 없으면 번호를 붙인 이름)으로 덮어쓰지 않는 이름 바꾸기를 한다.
+/// 링크는 링크 자체를 복사하고, 확장 속성(다운로드한 파일의 격리 표시 등)은 맥이 함께 복사한다
+fn copy_item(src: &str, dir: &str, file_id: u64) -> Result<Done, Fail> {
+    let meta = match std::fs::symlink_metadata(src) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Fail::Changed),
+        Err(e) => return Err(other(e)),
+    };
+    if file_id != 0 && std::os::unix::fs::MetadataExt::ino(&meta) != file_id {
+        return Err(Fail::Changed);
+    }
+    let is_dir = meta.is_dir();
+    // 폴더를 자기 자신이나 자기 안으로 복사하면 끝없이 자기를 복사하게 된다
+    if is_dir && inside(dir, src) {
+        return Err(Fail::Other("폴더를 자기 안에 넣을 수 없어요".to_string()));
+    }
+    let name = util::file_name(src);
+    // 임시 이름: 같은 임시 이름이 남아 있으면(앞서 하다 만 것) 건드리지 않고 번호를 붙인다
+    let mut temp = None;
+    for n in 1..1000 {
+        let candidate = util::join(dir, &fileops::staging_name(name, n));
+        if std::fs::symlink_metadata(&candidate).is_ok() {
+            continue;
+        }
+        match real_copy(src, &candidate, is_dir) {
+            Ok(()) => {
+                temp = Some(candidate);
+                break;
+            }
+            Err(None) => {}
+            Err(Some(why)) => {
+                // 하다 만 것이 남았으면 휴지통으로 보낸다 (복사를 시작하기 직전에 없던 이름이라 우리가 만든 것이다)
+                if std::fs::symlink_metadata(&candidate).is_ok() {
+                    let _ = to_trash(&candidate, is_dir);
+                }
+                return Err(Fail::Other(why));
+            }
+        }
+    }
+    let Some(temp) = temp else { return Err(Fail::Other("임시 이름을 정하지 못했어요".to_string())) };
+    for n in 1..10_000 {
+        let final_name = fileops::numbered_name(name, n, is_dir);
+        let dst = util::join(dir, &final_name);
+        match fileops::rename_excl(&temp, &dst) {
+            Ok(()) => return Ok(Done::Copied { file_id: fileops::inode(&dst).unwrap_or(0), name: final_name, renamed: n > 1 }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                let _ = to_trash(&temp, is_dir);
+                return Err(other(e));
+            }
+        }
+    }
+    let _ = to_trash(&temp, is_dir);
+    Err(Fail::Exists)
+}
+
+/// 맥의 복사(Finder가 쓰는 것과 같은 호출): 폴더는 속까지, 확장 속성과 권한도 함께, 링크는 링크 자체를.
+/// 받는 이름이 이미 있으면 Err(None), 그 밖의 오류는 맥이 준 글과 함께 Err(Some)
+pub fn real_copy(src: &str, dst: &str, is_dir: bool) -> Result<(), Option<String>> {
+    use objc2_foundation::{NSFileManager, NSFileWriteFileExistsError, NSString, NSURL};
+    objc2::rc::autoreleasepool(|_| {
+        let url = |p: &str| NSURL::fileURLWithPath_isDirectory(&NSString::from_str(p), is_dir);
+        NSFileManager::defaultManager()
+            .copyItemAtURL_toURL_error(&url(src), &url(dst))
+            .map_err(|e| (e.code() != NSFileWriteFileExistsError).then(|| e.localizedDescription().to_string()))
+    })
 }
 
 /// 항목 하나를 휴지통으로 보내고 휴지통 안의 경로를 돌려준다. 목록에서 본 그 항목일 때만, 디스크 자체가 아닐 때만
@@ -336,6 +436,111 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         assert_eq!(run(&undo), Err(Fail::Changed));
         assert!(std::fs::metadata(&path).unwrap().is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 그 경로의 확장 속성 값 (맥의 xattr 명령으로 읽는다. 없으면 None)
+    fn xattr(path: &str, key: &str) -> Option<String> {
+        let out = std::process::Command::new("xattr").args(["-p", key, path]).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn set_xattr(path: &str, key: &str, value: &str) {
+        let ok = std::process::Command::new("xattr").args(["-w", key, value, path]).status().is_ok_and(|s| s.success());
+        assert!(ok, "xattr -w {key} {path}");
+    }
+
+    fn names(dir: &str) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    /// 복사: 받는 쪽의 것을 덮어쓰지 않고 번호를 붙인다. 내용과 확장 속성(격리 표시 포함)이 그대로 오고, 임시 이름은 남지 않는다
+    #[test]
+    fn copy_keeps_contents_and_attributes_and_never_replaces() {
+        let dir = temp("copy");
+        let (from, to) = (util::join(&dir, "원본"), util::join(&dir, "받는 곳"));
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        let src = util::join(&from, "보고서.docx");
+        std::fs::write(&src, b"report").unwrap();
+        set_xattr(&src, "com.apple.quarantine", "0081;00000000;Safari;");
+        set_xattr(&src, "com.example.note", "사카두");
+        let copy = |file_id: u64| run(&Job::Copy { src: src.clone(), dir: to.clone(), file_id });
+        assert_eq!(copy(id(&src)), Ok(Done::Copied { name: "보고서.docx".into(), file_id: id(&util::join(&to, "보고서.docx")), renamed: false }));
+        let made = util::join(&to, "보고서.docx");
+        assert_eq!(std::fs::read(&made).unwrap(), b"report");
+        assert_ne!(id(&made), id(&src), "a copy is its own file");
+        assert_eq!(xattr(&made, "com.apple.quarantine").as_deref(), Some("0081;00000000;Safari;"), "the quarantine mark comes along");
+        assert_eq!(xattr(&made, "com.example.note").as_deref(), Some("사카두"));
+        // 같은 이름이 있으면 번호를 붙인다: 먼저 있던 것은 그대로다
+        std::fs::write(&made, b"already here").unwrap();
+        assert!(matches!(copy(0), Ok(Done::Copied { name, renamed: true, .. }) if name == "보고서 2.docx"));
+        assert!(matches!(copy(0), Ok(Done::Copied { name, renamed: true, .. }) if name == "보고서 3.docx"));
+        assert_eq!(std::fs::read(&made).unwrap(), b"already here");
+        assert_eq!(std::fs::read(util::join(&to, "보고서 2.docx")).unwrap(), b"report");
+        assert_eq!(names(&to), ["보고서 2.docx", "보고서 3.docx", "보고서.docx"], "no temporary name is left");
+        // 목록에서 본 것이 아니면(파일 번호가 다르면) 복사하지 않는다. 없어진 것도 마찬가지
+        assert_eq!(copy(id(&made)), Err(Fail::Changed));
+        assert_eq!(run(&Job::Copy { src: util::join(&from, "없는 것"), dir: to.clone(), file_id: 0 }), Err(Fail::Changed));
+        // 받는 폴더가 없으면 오류만 나고 아무것도 생기지 않는다
+        assert!(matches!(run(&Job::Copy { src: src.clone(), dir: util::join(&dir, "없는 곳"), file_id: 0 }), Err(Fail::Other(_))));
+        assert_eq!(names(&dir), ["받는 곳", "원본"]);
+        // 원본은 그대로다
+        assert_eq!((std::fs::read(&src).unwrap(), names(&from)), (b"report".to_vec(), vec!["보고서.docx".to_string()]));
+        // 길이 한도에 닿는 이름도 복사된다 (임시 이름이 한도를 넘지 않는다). 이름 끝의 공백도 그대로 간다
+        for name in ["a".repeat(fileops::NAME_MAX), format!("{}.txt", "가".repeat(83)), "끝에 공백 ".to_string()] {
+            let long = util::join(&from, &name);
+            std::fs::write(&long, b"long").unwrap();
+            assert!(matches!(run(&Job::Copy { src: long.clone(), dir: to.clone(), file_id: 0 }), Ok(Done::Copied { name: made, renamed: false, .. }) if made == name), "{} bytes", name.len());
+            assert_eq!(std::fs::read(util::join(&to, &name)).unwrap(), b"long");
+            // 한 번 더: 번호를 붙인 이름도 길이 한도 안에 들어 복사된다
+            let Ok(Done::Copied { name: second, renamed: true, .. }) = run(&Job::Copy { src: long, dir: to.clone(), file_id: 0 }) else { panic!("{name}") };
+            assert!(second != name && second.len() <= fileops::NAME_MAX, "{second}");
+            assert_eq!(std::fs::read(util::join(&to, &second)).unwrap(), b"long");
+        }
+        assert!(!names(&to).iter().any(|n| n.contains("sakadu-copying")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 폴더는 속까지 복사하고, 링크는 가리키는 것이 아니라 링크 자체를 복사한다. 폴더를 자기 안으로는 복사하지 않는다
+    #[test]
+    fn copy_takes_folders_whole_and_links_as_links() {
+        let dir = temp("copy-tree");
+        let p = |n: &str| util::join(&dir, n);
+        std::fs::create_dir_all(util::join(&p("자료"), "안쪽")).unwrap();
+        std::fs::write(util::join(&util::join(&p("자료"), "안쪽"), "깊은 파일.txt"), b"deep").unwrap();
+        std::fs::write(util::join(&p("자료"), "메모.txt"), b"memo").unwrap();
+        std::os::unix::fs::symlink(p("자료"), util::join(&p("자료"), "자기를 가리키는 링크")).unwrap();
+        std::os::unix::fs::symlink(p("자료"), p("링크")).unwrap();
+        std::fs::create_dir(p("받는 곳")).unwrap();
+        // 폴더: 속까지. 그 안의 링크도 링크로 온다 (가리키는 폴더를 따라 들어가지 않는다)
+        assert!(matches!(run(&Job::Copy { src: p("자료"), dir: p("받는 곳"), file_id: 0 }), Ok(Done::Copied { name, renamed: false, .. }) if name == "자료"));
+        let made = util::join(&p("받는 곳"), "자료");
+        assert_eq!(std::fs::read(util::join(&util::join(&made, "안쪽"), "깊은 파일.txt")).unwrap(), b"deep");
+        assert_eq!(std::fs::read(util::join(&made, "메모.txt")).unwrap(), b"memo");
+        assert!(std::fs::symlink_metadata(util::join(&made, "자기를 가리키는 링크")).unwrap().file_type().is_symlink());
+        // 링크: 링크 자체가 복사된다
+        assert!(matches!(run(&Job::Copy { src: p("링크"), dir: p("받는 곳"), file_id: 0 }), Ok(Done::Copied { name, .. }) if name == "링크"));
+        let link = util::join(&p("받는 곳"), "링크");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap().to_string_lossy(), p("자료"));
+        // 같은 폴더 안으로 복제: 번호가 붙는다
+        assert!(matches!(run(&Job::Copy { src: p("자료"), dir: dir.clone(), file_id: 0 }), Ok(Done::Copied { name, renamed: true, .. }) if name == "자료 2"));
+        // 폴더를 자기 자신이나 자기 안으로는 복사하지 않는다. 링크를 거쳐 들어가도 마찬가지
+        for into in [p("자료"), util::join(&p("자료"), "안쪽"), util::join(&p("링크"), "안쪽")] {
+            assert!(matches!(run(&Job::Copy { src: p("자료"), dir: into.clone(), file_id: 0 }), Err(Fail::Other(why)) if why.contains("자기 안")), "{into}");
+        }
+        assert_eq!(names(&p("자료")), ["메모.txt", "안쪽", "자기를 가리키는 링크"], "nothing was added to the source");
+        // 복사 되돌리기: 그때 만든 복사본만 휴지통으로 간다. 그 이름의 다른 것으로 바뀌었으면 그대로 둔다
+        let twin = p("자료 2");
+        let undo = |file_id: u64| run(&Job::Undo(Undo::Copy { dir: dir.clone(), items: vec![("자료 2".to_string(), file_id)] }));
+        assert!(matches!(undo(id(&p("자료"))), Ok(Done::Undone { left }) if left.len() == 1));
+        assert!(std::fs::metadata(&twin).unwrap().is_dir());
+        assert_eq!(undo(id(&twin)), Ok(Done::Undone { left: Vec::new() }));
+        assert!(std::fs::symlink_metadata(&twin).is_err());
+        assert_eq!(std::fs::read(util::join(&p("자료"), "메모.txt")).unwrap(), b"memo", "the original is untouched");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

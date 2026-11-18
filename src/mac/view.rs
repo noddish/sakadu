@@ -1,6 +1,7 @@
 //! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름, 항목 이름).
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인·미리 보기 카드의 그림과 글 읽기·아이콘 보기의 썸네일 읽기는
-//! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다. 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 되돌리기)은 뒷줄 하나가 맡긴 순서대로 하나씩 한다.
+//! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다. 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 복사, 되돌리기)은 뒷줄 하나가 맡긴 순서대로 하나씩 한다.
+//! 클립보드에는 파일 주소로 담고 읽는다 (Finder와 주고받을 수 있다).
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods};
@@ -13,7 +14,8 @@ use objc2::runtime::{Bool, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
-    NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
+    NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
+    NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardWriting,
     NSTextField, NSTextFieldDelegate, NSTextView, NSTitlebarSeparatorStyle, NSToolbar, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
     NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle, NSWorkspace,
 };
@@ -210,7 +212,24 @@ define_class!(
             self.after_input();
         }
 
-        /// 편집 메뉴의 실행 취소(⌘Z): 키 입력이 목록에 있을 때 가장 나중에 한 파일 작업(이름 바꾸기, 새 폴더, 휴지통)을 되돌린다.
+        /// 편집 메뉴의 복사하기(⌘C): 키 입력이 목록에 있을 때 고른 항목들을 클립보드에 담는다 (입력 상자에서는 입력 상자가 받는다)
+        #[unsafe(method(copy:))]
+        fn copy(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            with_app(App::copy_selected);
+            self.after_input();
+        }
+
+        /// 편집 메뉴의 붙여넣기(⌘V): 클립보드의 파일들을 지금 칸의 폴더로 복사한다. 누르고 있어도 한 번만 한다
+        #[unsafe(method(paste:))]
+        fn paste(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            if held_key(self.mtm()) {
+                return;
+            }
+            with_app(App::ask_paste);
+            self.after_input();
+        }
+
+        /// 편집 메뉴의 실행 취소(⌘Z): 키 입력이 목록에 있을 때 가장 나중에 한 파일 작업(이름 바꾸기, 새 폴더, 휴지통, 복사)을 되돌린다.
         /// 이름이나 경로를 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라 친 글자를 되돌린다:
         /// 이 뷰가 받지 않았을 때 창이 하던 대로, 창의 되돌리기 관리자에 넘긴다
         #[unsafe(method(undo:))]
@@ -221,6 +240,10 @@ define_class!(
                 {
                     typed.undo();
                 }
+                return;
+            }
+            // 누르고 있어도 한 번에 하나만 되돌린다
+            if held_key(self.mtm()) {
                 return;
             }
             with_app(App::undo);
@@ -379,6 +402,39 @@ impl SakaduView {
     }
 }
 
+/// 지금 처리하는 것이 키를 누르고 있어서 되풀이된 키 입력인지 (메뉴 단축키로 온 붙여넣기·실행 취소를 한 번만 받으려고 본다)
+fn held_key(mtm: MainThreadMarker) -> bool {
+    NSApplication::sharedApplication(mtm).currentEvent().is_some_and(|e| e.r#type() == NSEventType::KeyDown && e.isARepeat())
+}
+
+/// 파일들을 클립보드에 파일 주소로 담는다 (Finder나 다른 앱에 붙여넣을 수 있다)
+fn write_clipboard(paths: &[String]) {
+    let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> =
+        paths.iter().map(|p| ProtocolObject::from_retained(NSURL::fileURLWithPath(&NSString::from_str(p)))).collect();
+    let board = NSPasteboard::generalPasteboard();
+    board.clearContents();
+    if !board.writeObjects(&NSArray::from_retained_slice(&items)) {
+        sakadu::diag::log(|| "clipboard: write failed".to_string());
+    }
+}
+
+/// 클립보드에 담긴 파일들의 경로 (Finder에서 복사한 것도 읽는다). 파일이 아닌 것(글자, 그림)만 있으면 비어 있다
+fn read_clipboard() -> Vec<String> {
+    let Some(items) = NSPasteboard::generalPasteboard().pasteboardItems() else { return Vec::new() };
+    let mut out = Vec::new();
+    for item in items.iter() {
+        let Some(text) = item.stringForType(unsafe { NSPasteboardTypeFileURL }) else { continue };
+        let Some(url) = NSURL::URLWithString(&text) else { continue };
+        // Finder는 파일 번호로 된 주소를 줄 때가 있다: 경로로 된 주소로 바꿔 읽는다
+        let url = url.filePathURL().unwrap_or(url);
+        // 경로는 받은 글자 그대로 쓴다 (사용자가 친 경로처럼 다듬으면 이름 끝의 공백이나 따옴표가 잘려 다른 파일이 된다)
+        if let Some(path) = url.path() {
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
 /// 뒷줄 결과를 받은 뒤 (메인 줄에서): 입력 상자를 App 상태에 맞추고 다시 그려 달라고 한다.
 /// 새 폴더의 이름 상자는 입력이 아니라 뒷줄 결과(폴더를 만들고 다시 읽은 것)로 뜨므로, 그리기를 기다리지 않고 여기서 맞춘다
 fn redraw() {
@@ -393,6 +449,16 @@ fn redraw() {
 /// 쌓인 폴더 읽기 요청은 뒷줄에서 읽어 메인 줄로 돌려받고, 열어 달라는 파일은 macOS '열기'로 연다
 /// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다). 미리 보기 카드의 그림과 글도 뒷줄에서 읽는다
 fn pump() {
+    // 클립보드: 담아 달라는 것을 담고, 붙여넣어 달라고 했으면 읽어서 넘긴다 (그러면 아래에서 맡길 작업이 생긴다)
+    if let Some((out, wanted)) = with_app(|a| (a.clip_out.take(), std::mem::take(&mut a.clip_in))) {
+        if let Some(paths) = out {
+            write_clipboard(&paths);
+        }
+        if wanted {
+            let paths = read_clipboard();
+            with_app(|a| a.paste_paths(paths));
+        }
+    }
     let Some((reqs, probes, previews, files, ops, reveal)) =
         with_app(|a| (a.take_requests(), a.take_probes(), a.take_previews(), std::mem::take(&mut a.open_files), a.take_ops(), std::mem::take(&mut a.reveal_files)))
     else {
@@ -539,6 +605,7 @@ fn key_of(code: u16) -> Option<Key> {
         0x00 => Key::Char('a'),
         0x25 => Key::Char('l'),
         0x2D => Key::Char('n'),
+        0x02 => Key::Char('d'),
         0x05 => Key::Char('g'),
         0x1F => Key::Char('o'),
         0x0F => Key::Char('r'),

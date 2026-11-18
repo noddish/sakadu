@@ -153,6 +153,10 @@ impl Gfx {
         // 위아래를 뒤집은 좌표에서 글자가 거꾸로 서지 않게
         CGContext::set_text_matrix(Some(&ctx), CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: -1.0, tx: 0.0, ty: 0.0 });
         let ns = NSGraphicsContext::graphicsContextWithCGContext_flipped(&ctx, true);
+        // 글꼴은 한 번에 한 줄에서만 만든다. 시험은 여러 줄에서 한꺼번에 그림판을 만드는데, 그때 맥이 가끔 글꼴을 주지 못했다
+        // (CI에서 monospacedSystemFontOfSize가 빈 값을 돌려줘 시험이 멈춘 적이 있다). 창에서는 메인 줄 하나만 만든다
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _making = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let font = |size: CGFloat, strong: bool| NSFont::systemFontOfSize_weight(size, unsafe { if strong { NSFontWeightSemibold } else { NSFontWeightRegular } });
         // Windows gfx의 글꼴 표와 같은 순서·크기 (아이콘 글꼴 자리는 글자 크기만 쓴다)
         let fonts = vec![
