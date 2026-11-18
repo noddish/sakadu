@@ -337,9 +337,10 @@ pub enum Key {
 
 impl Key {
     /// 누르고 있을 때 되풀이해 받아도 되는 키인지. 파일을 만들거나 고치거나 옮기거나 휴지통으로 보내는 키
-    /// (Return, ⌫, 새 폴더의 n, 복제의 d, 옮기기의 v)는 한 번 누름에 한 번만 받는다
+    /// (Return, ⌫, 새 폴더의 n, 복제의 d, 옮기기의 v)는 한 번 누름에 한 번만 받는다.
+    /// 열고 닫는 키(스페이스, 훑어보기의 y)도 누르고 있는 동안 열렸다 닫혔다 하지 않게 한 번만 받는다
     pub fn repeats(self) -> bool {
-        !matches!(self, Key::Return | Key::Delete | Key::Char('n' | 'd' | 'v'))
+        !matches!(self, Key::Return | Key::Delete | Key::Char('n' | 'd' | 'v' | ' ' | 'y'))
     }
 }
 
@@ -810,6 +811,10 @@ pub struct App {
     /// 창 쪽이 클립보드를 이것만 잘라 둔 것으로 고친다 (비어 있으면 모두 옮겨 간 것이라 클립보드를 비운다).
     /// 옮겨 가지 않은 것은 다른 곳에 다시 붙여넣을 수 있다
     pub clip_left: Option<(i64, Vec<String>)>,
+    /// 훑어보기(Quick Look) 창을 열어(true) 또는 닫아(false) 달라는 요청 (창 쪽이 가져가 맥의 훑어보기 창을 다룬다)
+    pub look_request: Option<bool>,
+    /// 훑어보기 창이 떠 있고 이 창이 그 내용을 대고 있다 (창 쪽이 알려 준다)
+    pub look_open: bool,
     /// 칸 p의 칩 줄 오른쪽에 잠깐 보일 알림 (다음 입력 때 지운다)
     flash: Option<(usize, String)>,
     probes: Vec<Probe>,
@@ -900,6 +905,8 @@ impl App {
             clip_cut: false,
             clip_in: None,
             clip_left: None,
+            look_request: None,
+            look_open: false,
             flash: None,
             probes: Vec::new(),
             probe_seq: [0; 4],
@@ -3438,8 +3445,10 @@ impl App {
             (Key::Tab, false, true, false) => self.cycle_tab(p, m.shift),
             (Key::Tab, false, false, false) => self.cycle_pane(),
             (Key::Char('a'), true, false, false) => self.select_all(),
-            // 스페이스: 미리 보기 카드가 떠 있으면 크게·작게
-            (Key::Char(' '), false, false, false) if self.card().is_some() => self.toggle_card_large(),
+            // 스페이스: 훑어보기 창이 떠 있으면 닫고, 미리 보기 카드가 떠 있으면 카드를 크게·작게, 아니면 훑어보기를 연다.
+            // ⌘Y는 카드와 상관없이 훑어보기를 열고 닫는다 (Finder와 같다)
+            (Key::Char(' '), false, false, false) if !self.look_open && self.card().is_some() => self.toggle_card_large(),
+            (Key::Char(' '), false, false, false) | (Key::Char('y'), true, false, false) => return self.toggle_look(),
             // Esc: 복사 중이면 그만두고, 아니면 고른 것을 푼다
             (Key::Esc, false, false, false) if self.batch.is_some() => self.cancel_copy(),
             (Key::Esc, false, false, false) => self.clear_selection(),
@@ -3449,6 +3458,35 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    // ---------- 훑어보기 ----------
+
+    /// 훑어보기(Quick Look) 창에 보여 줄 것: 지금 칸에서 고른 항목들(보이는 순서. 고른 것이 없으면 커서 항목)과,
+    /// 그 가운데 커서 항목의 번호 (커서 항목이 그 안에 없으면 0)
+    pub fn look_items(&self) -> (Vec<String>, usize) {
+        let tab = self.panes[self.active].tab();
+        let items = tab.selected_paths();
+        let cursor = tab.cursor_entry().and_then(|e| tab.path_of(e));
+        let at = cursor.and_then(|c| items.iter().position(|p| *p == c)).unwrap_or(0);
+        (items, at)
+    }
+
+    /// 훑어보기 창을 열어 달라고(떠 있으면 닫아 달라고) 한다. 보여 줄 것이 없으면 아무것도 하지 않고 false
+    fn toggle_look(&mut self) -> bool {
+        if self.look_open {
+            self.look_request = Some(false);
+        } else if self.look_items().0.is_empty() {
+            return false;
+        } else {
+            self.look_request = Some(true);
+        }
+        true
+    }
+
+    /// 훑어보기 창을 열지 못했다 (창 쪽이 알려 준다)
+    pub fn look_failed(&mut self) {
+        self.flash = Some((self.active, "훑어보기를 열 수 없어요".to_string()));
     }
 
     // ---------- 그리기 ----------
@@ -6000,6 +6038,57 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// 훑어보기(Quick Look): 스페이스와 ⌘Y가 창을 열고 닫아 달라고 하고, 보여 줄 것은 고른 항목들이다.
+    /// 미리 보기 카드가 떠 있으면 스페이스는 지금처럼 카드를 크게 하고, ⌘Y는 카드와 상관없이 훑어보기다
+    #[test]
+    fn space_and_cmd_y_ask_for_quick_look() {
+        let (root, dir) = preview_demo();
+        let (mut a, g) = app(&dir);
+        let (none, cmd) = (Mods::default(), Mods { cmd: true, ..Default::default() });
+        // 카드가 뜨지 않는 파일(문서): 스페이스가 훑어보기를 열어 달라고 한다. 보여 줄 것은 그 파일
+        click_name(&mut a, &g, 0, "보고서.docx", none);
+        a.settle();
+        assert!(a.card().is_none());
+        assert!(a.key(Key::Char(' '), none));
+        assert_eq!(a.look_request.take(), Some(true));
+        assert_eq!(a.look_items(), (vec![util::join(&dir, "보고서.docx")], 0));
+        // 창이 떠 있으면(창 쪽이 알려 준다) 스페이스도 ⌘Y도 닫아 달라고 한다
+        a.look_open = true;
+        assert!(a.key(Key::Char(' '), none));
+        assert_eq!(a.look_request.take(), Some(false));
+        assert!(a.key(Key::Char('y'), cmd));
+        assert_eq!(a.look_request.take(), Some(false));
+        // 카드가 뜬 그림: 창이 떠 있으면 스페이스는 카드보다 창을 먼저 닫는다
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.settle();
+        assert!(a.card().is_some());
+        assert!(a.key(Key::Char(' '), none));
+        assert_eq!(a.look_request.take(), Some(false));
+        assert!(!a.card.large);
+        // 창이 닫혀 있으면: 스페이스는 카드를 크게 하고, ⌘Y는 훑어보기를 연다
+        a.look_open = false;
+        assert!(a.key(Key::Char(' '), none));
+        assert!(a.card.large && a.look_request.is_none());
+        assert!(a.key(Key::Char('y'), cmd));
+        assert_eq!(a.look_request.take(), Some(true));
+        a.key(Key::Char(' '), none);
+        assert!(!a.card.large);
+        // 여럿을 고르면 모두 보여 주고, 커서가 있는 것부터 보여 준다
+        click_name(&mut a, &g, 0, "메모.txt", cmd);
+        assert_eq!(a.look_items(), (vec![util::join(&dir, "노을.bmp"), util::join(&dir, "메모.txt")], 1));
+        // 아무것도 고르지 않았으면 커서 항목을 보여 준다
+        a.clear_selection();
+        assert_eq!(a.look_items(), (vec![util::join(&dir, "메모.txt")], 0));
+        // 빈 폴더: 보여 줄 것이 없으면 아무 일도 하지 않는다
+        a.navigate(0, Location::Dir(util::join(&dir, "폴더")), None);
+        a.settle();
+        assert!(!a.key(Key::Char(' '), none) && !a.key(Key::Char('y'), cmd));
+        assert_eq!(a.look_request, None);
+        // 스페이스와 ⌘Y는 누르고 있어도 한 번만 받는다 (열렸다 닫혔다 하지 않게)
+        assert!(!Key::Char(' ').repeats() && !Key::Char('y').repeats() && Key::Down.repeats());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// 미리 보기 시험용 폴더: 하위 폴더, 읽히는 그림 둘, 그림이 아닌 .jpg, 글 파일, 글이 아닌 .txt, 카드에 띄우지 않는 파일
     fn preview_demo() -> (std::path::PathBuf, String) {
         let (root, home) = demo();
@@ -6202,10 +6291,11 @@ mod tests {
         click_name(&mut a, &g, 0, "메모.txt", none);
         a.settle();
         assert_eq!(a.card().unwrap().card, large.card);
-        // 카드가 사라지면(폴더를 골랐다) 크게 보기도 끝난다. 카드가 없으면 스페이스는 하는 일이 없다
+        // 카드가 사라지면(폴더를 골랐다) 크게 보기도 끝난다. 카드가 없으면 스페이스는 훑어보기를 열어 달라고 한다
         click_name(&mut a, &g, 0, "폴더", none);
         a.settle();
-        assert!(a.card().is_none() && !a.key(Key::Char(' '), none));
+        assert!(a.card().is_none() && a.key(Key::Char(' '), none));
+        assert_eq!(a.look_request.take(), Some(true));
         click_name(&mut a, &g, 0, "노을.bmp", none);
         a.settle();
         assert_eq!(a.card().unwrap().card, small.card);
