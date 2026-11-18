@@ -87,11 +87,18 @@ pub enum LoadState {
     Error(String),
 }
 
-/// 다시 불러온 뒤 되살릴 선택·커서·스크롤. 이름은 소문자(내 PC 항목은 경로)로 비교한다
+/// 다시 불러온 뒤 되살릴 선택·커서·스크롤. 항목은 이름(내 PC 항목은 경로)으로 찾는다.
+/// 글자 그대로 같은 이름을 먼저 찾고, 없으면 대소문자만 다른 이름이 하나뿐일 때 그것을 받는다:
+/// 대소문자를 가리는 볼륨(맥)에서 Photo.JPG를 골랐는데 photo.jpg까지 골라지는 일이 없다
 #[derive(Default, Debug, Clone)]
 pub struct Restore {
     pub selected: Vec<String>,
+    /// selected와 같은 순서의 파일 번호 (모르면 비워 두거나 0). 대소문자만 다른 이름으로 되살릴 때
+    /// 같은 파일일 때만 받는다 (고른 파일이 없어지고 대소문자만 다른 딴 파일이 남은 경우를 가린다)
+    pub ids: Vec<u64>,
     pub cursor: Option<String>,
+    /// 커서 항목의 파일 번호 (모르면 0)
+    pub cursor_id: u64,
     pub cursor_index: usize,
     pub scroll: f32,
     /// 커서가 보이도록 스크롤
@@ -102,8 +109,7 @@ pub struct Restore {
 
 impl Restore {
     pub fn select(name: &str) -> Restore {
-        let key = name.to_lowercase();
-        Restore { selected: vec![key.clone()], cursor: Some(key), reveal: true, ..Default::default() }
+        Restore { selected: vec![name.to_string()], cursor: Some(name.to_string()), reveal: true, ..Default::default() }
     }
 }
 
@@ -134,8 +140,42 @@ pub struct Tab {
 
 fn key_of(e: &Entry) -> String {
     match &e.target {
-        Some(t) => t.to_lowercase(),
-        None => e.name_string().to_lowercase(),
+        Some(t) => t.to_string(),
+        None => e.name_string(),
+    }
+}
+
+/// 다시 읽은 목록에서 되살릴 항목을 이름으로 찾는다 (Restore의 규칙)
+struct Lookup<'a> {
+    entries: &'a [Entry],
+    keys: &'a [String],
+    exact: std::collections::HashMap<&'a str, usize>,
+    /// 소문자 이름 → 그 이름의 항목. 대소문자만 다른 항목이 여럿이면 None. 글자 그대로 찾지 못한 이름이 있을 때만 만든다
+    loose: Option<std::collections::HashMap<String, Option<usize>>>,
+}
+
+impl<'a> Lookup<'a> {
+    /// keys는 entries와 같은 순서의 이름(key_of)
+    fn new(entries: &'a [Entry], keys: &'a [String]) -> Lookup<'a> {
+        Lookup { entries, keys, exact: keys.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect(), loose: None }
+    }
+
+    /// 그 이름의 항목 번호. id는 그 이름을 적어 둘 때의 파일 번호 (모르면 0)
+    fn find(&mut self, key: &str, id: u64) -> Option<usize> {
+        if let Some(&i) = self.exact.get(key) {
+            return Some(i);
+        }
+        let keys = self.keys;
+        let loose = self.loose.get_or_insert_with(|| {
+            let mut m = std::collections::HashMap::with_capacity(keys.len());
+            for (i, k) in keys.iter().enumerate() {
+                m.entry(k.to_lowercase()).and_modify(|v| *v = None).or_insert(Some(i));
+            }
+            m
+        });
+        let i = (*loose.get(&key.to_lowercase())?)?;
+        let now = self.entries[i].file_id;
+        (id == 0 || now == 0 || now == id).then_some(i)
     }
 }
 
@@ -245,18 +285,20 @@ impl Tab {
         self.cursor = 0;
         self.anchor = 0;
         let restore = self.restore.take();
-        if let Some(r) = restore.as_ref().filter(|r| !r.selected.is_empty()) {
-            // 모두 고른 채 다시 읽어도(F5) 항목마다 목록 전체를 훑지 않게 한 번만 모아 둔다
-            let keep: std::collections::HashSet<&str> = r.selected.iter().map(String::as_str).collect();
-            for e in self.entries.iter_mut() {
-                if keep.contains(key_of(e).as_str()) {
-                    e.selected = true;
-                }
+        let mut cursor_entry = None;
+        if let Some(r) = restore.as_ref().filter(|r| !r.selected.is_empty() || r.cursor.is_some()) {
+            // 모두 고른 채 다시 읽어도(F5) 항목마다 목록 전체를 훑지 않게 이름 표를 한 번만 만든다
+            let keys: Vec<String> = self.entries.iter().map(key_of).collect();
+            let mut look = Lookup::new(&self.entries, &keys);
+            let picked: Vec<usize> = r.selected.iter().enumerate().filter_map(|(k, name)| look.find(name, r.ids.get(k).copied().unwrap_or(0))).collect();
+            cursor_entry = r.cursor.as_ref().and_then(|c| look.find(c, r.cursor_id));
+            for i in picked {
+                self.entries[i].selected = true;
             }
         }
         self.rebuild_view(sort, show_hidden);
         if let Some(r) = &restore {
-            let found = r.cursor.as_ref().and_then(|c| self.view.iter().position(|&i| key_of(&self.entries[i as usize]) == *c));
+            let found = cursor_entry.and_then(|i| self.view.iter().position(|&v| v as usize == i));
             self.cursor = found.unwrap_or(r.cursor_index.min(self.view.len().saturating_sub(1)));
             self.anchor = self.cursor;
             self.scroll = r.scroll;
@@ -269,7 +311,9 @@ impl Tab {
     pub fn snapshot(&self) -> Restore {
         Restore {
             selected: self.entries.iter().filter(|e| e.selected).map(key_of).collect(),
+            ids: self.entries.iter().filter(|e| e.selected).map(|e| e.file_id).collect(),
             cursor: self.cursor_entry().map(key_of),
+            cursor_id: self.cursor_entry().map_or(0, |e| e.file_id),
             cursor_index: self.cursor,
             scroll: self.scroll,
             reveal: false,
@@ -592,6 +636,54 @@ mod tests {
         t.set_entries(fresh, Sort::default(), false);
         assert_eq!(t.cursor_entry().unwrap().name_string(), "b");
         assert_eq!(t.selection_stats().0, 1);
+    }
+
+    /// 이름과 파일 번호로 만든 항목 (맥의 목록처럼)
+    fn with_id(name: &str, id: u64) -> Entry {
+        let mut e = Entry::from_str(name, Kind::File);
+        e.file_id = id;
+        e
+    }
+
+    /// 회귀: 대소문자만 다른 두 파일(대소문자를 가리는 볼륨) 가운데 하나만 골랐으면 다시 읽은 뒤에도 그 하나만 골라져 있다
+    #[test]
+    fn restore_matches_the_exact_name_before_other_cases() {
+        let pair = || vec![with_id("Photo.JPG", 11), with_id("photo.jpg", 22), with_id("메모.txt", 33)];
+        let mut t = Tab::new(1, Location::Dir("C:\\t".into()));
+        t.set_entries(pair(), Sort::default(), false);
+        let vi = names(&t).iter().position(|n| n == "Photo.JPG").unwrap();
+        t.select_only(vi);
+        t.restore = Some(t.snapshot());
+        t.set_entries(pair(), Sort::default(), false);
+        let selected: Vec<String> = t.entries.iter().filter(|e| e.selected).map(Entry::name_string).collect();
+        assert_eq!(selected, ["Photo.JPG"]);
+        assert_eq!(t.cursor_entry().unwrap().name_string(), "Photo.JPG");
+    }
+
+    /// 대소문자만 다른 이름으로 되살리기: 하나뿐일 때만, 파일 번호를 알면 같은 파일일 때만
+    #[test]
+    fn restore_accepts_another_case_only_when_it_is_the_same_item() {
+        let load = |entries: Vec<Entry>, restore: Restore| {
+            let mut t = Tab::new(1, Location::Dir("C:\\t".into()));
+            t.restore = Some(restore);
+            t.set_entries(entries, Sort::default(), false);
+            (t.selection_stats().0, t.cursor_entry().map(Entry::name_string))
+        };
+        // 이름만 아는 경우(직접 친 경로, 위로 갈 때 떠난 폴더): 대소문자만 다른 것이 하나면 고르고, 둘이면 어느 것인지 몰라 고르지 않는다
+        assert_eq!(load(vec![with_id("a", 1), with_id("Photo.JPG", 2)], Restore::select("PHOTO.jpg")), (1, Some("Photo.JPG".to_string())));
+        assert_eq!(load(vec![with_id("a", 1), with_id("Photo.JPG", 2), with_id("photo.jpg", 3)], Restore::select("PHOTO.jpg")).0, 0);
+        // 고른 파일이 없어지고 대소문자만 다른 딴 파일이 남았으면 그 파일을 고르지 않는다
+        let mut t = Tab::new(1, Location::Dir("C:\\t".into()));
+        t.set_entries(vec![with_id("Photo.JPG", 11), with_id("photo.jpg", 22)], Sort::default(), false);
+        let vi = names(&t).iter().position(|n| n == "Photo.JPG").unwrap();
+        t.select_only(vi);
+        let snap = t.snapshot();
+        assert_eq!((snap.ids.clone(), snap.cursor_id), (vec![11], 11));
+        assert_eq!(load(vec![with_id("photo.jpg", 22)], snap.clone()).0, 0);
+        // 같은 파일의 대소문자만 바뀌었으면(파일 번호가 같다) 그대로 고른다
+        assert_eq!(load(vec![with_id("PHOTO.JPG", 11)], snap.clone()), (1, Some("PHOTO.JPG".to_string())));
+        // 파일 번호를 모르는 목록(Windows)은 이름만으로 고른다
+        assert_eq!(load(vec![with_id("photo.jpg", 0)], snap).0, 1);
     }
 
     /// 성능 측정: QP_BENCH_DIR 폴더를 열거·정렬·필터하는 시간 (cargo test --release -- --ignored --nocapture)

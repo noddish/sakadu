@@ -105,7 +105,7 @@ impl App {
                     self.ensure_visible(p);
                 }
                 // 고르려던 항목(새 폴더)을 실제로 찾았을 때만: 못 찾았는데 열면 엉뚱한 항목의 이름이 바뀐다
-                let found = self.panes[p].tab().cursor_entry().map(|e| e.name_string().to_lowercase()) == r.cursor;
+                let found = self.panes[p].tab().cursor_entry().map(|e| e.name_string().to_lowercase()) == r.cursor.as_ref().map(|c| c.to_lowercase());
                 if r.rename && p == self.active && found && self.edit_mode == EditMode::None {
                     self.begin_rename(p);
                 }

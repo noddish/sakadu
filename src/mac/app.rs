@@ -5,8 +5,10 @@
 //! (이 앱의 상태로 장면을 채워 넘긴다).
 //! 그림·글 파일을 하나 고르면 다른 칸의 오른쪽 아래에 미리 보기 카드가 저절로 뜬다 (도구 막대의 눈으로 끄고 켠다).
 //! 아이콘 보기에서는 그림 파일이 썸네일로 보인다 (뒷줄에서 읽어 둔 것을 그린다).
+//! 파일 작업(새 폴더, 이름 바꾸기)은 할 일을 큐에 넣어 두면 창 쪽이 뒷줄에서 실행하고 결과를 돌려준다 (fileops.rs).
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
+use crate::fileops::{self, Done, Fail, Job, Op};
 use crate::gfx::{Gfx, MONO_LINE_H, Picture};
 use sakadu::draw::{Color, Font, R};
 use sakadu::favorites::{self, Favorite, Favorites, Row};
@@ -23,7 +25,7 @@ use sakadu::ui::*;
 use sakadu::util;
 use sakadu::workspaces::{self, Workspace, Workspaces};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 /// 사이드바 폭: 작업 공간 레일과 그 옆 패널(220)을 합친 폭
@@ -79,6 +81,8 @@ pub enum Hit {
     /// 도구 막대의 칸 나누기·보기 방식 단추 (누르면 메뉴가 열린다)
     LayoutPick,
     ViewPick,
+    /// 도구 막대의 새 폴더 (지금 칸)
+    NewFolder,
     /// 도구 막대의 눈 (자동 미리 보기를 끄고 켠다)
     PreviewToggle,
     /// 미리 보기 카드의 크게 보기 단추, 닫기 단추, 카드의 그 밖의 곳 (카드 아래 칸을 누르지 않게 카드가 받는다)
@@ -200,7 +204,43 @@ pub enum Key {
     PageDown,
     Tab,
     Esc,
+    Return,
     Char(char),
+}
+
+impl Key {
+    /// 누르고 있을 때 되풀이해 받아도 되는 키인지. 파일을 만들거나 고치는 키(Return, 새 폴더의 n)는 한 번 누름에 한 번만 받는다
+    pub fn repeats(self) -> bool {
+        !matches!(self, Key::Return | Key::Char('n'))
+    }
+}
+
+/// 입력 상자(창 쪽의 글 상자 하나)가 지금 무엇을 고치는지
+#[derive(Clone, PartialEq, Debug)]
+pub enum Editing {
+    None,
+    /// 칸 p의 경로 입력
+    Address(usize),
+    /// 지금 공간의 이름
+    Space,
+    /// 목록 항목의 이름
+    Item(ItemEdit),
+}
+
+/// 이름을 고치는 항목. 줄 번호가 아니라 탭·폴더·이름·파일 번호로 적어 둔다: 고치는 동안 목록이 다시 읽히거나 탭이 다른 곳으로
+/// 가면, 그 항목이 아직 그 자리에 있는지 다시 본다 (App::item_edit)
+#[derive(Clone, PartialEq, Debug)]
+pub struct ItemEdit {
+    pane: usize,
+    tab: u64,
+    dir: String,
+    name: String,
+    file_id: u64,
+    is_dir: bool,
+    /// 이 고치기의 번호 (입력 상자가 다른 항목으로 옮겨 갔는지 창 쪽이 안다)
+    serial: u64,
+    /// 확정해서 맡긴 이름 바꾸기의 작업 번호. 그 작업이 끝나기 전에는 다시 확정하지 않는다
+    waiting: Option<u64>,
 }
 
 pub struct Pane {
@@ -596,8 +636,17 @@ pub struct App {
     pub lights_bottom: f32,
     /// 창 없이 그림만 그릴 때 (그림 시험): 신호등과 경로 입력 글자도 직접 그린다 (창에서는 시스템·입력 상자가 그린다)
     pub standalone: bool,
-    /// 경로를 입력하는 칸 (창 쪽 입력 상자가 그 자리에 뜬다)
-    pub editing: Option<usize>,
+    /// 입력 상자가 지금 고치는 것: 경로, 공간 이름, 항목 이름 (창 쪽 입력 상자가 그 자리에 뜬다)
+    pub edit: Editing,
+    /// 항목 이름 고치기를 시작한 횟수 (ItemEdit::serial)
+    edit_serial: u64,
+    /// 맡길 파일 작업 (창 쪽이 뒷줄에서 하나씩 실행하고 on_op_done으로 돌려준다)
+    ops: Vec<Op>,
+    op_seq: u64,
+    /// 방금 만든 새 폴더: (탭, 폴더, 새 폴더의 파일 번호). 그 탭을 다 읽으면 그 줄에서 이름을 고친다
+    name_next: Option<(u64, String, u64)>,
+    /// 파일 작업 뒤 다시 읽어야 하는데 지금 보이지 않는 탭 (보이게 될 때 다시 읽는다)
+    stale: HashSet<u64>,
     /// 칸 p의 칩 줄 오른쪽에 잠깐 보일 알림 (다음 입력 때 지운다)
     flash: Option<(usize, String)>,
     probes: Vec<Probe>,
@@ -624,8 +673,6 @@ pub struct App {
     /// 맥 설정에서 읽은 모양과 강조 색 (창 쪽이 넣어 준다). 색을 정하지 않은 공간은 이 강조 색을 따른다
     dark: bool,
     system_accent: Option<Color>,
-    /// 지금 공간의 이름을 고치는 중 (창 쪽 입력 상자가 이름 자리에 뜬다)
-    pub renaming: bool,
     /// 자동 미리 보기: 그림·글 파일을 고르면 카드가 저절로 뜬다 (도구 막대의 눈으로 끄고 켠다. 숨김 항목 보기처럼 작업 공간과 상관없다)
     auto_preview: bool,
     card: Card,
@@ -663,7 +710,12 @@ impl App {
             requests: Vec::new(),
             lights_bottom: LIGHTS_BOTTOM,
             standalone: false,
-            editing: None,
+            edit: Editing::None,
+            edit_serial: 0,
+            ops: Vec::new(),
+            op_seq: 0,
+            name_next: None,
+            stale: HashSet::new(),
             flash: None,
             probes: Vec::new(),
             probe_seq: [0; 4],
@@ -677,7 +729,6 @@ impl App {
             workspaces: Workspaces::default(),
             dark: theme.dark,
             system_accent: None,
-            renaming: false,
             auto_preview: true,
             card: Card::new(),
             press_on_card: false,
@@ -795,15 +846,38 @@ impl App {
                 tab.state = LoadState::Error(msg);
             }
         }
+        self.name_listed(tab_id);
     }
 
-    /// 쌓인 읽기 요청을 바로 처리한다 (시험·그림용, 창에서는 뒷줄에서 읽는다)
+    /// 탭을 다 읽은 뒤: 방금 만든 새 폴더를 기다리던 탭이면 그 폴더의 줄에서 이름 고치기를 시작한다.
+    /// 그 폴더는 파일 번호로 찾는다. 찾지 못하면(그 사이 다른 곳으로 옮겼거나, 그 탭이 보이지 않거나, 다른 입력 중이면)
+    /// 아무것도 하지 않는다: 이름이 비슷한 줄이나 커서가 놓인 다른 줄에서 시작하지 않는다
+    fn name_listed(&mut self, tab_id: u64) {
+        let Some((_, dir, file_id)) = self.name_next.take_if(|(t, ..)| *t == tab_id) else { return };
+        let Some(p) = (0..self.layout.count()).find(|p| self.panes[*p].tab().id == tab_id) else { return };
+        if self.edit != Editing::None || file_id == 0 {
+            return;
+        }
+        let tab = self.panes[p].tab_mut();
+        if tab.loc.dir() != Some(dir.as_str()) {
+            return;
+        }
+        let Some(vi) = (0..tab.view.len()).find(|vi| tab.entry_at(*vi).is_some_and(|e| e.file_id == file_id)) else { return };
+        tab.select_only(vi);
+        self.begin_item_rename(p);
+    }
+
+    /// 쌓인 읽기 요청과 파일 작업을 바로 처리한다 (시험·그림용, 창에서는 뒷줄에서 한다)
     pub fn settle(&mut self) {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         loop {
-            let (reqs, probes, previews, thumbs) = (self.take_requests(), self.take_probes(), self.take_previews(), self.take_thumbs());
-            if reqs.is_empty() && probes.is_empty() && previews.is_empty() && thumbs.is_empty() {
+            let (reqs, probes, previews, thumbs, ops) = (self.take_requests(), self.take_probes(), self.take_previews(), self.take_thumbs(), self.take_ops());
+            if reqs.is_empty() && probes.is_empty() && previews.is_empty() && thumbs.is_empty() && ops.is_empty() {
                 break;
+            }
+            for op in ops {
+                let result = fileops::run(&op.job);
+                self.on_op_done(&op, result);
             }
             for r in reqs {
                 let result = listing::list_dir(&r.dir);
@@ -991,27 +1065,30 @@ impl App {
     pub fn begin_address(&mut self, p: usize) {
         if self.panes[p].tab().loc.dir().is_some() {
             self.activate_pane(p);
-            self.renaming = false;
-            self.editing = Some(p);
+            self.edit = Editing::Address(p);
         }
     }
 
-    /// 입력을 그만둔다 (경로 입력, 공간 이름 고치기)
+    /// 입력을 그만둔다 (경로 입력, 공간 이름·항목 이름 고치기). 이미 맡긴 이름 바꾸기는 그대로 끝까지 간다
     pub fn cancel_address(&mut self) {
-        self.editing = None;
-        self.renaming = false;
+        self.edit = Editing::None;
     }
 
-    /// 입력 상자의 글을 확정한다. 공간 이름을 고치는 중이면 그 이름으로, 아니면 입력한 경로로 간다.
+    /// 입력 상자의 글을 확정한다: 공간 이름이면 그 이름으로, 항목 이름이면 이름 바꾸기를 맡기고, 경로면 그 경로로 간다.
     /// 경로 확인은 뒷줄에서 하고 결과는 on_probed로 받는다
     pub fn commit_address(&mut self, text: &str) {
-        if std::mem::take(&mut self.renaming) {
-            return self.commit_rename(text);
+        if matches!(self.edit, Editing::Item(_)) {
+            return self.commit_item_rename(text);
         }
-        let Some(p) = self.editing.take() else { return };
-        let (tab, generation) = (self.panes[p].tab().id, self.panes[p].tab().generation);
-        self.probe_seq[p] += 1;
-        self.probes.push(Probe { pane: p, tab, generation, seq: self.probe_seq[p], text: text.to_string() });
+        match std::mem::replace(&mut self.edit, Editing::None) {
+            Editing::Space => self.commit_rename(text),
+            Editing::Address(p) => {
+                let (tab, generation) = (self.panes[p].tab().id, self.panes[p].tab().generation);
+                self.probe_seq[p] += 1;
+                self.probes.push(Probe { pane: p, tab, generation, seq: self.probe_seq[p], text: text.to_string() });
+            }
+            Editing::None | Editing::Item(_) => {}
+        }
     }
 
     /// 그림 시험용: 칸 p에서 text를 입력해 확정한 결과까지 바로 반영한다
@@ -1047,34 +1124,275 @@ impl App {
         }
     }
 
-    /// 입력 상자 자리: 공간 이름을 고치는 중이면 사이드바의 이름 자리, 아니면 칸의 경로 자리 (app.rs addr_rect)
+    /// 입력 상자 자리: 공간 이름이면 사이드바의 이름 자리, 항목 이름이면 그 줄의 이름 자리, 경로면 칸의 경로 자리 (app.rs addr_rect)
     pub fn address_rect(&self) -> Option<R> {
-        if self.renaming {
-            return Some(self.rename_rect());
+        match &self.edit {
+            Editing::None => None,
+            Editing::Space => Some(self.rename_rect()),
+            Editing::Address(p) => {
+                let r = self.pane_rects().into_iter().find(|(q, _)| q == p)?.1;
+                Some(addr_rect(&geom(r)))
+            }
+            Editing::Item(_) => self.item_edit().map(|(_, r)| r),
         }
-        let p = self.editing?;
-        let r = self.pane_rects().into_iter().find(|(q, _)| *q == p)?.1;
-        Some(addr_rect(&geom(r)))
     }
 
-    /// 입력 상자에 처음 넣을 글자: 지금 공간의 이름, 또는 지금 폴더
+    /// 입력 상자에 처음 넣을 글자: 지금 공간의 이름, 고치는 항목의 이름, 또는 지금 폴더
     pub fn address_text(&self) -> String {
-        if self.renaming {
-            return self.workspaces.current_name().unwrap_or_default().to_string();
+        match &self.edit {
+            Editing::None => String::new(),
+            Editing::Space => self.workspaces.current_name().unwrap_or_default().to_string(),
+            Editing::Address(p) => self.panes[*p].tab().loc.dir().unwrap_or_default().to_string(),
+            Editing::Item(e) => e.name.clone(),
         }
-        self.editing.and_then(|p| self.panes[p].tab().loc.dir().map(str::to_string)).unwrap_or_default()
     }
 
-    /// 입력 상자가 지금 무엇을 담는지: 경로를 입력하는 칸 번호, 공간 이름이면 usize::MAX (바뀌면 창 쪽이 글자를 다시 채운다)
-    pub fn edit_key(&self) -> Option<usize> {
-        if self.renaming { Some(usize::MAX) } else { self.editing }
+    /// 입력 상자에서 미리 골라 둘 앞부분의 길이 (UTF-16 단위). 항목 이름을 고칠 때만 있다: 파일은 확장자 앞까지.
+    /// None이면 전체를 골라 둔다
+    pub fn address_select(&self) -> Option<usize> {
+        match &self.edit {
+            Editing::Item(e) => Some(sakadu::fileops::stem_units(&e.name, e.is_dir)),
+            _ => None,
+        }
+    }
+
+    /// 입력 상자의 글자가 상자 왼쪽 끝에서 들어가 시작하는 거리. 항목 이름은 목록에 그려져 있던 이름과 같은 자리에서 시작한다
+    pub fn address_pad(&self) -> f32 {
+        if matches!(self.edit, Editing::Item(_)) { 2.0 } else { 6.0 }
+    }
+
+    /// 입력 상자가 지금 무엇을 담는지 가리는 값 (바뀌면 창 쪽이 글자를 다시 채운다): 경로를 입력하는 칸, 공간 이름, 항목 이름 고치기의 번호
+    pub fn edit_key(&self) -> Option<u64> {
+        match &self.edit {
+            Editing::None => None,
+            Editing::Address(p) => Some(*p as u64),
+            Editing::Space => Some(100),
+            Editing::Item(e) => Some(1000 + e.serial),
+        }
     }
 
     /// 입력 상자가 키 입력을 잃었다 (다른 곳을 눌렀다): 입력을 그만둔다. 입력 중이었으면 true
     pub fn end_editing(&mut self) -> bool {
-        let was = self.renaming || self.editing.is_some();
+        let was = self.edit != Editing::None;
         self.cancel_address();
         was
+    }
+
+    // ---------- 파일 작업: 새 폴더, 이름 바꾸기 ----------
+
+    fn push_op(&mut self, tab: u64, job: Job) -> u64 {
+        self.op_seq += 1;
+        self.ops.push(Op { seq: self.op_seq, tab, job });
+        self.op_seq
+    }
+
+    /// 맡길 파일 작업을 내준다. 창 쪽이 뒷줄에서 fileops::run으로 하나씩 실행하고 on_op_done으로 돌려준다
+    pub fn take_ops(&mut self) -> Vec<Op> {
+        std::mem::take(&mut self.ops)
+    }
+
+    /// 칸 p의 폴더에 새 폴더를 만든다 (⇧⌘N, 도구 막대). 만든 뒤 그 줄에서 이름을 바로 고칠 수 있다
+    pub fn new_folder(&mut self, p: usize) {
+        let tab = self.panes[p].tab();
+        let (Some(dir), LoadState::Ready) = (tab.loc.dir(), &tab.state) else { return };
+        let (tab, dir) = (tab.id, dir.to_string());
+        self.push_op(tab, Job::NewFolder { dir });
+    }
+
+    /// 칸 p에서 고른 항목의 이름을 고치기 시작한다 (Return). 하나만 골랐을 때만: 여럿이면 알리고, 없으면 아무것도 하지 않는다
+    pub fn begin_item_rename(&mut self, p: usize) {
+        let tab = self.panes[p].tab();
+        let Some(dir) = tab.loc.dir().map(str::to_string) else { return };
+        let chosen: Vec<usize> = (0..tab.view.len()).filter(|vi| tab.is_selected(*vi)).take(2).collect();
+        let &[vi] = chosen.as_slice() else {
+            if chosen.len() > 1 {
+                self.flash = Some((p, "이름은 하나씩 바꿀 수 있어요".to_string()));
+            }
+            return;
+        };
+        let Some(e) = tab.entry_at(vi) else { return };
+        let (tab_id, name, file_id, is_dir) = (tab.id, e.name_string(), e.file_id, e.is_dir());
+        // 파일 번호를 모르는 항목은 실행할 때 같은 항목인지 볼 수 없다
+        if file_id == 0 {
+            self.flash = Some((p, "이 항목은 이름을 바꿀 수 없어요".to_string()));
+            return;
+        }
+        self.activate_pane(p);
+        let tab = self.panes[p].tab_mut();
+        tab.cursor = vi;
+        tab.anchor = vi;
+        self.ensure_visible(p);
+        // 창이 너무 낮아 그 줄이 다 보이지 않으면 시작하지 않는다
+        if self.item_name_rect(p).is_none() {
+            return;
+        }
+        self.edit_serial += 1;
+        self.edit = Editing::Item(ItemEdit { pane: p, tab: tab_id, dir, name, file_id, is_dir, serial: self.edit_serial, waiting: None });
+    }
+
+    /// 고치는 중인 항목과 그 이름 상자 자리. 그 항목이 그 칸의 지금 탭, 그 폴더의 커서 줄에 그대로 있고 줄이 다 보일 때만 있다
+    fn item_edit(&self) -> Option<(&ItemEdit, R)> {
+        let Editing::Item(e) = &self.edit else { return None };
+        if e.pane >= self.layout.count() {
+            return None;
+        }
+        let tab = self.panes[e.pane].tab();
+        if tab.id != e.tab || tab.loc.dir() != Some(e.dir.as_str()) {
+            return None;
+        }
+        let cur = tab.cursor_entry()?;
+        if cur.file_id != e.file_id || cur.name_string() != e.name {
+            return None;
+        }
+        Some((e, self.item_name_rect(e.pane)?))
+    }
+
+    /// 항목 이름을 고치는 중인데 그 항목이 더는 그 자리에 없으면(탭이 다른 곳으로 갔거나, 다른 탭·칸 나누기로 바뀌었거나,
+    /// 목록에서 사라졌거나, 그 줄이 가려졌으면) 고치기를 끝낸다. 창 쪽이 입력 상자를 맞추기 전에 부른다
+    pub fn sync_edit(&mut self) {
+        if matches!(self.edit, Editing::Item(_)) && self.item_edit().is_none() {
+            self.edit = Editing::None;
+        }
+    }
+
+    /// 칸 p의 커서 줄에서 이름이 놓인 자리 (공통 칸 그리기가 이름 상자를 그리는 자리와 같다). 줄이 다 보이지 않으면 None
+    fn item_name_rect(&self, p: usize) -> Option<R> {
+        let list = self.list_rect(p)?;
+        let tab = self.panes[p].tab();
+        name_edit_rect(list, self.panes[p].view, DEFAULT_COLS, tab.cursor, tab.scroll)
+    }
+
+    /// 고친 이름을 확정한다: 이름 바꾸기를 맡기고, 끝날 때까지 상자는 그대로 둔다.
+    /// 쓸 수 없는 이름이나 이미 있는 이름이면 상자를 친 그대로 열어 둔 채 알린다
+    fn commit_item_rename(&mut self, text: &str) {
+        let Some((e, _)) = self.item_edit() else {
+            // 고치는 동안 탭이 다른 곳으로 갔거나 목록이 바뀌었다
+            self.edit = Editing::None;
+            self.flash = Some((self.active, "그 사이 목록이 바뀌어 이름을 바꾸지 않았어요".to_string()));
+            return;
+        };
+        if e.waiting.is_some() {
+            return;
+        }
+        let e = e.clone();
+        let new = text.trim();
+        if new.is_empty() || new == e.name {
+            self.edit = Editing::None;
+            return;
+        }
+        if let Some(problem) = sakadu::fileops::mac_name_problem(new, self.show_hidden) {
+            self.flash = Some((e.pane, problem));
+            return;
+        }
+        // 목록에 같은 이름이 보이면 바로 알린다 (목록이 낡았을 수 있어, 실행할 때 한 번 더 걸러진다)
+        if self.panes[e.pane].tab().entries.iter().any(|x| x.file_id != e.file_id && x.name_string() == new) {
+            self.flash = Some((e.pane, "같은 이름이 이미 있어요".to_string()));
+            return;
+        }
+        let seq = self.push_op(e.tab, Job::Rename { dir: e.dir, from: e.name, to: new.to_string(), file_id: e.file_id });
+        if let Editing::Item(cur) = &mut self.edit {
+            cur.waiting = Some(seq);
+        }
+    }
+
+    /// 뒷줄에서 끝낸 파일 작업의 결과
+    pub fn on_op_done(&mut self, op: &Op, result: Result<Done, Fail>) {
+        // 그 작업을 낸 탭이 지금 보이는 칸 (알림도 그 칸에. 보이지 않으면 지금 칸에)
+        let pane = (0..self.layout.count()).find(|p| self.panes[*p].tab().id == op.tab);
+        let note_at = pane.unwrap_or(self.active);
+        let here = |a: &App, dir: &str| pane.filter(|p| a.panes[*p].tab().loc.dir() == Some(dir));
+        // 이 작업이 끝나기를 기다리던 이름 상자
+        let waiting = matches!(&self.edit, Editing::Item(e) if e.waiting == Some(op.seq));
+        match (&op.job, result) {
+            (Job::NewFolder { dir }, Ok(Done::NewFolder { name, file_id })) => {
+                // 그 탭이 아직 그 폴더를 보이고 있으면 만든 폴더를 고르고, 다 읽은 뒤 그 줄에서 이름을 고친다
+                if let Some(p) = here(self, dir) {
+                    self.select_after(p, &name);
+                    self.name_next = Some((op.tab, dir.clone(), file_id));
+                }
+            }
+            (Job::Rename { dir, to, file_id, .. }, Ok(_)) => {
+                if waiting {
+                    self.edit = Editing::None;
+                }
+                self.deselect_file(dir, *file_id);
+                if let Some(p) = here(self, dir) {
+                    self.select_after(p, to);
+                }
+            }
+            (_, Ok(_)) => {}
+            (Job::Rename { .. }, Err(Fail::Exists)) => {
+                // 상자는 친 그대로 열어 둔다: 다른 이름으로 다시 확정할 수 있다
+                if let Editing::Item(e) = &mut self.edit
+                    && waiting
+                {
+                    e.waiting = None;
+                }
+                self.flash = Some((note_at, "같은 이름이 이미 있어요".to_string()));
+            }
+            (job, Err(fail)) => {
+                if waiting {
+                    self.edit = Editing::None;
+                }
+                let what = match job {
+                    Job::NewFolder { .. } => "폴더를 만들지 못했어요",
+                    Job::Rename { .. } => "이름을 바꾸지 못했어요",
+                };
+                let why = match fail {
+                    Fail::Exists => "같은 이름이 이미 있어요".to_string(),
+                    Fail::Changed => "그 사이 항목이 바뀌었어요".to_string(),
+                    Fail::Other(msg) => msg,
+                };
+                self.flash = Some((note_at, format!("{what}: {why}")));
+            }
+        }
+        // 잘 끝났든 아니든 다시 읽는다 (하지 못한 까닭이 낡은 목록일 수 있다)
+        self.refresh_changed();
+    }
+
+    /// 칸 p를 다음에 읽은 뒤 그 이름을 고르고 보이게 한다 (스크롤은 지금 자리에서)
+    fn select_after(&mut self, p: usize, name: &str) {
+        let tab = self.panes[p].tab_mut();
+        tab.restore = Some(Restore { scroll: tab.scroll, cursor_index: tab.cursor, ..Restore::select(name) });
+    }
+
+    /// 폴더 dir 안의 이름이 바뀐 항목을, 그 폴더를 보이는 모든 탭의 고른 것에서 뺀다: 아직 다시 읽지 않은 목록에 고른 채 남은
+    /// 옛 이름이, 나중에 그 이름을 갖게 된 다른 항목의 선택으로 되살아나지 않게.
+    /// 파일 번호는 한 볼륨 안에서만 서로 다르므로 그 폴더를 보이는 탭에서만 찾는다 (다른 볼륨의 파일이 같은 번호일 수 있다)
+    fn deselect_file(&mut self, dir: &str, file_id: u64) {
+        if file_id == 0 {
+            return;
+        }
+        for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()).filter(|tab| tab.loc.dir() == Some(dir)) {
+            for e in tab.entries.iter_mut().filter(|e| e.file_id == file_id) {
+                e.selected = false;
+            }
+        }
+    }
+
+    /// 파일 작업 뒤: 보이는 칸은 모두 다시 읽고 (맥 버전에는 아직 폴더 감시가 없다),
+    /// 보이지 않는 탭은 보이게 될 때 다시 읽게 적어 둔다
+    fn refresh_changed(&mut self) {
+        let shown = self.layout.count();
+        for (p, pane) in self.panes.iter().enumerate() {
+            for (i, tab) in pane.tabs.iter().enumerate() {
+                if tab.generation > 0 && !(p < shown && i == pane.active) {
+                    self.stale.insert(tab.id);
+                }
+            }
+        }
+        for p in 0..shown {
+            self.refresh(p);
+        }
+    }
+
+    /// 보이는 칸 가운데 다 읽은 탭을 다시 읽는다 (창이 다시 앞으로 올 때: 다른 앱에서 바뀐 것이 보이게). 읽는 중인 탭은 그대로 둔다
+    pub fn refresh_shown(&mut self) {
+        for p in 0..self.layout.count() {
+            if self.panes[p].tab().state == LoadState::Ready {
+                self.refresh(p);
+            }
+        }
     }
 
     // ---------- 세션 ----------
@@ -1120,6 +1438,9 @@ impl App {
     /// 저장한 화면 상태로 연다. 없어진 폴더(와 맥에서 쓰지 않는 '내 PC'·시작 화면)는 home으로 바꾼다
     pub fn restore(&mut self, s: &Session, home: &str) {
         self.requests.clear();
+        // 탭을 새로 만든다: 옛 탭에 걸어 둔 표시는 버린다
+        self.stale.clear();
+        self.name_next = None;
         self.layout = Layout::ALL[(s.layout as usize).min(4)];
         self.split = (s.split.0.clamp(0.15, 0.85), s.split.1.clamp(0.15, 0.85));
         self.show_hidden = s.show_hidden;
@@ -1161,7 +1482,7 @@ impl App {
         if self.workspaces.current.is_none_or(|c| c >= self.workspaces.list.len()) {
             self.workspaces.current = Some(0);
         }
-        self.renaming = false;
+        self.end_space_rename();
         self.side_scroll = 0.0;
         self.retheme();
     }
@@ -1245,8 +1566,7 @@ impl App {
         self.restore(&state, &home);
         self.show_hidden = hidden;
         self.auto_preview = auto_preview;
-        self.editing = None;
-        self.renaming = false;
+        self.edit = Editing::None;
         self.flash = None;
         self.menu = None;
         self.drag = None;
@@ -1287,7 +1607,7 @@ impl App {
         if self.workspaces.remove(i) {
             self.open_current_workspace();
         }
-        self.renaming = false;
+        self.end_space_rename();
         self.save_workspaces();
     }
 
@@ -1304,13 +1624,18 @@ impl App {
 
     /// 지금 공간의 이름을 고치기 시작한다 (창 쪽 입력 상자가 이름 자리에 뜬다. 확정은 commit_address, 취소는 cancel_address)
     pub fn begin_rename(&mut self) {
-        self.editing = None;
-        self.renaming = true;
+        self.edit = Editing::Space;
+    }
+
+    /// 공간 이름을 고치던 중이면 그만둔다 (다른 입력은 그대로 둔다)
+    fn end_space_rename(&mut self) {
+        if self.edit == Editing::Space {
+            self.edit = Editing::None;
+        }
     }
 
     /// 고친 이름을 지금 공간에 적는다. 비었거나 그대로면 두고, 다른 공간과 겹치면 번호를 붙인다
     fn commit_rename(&mut self, text: &str) {
-        self.renaming = false;
         let name = workspaces::clean_name(text);
         let Some(c) = self.workspaces.current else { return };
         if name.is_empty() || self.workspaces.list[c].name == name {
@@ -1412,7 +1737,8 @@ impl App {
         if pane.tabs.len() <= 1 || i >= pane.tabs.len() {
             return;
         }
-        pane.tabs.remove(i);
+        let closed = pane.tabs.remove(i);
+        self.stale.remove(&closed.id);
         if pane.active > i || pane.active >= pane.tabs.len() {
             pane.active = pane.active.saturating_sub(1);
         }
@@ -1432,10 +1758,13 @@ impl App {
         self.activate_tab(p, if back { (i + n - 1) % n } else { (i + 1) % n });
     }
 
-    /// 한 번도 읽지 않은 탭이면 읽는다
+    /// 한 번도 읽지 않은 탭이면 읽고, 파일 작업 뒤 다시 읽기로 해 둔 탭이면 다시 읽는다
     fn load_if_new(&mut self, p: usize) {
-        if self.panes[p].tab().generation == 0 {
+        let tab = self.panes[p].tab();
+        if tab.generation == 0 {
             self.load(p);
+        } else if self.stale.remove(&tab.id) {
+            self.refresh(p);
         }
     }
 
@@ -1916,11 +2245,11 @@ impl App {
         self.side_scroll = self.side_scroll.clamp(0.0, if max < 0.5 { 0.0 } else { max });
     }
 
-    /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다. 오른쪽 끝은 자동 미리 보기의 눈.
-    /// 새 폴더·검색은 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
+    /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다. 오른쪽 끝은 새 폴더와 자동 미리 보기의 눈.
+    /// 검색은 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
     fn toolbar(&self) -> ToolbarGeom {
         let a = self.area();
-        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: false, preview: true, search: false, search_w: 0.0 })
+        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: true, preview: true, search: false, search_w: 0.0 })
     }
 
     /// 탭 칩 자리와 새 탭(+) 자리 (app.rs chips와 같다: 오른쪽 항목 수 자리 앞까지, 넘치면 지금 탭을 지킨다)
@@ -1977,7 +2306,7 @@ impl App {
             // 도구 막대: 뒤로·앞으로는 지금 칸에 대해 움직인다
             let m = self.toolbar();
             let p = self.active;
-            let hits = [(m.back, Hit::Back(p)), (m.fwd, Hit::Fwd(p)), (m.layout, Hit::LayoutPick), (m.view, Hit::ViewPick), (m.preview, Hit::PreviewToggle)];
+            let hits = [(m.back, Hit::Back(p)), (m.fwd, Hit::Fwd(p)), (m.layout, Hit::LayoutPick), (m.view, Hit::ViewPick), (m.new_folder, Hit::NewFolder), (m.preview, Hit::PreviewToggle)];
             return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);
         }
         // 미리 보기 카드는 칸 위에 떠 있다: 카드 안은 어디든 카드가 받는다 (아래 칸을 누르지 않게)
@@ -2049,9 +2378,8 @@ impl App {
         } else if on_card {
             hit = self.hit_with(g, x, y, false);
         }
-        // 입력 상자 밖을 누르면 입력(경로, 공간 이름)을 그만둔다. 알림은 다음 입력 때 지운다
-        self.editing = None;
-        self.renaming = false;
+        // 입력 상자 밖을 누르면 입력(경로, 공간 이름, 항목 이름)을 그만둔다. 알림은 다음 입력 때 지운다
+        self.edit = Editing::None;
         self.flash = None;
         // ⌃-누르기는 오른쪽 단추와 같다
         if mods.ctrl && self.ask_menu(hit) {
@@ -2075,6 +2403,7 @@ impl App {
             Hit::SideRow(i) => self.open_side_row(i),
             Hit::LayoutPick => self.menu = Some(MenuKind::Layout),
             Hit::ViewPick => self.menu = Some(MenuKind::View),
+            Hit::NewFolder => self.new_folder(self.active),
             Hit::PreviewToggle => self.toggle_auto_preview(),
             // 카드는 단추가 아닌 곳을 눌러도 커지고 작아진다
             Hit::CardExpand | Hit::Card => self.toggle_card_large(),
@@ -2153,6 +2482,10 @@ impl App {
             Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) => p,
             _ => return,
         };
+        // 이름을 고치는 칸은 스크롤하지 않는다 (트랙패드에 손이 스쳐 그 줄이 밀려나면 치던 이름을 잃는다)
+        if matches!(&self.edit, Editing::Item(e) if e.pane == p) {
+            return;
+        }
         self.panes[p].tab_mut().scroll += dy;
         self.clamp_scroll(p);
     }
@@ -2176,6 +2509,9 @@ impl App {
             (Key::Char('g'), true, false, false) if m.shift => self.begin_address(p),
             (Key::Up | Key::Down | Key::Left | Key::Right, false, false, false) | (Key::Home | Key::End | Key::PageUp | Key::PageDown, false, false, false) => self.move_cursor(key, m.shift),
             (Key::Down, true, false, false) | (Key::Char('o'), true, false, false) => self.open_selected(p),
+            // 파일 작업: Return 이름 바꾸기, ⇧⌘N 새 폴더 (Finder와 같다)
+            (Key::Return, false, false, false) => self.begin_item_rename(p),
+            (Key::Char('n'), true, false, false) if m.shift => self.new_folder(p),
             (Key::Up, true, false, false) => self.go_up(p),
             (Key::Char('['), true, false, false) => self.go_back(p),
             (Key::Char(']'), true, false, false) => self.go_forward(p),
@@ -2274,7 +2610,7 @@ impl App {
         paint_rail(g, t, &RailScene { geom: &rail, spaces: &spaces, current, hover, drop: None });
 
         // 지금 공간의 이름. 고치는 중이면 입력 상자의 바탕과 테두리만 (글자는 창 쪽 입력 상자가 그린다)
-        if self.renaming {
+        if self.edit == Editing::Space {
             let er = self.rename_rect();
             g.fill_round(er, R_ROW, t.pane);
             g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
@@ -2329,6 +2665,7 @@ impl App {
             Hit::Fwd(_) => ToolbarHover::Fwd,
             Hit::LayoutPick => ToolbarHover::Layout,
             Hit::ViewPick => ToolbarHover::View,
+            Hit::NewFolder => ToolbarHover::NewFolder,
             Hit::PreviewToggle => ToolbarHover::Preview,
             _ => ToolbarHover::None,
         };
@@ -2343,7 +2680,7 @@ impl App {
                 can_back: !tab.back.is_empty(),
                 can_fwd: !tab.fwd.is_empty(),
                 can_up: can_go_up(&tab.loc),
-                new_folder_ok: false,
+                new_folder_ok: tab.loc.dir().is_some(),
                 view_ok: true,
                 preview_on: self.auto_preview,
                 search_on: false,
@@ -2355,7 +2692,7 @@ impl App {
         );
     }
 
-    /// 칸 하나: 이 앱의 상태로 장면을 채워 공통 칸 그리기에 넘긴다 (맥에 아직 없는 필터·이름 바꾸기·끌어 놓기는 비워 둔다)
+    /// 칸 하나: 이 앱의 상태로 장면을 채워 공통 칸 그리기에 넘긴다 (맥에 아직 없는 필터·끌어 놓기는 비워 둔다)
     fn paint_pane(&self, g: &mut Gfx, t: &Theme, p: usize, r: R) {
         let pane = &self.panes[p];
         let tab = pane.tab();
@@ -2368,7 +2705,9 @@ impl App {
         let count_text = flash.unwrap_or_else(|| count_text(tab));
         let cw = g.measure(&count_text, Font::Small).min(gm.head.w() * 0.6);
         let count_rect = R::new(gm.head.r - 8.0 - cw, gm.head.t + 8.0, gm.head.r - 8.0, gm.head.t + 36.0);
-        let editing = self.editing == Some(p);
+        let editing = self.edit == Editing::Address(p);
+        // 이 칸에서 이름을 고치는 항목 (커서 줄에 이름 상자가 뜬다)
+        let naming = self.item_edit().filter(|(e, _)| e.pane == p);
         let dir = tab.loc.dir();
         let scene = PaneScene {
             r,
@@ -2392,7 +2731,7 @@ impl App {
             address: editing,
             // 창에서는 입력 상자가 글자를 그린다. 그림 시험에서만 직접 그린다
             address_text: dir.filter(|_| editing && self.standalone),
-            renaming: false,
+            renaming: naming.is_some(),
             dragged_tab: None,
             tab_drop: None,
             drop_on_pane: false,
@@ -2407,6 +2746,13 @@ impl App {
         };
         paint_pane_head(g, t, &scene);
         paint_pane_list(g, &mut self.art(), t, &scene);
+        // 창에서는 입력 상자가 고치는 이름을 그린다. 그림 시험에서만 직접 그린다: 이름과, 미리 골라 둔 앞부분의 바탕
+        if let (true, Some((e, r))) = (self.standalone, naming) {
+            let stem: String = String::from_utf16_lossy(&e.name.encode_utf16().take(sakadu::fileops::stem_units(&e.name, e.is_dir)).collect::<Vec<_>>());
+            let x = r.l + 4.0;
+            g.fill(R::new(x, r.t + 3.0, (x + g.measure(&stem, Font::Normal)).min(r.r - 4.0), r.b - 3.0), alpha(t.accent, 0.28));
+            g.text(&e.name, R::new(x, r.t, r.r - 4.0, r.b), Font::Normal, t.text);
+        }
         paint_pane_border(g, t, &scene);
     }
 
@@ -2792,17 +3138,17 @@ mod tests {
         assert!(x < gm.crumb.r, "an empty spot after the last crumb");
         assert_eq!(a.hit(&g, x, y), Hit::CrumbEmpty(1));
         a.mouse_down(&g, x, y, Mods::default(), 1);
-        assert_eq!((a.editing, a.active()), (Some(1), 1));
+        assert_eq!((a.edit.clone(), a.active()), (Editing::Address(1), 1));
         assert_eq!(a.address_text(), home);
         assert!(a.address_rect().is_some());
         a.commit_address(&util::join(&util::join(&home, "업무"), "회의록.md"));
         a.settle();
-        assert_eq!(a.editing, None);
+        assert_eq!(a.edit, Editing::None);
         assert_eq!(a.pane(1).tab().loc, Location::Dir(util::join(&home, "업무")));
         assert_eq!(a.pane(1).tab().cursor_entry().unwrap().name_string(), "회의록.md");
         // 없는 경로: 그대로 두고 알림
         a.key(Key::Char('l'), Mods { cmd: true, ..Default::default() });
-        assert_eq!(a.editing, Some(1));
+        assert_eq!(a.edit, Editing::Address(1));
         a.commit_address("/없는/경로");
         a.settle();
         assert!(a.flash.as_ref().is_some_and(|(p, m)| *p == 1 && m.contains("찾을 수 없어요")));
@@ -2837,10 +3183,10 @@ mod tests {
         }
         // ⌘⇧G로 열고, 목록을 누르면 취소된다 (알림도 지운다)
         a.key(Key::Char('g'), Mods { cmd: true, shift: true, ..Default::default() });
-        assert_eq!(a.editing, Some(1));
+        assert_eq!(a.edit, Editing::Address(1));
         let l = a.list_rect(0).unwrap();
         a.mouse_down(&g, l.l + 60.0, l.b - 10.0, Mods::default(), 1);
-        assert_eq!((a.editing, a.flash.is_none()), (None, true));
+        assert_eq!((a.edit.clone(), a.flash.is_none()), (Editing::None, true));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2975,10 +3321,10 @@ mod tests {
         assert_eq!(a.workspaces().current, Some(1));
         let w = a.workspaces().current().unwrap();
         assert_eq!((w.name.as_str(), w.color.as_str()), ("업무", "blue"));
-        assert!(a.renaming && a.address_rect().is_some());
-        assert_eq!((a.address_text().as_str(), a.edit_key()), ("업무", Some(usize::MAX)));
+        assert!(a.edit == Editing::Space && a.address_rect().is_some());
+        assert_eq!((a.address_text().as_str(), a.address_select()), ("업무", None));
         a.commit_address("  월말 정산 ");
-        assert_eq!((a.renaming, a.workspaces().current_name()), (false, Some("월말 정산")));
+        assert_eq!((a.edit.clone(), a.workspaces().current_name()), (Editing::None, Some("월말 정산")));
         // 새 공간에서 화면을 바꾼다: 세 칸, 첫 칸에 탭 둘
         a.set_layout(Layout::Three);
         a.new_tab(0);
@@ -3001,17 +3347,17 @@ mod tests {
         let (x, y) = mid(a.side_title());
         assert_eq!(a.hit(&g, x, y), Hit::SideTitle);
         a.mouse_down(&g, x, y, Mods::default(), 1);
-        assert!(!a.renaming);
+        assert_eq!(a.edit, Editing::None);
         a.mouse_down(&g, x, y, Mods::default(), 2);
-        assert!(a.renaming);
+        assert_eq!(a.edit, Editing::Space);
         let l = a.list_rect(0).unwrap();
         a.mouse_down(&g, l.l + 60.0, l.b - 10.0, Mods::default(), 1);
-        assert_eq!((a.renaming, a.workspaces().current_name()), (false, Some("월말 정산")));
+        assert_eq!((a.edit.clone(), a.workspaces().current_name()), (Editing::None, Some("월말 정산")));
         a.begin_rename();
         a.commit_address("기본");
         assert_eq!(a.workspaces().current_name(), Some("기본 2"));
         a.begin_rename();
-        assert!(a.end_editing() && !a.renaming && !a.end_editing());
+        assert!(a.end_editing() && a.edit == Editing::None && !a.end_editing());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3043,7 +3389,7 @@ mod tests {
         assert_ne!(orange, before);
         // 이름 바꾸기는 지금 공간의 메뉴에만 있다
         a.pick_menu(MenuKind::Space(0), workspaces::COLORS.len());
-        assert!(a.renaming);
+        assert_eq!(a.edit, Editing::Space);
         a.cancel_address();
         // 공간이 둘이면 지우기가 생긴다. 새 공간은 다른 색을 받는다
         a.new_workspace();
@@ -3356,6 +3702,271 @@ mod tests {
         d.open_saved(Workspaces::default(), Some(&session), &home);
         assert_eq!((d.workspaces().list.len(), d.workspaces().current_name(), d.layout()), (1, Some("기본"), Layout::Four));
         assert_eq!(d.workspaces().list[0].state.layout, 4, "the new workspace starts from that screen");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 칸 p에서 고른 줄의 이름들(보이는 순서)과 커서 줄의 이름
+    fn picked(a: &App, p: usize) -> (Vec<String>, String) {
+        let t = a.pane(p).tab();
+        let chosen = (0..t.view.len()).filter_map(|vi| t.entry_at(vi)).filter(|e| e.selected).map(Entry::name_string).collect();
+        (chosen, t.cursor_entry().map(Entry::name_string).unwrap_or_default())
+    }
+
+    /// 새 폴더(⇧⌘N): 만들고, 다 읽으면 그 줄에서 이름을 고친다. 같은 이름이 있으면 번호가 붙는다
+    #[test]
+    fn new_folder_is_made_selected_and_renamed_in_place() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, _g) = app(&work);
+        let shift_cmd = Mods { cmd: true, shift: true, ..Default::default() };
+        assert!(a.key(Key::Char('n'), shift_cmd));
+        a.settle();
+        assert!(std::fs::metadata(util::join(&work, "새 폴더")).unwrap().is_dir());
+        assert_eq!(names(&a, 0), ["2026 4분기", "새 폴더", "예산.csv", "회의록.md"]);
+        assert_eq!(picked(&a, 0), (vec!["새 폴더".to_string()], "새 폴더".to_string()));
+        assert!(names(&a, 1).contains(&"새 폴더".to_string()), "the other pane on the same folder was read again");
+        // 이름 상자가 그 줄에 떠 있다. 폴더는 이름 전체를 골라 둔다
+        assert!(matches!(&a.edit, Editing::Item(e) if e.name == "새 폴더" && e.is_dir));
+        let (list, rect) = (a.list_rect(0).unwrap(), a.address_rect().unwrap());
+        assert!(rect.t >= list.t && rect.b <= list.b && rect.l >= list.l && rect.r <= list.r, "{rect:?} in {list:?}");
+        assert_eq!((a.address_text().as_str(), a.address_select()), ("새 폴더", Some(4)));
+        // 확정: 끝날 때까지 상자는 그대로 있고, 끝나면 새 이름이 골라져 있다
+        a.commit_address("  자료 모음 ");
+        assert!(matches!(&a.edit, Editing::Item(e) if e.waiting.is_some()));
+        a.settle();
+        assert_eq!(a.edit, Editing::None);
+        assert!(std::fs::metadata(util::join(&work, "자료 모음")).unwrap().is_dir());
+        assert!(std::fs::symlink_metadata(util::join(&work, "새 폴더")).is_err());
+        assert_eq!(picked(&a, 0), (vec!["자료 모음".to_string()], "자료 모음".to_string()));
+        // 두 번 더 만들면 둘째에는 번호가 붙고, 이름 상자는 나중에 만든 폴더에 있다
+        a.key(Key::Char('n'), shift_cmd);
+        a.settle();
+        assert!(matches!(&a.edit, Editing::Item(e) if e.name == "새 폴더"));
+        a.cancel_address();
+        a.key(Key::Char('n'), shift_cmd);
+        a.settle();
+        assert!(matches!(&a.edit, Editing::Item(e) if e.name == "새 폴더 2"));
+        // Esc: 폴더는 만든 이름 그대로 남는다
+        a.cancel_address();
+        assert_eq!(a.edit, Editing::None);
+        assert!(std::fs::metadata(util::join(&work, "새 폴더")).unwrap().is_dir() && std::fs::metadata(util::join(&work, "새 폴더 2")).unwrap().is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 이름 바꾸기(Return): 하나만 골랐을 때 그 줄에서. 쓸 수 없는 이름과 이미 있는 이름은 상자를 연 채로 알리고 아무것도 바꾸지 않는다
+    #[test]
+    fn return_renames_the_one_selected_item() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        let flashed = |a: &App, word: &str| a.flash.as_ref().is_some_and(|(p, m)| *p == 0 && m.contains(word));
+        // 고른 것이 없으면 아무 일도 없다
+        assert!(a.key(Key::Return, Mods::default()));
+        assert_eq!(a.edit, Editing::None);
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        a.key(Key::Return, Mods::default());
+        assert!(matches!(&a.edit, Editing::Item(e) if e.name == "예산.csv" && !e.is_dir));
+        assert_eq!((a.address_text().as_str(), a.address_select()), ("예산.csv", Some(2)), "the extension is left out of the selection");
+        // 그대로 두면 아무 일 없이 끝난다
+        a.commit_address("예산.csv");
+        assert_eq!((a.edit.clone(), a.take_ops().len()), (Editing::None, 0));
+        // 쓸 수 없는 이름, 숨김이 되는 이름, 목록에 이미 있는 이름: 상자는 그대로, 알림만
+        a.key(Key::Return, Mods::default());
+        a.commit_address("예산/최종.csv");
+        assert!(matches!(a.edit, Editing::Item(_)) && flashed(&a, "/"), "{:?}", a.flash);
+        a.commit_address(".예산");
+        assert!(matches!(a.edit, Editing::Item(_)) && flashed(&a, "숨김"), "{:?}", a.flash);
+        a.commit_address("회의록.md");
+        assert!(matches!(a.edit, Editing::Item(_)) && flashed(&a, "이미 있어요"), "{:?}", a.flash);
+        assert_eq!(a.take_ops().len(), 0, "nothing was asked of the disk");
+        // 목록에는 아직 없지만 디스크에는 있는 이름 (목록이 낡았다): 실행할 때 걸리고, 두 파일 모두 그대로다
+        std::fs::write(util::join(&work, "몰래 생긴 파일.csv"), b"other").unwrap();
+        a.flash = None;
+        a.commit_address("몰래 생긴 파일.csv");
+        a.settle();
+        assert!(matches!(&a.edit, Editing::Item(e) if e.waiting.is_none()), "the box stays open for another name: {:?}", a.edit);
+        assert!(flashed(&a, "이미 있어요"), "{:?}", a.flash);
+        assert_eq!(std::fs::read(util::join(&work, "몰래 생긴 파일.csv")).unwrap(), b"other");
+        assert_eq!(std::fs::read(util::join(&work, "예산.csv")).unwrap(), b"x");
+        assert!(names(&a, 0).contains(&"몰래 생긴 파일.csv".to_string()), "the list was read again");
+        // 다른 이름으로 확정: 파일이 바뀌고 그 이름이 골라진다
+        a.commit_address("예산 최종.csv");
+        a.settle();
+        assert_eq!(a.edit, Editing::None);
+        assert_eq!(std::fs::read(util::join(&work, "예산 최종.csv")).unwrap(), b"x");
+        assert!(std::fs::symlink_metadata(util::join(&work, "예산.csv")).is_err());
+        assert_eq!(picked(&a, 0), (vec!["예산 최종.csv".to_string()], "예산 최종.csv".to_string()));
+        // 여럿을 골랐으면 고치지 않고 알린다
+        a.select_all();
+        a.key(Key::Return, Mods::default());
+        assert!(a.edit == Editing::None && flashed(&a, "하나씩"), "{:?}", a.flash);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 목록이 낡았을 때: 고친 이름의 파일이 그 사이 다른 파일로 바뀌었으면 이름을 바꾸지 않는다 (파일 번호가 다르다)
+    #[test]
+    fn rename_is_refused_when_another_file_took_the_name() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        click_name(&mut a, &g, 0, "회의록.md", Mods::default());
+        a.key(Key::Return, Mods::default());
+        // 앱 밖에서: 원래 파일은 다른 이름이 되고, 같은 이름의 새 파일이 생겼다
+        std::fs::rename(util::join(&work, "회의록.md"), util::join(&work, "옮긴 회의록.md")).unwrap();
+        std::fs::write(util::join(&work, "회의록.md"), b"new").unwrap();
+        a.commit_address("11월 회의록.md");
+        a.settle();
+        assert_eq!(a.edit, Editing::None);
+        assert!(a.flash.as_ref().is_some_and(|(_, m)| m.contains("바뀌었어요")), "{:?}", a.flash);
+        assert_eq!(std::fs::read(util::join(&work, "회의록.md")).unwrap(), b"new");
+        assert_eq!(std::fs::read(util::join(&work, "옮긴 회의록.md")).unwrap(), b"x");
+        assert!(std::fs::symlink_metadata(util::join(&work, "11월 회의록.md")).is_err());
+        assert!(names(&a, 0).contains(&"옮긴 회의록.md".to_string()), "the list was read again");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 이름을 고치는 중에 그 탭이 다른 곳으로 가거나 그 줄이 보이지 않게 되면 고치기가 끝나고, 확정해도 아무것도 바꾸지 않는다
+    #[test]
+    fn rename_ends_when_its_row_is_no_longer_there() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        let begin = |a: &mut App, p: usize| {
+            click_name(a, &g, p, "예산.csv", Mods::default());
+            a.key(Key::Return, Mods::default());
+            assert!(matches!(&a.edit, Editing::Item(e) if e.pane == p));
+        };
+        // 늦게 끝난 경로 확인이 그 탭을 다른 폴더로 옮겼다: 그 폴더의 줄에는 상자가 뜨지 않고, 확정해도 바뀌지 않는다
+        begin(&mut a, 0);
+        a.navigate(0, Location::Dir(home.clone()), None);
+        a.settle();
+        assert!(a.address_rect().is_none());
+        a.commit_address("바뀐 이름.csv");
+        a.settle();
+        assert!(a.edit == Editing::None && a.flash.as_ref().is_some_and(|(_, m)| m.contains("목록이 바뀌어")), "{:?}", a.flash);
+        assert_eq!(std::fs::read(util::join(&work, "예산.csv")).unwrap(), b"x");
+        assert!(std::fs::symlink_metadata(util::join(&work, "바뀐 이름.csv")).is_err() && std::fs::symlink_metadata(util::join(&home, "바뀐 이름.csv")).is_err());
+        // 그 칸의 탭이 바뀌었다
+        a.navigate(0, Location::Dir(work.clone()), None);
+        a.settle();
+        begin(&mut a, 0);
+        a.new_tab(0);
+        a.sync_edit();
+        assert_eq!(a.edit, Editing::None);
+        // 칸 나누기가 바뀌어 그 칸이 보이지 않는다
+        a.settle();
+        begin(&mut a, 1);
+        a.set_layout(Layout::One);
+        a.sync_edit();
+        assert_eq!(a.edit, Editing::None);
+        // 그 항목이 목록에서 사라졌다 (앱 밖에서 지워졌다)
+        a.set_layout(Layout::TwoV);
+        a.settle();
+        begin(&mut a, 1);
+        std::fs::remove_file(util::join(&work, "예산.csv")).unwrap();
+        a.refresh(1);
+        a.settle();
+        a.sync_edit();
+        assert_eq!(a.edit, Editing::None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 이름을 고치는 칸은 스크롤해도 움직이지 않는다 (그 줄이 밀려나 치던 이름을 잃지 않게). 그만두면 다시 움직인다
+    #[test]
+    fn list_does_not_scroll_while_a_name_is_edited() {
+        let (root, home) = demo();
+        let long = util::join(&home, "긴 폴더");
+        for i in 0..100 {
+            std::fs::create_dir_all(util::join(&long, &format!("sub_{i:03}"))).unwrap();
+        }
+        let (mut a, g) = app(&long);
+        let (x, y) = row_point(&a, 0, 2);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.key(Key::Return, Mods::default());
+        assert!(matches!(a.edit, Editing::Item(_)));
+        a.scroll(&g, x, y, 300.0);
+        assert_eq!(a.pane(0).tab().scroll, 0.0);
+        // 다른 칸은 움직인다
+        let (x1, y1) = row_point(&a, 1, 2);
+        a.scroll(&g, x1, y1, 300.0);
+        assert!(a.pane(1).tab().scroll > 0.0);
+        a.cancel_address();
+        a.scroll(&g, x, y, 300.0);
+        assert!(a.pane(0).tab().scroll > 0.0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 이름을 바꾼 항목은 다른 칸에서도 고른 것에서 빠지고, 다른 항목의 선택은 그대로 남는다. 보이지 않던 탭은 보일 때 다시 읽는다
+    #[test]
+    fn other_panes_and_hidden_tabs_follow_a_rename() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        // 오른쪽 칸(같은 폴더)에서 두 파일을 골라 둔다
+        click_name(&mut a, &g, 1, "예산.csv", Mods::default());
+        click_name(&mut a, &g, 1, "회의록.md", Mods { cmd: true, ..Default::default() });
+        assert_eq!(picked(&a, 1).0, ["예산.csv", "회의록.md"]);
+        // 왼쪽 칸에는 새 탭을 열어, 처음 탭이 보이지 않게 한다
+        a.new_tab(0);
+        a.settle();
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        a.key(Key::Return, Mods::default());
+        a.commit_address("예산 최종.csv");
+        a.settle();
+        assert_eq!(picked(&a, 0).0, ["예산 최종.csv"]);
+        assert_eq!(picked(&a, 1).0, ["회의록.md"], "the renamed file is no longer selected there, the other one still is");
+        assert!(names(&a, 1).contains(&"예산 최종.csv".to_string()), "the other pane was read again");
+        // 보이지 않던 탭은 그대로 두었다가, 보이게 될 때 다시 읽는다
+        assert!(!a.pane(0).tabs[0].entries.iter().any(|e| e.name_string() == "예산 최종.csv"));
+        a.activate_tab(0, 0);
+        a.settle();
+        assert!(names(&a, 0).contains(&"예산 최종.csv".to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 파일 번호는 한 볼륨 안에서만 서로 다르다: 이름이 바뀐 항목을 고른 것에서 뺄 때, 다른 폴더를 보이는 탭의 항목은
+    /// 번호가 같아도 건드리지 않는다
+    #[test]
+    fn a_rename_does_not_deselect_items_of_other_folders() {
+        let (root, home) = demo();
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        let (mut a, g) = app(&work);
+        a.navigate(1, Location::Dir(downloads), None);
+        a.settle();
+        click_name(&mut a, &g, 1, "사진.jpg", Mods::default());
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        // 다른 볼륨의 파일이 우연히 같은 번호인 경우를 흉내 낸다
+        let id = a.pane(0).tab().cursor_entry().unwrap().file_id;
+        a.tab_mut(1).entries.iter_mut().for_each(|e| e.file_id = id);
+        a.key(Key::Return, Mods::default());
+        a.commit_address("예산 최종.csv");
+        a.settle();
+        assert_eq!(picked(&a, 0).0, ["예산 최종.csv"]);
+        assert_eq!(picked(&a, 1).0, ["사진.jpg"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 도구 막대의 새 폴더 단추. 파일을 만들거나 고치는 키는 누르고 있어도 되풀이하지 않는다
+    #[test]
+    fn toolbar_has_a_new_folder_button() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let (x, y) = mid(a.toolbar().new_folder);
+        assert_eq!(a.hit(&g, x, y), Hit::NewFolder);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.settle();
+        assert!(std::fs::metadata(util::join(&home, "새 폴더")).unwrap().is_dir());
+        assert!(matches!(&a.edit, Editing::Item(e) if e.name == "새 폴더"));
+        assert!(!Key::Return.repeats() && !Key::Char('n').repeats() && Key::Down.repeats() && Key::Char('t').repeats());
+        // 만들 수 없는 곳(없어진 폴더): 알림만 뜬다
+        a.cancel_address();
+        let gone = util::join(&home, "다운로드");
+        a.navigate(0, Location::Dir(gone.clone()), None);
+        a.settle();
+        std::fs::remove_dir_all(&gone).unwrap();
+        a.new_folder(0);
+        a.settle();
+        assert!(a.edit == Editing::None && a.flash.as_ref().is_some_and(|(_, m)| m.contains("폴더를 만들지 못했어요")), "{:?}", a.flash);
         std::fs::remove_dir_all(root).unwrap();
     }
 

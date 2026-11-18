@@ -6,6 +6,8 @@
 #[cfg(target_os = "macos")]
 mod app;
 #[cfg(target_os = "macos")]
+mod fileops;
+#[cfg(target_os = "macos")]
 mod gfx;
 #[cfg(target_os = "macos")]
 mod render;

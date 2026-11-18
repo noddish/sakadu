@@ -486,6 +486,28 @@ impl Grid {
     }
 }
 
+/// 목록의 줄 vi에서 이름을 고치는 상자의 자리 (paint_pane_list가 이름 상자를 그리는 자리와 같다).
+/// 그 줄이 목록 안에 다 보이지 않으면 None
+pub fn name_edit_rect(list: R, view: ViewMode, cols: [f32; 3], vi: usize, scroll: f32) -> Option<R> {
+    let grid = Grid::of(list, view);
+    let it = grid.item(vi, scroll);
+    if it.t < list.t - 1.0 || it.b > list.b + 1.0 || it.l < list.l - 1.0 || it.r > list.r + 1.0 {
+        return None;
+    }
+    Some(match grid.cell {
+        // 그림 아래 이름 자리
+        CellKind::Tile(thumb) => {
+            let y = it.t + 8.0 + thumb + 6.0;
+            R::new(it.l + 4.0, y, it.r - 8.0, y + 24.0)
+        }
+        CellKind::Icon => R::new(it.l + 24.0, it.t + 2.0, it.r - 6.0, it.b - 2.0),
+        CellKind::Row => {
+            let name = columns(list, cols).name;
+            R::new(name.0 + 24.0, it.t + 2.0, name.1 - 4.0, it.b - 2.0)
+        }
+    })
+}
+
 /// 목록이 넘칠 때 (트랙, 손잡이). content는 전체 내용 높이
 pub fn scroll_metrics(list: R, content: f32, scroll: f32) -> Option<(R, R)> {
     let view = list.h();
@@ -657,6 +679,25 @@ pub fn draw_pin(g: &impl Canvas, r: R, pinned: bool, c: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 이름 상자 자리: 자세히 보기에서는 그 줄의 이름 열 안, 아이콘 보기에서는 칸 안의 그림 아래. 줄이 다 보이지 않으면 없다
+    #[test]
+    fn name_edit_rect_sits_on_the_row_and_goes_away_when_it_is_cut_off() {
+        let list = R::new(0.0, 100.0, 600.0, 400.0);
+        let cols = [140.0, 180.0, 84.0];
+        let r = name_edit_rect(list, ViewMode::Details, cols, 2, 0.0).unwrap();
+        let name = columns(list, cols).name;
+        assert_eq!((r.t, r.b), (100.0 + 2.0 * ROW_H + 2.0, 100.0 + 3.0 * ROW_H - 2.0));
+        assert_eq!((r.l, r.r), (name.0 + 24.0, name.1 - 4.0));
+        // 위로 반쯤 밀려난 줄, 목록 아래로 넘어간 줄
+        assert!(name_edit_rect(list, ViewMode::Details, cols, 2, 2.0 * ROW_H + 10.0).is_none());
+        assert!(name_edit_rect(list, ViewMode::Details, cols, 50, 0.0).is_none());
+        for view in [ViewMode::Medium, ViewMode::Large, ViewMode::Small, ViewMode::List] {
+            let it = Grid::of(list, view).item(0, 0.0);
+            let r = name_edit_rect(list, view, cols, 0, 0.0).unwrap();
+            assert!(r.l >= it.l && r.r <= it.r && r.t > it.t && r.b <= it.b && r.w() > 40.0, "{view:?}: {r:?} in {it:?}");
+        }
+    }
 
     /// 모든 보기에서 칸 가운데를 누르면 그 항목이 잡히고, 보이는 범위에 들어 있다. 경로 줄은 경로와 책갈피가 겹치지 않는다
     #[test]

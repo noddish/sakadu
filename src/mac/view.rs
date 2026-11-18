@@ -1,6 +1,6 @@
-//! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름).
+//! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름, 항목 이름).
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인·미리 보기 카드의 그림과 글 읽기·아이콘 보기의 썸네일 읽기는
-//! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다.
+//! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다. 파일 작업(새 폴더, 이름 바꾸기)은 뒷줄 하나가 맡긴 순서대로 하나씩 한다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods};
@@ -17,7 +17,7 @@ use objc2_app_kit::{
     NSTextField, NSTextFieldDelegate, NSTextView, NSTitlebarSeparatorStyle, NSToolbar, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
     NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle, NSWorkspace,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{NSArray, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL};
 use sakadu::draw::Color;
 use sakadu::palette::{System, Theme};
 use std::cell::{OnceCell, RefCell};
@@ -27,6 +27,8 @@ use std::time::Duration;
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
     static VIEW: OnceCell<Retained<SakaduView>> = const { OnceCell::new() };
+    /// 파일 작업을 하는 뒷줄로 가는 길 (처음 맡길 때 그 줄을 만든다)
+    static OPS: OnceCell<std::sync::mpsc::Sender<crate::fileops::Op>> = const { OnceCell::new() };
 }
 
 /// 가장 나중에 낸 미리 보기 카드 요청의 번호. 뒷줄이 그림을 읽기 직전에 보고, 그 사이 다른 요청이 나왔으면 읽지 않는다
@@ -66,10 +68,10 @@ fn system(mtm: MainThreadMarker) -> (bool, Option<Color>) {
 pub struct ViewIvars {
     /// 그리기 밖(누르기 판정)에서 글자 폭을 재는 그림판
     measure: Gfx,
-    /// 입력 상자 (경로, 작업 공간 이름). 입력할 때만 보인다 (한글 조합은 맥이 처리)
+    /// 입력 상자 (경로, 작업 공간 이름, 항목 이름). 입력할 때만 보인다 (한글 조합은 맥이 처리)
     field: OnceCell<Retained<NSTextField>>,
-    /// 입력 상자가 지금 무엇을 담고 있는지: 어느 칸의 경로인지, 작업 공간 이름인지 (App::edit_key. 바뀌면 다시 채운다)
-    field_pane: std::cell::Cell<Option<usize>>,
+    /// 입력 상자가 지금 무엇을 담고 있는지: 어느 칸의 경로인지, 작업 공간 이름인지, 어느 항목의 이름인지 (App::edit_key. 바뀌면 다시 채운다)
+    field_pane: std::cell::Cell<Option<u64>>,
 }
 
 define_class!(
@@ -187,7 +189,12 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, e: &NSEvent) {
-            let handled = key_of(e.keyCode()).is_some_and(|k| with_app(|a| a.key(k, mods(e))).unwrap_or(false));
+            let key = key_of(e.keyCode());
+            // 파일을 만들거나 고치는 키는 누르고 있어도 한 번만 받는다
+            if e.isARepeat() && key.is_some_and(|k| !k.repeats()) {
+                return;
+            }
+            let handled = key.is_some_and(|k| with_app(|a| a.key(k, mods(e))).unwrap_or(false));
             if handled {
                 self.after_input();
             } else {
@@ -310,18 +317,24 @@ impl SakaduView {
         menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(anchor.l as f64, anchor.b as f64 + 4.0), Some(self));
     }
 
-    /// 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 자리(칸의 경로 자리, 사이드바의 공간 이름 자리)에 보이고 키 입력을 받는다
+    /// 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 자리(칸의 경로 자리, 사이드바의 공간 이름 자리, 목록 줄의 이름 자리)에 보이고 키 입력을 받는다
     fn sync_field(&self) {
         let Some(field) = self.ivars().field.get() else { return };
-        let Some((rect, text, color, pane)) = with_app(|a| (a.address_rect(), a.address_text(), a.theme.text, a.edit_key())) else { return };
+        let Some((rect, text, color, pane, pad, select)) = with_app(|a| {
+            // 이름을 고치던 항목이 그 자리에 없으면 여기서 고치기가 끝난다
+            a.sync_edit();
+            (a.address_rect(), a.address_text(), a.theme.text, a.edit_key(), a.address_pad(), a.address_select())
+        }) else {
+            return;
+        };
         match rect {
             Some(r) => {
                 // 한 줄 글자가 세로 가운데에 오게 (시스템 13pt 글꼴의 줄 높이 약 17)
                 let h = 18.0;
-                let frame = NSRect::new(NSPoint::new((r.l + 6.0) as f64, (r.t + (r.h() - h) / 2.0) as f64), NSSize::new((r.w() - 12.0).max(0.0) as f64, h as f64));
+                let frame = NSRect::new(NSPoint::new((r.l + pad) as f64, (r.t + (r.h() - h) / 2.0) as f64), NSSize::new((r.w() - pad * 2.0).max(0.0) as f64, h as f64));
                 field.setFrame(frame);
                 field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(color.r as f64, color.g as f64, color.b as f64, 1.0)));
-                // 처음 열 때와, 입력 중에 다른 입력(다른 칸의 경로, 공간 이름)으로 옮겼을 때 그 글로 다시 채운다
+                // 처음 열 때와, 입력 중에 다른 입력(다른 칸의 경로, 공간 이름, 다른 항목의 이름)으로 옮겼을 때 그 글로 다시 채운다
                 if field.isHidden() || self.ivars().field_pane.get() != pane {
                     self.ivars().field_pane.set(pane);
                     field.setStringValue(&NSString::from_str(&text));
@@ -330,6 +343,10 @@ impl SakaduView {
                         w.makeFirstResponder(Some(field));
                     }
                     unsafe { field.selectText(None) };
+                    // 항목 이름은 확장자 앞까지만 골라 둔다 (바로 치면 이름만 바뀐다)
+                    if let (Some(n), Some(editor)) = (select, field.currentEditor()) {
+                        editor.setSelectedRange(NSRange::new(0, n));
+                    }
                 }
             }
             None if !field.isHidden() => {
@@ -344,10 +361,12 @@ impl SakaduView {
     }
 }
 
-/// 다시 그려 달라고 한다 (메인 줄에서)
+/// 뒷줄 결과를 받은 뒤 (메인 줄에서): 입력 상자를 App 상태에 맞추고 다시 그려 달라고 한다.
+/// 새 폴더의 이름 상자는 입력이 아니라 뒷줄 결과(폴더를 만들고 다시 읽은 것)로 뜨므로, 그리기를 기다리지 않고 여기서 맞춘다
 fn redraw() {
     VIEW.with(|v| {
         if let Some(v) = v.get() {
+            v.sync_field();
             v.setNeedsDisplay(true);
         }
     });
@@ -356,7 +375,8 @@ fn redraw() {
 /// 쌓인 폴더 읽기 요청은 뒷줄에서 읽어 메인 줄로 돌려받고, 열어 달라는 파일은 macOS '열기'로 연다
 /// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다). 미리 보기 카드의 그림과 글도 뒷줄에서 읽는다
 fn pump() {
-    let Some((reqs, probes, previews, files)) = with_app(|a| (a.take_requests(), a.take_probes(), a.take_previews(), std::mem::take(&mut a.open_files))) else { return };
+    let Some((reqs, probes, previews, files, ops)) = with_app(|a| (a.take_requests(), a.take_probes(), a.take_previews(), std::mem::take(&mut a.open_files), a.take_ops())) else { return };
+    run_ops(ops);
     let mut picture = false;
     for r in previews {
         LATEST_PREVIEW.store(r.seq, Ordering::Relaxed);
@@ -403,11 +423,7 @@ fn pump() {
                 with_app(|a| a.on_listed(r.tab, r.generation, result));
                 // 읽기 결과가 새 요청을 낼 수 있다 (세션에서 연 폴더가 없으면 홈을 읽는다)
                 pump();
-                VIEW.with(|v| {
-                    if let Some(v) = v.get() {
-                        v.setNeedsDisplay(true);
-                    }
-                });
+                redraw();
             });
         });
     }
@@ -417,6 +433,35 @@ fn pump() {
             sakadu::diag::log(|| format!("open failed: {f}"));
         }
     }
+}
+
+/// 파일 작업을 뒷줄 하나에 맡긴다. 그 줄이 맡긴 순서대로 하나씩 실행하고(둘이 한꺼번에 파일을 건드리지 않는다),
+/// 하나가 끝날 때마다 결과를 메인 줄로 돌려준다. 결과에 따라 폴더를 다시 읽으므로 이어서 pump를 돈다
+fn run_ops(ops: Vec<crate::fileops::Op>) {
+    if ops.is_empty() {
+        return;
+    }
+    OPS.with(|cell| {
+        let tx = cell.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<crate::fileops::Op>();
+            std::thread::spawn(move || {
+                for op in rx {
+                    let result = crate::fileops::run(&op.job);
+                    DispatchQueue::main().exec_async(move || {
+                        with_app(|a| a.on_op_done(&op, result));
+                        pump();
+                        redraw();
+                    });
+                }
+            });
+            tx
+        });
+        for op in ops {
+            if tx.send(op).is_err() {
+                sakadu::diag::log(|| "file ops: worker is gone".to_string());
+            }
+        }
+    });
 }
 
 /// 아이콘 보기의 썸네일을 뒷줄에서 읽어 메인 줄로 돌려받는다. App::take_thumbs가 지금 보이는데 아직 없는 것만,
@@ -459,9 +504,12 @@ fn key_of(code: u16) -> Option<Key> {
         0x79 => Key::PageDown,
         0x30 => Key::Tab,
         0x35 => Key::Esc,
+        // Return과 숫자판의 Enter
+        0x24 | 0x4C => Key::Return,
         0x31 => Key::Char(' '),
         0x00 => Key::Char('a'),
         0x25 => Key::Char('l'),
+        0x2D => Key::Char('n'),
         0x05 => Key::Char('g'),
         0x1F => Key::Char('o'),
         0x0F => Key::Char('r'),
@@ -546,7 +594,15 @@ define_class!(
         }
     }
 
-    unsafe impl NSWindowDelegate for Delegate {}
+    unsafe impl NSWindowDelegate for Delegate {
+        /// 창이 다시 앞으로 왔다: 다른 앱(Finder 등)에서 바뀐 것이 보이게 보이는 칸을 다시 읽는다 (맥 버전에는 아직 폴더 감시가 없다)
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn did_become_key(&self, _n: &NSNotification) {
+            with_app(App::refresh_shown);
+            pump();
+            redraw();
+        }
+    }
 );
 
 impl Delegate {
