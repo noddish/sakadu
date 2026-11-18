@@ -30,7 +30,9 @@ struct DragIvars {
 }
 
 define_class!(
-    /// 맥이 끌기 중에 받는 쪽에 주는 정보(NSDraggingInfo)를 흉내 낸 것. 뷰가 묻는 세 가지만 답한다
+    /// 맥이 끌기 중에 받는 쪽에 주는 정보(NSDraggingInfo)를 흉내 낸 것. 뷰가 묻는 세 가지만 답한다.
+    /// 그 프로토콜을 따른다고 밝히지는 않는다: 밝히면 objc2가 필수 메서드(animatesToDestination 등)를 모두 갖추라고 멈춘다.
+    /// 뷰는 이것을 그 프로토콜로 받아 메시지로만 물으므로, 묻는 메서드만 있으면 된다
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "SakaduSmokeDrag"]
@@ -39,7 +41,7 @@ define_class!(
 
     unsafe impl NSObjectProtocol for FakeDrag {}
 
-    unsafe impl NSDraggingInfo for FakeDrag {
+    impl FakeDrag {
         #[unsafe(method_id(draggingPasteboard))]
         fn dragging_pasteboard(&self) -> Retained<NSPasteboard> {
             self.ivars().board.clone()
