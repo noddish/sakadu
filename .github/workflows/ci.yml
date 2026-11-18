@@ -30,6 +30,7 @@ jobs:
       - name: Test mac prototype
         run: cargo test --features mac-app --bin sakadu-mac --locked
       # 파일 작업 시험을 대소문자를 가리는 볼륨에서 한 번 더 (맥 기본 볼륨은 가리지 않는다). 시험의 임시 폴더를 그 볼륨에 둔다.
+      # 그 볼륨과 러너의 기본 볼륨 사이로 '다른 디스크로 옮기기·끌어다 놓기'도 본다 (SAKADU_TEST_OTHER_VOLUME).
       # 러너에서 디스크 이미지를 만들 수 없으면 이 단계만 실패로 남긴다
       - name: File operation tests on a case-sensitive volume
         continue-on-error: true
@@ -40,7 +41,8 @@ jobs:
           touch "$RUNNER_TEMP/case/tmp/probe/a" "$RUNNER_TEMP/case/tmp/probe/A"
           test "$(ls "$RUNNER_TEMP/case/tmp/probe" | wc -l)" -eq 2
           TMPDIR="$RUNNER_TEMP/case/tmp" cargo test --lib --locked -- fileops listing pane
-          TMPDIR="$RUNNER_TEMP/case/tmp" cargo test --features mac-app --bin sakadu-mac --locked -- fileops rename new_folder
+          mkdir -p "$RUNNER_TEMP/other-volume"
+          SAKADU_TEST_OTHER_VOLUME="$RUNNER_TEMP/other-volume" TMPDIR="$RUNNER_TEMP/case/tmp" cargo test --features mac-app --bin sakadu-mac --locked -- fileops rename new_folder
           hdiutil detach "$RUNNER_TEMP/case"
       - name: Build mac prototype
         run: cargo build --features mac-app --bin sakadu-mac --locked

@@ -2,6 +2,8 @@
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인·미리 보기 카드의 그림과 글 읽기·아이콘 보기의 썸네일 읽기는
 //! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다. 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 복사, 되돌리기)은 뒷줄 하나가 맡긴 순서대로 하나씩 한다.
 //! 클립보드에는 파일 주소로 담고 읽는다 (Finder와 주고받을 수 있다).
+//! 끌어서 놓기도 파일 주소로 한다: 고른 줄을 끌어 내면 맥의 끌기를 시작하고(Finder나 다른 칸에 놓을 수 있다),
+//! 끌려 온 파일은 App에 어디에 놓일지 묻고 놓는다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods, Paste};
@@ -15,7 +17,8 @@ use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_cl
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
     NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
-    NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardWriting,
+    NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo, NSDraggingItem, NSDraggingSession, NSDraggingSource, NSPasteboard, NSPasteboardTypeFileURL,
+    NSPasteboardWriting,
     NSTextField, NSTextFieldDelegate, NSTextView, NSTitlebarSeparatorStyle, NSToolbar, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
     NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle, NSWorkspace,
 };
@@ -31,6 +34,9 @@ thread_local! {
     static VIEW: OnceCell<Retained<SakaduView>> = const { OnceCell::new() };
     /// 잘라 둔 것을 클립보드에 담은 직후의 클립보드 번호. 붙여넣을 때 번호가 그대로면(그 사이 다른 것이 담기지 않았으면) 옮긴다
     static CUT: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
+    /// 끌려 온 것과 받는 폴더가 같은 디스크인지 물어 둔 것: (끌려 온 첫 항목, 받는 폴더, 같은 디스크인지).
+    /// 끄는 동안 마우스가 움직일 때마다 디스크에 묻지 않게 한다
+    static SAME_VOLUME: RefCell<Option<(String, String, bool)>> = const { RefCell::new(None) };
     /// 파일 작업을 하는 뒷줄로 가는 길 (처음 맡길 때 그 줄을 만든다)
     static OPS: OnceCell<std::sync::mpsc::Sender<crate::fileops::Op>> = const { OnceCell::new() };
 }
@@ -158,14 +164,24 @@ define_class!(
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, e: &NSEvent) {
             let (x, y) = self.point(e);
-            with_app(|a| a.mouse_dragged(x, y));
+            // 고른 줄을 누른 채 움직였으면 App이 끌어 낼 항목들을 내준다: 맥의 끌기를 시작한다
+            let drag = with_app(|a| {
+                a.mouse_dragged(x, y);
+                a.take_drag()
+            })
+            .flatten();
+            if let Some(paths) = drag {
+                self.begin_drag(&paths, e);
+            }
             self.setNeedsDisplay(true);
         }
 
+        /// 떼기: 여럿을 고른 것 가운데 하나를 눌렀다 떼면 이때 그 줄만 남는다. 고른 것이 바뀌므로 입력 뒤처럼 처리한다
+        /// (새로 고른 파일의 미리 보기를 읽기 시작한다)
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _e: &NSEvent) {
             with_app(App::mouse_up);
-            self.setNeedsDisplay(true);
+            self.after_input();
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -303,6 +319,67 @@ define_class!(
     }
 
     unsafe impl NSTextFieldDelegate for SakaduView {}
+
+    unsafe impl NSDraggingSource for SakaduView {
+        /// 끌어 낸 항목을 받는 쪽이 할 수 있는 일: 복사하거나 옮기기. 지우기는 내주지 않는다 (Dock의 휴지통에 놓아도 지워지지 않는다)
+        #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+        fn source_operations(&self, _session: &NSDraggingSession, _context: NSDraggingContext) -> NSDragOperation {
+            NSDragOperation(NSDragOperation::Copy.0 | NSDragOperation::Move.0 | NSDragOperation::Generic.0)
+        }
+
+        /// 끌기가 끝났다 (다른 앱에 놓았으면 그 앱이 옮기거나 복사했다): 보이는 칸을 다시 읽는다
+        #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+        fn drag_ended(&self, _session: &NSDraggingSession, _point: NSPoint, operation: NSDragOperation) {
+            if operation != NSDragOperation::None {
+                with_app(App::refresh_shown);
+                self.after_input();
+            }
+        }
+    }
+
+    unsafe impl NSDraggingDestination for SakaduView {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.drag_over(sender)
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.drag_over(sender)
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            with_app(App::drag_exit);
+            self.setNeedsDisplay(true);
+        }
+
+        /// 놓았다: 그 자리의 폴더로 옮기거나 복사하기 시작한다
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            match drop_kind(sender.draggingSourceOperationMask()) {
+                Some(how) => {
+                    let paths = board_paths(&sender.draggingPasteboard());
+                    let p = self.convertPoint_fromView(sender.draggingLocation(), None);
+                    let started = with_app(|a| a.drop_paths(&self.ivars().measure, p.x as f32, p.y as f32, paths, how)).unwrap_or(false);
+                    self.after_input();
+                    started
+                }
+                // 복사도 옮기기도 허락되지 않은 끌기(⌥⌘: 가상본 만들기)는 받지 않는다
+                None => {
+                    self.refuse_drag();
+                    false
+                }
+            }
+        }
+
+        #[unsafe(method(draggingEnded:))]
+        fn dragging_ended(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) {
+            with_app(App::drag_exit);
+            SAME_VOLUME.with(|v| v.borrow_mut().take());
+            self.setNeedsDisplay(true);
+        }
+    }
 );
 
 impl SakaduView {
@@ -320,6 +397,8 @@ impl SakaduView {
         field.setHidden(true);
         unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*view))) };
         view.addSubview(&field);
+        // 끌려 오는 파일을 받는다 (Finder, 다른 앱, 사카두의 다른 칸)
+        view.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
         let _ = view.ivars().field.set(field);
         // 마우스 올림: 보이는 곳 전체, 창이 앞에 있을 때
         let opts = NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveInKeyWindow | NSTrackingAreaOptions::InVisibleRect;
@@ -332,6 +411,56 @@ impl SakaduView {
     fn point(&self, e: &NSEvent) -> (f32, f32) {
         let p = self.convertPoint_fromView(e.locationInWindow(), None);
         (p.x as f32, p.y as f32)
+    }
+
+    /// 고른 항목들을 끌어 낸다: 파일 주소로 내주므로 Finder나 다른 앱, 사카두의 다른 칸에 놓을 수 있다.
+    /// 끌리는 그림은 그 파일의 아이콘이다 (여럿이면 조금씩 어긋나게 겹친다)
+    fn begin_drag(&self, paths: &[String], event: &NSEvent) {
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let items: Vec<Retained<NSDraggingItem>> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                let path = NSString::from_str(path);
+                let url: Retained<ProtocolObject<dyn NSPasteboardWriting>> = ProtocolObject::from_retained(NSURL::fileURLWithPath(&path));
+                let item = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), &url);
+                let icon = NSWorkspace::sharedWorkspace().iconForFile(&path);
+                let shift = i.min(6) as f64 * 3.0;
+                let frame = NSRect::new(NSPoint::new(at.x - 16.0 + shift, at.y - 16.0 + shift), NSSize::new(32.0, 32.0));
+                let picture: &objc2::runtime::AnyObject = &icon;
+                unsafe { item.setDraggingFrame_contents(frame, Some(picture)) };
+                item
+            })
+            .collect();
+        if !items.is_empty() {
+            self.beginDraggingSessionWithItems_event_source(&NSArray::from_retained_slice(&items), event, ProtocolObject::from_ref(self));
+        }
+    }
+
+    /// 끌려 온 것이 지금 어디에 놓일지 App에 묻고(그 자리를 강조한다), 놓으면 무엇을 할지 돌려준다:
+    /// 복사면 마우스에 더하기 표시가 붙고, 놓을 수 없는 곳이면 아무것도 하지 않는다
+    fn drag_over(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        // 복사도 옮기기도 허락되지 않은 끌기(⌥⌘: 가상본 만들기)는 받지 않는다: 놓일 곳도 강조하지 않는다
+        let Some(how) = drop_kind(sender.draggingSourceOperationMask()) else {
+            self.refuse_drag();
+            return NSDragOperation::None;
+        };
+        let paths = board_paths(&sender.draggingPasteboard());
+        let p = self.convertPoint_fromView(sender.draggingLocation(), None);
+        let dir = with_app(|a| a.drag_over(&self.ivars().measure, p.x as f32, p.y as f32, &paths)).flatten();
+        self.setNeedsDisplay(true);
+        let (Some(dir), Some(first)) = (dir, paths.first()) else { return NSDragOperation::None };
+        match how {
+            Paste::Copy => NSDragOperation::Copy,
+            Paste::Drop if !same_volume(first, &dir) => NSDragOperation::Copy,
+            _ => NSDragOperation::Move,
+        }
+    }
+
+    /// 받지 않는 끌기: 앞서 강조해 둔 놓일 곳이 있으면 지운다 (끄는 중에 누른 키가 바뀌면 받던 끌기가 받지 않는 끌기가 된다)
+    fn refuse_drag(&self) {
+        with_app(App::drag_exit);
+        self.setNeedsDisplay(true);
     }
 
     /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다. 메뉴를 열어 달라고 했으면 연다
@@ -435,7 +564,49 @@ fn write_clipboard(paths: &[String], cut: bool) {
 fn read_clipboard() -> (Vec<String>, Option<isize>) {
     let board = NSPasteboard::generalPasteboard();
     let cut = CUT.get().filter(|count| *count == board.changeCount());
-    let Some(items) = board.pasteboardItems() else { return (Vec::new(), None) };
+    (board_paths(&board), cut)
+}
+
+/// 끌어다 놓을 때 누른 키에 따라 무엇을 할지. 맥은 누른 키에 맞춰 끌어 낸 쪽이 허락한 일을 줄여서 알려 준다:
+/// ⌥를 누르면 복사만 남고, ⌘를 누르면 옮기기만 남는다. 아무 키도 누르지 않았으면 디스크에 따라 정한다
+/// (같은 디스크면 옮기고 다른 디스크면 복사).
+/// 복사도 옮기기도 남지 않았으면 None: 받지 않는다. ⌥⌘를 누르면 가상본 만들기만 남는데, 그것은 사카두에 없는 일이다
+/// (그때 옮겨 버리면 가상본을 바랐는데 원본이 자리를 뜬다)
+fn drop_kind(allowed: NSDragOperation) -> Option<Paste> {
+    let copy = allowed.0 & NSDragOperation::Copy.0 != 0;
+    let moving = allowed.0 & (NSDragOperation::Move.0 | NSDragOperation::Generic.0) != 0;
+    match (copy, moving) {
+        (true, true) => Some(Paste::Drop),
+        (true, false) => Some(Paste::Copy),
+        (false, true) => Some(Paste::Move),
+        (false, false) => None,
+    }
+}
+
+/// 끌려 온 항목과 받는 폴더가 같은 디스크에 있는지 (마우스에 붙일 표시를 정할 때만 쓴다. 실제로 옮길지 복사할지는
+/// 놓은 뒤 실행할 때 정해진다). 끄는 동안 같은 것을 되풀이해 묻지 않게 적어 둔다. 알 수 없으면 같다고 본다
+fn same_volume(item: &str, dir: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    SAME_VOLUME.with(|cell| {
+        let mut known = cell.borrow_mut();
+        if let Some((i, d, same)) = known.as_ref()
+            && i == item
+            && d == dir
+        {
+            return *same;
+        }
+        let same = match (std::fs::symlink_metadata(item), std::fs::metadata(dir)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev(),
+            _ => true,
+        };
+        *known = Some((item.to_string(), dir.to_string(), same));
+        same
+    })
+}
+
+/// 그 클립보드(보통의 클립보드나 끌기의 클립보드)에 담긴 파일들의 경로
+fn board_paths(board: &NSPasteboard) -> Vec<String> {
+    let Some(items) = board.pasteboardItems() else { return Vec::new() };
     let mut out = Vec::new();
     for item in items.iter() {
         let Some(text) = item.stringForType(unsafe { NSPasteboardTypeFileURL }) else { continue };
@@ -447,7 +618,7 @@ fn read_clipboard() -> (Vec<String>, Option<isize>) {
             out.push(path.to_string());
         }
     }
-    (out, cut)
+    out
 }
 
 /// 뒷줄 결과를 받은 뒤 (메인 줄에서): 입력 상자를 App 상태에 맞추고 다시 그려 달라고 한다.
@@ -866,4 +1037,27 @@ pub fn run() {
     let delegate = Delegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 끌어 낸 쪽이 허락한 일에서 할 일을 고른다. 복사도 옮기기도 없으면 받지 않는다
+    #[test]
+    fn drop_kind_follows_what_the_source_allows() {
+        let mask = |ops: &[NSDragOperation]| NSDragOperation(ops.iter().fold(0, |all, op| all | op.0));
+        // 아무 키도 누르지 않았다: 사카두가 끌어 낸 것(복사, 옮기기), Finder가 끌어 낸 것(모두)
+        assert_eq!(drop_kind(mask(&[NSDragOperation::Copy, NSDragOperation::Move, NSDragOperation::Generic])), Some(Paste::Drop));
+        assert_eq!(drop_kind(NSDragOperation::Every), Some(Paste::Drop));
+        // ⌥: 복사만 남는다. ⌘: 옮기기만 남는다
+        assert_eq!(drop_kind(NSDragOperation::Copy), Some(Paste::Copy));
+        assert_eq!(drop_kind(mask(&[NSDragOperation::Copy, NSDragOperation::Link])), Some(Paste::Copy));
+        assert_eq!(drop_kind(NSDragOperation::Generic), Some(Paste::Move));
+        assert_eq!(drop_kind(NSDragOperation::Move), Some(Paste::Move));
+        // ⌥⌘: 가상본 만들기만 남는다. 옮기지도 복사하지도 않는다
+        assert_eq!(drop_kind(NSDragOperation::Link), None);
+        assert_eq!(drop_kind(NSDragOperation::None), None);
+        assert_eq!(drop_kind(mask(&[NSDragOperation::Link, NSDragOperation::Delete, NSDragOperation::Private])), None);
+    }
 }
