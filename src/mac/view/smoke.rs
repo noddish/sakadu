@@ -125,10 +125,15 @@ impl Run {
         self.check(what, false, || format!("not within {limit} s (the list shows {last:?})"))
     }
 
-    /// 지금 칸에서 그 이름의 줄로 실제 키(Home, 그리고 ↓를 그만큼)를 눌러 옮긴다. 그 줄만 골라진다
+    /// 지금 칸에서 그 이름의 줄로 실제 키(Home, 그리고 ↓를 그만큼)를 눌러 옮긴다. 그 줄만 골라진다.
+    /// 앞 걸음의 결과로 목록을 다시 읽는 중일 수 있어서, 그 이름이 목록에 오고 앱이 일을 마칠 때까지 먼저 기다린다
     fn select(&mut self, name: &str) -> bool {
+        let listed = |s: &Seen| s.ready && !s.busy && s.names.iter().any(|n| n == name);
+        if !self.wait(&format!("{name} is in the list"), 5, || seen().is_some_and(|s| listed(&s))) {
+            return false;
+        }
         let Some(i) = seen().and_then(|s| s.names.iter().position(|n| n == name)) else {
-            return self.check(&format!("{name} is in the list"), false, || format!("{:?}", seen()));
+            return self.check(&format!("{name} stays in the list"), false, || format!("{:?}", seen()));
         };
         key(HOME, false);
         for _ in 0..i {
