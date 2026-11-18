@@ -813,7 +813,7 @@ pub struct App {
     pub clip_left: Option<(i64, Vec<String>)>,
     /// 훑어보기(Quick Look) 창을 열어(true) 또는 닫아(false) 달라는 요청 (창 쪽이 가져가 맥의 훑어보기 창을 다룬다)
     pub look_request: Option<bool>,
-    /// 훑어보기 창이 떠 있고 이 창이 그 내용을 대고 있다 (창 쪽이 알려 준다)
+    /// 훑어보기 창이 화면에 떠 있다 (창 쪽이 키를 넘기기 직전에 그 창에 물어 맞춘다)
     pub look_open: bool,
     /// 칸 p의 칩 줄 오른쪽에 잠깐 보일 알림 (다음 입력 때 지운다)
     flash: Option<(usize, String)>,

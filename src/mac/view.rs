@@ -236,11 +236,11 @@ define_class!(
             true
         }
 
-        /// 훑어보기 창의 내용(무엇을 보일지)과 키를 이 뷰가 맡는다. 창은 둘 다 약하게 잡는다 (이 뷰가 더 오래 산다)
+        /// 훑어보기 창의 내용(무엇을 보일지)과 키를 이 뷰가 맡는다. 창은 둘 다 약하게 잡는다 (이 뷰가 더 오래 산다).
+        /// 맡는 것과 창이 떠 있는 것은 다르다: 창을 닫아도 이 뷰가 계속 맡고 있을 수 있다 (떠 있는지는 look_shown이 창에 묻는다)
         #[unsafe(method(beginPreviewPanelControl:))]
         fn begin_preview_panel_control(&self, panel: &AnyObject) {
             LOOK_ON.set(true);
-            with_app(|a| a.look_open = true);
             let at = LOOK.with(|l| l.borrow().1) as NSInteger;
             // SAFETY: QLPreviewPanel의 속성과 메서드다. 내용을 대는 쪽과 키를 받는 쪽으로 이 뷰를 건다
             unsafe {
@@ -251,11 +251,10 @@ define_class!(
             }
         }
 
-        /// 훑어보기 창이 닫혔거나 다른 곳이 내용을 대게 됐다
+        /// 훑어보기 창의 내용을 더는 이 뷰가 대지 않는다
         #[unsafe(method(endPreviewPanelControl:))]
         fn end_preview_panel_control(&self, panel: &AnyObject) {
             LOOK_ON.set(false);
-            with_app(|a| a.look_open = false);
             // SAFETY: 위에서 건 것을 푼다
             unsafe {
                 let _: () = msg_send![panel, setDataSource: None::<&AnyObject>];
@@ -538,7 +537,15 @@ impl SakaduView {
         if e.isARepeat() && key.is_some_and(|k| !k.repeats()) {
             return true;
         }
-        let handled = key.is_some_and(|k| with_app(|a| a.key(k, mods(e))).unwrap_or(false));
+        // 스페이스·⌘Y가 열지 닫을지는 훑어보기 창이 지금 떠 있는지로 정한다: 창에 물어 App에 맞춰 둔다
+        let shown = key.is_some() && look_shown();
+        let handled = key.is_some_and(|k| {
+            with_app(|a| {
+                a.look_open = shown;
+                a.key(k, mods(e))
+            })
+            .unwrap_or(false)
+        });
         if handled {
             self.after_input();
         }
@@ -763,6 +770,20 @@ fn look_panel(create: bool) -> Option<Retained<AnyObject>> {
     }
 }
 
+/// 훑어보기 창이 지금 화면에 떠 있는지. 한 번도 열지 않았으면 프레임워크를 열지 않고 false
+fn look_shown() -> bool {
+    let Some(cls) = LOOK_CLASS.with(|cell| cell.get().copied().flatten()) else { return false };
+    // SAFETY: QLPreviewPanel의 클래스 메서드와 NSWindow의 isVisible이다
+    unsafe {
+        let exists: bool = msg_send![cls, sharedPreviewPanelExists];
+        if !exists {
+            return false;
+        }
+        let panel: Option<Retained<AnyObject>> = msg_send![cls, sharedPreviewPanel];
+        panel.is_some_and(|panel| msg_send![&*panel, isVisible])
+    }
+}
+
 /// 훑어보기 창을 연다(open) 또는 닫는다. 열 때는 보여 줄 것을 먼저 맞춘다: 창이 열리며 곧바로 묻는다
 fn show_look(open: bool) {
     if !open {
@@ -778,8 +799,16 @@ fn show_look(open: bool) {
     }
     LOOK.with(|l| *l.borrow_mut() = items);
     match look_panel(true) {
-        // SAFETY: NSWindow의 makeKeyAndOrderFront:
-        Some(panel) => unsafe { msg_send![&*panel, makeKeyAndOrderFront: None::<&AnyObject>] },
+        // SAFETY: NSWindow의 makeKeyAndOrderFront:와 QLPreviewPanel의 메서드들
+        Some(panel) => unsafe {
+            let _: () = msg_send![&*panel, makeKeyAndOrderFront: None::<&AnyObject>];
+            // 닫았던 창을 다시 열 때는 이 뷰가 계속 맡고 있어 begin…이 다시 오지 않을 수 있다: 새 내용을 직접 알린다
+            if LOOK_ON.get() {
+                let at = LOOK.with(|l| l.borrow().1) as NSInteger;
+                let _: () = msg_send![&*panel, reloadData];
+                let _: () = msg_send![&*panel, setCurrentPreviewItemIndex: at];
+            }
+        },
         None => {
             with_app(App::look_failed);
             redraw();
@@ -787,10 +816,11 @@ fn show_look(open: bool) {
     }
 }
 
-/// 훑어보기 창이 이 뷰의 것을 보이고 있으면, 보여 줄 것을 App의 지금 선택에 맞춘다. 달라졌을 때만 창에 알린다
+/// 훑어보기 창이 떠 있고 이 뷰의 것을 보이고 있으면, 보여 줄 것을 App의 지금 선택에 맞춘다. 달라졌을 때만 창에 알린다
 /// (그릴 때마다 다시 읽게 하면 깜빡인다). 보여 줄 것이 없어졌으면 창을 닫는다
 fn sync_look() {
-    if !LOOK_ON.get() {
+    // 이 뷰가 맡고 있어도 창이 닫혀 있으면 알리지 않는다 (다시 열 때 show_look이 새로 알린다)
+    if !LOOK_ON.get() || !look_shown() {
         return;
     }
     let Some(items) = with_app(|a| a.look_items()) else { return };
