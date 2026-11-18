@@ -5,13 +5,14 @@
 //! (이 앱의 상태로 장면을 채워 넘긴다).
 //! 그림·글 파일을 하나 고르면 다른 칸의 오른쪽 아래에 미리 보기 카드가 저절로 뜬다 (도구 막대의 눈으로 끄고 켠다).
 //! 아이콘 보기에서는 그림 파일이 썸네일로 보인다 (뒷줄에서 읽어 둔 것을 그린다).
-//! 파일 작업(새 폴더, 이름 바꾸기)은 할 일을 큐에 넣어 두면 창 쪽이 뒷줄에서 실행하고 결과를 돌려준다 (fileops.rs).
+//! 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 되돌리기)은 할 일을 큐에 넣어 두면 창 쪽이 뒷줄에서 실행하고 결과를 돌려준다 (fileops.rs).
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
 use crate::fileops::{self, Done, Fail, Job, Op};
 use crate::gfx::{Gfx, MONO_LINE_H, Picture};
 use sakadu::draw::{Color, Font, R};
 use sakadu::favorites::{self, Favorite, Favorites, Row};
+use sakadu::fileops::{Undo, UndoStack};
 use sakadu::listing::{self, Entry, Kind};
 use sakadu::palette::{self, R_ROW, System, Theme, alpha};
 use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab, ViewMode, child_toward};
@@ -130,16 +131,20 @@ pub enum MenuKind {
     Pin(usize),
     /// 사이드바 '모든 공간'의 즐겨찾기 항목을 오른쪽 단추로 눌렀을 때 (Favorites::rows의 줄 번호): 이 작업 공간에만 두기, 모든 공간에서 빼기
     Fav(usize),
+    /// 목록의 줄을 오른쪽 단추로 눌렀을 때: 고른 항목들의 메뉴 (열기, Finder에서 보기, 이름 바꾸기, 휴지통으로 이동)
+    Rows,
+    /// 목록의 빈 곳을 오른쪽 단추로 눌렀을 때: 그 폴더의 메뉴 (새 폴더, 새로 고침)
+    Blank,
 }
 
 /// 메뉴 한 개에 담을 수 있는 줄 수 (tag에서 줄 번호가 차지하는 범위)
 const TAG_ITEMS: usize = 1_000_000;
-/// tag에서 메뉴 종류가 차지하는 범위 (종류는 여섯 가지)
+/// tag에서 메뉴 종류가 차지하는 범위 (종류는 여덟 가지)
 const TAG_KINDS: usize = 8;
 
 impl MenuKind {
     /// 메뉴 줄에 붙이는 번호 (맥 메뉴 항목의 tag): 메뉴 종류, 그 메뉴를 연 것의 번호(공간, 고정한 줄, 즐겨찾기 줄), 줄 번호를 한 수에 담는다.
-    /// 종류(0~5) + TAG_KINDS × (줄 번호 + TAG_ITEMS × 연 것의 번호). 줄 번호와 연 것의 번호는 자르지 않는다:
+    /// 종류(0~7) + TAG_KINDS × (줄 번호 + TAG_ITEMS × 연 것의 번호). 줄 번호와 연 것의 번호는 자르지 않는다:
     /// 모든 작업 공간 메뉴는 줄 번호가 곧 공간 번호라, 잘리면 뒤쪽 공간들이 같은 번호가 된다
     pub fn tag(self, item: usize) -> isize {
         let (kind, index) = match self {
@@ -149,6 +154,8 @@ impl MenuKind {
             MenuKind::Spaces => (3, 0),
             MenuKind::Pin(i) => (4, i),
             MenuKind::Fav(i) => (5, i),
+            MenuKind::Rows => (6, 0),
+            MenuKind::Blank => (7, 0),
         };
         (kind + TAG_KINDS * (item.min(TAG_ITEMS - 1) + TAG_ITEMS * index)) as isize
     }
@@ -165,6 +172,8 @@ impl MenuKind {
             3 => MenuKind::Spaces,
             4 => MenuKind::Pin(index),
             5 => MenuKind::Fav(index),
+            6 => MenuKind::Rows,
+            7 => MenuKind::Blank,
             _ => return None,
         };
         Some((kind, item))
@@ -191,6 +200,42 @@ impl PinAct {
     }
 }
 
+/// 목록 메뉴(고른 항목들)의 줄
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RowAct {
+    Open,
+    Reveal,
+    Rename,
+    Trash,
+}
+
+impl RowAct {
+    fn label(self) -> &'static str {
+        match self {
+            RowAct::Open => "열기",
+            RowAct::Reveal => "Finder에서 보기",
+            RowAct::Rename => "이름 바꾸기",
+            RowAct::Trash => "휴지통으로 이동",
+        }
+    }
+}
+
+/// 목록 메뉴를 열 때 적어 둔 대상: 그 탭, 그 폴더, 고른 항목들(이름, 파일 번호, 폴더인지), 누른 자리.
+/// 메뉴가 떠 있는 동안 목록이나 고른 것이 바뀌어도, 고른 줄은 이때 적어 둔 항목에 한다
+struct ListTarget {
+    pane: usize,
+    tab: u64,
+    dir: String,
+    items: Vec<(String, u64, bool)>,
+    at: (f32, f32),
+}
+
+/// path가 old이거나 그 아래면, old 뒤에 남는 부분 (빈 글자이거나 '/'로 시작한다)
+fn under<'a>(path: &'a str, old: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix(old)?;
+    (rest.is_empty() || rest.starts_with('/')).then_some(rest)
+}
+
 /// 맥 키 (글자 키는 소문자 그대로, 스페이스는 ' ')
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Key {
@@ -205,13 +250,16 @@ pub enum Key {
     Tab,
     Esc,
     Return,
+    /// 지우기 키(⌫). ⌘와 함께 누르면 휴지통으로 보낸다
+    Delete,
     Char(char),
 }
 
 impl Key {
-    /// 누르고 있을 때 되풀이해 받아도 되는 키인지. 파일을 만들거나 고치는 키(Return, 새 폴더의 n)는 한 번 누름에 한 번만 받는다
+    /// 누르고 있을 때 되풀이해 받아도 되는 키인지. 파일을 만들거나 고치거나 휴지통으로 보내는 키(Return, ⌫, 새 폴더의 n)는
+    /// 한 번 누름에 한 번만 받는다
     pub fn repeats(self) -> bool {
-        !matches!(self, Key::Return | Key::Char('n'))
+        !matches!(self, Key::Return | Key::Delete | Key::Char('n'))
     }
 }
 
@@ -647,6 +695,14 @@ pub struct App {
     name_next: Option<(u64, String, u64)>,
     /// 파일 작업 뒤 다시 읽어야 하는데 지금 보이지 않는 탭 (보이게 될 때 다시 읽는다)
     stale: HashSet<u64>,
+    /// 맡기고 아직 결과를 받지 못한 파일 작업의 수
+    ops_running: usize,
+    /// 되돌리기 기록: 이름 바꾸기, 새 폴더, 휴지통 (⌘Z)
+    undos: UndoStack,
+    /// 목록 메뉴를 열 때 적어 둔 대상
+    list_target: Option<ListTarget>,
+    /// Finder에서 보여 달라는 항목 (창 쪽이 Finder를 앞으로 불러 그 항목을 고른다)
+    pub reveal_files: Vec<String>,
     /// 칸 p의 칩 줄 오른쪽에 잠깐 보일 알림 (다음 입력 때 지운다)
     flash: Option<(usize, String)>,
     probes: Vec<Probe>,
@@ -716,6 +772,10 @@ impl App {
             op_seq: 0,
             name_next: None,
             stale: HashSet::new(),
+            ops_running: 0,
+            undos: UndoStack::default(),
+            list_target: None,
+            reveal_files: Vec::new(),
             flash: None,
             probes: Vec::new(),
             probe_seq: [0; 4],
@@ -1178,10 +1238,11 @@ impl App {
         was
     }
 
-    // ---------- 파일 작업: 새 폴더, 이름 바꾸기 ----------
+    // ---------- 파일 작업: 새 폴더, 이름 바꾸기, 휴지통, 되돌리기 ----------
 
     fn push_op(&mut self, tab: u64, job: Job) -> u64 {
         self.op_seq += 1;
+        self.ops_running += 1;
         self.ops.push(Op { seq: self.op_seq, tab, job });
         self.op_seq
     }
@@ -1197,6 +1258,42 @@ impl App {
         let (Some(dir), LoadState::Ready) = (tab.loc.dir(), &tab.state) else { return };
         let (tab, dir) = (tab.id, dir.to_string());
         self.push_op(tab, Job::NewFolder { dir });
+    }
+
+    /// 칸 p에서 고른 항목들을 휴지통으로 보낸다 (⌘⌫). 실제로 고른 것만: 커서만 놓인 줄은 대상이 아니다.
+    /// 묻지 않고 보낸다 (잘못 보냈으면 ⌘Z로 되돌린다)
+    pub fn trash_selected(&mut self, p: usize) {
+        let tab = self.panes[p].tab();
+        let Some(dir) = tab.loc.dir().map(str::to_string) else { return };
+        let items: Vec<(String, u64)> = (0..tab.view.len()).filter_map(|vi| tab.entry_at(vi)).filter(|e| e.selected).map(|e| (e.name_string(), e.file_id)).collect();
+        let tab = tab.id;
+        self.trash_items(tab, dir, items);
+    }
+
+    /// dir 안의 항목들(이름, 목록에서 본 파일 번호)을 휴지통으로 보내 달라고 맡긴다
+    fn trash_items(&mut self, tab: u64, dir: String, items: Vec<(String, u64)>) {
+        if !items.is_empty() {
+            self.push_op(tab, Job::Trash { dir, items });
+        }
+    }
+
+    /// 가장 나중에 한 파일 작업(이름 바꾸기, 새 폴더, 휴지통)을 되돌린다 (⌘Z).
+    /// 이름이나 경로를 치는 중에는 하지 않는다: 그때의 ⌘Z는 입력 상자의 글자에 쓰는 키다
+    pub fn undo(&mut self) {
+        if self.edit != Editing::None {
+            return;
+        }
+        // 앞의 작업이 끝나야 그 기록이 생긴다: 끝나기 전에 누르면 그보다 앞의 작업이 되돌려진다
+        let note = if self.ops_running > 0 {
+            Some("앞의 작업이 끝난 뒤에 되돌릴 수 있어요")
+        } else if let Some(undo) = self.undos.pop() {
+            let tab = self.panes[self.active].tab().id;
+            self.push_op(tab, Job::Undo(undo));
+            None
+        } else {
+            Some("되돌릴 작업이 없어요")
+        };
+        self.flash = note.map(|n| (self.active, n.to_string()));
     }
 
     /// 칸 p에서 고른 항목의 이름을 고치기 시작한다 (Return). 하나만 골랐을 때만: 여럿이면 알리고, 없으면 아무것도 하지 않는다
@@ -1297,30 +1394,85 @@ impl App {
 
     /// 뒷줄에서 끝낸 파일 작업의 결과
     pub fn on_op_done(&mut self, op: &Op, result: Result<Done, Fail>) {
+        self.ops_running = self.ops_running.saturating_sub(1);
         // 그 작업을 낸 탭이 지금 보이는 칸 (알림도 그 칸에. 보이지 않으면 지금 칸에)
         let pane = (0..self.layout.count()).find(|p| self.panes[*p].tab().id == op.tab);
         let note_at = pane.unwrap_or(self.active);
-        let here = |a: &App, dir: &str| pane.filter(|p| a.panes[*p].tab().loc.dir() == Some(dir));
+        // 그 폴더를 보이고 있는 칸: 작업을 낸 탭의 칸이 먼저, 아니면 그 폴더를 보이는 다른 칸 (되돌리기는 어느 칸에서나 한다)
+        let here = |a: &App, dir: &str| {
+            let shows = |p: &usize| a.panes[*p].tab().loc.dir() == Some(dir);
+            pane.filter(shows).or_else(|| (0..a.layout.count()).find(shows))
+        };
         // 이 작업이 끝나기를 기다리던 이름 상자
         let waiting = matches!(&self.edit, Editing::Item(e) if e.waiting == Some(op.seq));
-        match (&op.job, result) {
+        let note = match (&op.job, result) {
             (Job::NewFolder { dir }, Ok(Done::NewFolder { name, file_id })) => {
                 // 그 탭이 아직 그 폴더를 보이고 있으면 만든 폴더를 고르고, 다 읽은 뒤 그 줄에서 이름을 고친다
-                if let Some(p) = here(self, dir) {
-                    self.select_after(p, &name);
+                if let Some(p) = pane.filter(|p| self.panes[*p].tab().loc.dir() == Some(dir.as_str())) {
+                    self.select_after(p, std::slice::from_ref(&name));
                     self.name_next = Some((op.tab, dir.clone(), file_id));
                 }
+                if file_id != 0 {
+                    self.undos.push(Undo::NewFolder { dir: dir.clone(), name, file_id });
+                }
+                None
             }
-            (Job::Rename { dir, to, file_id, .. }, Ok(_)) => {
+            (Job::Rename { dir, from, to, file_id }, Ok(_)) => {
                 if waiting {
                     self.edit = Editing::None;
                 }
                 self.deselect_file(dir, *file_id);
+                self.tabs_moved(&util::join(dir, from), &util::join(dir, to));
                 if let Some(p) = here(self, dir) {
-                    self.select_after(p, to);
+                    self.select_after(p, std::slice::from_ref(to));
                 }
+                self.undos.push(Undo::Rename { dir: dir.clone(), from: from.clone(), to: to.clone(), file_id: *file_id });
+                None
             }
-            (_, Ok(_)) => {}
+            (Job::Trash { dir, .. }, Ok(Done::Trashed { moved, failed })) => {
+                for t in &moved {
+                    self.deselect_file(dir, t.file_id);
+                    self.tabs_left(&util::join(dir, &t.name), dir);
+                }
+                // 되돌릴 수 있다고 약속하지 않는다: 맥의 개인정보 보호 때문에 휴지통에서 꺼내지 못할 수 있다
+                let note = match (moved.len(), failed.first()) {
+                    (n, None) => format!("{n}개를 휴지통으로 옮겼어요"),
+                    (0, Some((name, why))) => format!("휴지통으로 옮기지 못했어요: {name} · {why}"),
+                    (n, Some((name, why))) => format!("{n}개를 휴지통으로 옮겼고 {}개는 그대로 뒀어요: {name} · {why}", failed.len()),
+                };
+                if !moved.is_empty() {
+                    self.undos.push(Undo::Trash { dir: dir.clone(), items: moved });
+                }
+                Some(note)
+            }
+            (Job::Undo(undo), Ok(Done::Undone { left })) => {
+                match undo {
+                    Undo::Rename { dir, from, to, file_id } => {
+                        self.deselect_file(dir, *file_id);
+                        self.tabs_moved(&util::join(dir, to), &util::join(dir, from));
+                        if let Some(p) = here(self, dir) {
+                            self.select_after(p, std::slice::from_ref(from));
+                        }
+                    }
+                    Undo::NewFolder { dir, name, file_id } => {
+                        self.deselect_file(dir, *file_id);
+                        self.tabs_left(&util::join(dir, name), dir);
+                    }
+                    Undo::Trash { dir, items } => {
+                        // 원래 자리로 돌아온 것들을 고른다
+                        let back: Vec<String> = items.iter().filter(|t| !left.iter().any(|(name, _)| *name == t.name)).map(|t| t.name.clone()).collect();
+                        if let Some(p) = here(self, dir).filter(|_| !back.is_empty()) {
+                            self.select_after(p, &back);
+                        }
+                    }
+                }
+                Some(match left.as_slice() {
+                    [] => undo.label(),
+                    [(name, why)] => format!("‘{name}’은(는) 휴지통에 그대로 있어요: {why}"),
+                    [(_, why), ..] => format!("{}개는 휴지통에 그대로 있어요: {why}", left.len()),
+                })
+            }
+            (_, Ok(_)) => None,
             (Job::Rename { .. }, Err(Fail::Exists)) => {
                 // 상자는 친 그대로 열어 둔다: 다른 이름으로 다시 확정할 수 있다
                 if let Editing::Item(e) = &mut self.edit
@@ -1328,7 +1480,7 @@ impl App {
                 {
                     e.waiting = None;
                 }
-                self.flash = Some((note_at, "같은 이름이 이미 있어요".to_string()));
+                Some("같은 이름이 이미 있어요".to_string())
             }
             (job, Err(fail)) => {
                 if waiting {
@@ -1337,27 +1489,69 @@ impl App {
                 let what = match job {
                     Job::NewFolder { .. } => "폴더를 만들지 못했어요",
                     Job::Rename { .. } => "이름을 바꾸지 못했어요",
+                    Job::Trash { .. } => "휴지통으로 옮기지 못했어요",
+                    Job::Undo(_) => "되돌리지 못했어요",
                 };
-                let why = match fail {
-                    Fail::Exists => "같은 이름이 이미 있어요".to_string(),
-                    Fail::Changed => "그 사이 항목이 바뀌었어요".to_string(),
-                    Fail::Other(msg) => msg,
+                let why = match (job, fail) {
+                    (Job::Undo(Undo::Rename { .. }), Fail::Exists) => "원래 이름을 다른 항목이 쓰고 있어요".to_string(),
+                    (_, Fail::Exists) => "같은 이름이 이미 있어요".to_string(),
+                    (_, Fail::Changed) => "그 사이 항목이 바뀌었어요".to_string(),
+                    (_, Fail::Other(msg)) => msg,
                 };
-                self.flash = Some((note_at, format!("{what}: {why}")));
+                Some(format!("{what}: {why}"))
             }
+        };
+        if let Some(note) = note {
+            self.flash = Some((note_at, note));
         }
         // 잘 끝났든 아니든 다시 읽는다 (하지 못한 까닭이 낡은 목록일 수 있다)
         self.refresh_changed();
     }
 
-    /// 칸 p를 다음에 읽은 뒤 그 이름을 고르고 보이게 한다 (스크롤은 지금 자리에서)
-    fn select_after(&mut self, p: usize, name: &str) {
+    /// 칸 p를 다음에 읽은 뒤 그 이름들을 고르고 첫 이름이 보이게 한다 (스크롤은 지금 자리에서)
+    fn select_after(&mut self, p: usize, names: &[String]) {
         let tab = self.panes[p].tab_mut();
-        tab.restore = Some(Restore { scroll: tab.scroll, cursor_index: tab.cursor, ..Restore::select(name) });
+        tab.restore = Some(Restore { selected: names.to_vec(), cursor: names.first().cloned(), scroll: tab.scroll, cursor_index: tab.cursor, reveal: true, ..Default::default() });
     }
 
-    /// 폴더 dir 안의 이름이 바뀐 항목을, 그 폴더를 보이는 모든 탭의 고른 것에서 뺀다: 아직 다시 읽지 않은 목록에 고른 채 남은
-    /// 옛 이름이, 나중에 그 이름을 갖게 된 다른 항목의 선택으로 되살아나지 않게.
+    /// 폴더 old가 new가 됐다 (이름 바꾸기와 그 되돌리기): 그 안을 보던 탭과 방문 기록을 새 경로로 고친다.
+    /// 고친 탭은 읽던 것을 버린다 (옛 경로로 읽던 결과가 뒤늦게 와서 '열 수 없어요'가 되지 않게). 다시 읽기는 refresh_changed가 한다
+    fn tabs_moved(&mut self, old: &str, new: &str) {
+        let fix = |loc: &mut Location| {
+            let Location::Dir(d) = loc else { return false };
+            let Some(rest) = under(d, old) else { return false };
+            *d = format!("{new}{rest}");
+            true
+        };
+        for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+            for loc in tab.back.iter_mut().chain(tab.fwd.iter_mut()) {
+                fix(loc);
+            }
+            if fix(&mut tab.loc) && tab.generation > 0 {
+                tab.generation += 1;
+            }
+        }
+    }
+
+    /// 폴더 gone이 휴지통으로 갔다: 그 안을 보던 탭은 남아 있는 위 폴더 up으로 올리고, 방문 기록에서 그 안의 곳들을 뺀다
+    fn tabs_left(&mut self, gone: &str, up: &str) {
+        let inside = |loc: &Location| loc.dir().is_some_and(|d| under(d, gone).is_some());
+        for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+            tab.back.retain(|loc| !inside(loc));
+            tab.fwd.retain(|loc| !inside(loc));
+            if inside(&tab.loc) {
+                tab.loc = Location::Dir(up.to_string());
+                tab.reset_view_state();
+                tab.state = LoadState::Loading;
+                if tab.generation > 0 {
+                    tab.generation += 1;
+                }
+            }
+        }
+    }
+
+    /// 폴더 dir 안의 이름이 바뀌었거나 휴지통으로 간 항목을, 그 폴더를 보이는 모든 탭의 고른 것에서 뺀다: 아직 다시 읽지 않은
+    /// 목록에 고른 채 남은 옛 이름이, 나중에 그 이름을 갖게 된 다른 항목의 선택으로 되살아나지 않게.
     /// 파일 번호는 한 볼륨 안에서만 서로 다르므로 그 폴더를 보이는 탭에서만 찾는다 (다른 볼륨의 파일이 같은 번호일 수 있다)
     fn deselect_file(&mut self, dir: &str, file_id: u64) {
         if file_id == 0 {
@@ -1819,6 +2013,11 @@ impl App {
                 let i = (0..rows.len()).find(|i| side_menu(&rows, *i) == Some(kind))?;
                 self.side_rect(&rows[i])
             }
+            // 목록 메뉴는 누른 자리에 연다 (창 쪽이 자리의 아래 끝에서 4 내려 연다)
+            MenuKind::Rows | MenuKind::Blank => {
+                let (x, y) = self.list_target.as_ref()?.at;
+                R::new(x, y - 4.0, x, y - 4.0)
+            }
         };
         Some((kind, anchor))
     }
@@ -1860,6 +2059,17 @@ impl App {
                 Some(Row::Item { .. }) => vec![("이 작업 공간에만 두기".to_string(), false), ("모든 공간에서 빼기".to_string(), false)],
                 _ => Vec::new(),
             },
+            MenuKind::Rows => self.row_menu().into_iter().map(|act| (act.label().to_string(), false)).collect(),
+            MenuKind::Blank => vec![("새 폴더".to_string(), false), ("새로 고침".to_string(), false)],
+        }
+    }
+
+    /// 목록 메뉴(고른 항목들)의 줄: 열기, Finder에서 보기, 이름 바꾸기(하나를 골랐을 때만), 휴지통으로 이동
+    fn row_menu(&self) -> Vec<RowAct> {
+        match self.list_target.as_ref().map_or(0, |t| t.items.len()) {
+            0 => Vec::new(),
+            1 => vec![RowAct::Open, RowAct::Reveal, RowAct::Rename, RowAct::Trash],
+            _ => vec![RowAct::Open, RowAct::Reveal, RowAct::Trash],
         }
     }
 
@@ -1884,7 +2094,9 @@ impl App {
     /// 고정한 줄을 옮기는 줄과 그 밖의 줄 사이)
     pub fn menu_break(&self, kind: MenuKind) -> Option<usize> {
         match kind {
-            MenuKind::Layout | MenuKind::Spaces | MenuKind::Fav(_) => None,
+            MenuKind::Layout | MenuKind::Spaces | MenuKind::Fav(_) | MenuKind::Blank => None,
+            // 보는 줄(열기, Finder에서 보기)과 바꾸는 줄(이름 바꾸기, 휴지통으로 이동) 사이
+            MenuKind::Rows => Some(2),
             MenuKind::View => Some(ViewMode::ALL.len()),
             MenuKind::Space(_) => Some(workspaces::COLORS.len()),
             // 옮길 곳이 없는 줄(고정한 것이 하나뿐)은 구분선 없이 나머지 줄만
@@ -1935,28 +2147,90 @@ impl App {
                     _ => {}
                 }
             }
+            MenuKind::Rows | MenuKind::Blank => self.pick_list_menu(kind, i),
+        }
+    }
+
+    /// 목록 메뉴에서 고른 줄을, 메뉴를 열 때 적어 둔 대상에 한다. 그 사이 그 탭이 다른 곳으로 갔으면 아무것도 하지 않는다
+    fn pick_list_menu(&mut self, kind: MenuKind, i: usize) {
+        let acts = self.row_menu();
+        let Some(t) = self.list_target.take() else { return };
+        let still = t.pane < self.layout.count() && {
+            let tab = self.panes[t.pane].tab();
+            tab.id == t.tab && tab.loc.dir() == Some(t.dir.as_str())
+        };
+        if !still {
+            return;
+        }
+        if kind == MenuKind::Blank {
+            match i {
+                0 => self.new_folder(t.pane),
+                1 => self.refresh(t.pane),
+                _ => {}
+            }
+            return;
+        }
+        let path = |name: &str| util::join(&t.dir, name);
+        match acts.get(i) {
+            // 폴더 하나면 그리로 들어가고, 아니면 고른 파일들을 macOS '열기'로 연다
+            Some(RowAct::Open) => match t.items.as_slice() {
+                [(name, _, true)] => self.navigate(t.pane, Location::Dir(path(name)), None),
+                items => self.open_files.extend(items.iter().filter(|(_, _, is_dir)| !is_dir).map(|(name, ..)| path(name))),
+            },
+            Some(RowAct::Reveal) => self.reveal_files.extend(t.items.iter().map(|(name, ..)| path(name))),
+            Some(RowAct::Rename) => {
+                self.begin_item_rename(t.pane);
+                // 지금 고른 것이 메뉴를 열 때의 그 항목이 아니면(그 사이 목록이 바뀌었으면) 시작하지 않는다
+                let same = matches!((&self.edit, t.items.as_slice()), (Editing::Item(e), [(_, id, _)]) if e.file_id == *id);
+                if !same {
+                    self.edit = Editing::None;
+                }
+            }
+            Some(RowAct::Trash) => self.trash_items(t.tab, t.dir.clone(), t.items.iter().map(|(name, id, _)| (name.clone(), *id)).collect()),
+            None => {}
         }
     }
 
     /// 오른쪽 단추로 누른 곳의 메뉴를 열어 달라고 한다: 레일의 공간 아이콘이면 그 공간의 메뉴, + 면 모든 작업 공간 목록,
-    /// 사이드바의 고정한 줄이나 즐겨찾기 항목이면 그 줄의 메뉴. 그랬으면 true
+    /// 사이드바의 고정한 줄이나 즐겨찾기 항목이면 그 줄의 메뉴, 목록의 줄이나 빈 곳이면 목록 메뉴. 그랬으면 true
     pub fn right_down(&mut self, g: &Gfx, x: f32, y: f32) -> bool {
         let hit = self.hit(g, x, y);
-        self.ask_menu(hit)
+        self.ask_menu(hit, x, y)
     }
 
-    fn ask_menu(&mut self, hit: Hit) -> bool {
+    fn ask_menu(&mut self, hit: Hit, x: f32, y: f32) -> bool {
         let kind = match hit {
             Hit::Space(i) => Some(MenuKind::Space(i)),
             // 창이 낮으면 레일에 공간이 다 보이지 않는다: 안 보이는 공간은 이 목록에서 고른다
             Hit::SpaceAdd => Some(MenuKind::Spaces),
             Hit::SideRow(i) => side_menu(&self.side_rows(), i),
+            Hit::Row(p, vi) => self.list_menu(p, Some(vi), x, y),
+            Hit::List(p) => self.list_menu(p, None, x, y),
             _ => None,
         };
         if kind.is_some() {
             self.menu = kind;
         }
         kind.is_some()
+    }
+
+    /// 목록 메뉴를 준비한다. 고르지 않은 줄을 눌렀으면 그 줄만 고르고(고른 줄이면 고른 것들 그대로), 빈 곳이면 고른 것을 푼다.
+    /// 그리고 대상을 지금 적어 둔다: 그 탭, 그 폴더, 고른 항목들의 이름과 파일 번호
+    fn list_menu(&mut self, p: usize, row: Option<usize>, x: f32, y: f32) -> Option<MenuKind> {
+        let dir = self.panes[p].tab().loc.dir()?.to_string();
+        self.activate_pane(p);
+        // 하던 입력(경로, 이름)은 그만둔다
+        self.edit = Editing::None;
+        self.flash = None;
+        let tab = self.panes[p].tab_mut();
+        match row {
+            Some(vi) if tab.is_selected(vi) => tab.cursor = vi,
+            Some(vi) => tab.select_only(vi),
+            None => tab.clear_selection(),
+        }
+        let items = (0..tab.view.len()).filter_map(|vi| tab.entry_at(vi)).filter(|e| e.selected).map(|e| (e.name_string(), e.file_id, e.is_dir())).collect();
+        self.list_target = Some(ListTarget { pane: p, tab: tab.id, dir, items, at: (x, y) });
+        Some(if row.is_some() { MenuKind::Rows } else { MenuKind::Blank })
     }
 
     // ---------- 고르기 ----------
@@ -2382,7 +2656,7 @@ impl App {
         self.edit = Editing::None;
         self.flash = None;
         // ⌃-누르기는 오른쪽 단추와 같다
-        if mods.ctrl && self.ask_menu(hit) {
+        if mods.ctrl && self.ask_menu(hit, x, y) {
             return;
         }
         match hit {
@@ -2509,9 +2783,10 @@ impl App {
             (Key::Char('g'), true, false, false) if m.shift => self.begin_address(p),
             (Key::Up | Key::Down | Key::Left | Key::Right, false, false, false) | (Key::Home | Key::End | Key::PageUp | Key::PageDown, false, false, false) => self.move_cursor(key, m.shift),
             (Key::Down, true, false, false) | (Key::Char('o'), true, false, false) => self.open_selected(p),
-            // 파일 작업: Return 이름 바꾸기, ⇧⌘N 새 폴더 (Finder와 같다)
+            // 파일 작업: Return 이름 바꾸기, ⇧⌘N 새 폴더, ⌘⌫ 휴지통 (Finder와 같다). 되돌리기(⌘Z)는 편집 메뉴로 온다
             (Key::Return, false, false, false) => self.begin_item_rename(p),
             (Key::Char('n'), true, false, false) if m.shift => self.new_folder(p),
+            (Key::Delete, true, false, false) => self.trash_selected(p),
             (Key::Up, true, false, false) => self.go_up(p),
             (Key::Char('['), true, false, false) => self.go_back(p),
             (Key::Char(']'), true, false, false) => self.go_forward(p),
@@ -3379,7 +3654,9 @@ mod tests {
         assert_eq!(a.take_menu().map(|(k, r)| (k, r.t)), Some((MenuKind::Space(0), tile.t)));
         a.mouse_down(&g, x, y, Mods { ctrl: true, ..Default::default() }, 1);
         assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Space(0)));
-        assert!(!a.right_down(&g, a.list_rect(0).unwrap().l + 60.0, 300.0), "the file list has no menu yet");
+        // 목록의 빈 곳에도 메뉴가 있다 (새 폴더, 새로 고침)
+        assert!(a.right_down(&g, a.list_rect(0).unwrap().l + 60.0, 300.0));
+        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Blank));
         // 색: 고르면 그 공간의 색이 되고, 지금 공간이면 강조 색도 바뀐다
         let before = a.theme.accent;
         a.pick_menu(MenuKind::Space(0), 2);
@@ -3421,7 +3698,10 @@ mod tests {
             assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
         }
         assert_eq!(MenuKind::from_tag(-1), None);
-        assert_eq!((MenuKind::from_tag(6), MenuKind::from_tag(7)), (None, None), "kinds that do not exist");
+        // 목록 메뉴 (고른 항목들, 빈 곳)
+        for (kind, item) in [(MenuKind::Rows, 0), (MenuKind::Rows, 3), (MenuKind::Blank, 1)] {
+            assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3967,6 +4247,260 @@ mod tests {
         a.new_folder(0);
         a.settle();
         assert!(a.edit == Editing::None && a.flash.as_ref().is_some_and(|(_, m)| m.contains("폴더를 만들지 못했어요")), "{:?}", a.flash);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 잠깐 뜨는 알림 글에 그 말이 들어 있는지
+    fn noted(a: &App, word: &str) -> bool {
+        a.flash.as_ref().is_some_and(|(_, m)| m.contains(word))
+    }
+
+    /// 휴지통(⌘⌫): 실제로 고른 것만 간다. ⌘Z로 되돌리면 원래 자리로 오고 다시 골라진다
+    #[test]
+    fn trash_takes_the_selected_items_and_undo_brings_them_back() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        let cmd = Mods { cmd: true, ..Default::default() };
+        // 고른 것이 없으면(커서만 놓여 있으면) 아무 일도 없다
+        assert!(a.key(Key::Delete, cmd));
+        a.settle();
+        assert_eq!(names(&a, 0), ["2026 4분기", "예산.csv", "회의록.md"]);
+        // ⌘ 없이 누른 ⌫는 아무것도 하지 않는다
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        assert!(!a.key(Key::Delete, Mods::default()));
+        click_name(&mut a, &g, 0, "회의록.md", cmd);
+        a.key(Key::Delete, cmd);
+        a.settle();
+        assert_eq!(names(&a, 0), ["2026 4분기"]);
+        assert_eq!(names(&a, 1), ["2026 4분기"], "the other pane on the same folder follows");
+        assert!(noted(&a, "2개를 휴지통으로 옮겼어요"), "{:?}", a.flash);
+        assert!(picked(&a, 0).0.is_empty());
+        // 없어진 것이 아니다: 되돌리면 그 파일들이 그대로 돌아오고 골라진다
+        a.undo();
+        a.settle();
+        assert_eq!(names(&a, 0), ["2026 4분기", "예산.csv", "회의록.md"]);
+        assert_eq!(picked(&a, 0).0, ["예산.csv", "회의록.md"]);
+        assert_eq!((std::fs::read(util::join(&work, "예산.csv")).unwrap(), std::fs::read(util::join(&work, "회의록.md")).unwrap()), (b"x".to_vec(), b"x".to_vec()));
+        assert!(noted(&a, "2개를 휴지통에서 되돌려 놓았어요"), "{:?}", a.flash);
+        // 더 되돌릴 것이 없다
+        a.undo();
+        assert!(noted(&a, "되돌릴 작업이 없어요"), "{:?}", a.flash);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 낡은 목록에서 휴지통: 그 사이 다른 파일로 바뀐 것은 보내지 않고 그대로 둔다. 보낸 것만 되돌리기 기록에 남는다
+    #[test]
+    fn trash_leaves_an_item_that_changed_under_the_list() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        let cmd = Mods { cmd: true, ..Default::default() };
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        click_name(&mut a, &g, 0, "회의록.md", cmd);
+        // 앱 밖에서: 회의록은 다른 이름이 되고, 같은 이름의 새 파일이 생겼다
+        std::fs::rename(util::join(&work, "회의록.md"), util::join(&work, "옮긴 회의록.md")).unwrap();
+        std::fs::write(util::join(&work, "회의록.md"), b"new").unwrap();
+        a.key(Key::Delete, cmd);
+        a.settle();
+        assert_eq!(names(&a, 0), ["2026 4분기", "옮긴 회의록.md", "회의록.md"]);
+        assert_eq!(std::fs::read(util::join(&work, "회의록.md")).unwrap(), b"new");
+        assert_eq!(std::fs::read(util::join(&work, "옮긴 회의록.md")).unwrap(), b"x");
+        assert!(noted(&a, "1개를 휴지통으로 옮겼고 1개는 그대로 뒀어요"), "{:?}", a.flash);
+        // 되돌리면 보낸 것 하나만 돌아온다
+        a.undo();
+        a.settle();
+        assert_eq!(names(&a, 0), ["2026 4분기", "예산.csv", "옮긴 회의록.md", "회의록.md"]);
+        assert_eq!(picked(&a, 0).0, ["예산.csv"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 되돌리기(⌘Z): 나중에 한 것부터. 이름 바꾸기는 원래 이름으로, 만든 폴더는 비어 있을 때만 휴지통으로. 이름을 치는 중에는 하지 않는다
+    #[test]
+    fn undo_reverts_new_folder_and_rename_in_order() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        let folder = util::join(&work, "새 폴더");
+        // 이름 바꾸기, 새 폴더 순으로 한다
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        a.key(Key::Return, Mods::default());
+        a.commit_address("예산 최종.csv");
+        a.settle();
+        a.new_folder(0);
+        a.settle();
+        // 이름 상자가 떠 있는 동안의 ⌘Z는 파일 작업을 되돌리지 않는다
+        assert!(matches!(a.edit, Editing::Item(_)));
+        a.undo();
+        a.settle();
+        assert!(std::fs::metadata(&folder).unwrap().is_dir() && matches!(a.edit, Editing::Item(_)));
+        a.cancel_address();
+        // 폴더에 무엇을 넣었으면 그대로 둔다 (넣은 것을 함께 휴지통으로 보내지 않는다)
+        std::fs::write(util::join(&folder, "넣은 파일.txt"), b"x").unwrap();
+        a.undo();
+        a.settle();
+        assert!(noted(&a, "되돌리지 못했어요") && noted(&a, "들어 있어"), "{:?}", a.flash);
+        assert_eq!(std::fs::read(util::join(&folder, "넣은 파일.txt")).unwrap(), b"x");
+        // 그다음 ⌘Z는 그 앞의 작업(이름 바꾸기)을 되돌린다
+        a.undo();
+        a.settle();
+        assert_eq!(std::fs::read(util::join(&work, "예산.csv")).unwrap(), b"x");
+        assert!(std::fs::symlink_metadata(util::join(&work, "예산 최종.csv")).is_err());
+        assert_eq!(picked(&a, 0).0, ["예산.csv"]);
+        assert!(noted(&a, "예산.csv"), "{:?}", a.flash);
+        // 새 폴더를 하나 더 만들고 비어 있는 채로 되돌리면 휴지통으로 간다
+        a.new_folder(0);
+        a.settle();
+        a.cancel_address();
+        assert!(std::fs::metadata(util::join(&work, "새 폴더 2")).unwrap().is_dir());
+        a.undo();
+        a.settle();
+        assert!(std::fs::symlink_metadata(util::join(&work, "새 폴더 2")).is_err());
+        assert!(!names(&a, 0).contains(&"새 폴더 2".to_string()) && names(&a, 0).contains(&"새 폴더".to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 되돌릴 자리에 다른 것이 생겼으면 덮어쓰지 않는다: 이름 바꾸기는 그대로 두고, 휴지통의 것은 휴지통에 둔다
+    #[test]
+    fn undo_never_replaces_what_took_the_old_name() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        let cmd = Mods { cmd: true, ..Default::default() };
+        // 이름을 바꾼 뒤, 원래 이름으로 새 파일이 생겼다
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        a.key(Key::Return, Mods::default());
+        a.commit_address("예산 최종.csv");
+        a.settle();
+        std::fs::write(util::join(&work, "예산.csv"), b"new").unwrap();
+        a.undo();
+        a.settle();
+        assert!(noted(&a, "원래 이름을 다른 항목이 쓰고 있어요"), "{:?}", a.flash);
+        assert_eq!((std::fs::read(util::join(&work, "예산.csv")).unwrap(), std::fs::read(util::join(&work, "예산 최종.csv")).unwrap()), (b"new".to_vec(), b"x".to_vec()));
+        // 휴지통으로 보낸 뒤, 원래 이름으로 새 파일이 생겼다
+        click_name(&mut a, &g, 0, "회의록.md", Mods::default());
+        a.key(Key::Delete, cmd);
+        a.settle();
+        std::fs::write(util::join(&work, "회의록.md"), b"new").unwrap();
+        a.undo();
+        a.settle();
+        assert!(noted(&a, "휴지통에 그대로 있어요") && noted(&a, "직접 꺼내"), "{:?}", a.flash);
+        assert_eq!(std::fs::read(util::join(&work, "회의록.md")).unwrap(), b"new");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 폴더 이름을 바꾸면 그 안을 보던 탭이 새 경로로 따라오고, 휴지통으로 보내면 남아 있는 위 폴더로 올라간다
+    #[test]
+    fn tabs_inside_a_renamed_or_trashed_folder_follow() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let quarter = util::join(&work, "2026 4분기");
+        let (mut a, g) = app(&work);
+        // 오른쪽 칸은 그 폴더 안에 들어가 있고, 왼쪽 칸의 보이지 않는 탭도 그 안에 있다
+        a.navigate(1, Location::Dir(quarter.clone()), None);
+        a.navigate(0, Location::Dir(quarter.clone()), None);
+        a.settle();
+        a.new_tab(0);
+        a.navigate(0, Location::Dir(work.clone()), None);
+        a.settle();
+        click_name(&mut a, &g, 0, "2026 4분기", Mods::default());
+        a.key(Key::Return, Mods::default());
+        a.commit_address("2027 1분기");
+        a.settle();
+        let moved = util::join(&work, "2027 1분기");
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(moved.clone()));
+        assert_eq!(names(&a, 1), ["보고서.docx"], "the tab reads the folder under its new name");
+        assert_eq!(a.pane(0).tabs[0].loc, Location::Dir(moved.clone()), "a hidden tab follows too");
+        assert_eq!(a.pane(0).tab().back.last(), Some(&Location::Dir(moved.clone())), "and so does the history");
+        // 되돌리면 탭도 원래 경로로 돌아온다
+        a.undo();
+        a.settle();
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(quarter.clone()));
+        assert_eq!(names(&a, 1), ["보고서.docx"]);
+        // 휴지통으로 보내면 그 안을 보던 탭은 위 폴더로 올라가고, 그 안으로 돌아가는 기록은 빠진다
+        click_name(&mut a, &g, 0, "2026 4분기", Mods::default());
+        a.key(Key::Delete, Mods { cmd: true, ..Default::default() });
+        a.settle();
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(work.clone()));
+        assert!(matches!(a.pane(1).tab().state, LoadState::Ready) && !names(&a, 1).contains(&"2026 4분기".to_string()));
+        assert_eq!(a.pane(0).tabs[0].loc, Location::Dir(work.clone()));
+        assert!(!a.pane(0).tab().back.contains(&Location::Dir(quarter.clone())));
+        // 보이지 않던 탭은 보이게 될 때 위 폴더를 읽는다
+        a.activate_tab(0, 0);
+        a.settle();
+        assert!(matches!(a.pane(0).tab().state, LoadState::Ready) && names(&a, 0).contains(&"예산.csv".to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 목록의 오른쪽 단추 메뉴: 고르지 않은 줄이면 그 줄만 고르고, 메뉴를 연 때의 항목에 한다. 빈 곳은 새 폴더와 새로 고침
+    #[test]
+    fn list_menu_acts_on_the_rows_it_was_opened_for() {
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let (mut a, g) = app(&work);
+        let menu = |a: &mut App, name: &str| {
+            let vi = names(a, 0).iter().position(|n| n == name).unwrap();
+            let (x, y) = row_point(a, 0, vi);
+            assert!(a.right_down(&g, x, y));
+            let (kind, at) = a.take_menu().unwrap();
+            assert_eq!((kind, at.l, at.b + 4.0), (MenuKind::Rows, x, y), "the menu opens where the row was pressed");
+        };
+        // 고르지 않은 줄을 오른쪽 단추로: 그 줄만 골라진다
+        click_name(&mut a, &g, 0, "2026 4분기", Mods::default());
+        menu(&mut a, "예산.csv");
+        assert_eq!(picked(&a, 0).0, ["예산.csv"]);
+        assert_eq!(menu_labels(&a, MenuKind::Rows), ["열기", "Finder에서 보기", "이름 바꾸기", "휴지통으로 이동"]);
+        assert_eq!(a.menu_break(MenuKind::Rows), Some(2));
+        // Finder에서 보기, 열기(파일은 macOS '열기'로 넘긴다)
+        a.pick_menu(MenuKind::Rows, 1);
+        assert_eq!(a.reveal_files, [util::join(&work, "예산.csv")]);
+        a.pick_menu(MenuKind::Rows, 0);
+        assert!(a.open_files.is_empty(), "a menu acts once: its target is used up");
+        menu(&mut a, "예산.csv");
+        a.pick_menu(MenuKind::Rows, 0);
+        assert_eq!(a.open_files, [util::join(&work, "예산.csv")]);
+        // 이름 바꾸기: 그 줄에서 시작한다
+        menu(&mut a, "예산.csv");
+        a.pick_menu(MenuKind::Rows, 2);
+        assert!(matches!(&a.edit, Editing::Item(e) if e.name == "예산.csv"));
+        // 이름을 고치는 중에 오른쪽 단추를 누르면 고치기는 끝난다
+        menu(&mut a, "예산.csv");
+        assert_eq!(a.edit, Editing::None);
+        // 여럿을 고른 채 그중 하나를 오른쪽 단추로: 고른 것 모두의 메뉴 (이름 바꾸기는 없다)
+        click_name(&mut a, &g, 0, "예산.csv", Mods::default());
+        click_name(&mut a, &g, 0, "회의록.md", Mods { cmd: true, ..Default::default() });
+        menu(&mut a, "회의록.md");
+        assert_eq!(picked(&a, 0).0, ["예산.csv", "회의록.md"]);
+        assert_eq!(menu_labels(&a, MenuKind::Rows), ["열기", "Finder에서 보기", "휴지통으로 이동"]);
+        // 메뉴가 떠 있는 동안 고른 것이 바뀌어도, 메뉴를 열 때의 두 항목만 휴지통으로 간다
+        a.select_all();
+        a.pick_menu(MenuKind::Rows, 2);
+        a.settle();
+        assert_eq!(names(&a, 0), ["2026 4분기"]);
+        // 폴더 하나의 열기는 그리로 들어간다
+        menu(&mut a, "2026 4분기");
+        a.pick_menu(MenuKind::Rows, 0);
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(util::join(&work, "2026 4분기")));
+        a.go_back(0);
+        a.settle();
+        // 메뉴를 연 뒤 그 탭이 다른 곳으로 갔으면 아무것도 하지 않는다
+        menu(&mut a, "2026 4분기");
+        a.navigate(0, Location::Dir(home.clone()), None);
+        a.settle();
+        a.pick_menu(MenuKind::Rows, 3);
+        a.settle();
+        assert!(std::fs::metadata(util::join(&work, "2026 4분기")).unwrap().is_dir());
+        // 빈 곳: 고른 것을 풀고 그 폴더의 메뉴를 연다. ⌃-누르기도 같다
+        click_name(&mut a, &g, 0, "업무", Mods::default());
+        let l = a.list_rect(0).unwrap();
+        a.mouse_down(&g, l.l + 60.0, l.b - 10.0, Mods { ctrl: true, ..Default::default() }, 1);
+        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Blank));
+        assert!(picked(&a, 0).0.is_empty());
+        assert_eq!(menu_labels(&a, MenuKind::Blank), ["새 폴더", "새로 고침"]);
+        a.pick_menu(MenuKind::Blank, 0);
+        a.settle();
+        assert!(std::fs::metadata(util::join(&home, "새 폴더")).unwrap().is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
 
