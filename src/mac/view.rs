@@ -4,6 +4,7 @@
 //! 클립보드에는 파일 주소로 담고 읽는다 (Finder와 주고받을 수 있다).
 //! 끌어서 놓기도 파일 주소로 한다: 고른 줄을 끌어 내면 맥의 끌기를 시작하고(Finder나 다른 칸에 놓을 수 있다),
 //! 끌려 온 파일은 App에 어디에 놓일지 묻고 놓는다.
+//! 훑어보기(스페이스, ⌘Y)는 맥의 훑어보기 창(QLPreviewPanel)에 고른 파일을 띄운다. 그 창의 내용은 이 뷰가 댄다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods, Paste};
@@ -12,8 +13,9 @@ use crate::gfx::Gfx;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::runtime::{Bool, Sel};
-use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::ffi::NSInteger;
+use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, Sel};
+use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
     NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
@@ -37,6 +39,12 @@ thread_local! {
     /// 끌려 온 것과 받는 폴더가 같은 디스크인지 물어 둔 것: (끌려 온 첫 항목, 받는 폴더, 같은 디스크인지).
     /// 끄는 동안 마우스가 움직일 때마다 디스크에 묻지 않게 한다
     static SAME_VOLUME: RefCell<Option<(String, String, bool)>> = const { RefCell::new(None) };
+    /// 훑어보기 창에 대고 있는 것: (경로들, 지금 보이는 것의 번호). 그 창이 물으면 이것을 준다
+    static LOOK: RefCell<(Vec<String>, usize)> = const { RefCell::new((Vec::new(), 0)) };
+    /// 이 뷰가 훑어보기 창의 내용을 대고 있다 (beginPreviewPanelControl:부터 endPreviewPanelControl:까지)
+    static LOOK_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 훑어보기 창의 클래스 (처음 쓸 때 찾는다. 찾지 못하면 None)
+    static LOOK_CLASS: OnceCell<Option<&'static AnyClass>> = const { OnceCell::new() };
     /// 파일 작업을 하는 뒷줄로 가는 길 (처음 맡길 때 그 줄을 만든다)
     static OPS: OnceCell<std::sync::mpsc::Sender<crate::fileops::Op>> = const { OnceCell::new() };
     /// 폴더 감시 (처음 쓸 때 띄운다). 띄우지 못했으면 None: 그때는 창이 다시 앞으로 올 때와 파일 작업 뒤에만 다시 읽는다
@@ -217,17 +225,60 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, e: &NSEvent) {
-            let key = key_of(e.keyCode());
-            // 파일을 만들거나 고치는 키는 누르고 있어도 한 번만 받는다
-            if e.isARepeat() && key.is_some_and(|k| !k.repeats()) {
-                return;
-            }
-            let handled = key.is_some_and(|k| with_app(|a| a.key(k, mods(e))).unwrap_or(false));
-            if handled {
-                self.after_input();
-            } else {
+            if !self.handle_key(e) {
                 let _: () = unsafe { msg_send![super(self), keyDown: e] };
             }
+        }
+
+        /// 훑어보기 창이 내용을 댈 곳을 찾는다 (창이 뜰 때 응답 사슬을 거슬러 묻는다): 이 뷰가 댄다
+        #[unsafe(method(acceptsPreviewPanelControl:))]
+        fn accepts_preview_panel_control(&self, _panel: &AnyObject) -> bool {
+            true
+        }
+
+        /// 훑어보기 창의 내용(무엇을 보일지)과 키를 이 뷰가 맡는다. 창은 둘 다 약하게 잡는다 (이 뷰가 더 오래 산다).
+        /// 맡는 것과 창이 떠 있는 것은 다르다: 창을 닫아도 이 뷰가 계속 맡고 있을 수 있다 (떠 있는지는 look_shown이 창에 묻는다)
+        #[unsafe(method(beginPreviewPanelControl:))]
+        fn begin_preview_panel_control(&self, panel: &AnyObject) {
+            LOOK_ON.set(true);
+            let at = LOOK.with(|l| l.borrow().1) as NSInteger;
+            // SAFETY: QLPreviewPanel의 속성과 메서드다. 내용을 대는 쪽과 키를 받는 쪽으로 이 뷰를 건다
+            unsafe {
+                let _: () = msg_send![panel, setDataSource: self];
+                let _: () = msg_send![panel, setDelegate: self];
+                let _: () = msg_send![panel, reloadData];
+                let _: () = msg_send![panel, setCurrentPreviewItemIndex: at];
+            }
+        }
+
+        /// 훑어보기 창의 내용을 더는 이 뷰가 대지 않는다
+        #[unsafe(method(endPreviewPanelControl:))]
+        fn end_preview_panel_control(&self, panel: &AnyObject) {
+            LOOK_ON.set(false);
+            // SAFETY: 위에서 건 것을 푼다
+            unsafe {
+                let _: () = msg_send![panel, setDataSource: None::<&AnyObject>];
+                let _: () = msg_send![panel, setDelegate: None::<&AnyObject>];
+            }
+        }
+
+        #[unsafe(method(numberOfPreviewItemsInPreviewPanel:))]
+        fn number_of_preview_items(&self, _panel: &AnyObject) -> NSInteger {
+            LOOK.with(|l| l.borrow().0.len()) as NSInteger
+        }
+
+        /// 훑어보기 창에 보일 index번째 항목: 파일 주소 (NSURL은 훑어보기 항목이 될 수 있다)
+        #[unsafe(method_id(previewPanel:previewItemAtIndex:))]
+        fn preview_item(&self, _panel: &AnyObject, index: NSInteger) -> Option<Retained<NSURL>> {
+            let path = LOOK.with(|l| usize::try_from(index).ok().and_then(|i| l.borrow().0.get(i).cloned()));
+            path.map(|p| NSURL::fileURLWithPath(&NSString::from_str(&p)))
+        }
+
+        /// 훑어보기 창이 앞에 있을 때 누른 키: 목록이 받게 넘긴다 (화살표로 고른 것이 바뀌면 창도 따라간다).
+        /// Esc는 넘기지 않는다: 창이 받아 스스로 닫는다. 목록이 받지 않은 키는 창이 받는다
+        #[unsafe(method(previewPanel:handleEvent:))]
+        fn preview_handle_event(&self, _panel: &AnyObject, e: &NSEvent) -> bool {
+            e.r#type() == NSEventType::KeyDown && !matches!(key_of(e.keyCode()), Some(Key::Esc)) && self.handle_key(e)
         }
 
         /// 편집 메뉴의 모두 선택(⌘A): 목록에 키 입력이 있을 때 모든 줄을 고른다
@@ -479,9 +530,36 @@ impl SakaduView {
         self.setNeedsDisplay(true);
     }
 
+    /// 키 하나를 App에 넘긴다 (이 뷰가 받은 키, 그리고 훑어보기 창이 넘겨준 키). 받았으면 true
+    fn handle_key(&self, e: &NSEvent) -> bool {
+        let key = key_of(e.keyCode());
+        // 파일을 만들거나 고치는 키, 열고 닫는 키는 누르고 있어도 한 번만 받는다
+        if e.isARepeat() && key.is_some_and(|k| !k.repeats()) {
+            return true;
+        }
+        // 스페이스·⌘Y가 열지 닫을지는 훑어보기 창이 지금 떠 있는지로 정한다: 창에 물어 App에 맞춰 둔다
+        let shown = key.is_some() && look_shown();
+        let handled = key.is_some_and(|k| {
+            with_app(|a| {
+                a.look_open = shown;
+                a.key(k, mods(e))
+            })
+            .unwrap_or(false)
+        });
+        if handled {
+            self.after_input();
+        }
+        handled
+    }
+
     /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다. 메뉴를 열어 달라고 했으면 연다
     fn after_input(&self) {
         pump();
+        // 훑어보기 창을 열거나 닫아 달라고 했으면 (스페이스, ⌘Y). App을 빌리지 않은 채로 한다: 창이 열리며 이 뷰에 묻는다
+        if let Some(open) = with_app(|a| a.look_request.take()).flatten() {
+            show_look(open);
+        }
+        sync_look();
         if let (Some(w), Some(title)) = (self.window(), with_app(|a| a.title())) {
             w.setTitle(&NSString::from_str(&title));
         }
@@ -646,6 +724,122 @@ fn redraw() {
             v.setNeedsDisplay(true);
         }
     });
+    sync_look();
+}
+
+/// 훑어보기 창의 클래스. Quartz 프레임워크(훑어보기 창이 든 QuickLookUI를 품는다)를 처음 한 번 열어 찾는다.
+/// 실행 파일에 링크하지 않고 이렇게 여는 것은, 열지 못하더라도 앱은 뜨게 하려는 것이다
+fn look_class() -> Option<&'static AnyClass> {
+    LOOK_CLASS.with(|cell| {
+        *cell.get_or_init(|| {
+            // SAFETY: NUL로 끝나는 고정 경로다. 받은 핸들은 닫지 않는다 (앱이 끝날 때까지 쓴다)
+            let lib = unsafe { libc::dlopen(c"/System/Library/Frameworks/Quartz.framework/Quartz".as_ptr(), libc::RTLD_LAZY) };
+            if lib.is_null() {
+                sakadu::diag::log(|| "quick look: Quartz did not load".to_string());
+                return None;
+            }
+            let cls = AnyClass::get(c"QLPreviewPanel");
+            if cls.is_none() {
+                sakadu::diag::log(|| "quick look: no QLPreviewPanel".to_string());
+            }
+            // 이 뷰가 훑어보기 창의 내용과 키를 맡는다고 런타임에도 밝혀 둔다 (그 프로토콜들은 위의 프레임워크를 열어야 생긴다).
+            // 창이 그것을 따지지 않으면 하는 일은 없다
+            for name in [c"QLPreviewPanelDataSource", c"QLPreviewPanelDelegate"] {
+                if let Some(proto) = AnyProtocol::get(name) {
+                    // SAFETY: 이미 등록된 클래스에 프로토콜을 더하는 것은 런타임이 허락한다. 그 메서드들은 define_class에 있다
+                    unsafe { objc2::ffi::class_addProtocol(SakaduView::class() as *const AnyClass as *mut AnyClass, proto) };
+                }
+            }
+            cls
+        })
+    })
+}
+
+/// 훑어보기 창. create가 false면 이미 만들어진 것만 돌려준다 (없으면 None)
+fn look_panel(create: bool) -> Option<Retained<AnyObject>> {
+    let cls = look_class()?;
+    // SAFETY: QLPreviewPanel의 클래스 메서드들이다 (인자 없이 BOOL과 그 창을 돌려준다)
+    unsafe {
+        if !create {
+            let exists: bool = msg_send![cls, sharedPreviewPanelExists];
+            if !exists {
+                return None;
+            }
+        }
+        msg_send![cls, sharedPreviewPanel]
+    }
+}
+
+/// 훑어보기 창이 지금 화면에 떠 있는지. 한 번도 열지 않았으면 프레임워크를 열지 않고 false
+fn look_shown() -> bool {
+    let Some(cls) = LOOK_CLASS.with(|cell| cell.get().copied().flatten()) else { return false };
+    // SAFETY: QLPreviewPanel의 클래스 메서드와 NSWindow의 isVisible이다
+    unsafe {
+        let exists: bool = msg_send![cls, sharedPreviewPanelExists];
+        if !exists {
+            return false;
+        }
+        let panel: Option<Retained<AnyObject>> = msg_send![cls, sharedPreviewPanel];
+        panel.is_some_and(|panel| msg_send![&*panel, isVisible])
+    }
+}
+
+/// 훑어보기 창을 연다(open) 또는 닫는다. 열 때는 보여 줄 것을 먼저 맞춘다: 창이 열리며 곧바로 묻는다
+fn show_look(open: bool) {
+    if !open {
+        if let Some(panel) = look_panel(false) {
+            // SAFETY: NSWindow의 orderOut:
+            let _: () = unsafe { msg_send![&*panel, orderOut: None::<&AnyObject>] };
+        }
+        return;
+    }
+    let Some(items) = with_app(|a| a.look_items()) else { return };
+    if items.0.is_empty() {
+        return;
+    }
+    LOOK.with(|l| *l.borrow_mut() = items);
+    match look_panel(true) {
+        // SAFETY: NSWindow의 makeKeyAndOrderFront:와 QLPreviewPanel의 메서드들
+        Some(panel) => unsafe {
+            let _: () = msg_send![&*panel, makeKeyAndOrderFront: None::<&AnyObject>];
+            // 닫았던 창을 다시 열 때는 이 뷰가 계속 맡고 있어 begin…이 다시 오지 않을 수 있다: 새 내용을 직접 알린다
+            if LOOK_ON.get() {
+                let at = LOOK.with(|l| l.borrow().1) as NSInteger;
+                let _: () = msg_send![&*panel, reloadData];
+                let _: () = msg_send![&*panel, setCurrentPreviewItemIndex: at];
+            }
+        },
+        None => {
+            with_app(App::look_failed);
+            redraw();
+        }
+    }
+}
+
+/// 훑어보기 창이 떠 있고 이 뷰의 것을 보이고 있으면, 보여 줄 것을 App의 지금 선택에 맞춘다. 달라졌을 때만 창에 알린다
+/// (그릴 때마다 다시 읽게 하면 깜빡인다). 보여 줄 것이 없어졌으면 창을 닫는다
+fn sync_look() {
+    // 이 뷰가 맡고 있어도 창이 닫혀 있으면 알리지 않는다 (다시 열 때 show_look이 새로 알린다)
+    if !LOOK_ON.get() || !look_shown() {
+        return;
+    }
+    let Some(items) = with_app(|a| a.look_items()) else { return };
+    let before = LOOK.with(|l| std::mem::replace(&mut *l.borrow_mut(), items.clone()));
+    if before == items {
+        return;
+    }
+    let Some(panel) = look_panel(false) else { return };
+    // SAFETY: QLPreviewPanel의 메서드들이다. 창은 이 안에서 곧바로 LOOK을 물을 수 있다 (App은 빌리지 않은 채다)
+    unsafe {
+        if items.0.is_empty() {
+            let _: () = msg_send![&*panel, orderOut: None::<&AnyObject>];
+            return;
+        }
+        if before.0 != items.0 {
+            let _: () = msg_send![&*panel, reloadData];
+        }
+        let _: () = msg_send![&*panel, setCurrentPreviewItemIndex: items.1 as NSInteger];
+    }
 }
 
 /// 쌓인 폴더 읽기 요청은 뒷줄에서 읽어 메인 줄로 돌려받고, 열어 달라는 파일은 macOS '열기'로 연다
@@ -855,6 +1049,7 @@ fn key_of(code: u16) -> Option<Key> {
         0x2D => Key::Char('n'),
         0x02 => Key::Char('d'),
         0x09 => Key::Char('v'),
+        0x10 => Key::Char('y'),
         0x05 => Key::Char('g'),
         0x1F => Key::Char('o'),
         0x0F => Key::Char('r'),
@@ -1083,6 +1278,39 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 훑어보기 창: 프레임워크를 열어 창의 클래스를 찾고, 이 뷰가 부르는 그 창의 메서드 이름과 이 뷰가 대는 메서드 이름이
+    /// 맥이 아는 이름과 맞는지 본다 (하나라도 틀리면 창이 비어 보이거나 앱이 멈춘다). 창을 띄우지는 않는다
+    #[test]
+    fn quick_look_names_match_the_system() {
+        let cls = look_class().expect("QLPreviewPanel is found after opening Quartz");
+        for sel in [sel!(sharedPreviewPanel), sel!(sharedPreviewPanelExists)] {
+            assert!(cls.metaclass().instance_method(sel).is_some(), "class method {sel:?}");
+        }
+        for sel in [sel!(setDataSource:), sel!(setDelegate:), sel!(reloadData), sel!(setCurrentPreviewItemIndex:), sel!(makeKeyAndOrderFront:), sel!(orderOut:), sel!(isVisible)] {
+            assert!(cls.instance_method(sel).is_some(), "panel method {sel:?}");
+        }
+        let view = SakaduView::class();
+        for (proto, sel) in [
+            (c"QLPreviewPanelDataSource", sel!(numberOfPreviewItemsInPreviewPanel:)),
+            (c"QLPreviewPanelDataSource", sel!(previewPanel:previewItemAtIndex:)),
+            (c"QLPreviewPanelDelegate", sel!(previewPanel:handleEvent:)),
+        ] {
+            let p = AnyProtocol::get(proto).unwrap_or_else(|| panic!("protocol {proto:?}"));
+            // 꼭 있어야 하는 메서드든 골라 넣는 메서드든, 그 프로토콜에 그 이름이 있다
+            let declared = [true, false].into_iter().any(|required| {
+                // SAFETY: 등록된 프로토콜과 선택자로 묻기만 한다
+                let d = unsafe { objc2::ffi::protocol_getMethodDescription(p, sel, Bool::new(required), Bool::YES) };
+                d.name == Some(sel)
+            });
+            assert!(declared, "{proto:?} has no {sel:?}");
+            assert!(view.conforms_to(p) && view.responds_to(sel), "the view takes {sel:?}");
+        }
+        // 응답 사슬에서 물을 때 쓰는 이름은 NSObject의 비공식 프로토콜이라 위처럼 따질 수 없다: 이 뷰에 있기만 본다
+        for sel in [sel!(acceptsPreviewPanelControl:), sel!(beginPreviewPanelControl:), sel!(endPreviewPanelControl:)] {
+            assert!(view.instance_method(sel).is_some(), "{sel:?}");
+        }
+    }
 
     /// 끌어 낸 쪽이 허락한 일에서 할 일을 고른다. 복사도 옮기기도 없으면 받지 않는다
     #[test]

@@ -2,6 +2,7 @@
 //! 지금은 비트맵(PNG로 저장)에 그리고, 다음 단계에서 창(NSView)에 그릴 때도 같은 함수를 쓴다
 
 use objc2::rc::Retained;
+use objc2::{ClassType, msg_send};
 use objc2_app_kit::{NSCompositingOperation, NSFont, NSFontWeightRegular, NSFontWeightSemibold, NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSWorkspace};
 use objc2_core_foundation::{CFAttributedString, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
 use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGInterpolationQuality, CGPath, kCGColorSpaceSRGB};
@@ -168,7 +169,7 @@ impl Gfx {
             font(13.0, false),
             font(13.0, false),
             font(12.0, false),
-            NSFont::monospacedSystemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular }),
+            mono_font(12.0, || font(12.0, false)),
             font(15.0, true),
             font(12.0, false),
             font(12.0, false),
@@ -381,4 +382,20 @@ impl Gfx {
         unsafe { dest.add_image(&img, None) };
         if unsafe { dest.finalize() } { Ok(()) } else { Err("PNG를 쓰지 못함".into()) }
     }
+}
+
+/// 고정폭 시스템 글꼴. 맥이 가끔 빈 값을 돌려줘서(CI의 시험에서 두 번, 글꼴을 한 줄에서만 만들게 한 뒤에도 한 번)
+/// 몇 번 다시 묻고, 그래도 없으면 사용자 고정폭 글꼴, 그것도 없으면 fallback을 쓴다.
+/// 바인딩(monospacedSystemFontOfSize_weight)은 빈 값이면 멈추므로 직접 묻는다
+fn mono_font(size: CGFloat, fallback: impl Fn() -> Retained<NSFont>) -> Retained<NSFont> {
+    for attempt in 1..=3u64 {
+        // SAFETY: +[NSFont monospacedSystemFontOfSize:weight:] (macOS 10.15부터). 빈 값일 수 있어 Option으로 받는다
+        let font: Option<Retained<NSFont>> = unsafe { msg_send![NSFont::class(), monospacedSystemFontOfSize: size, weight: NSFontWeightRegular] };
+        if let Some(font) = font {
+            return font;
+        }
+        sakadu::diag::log(|| format!("monospaced system font was not given (try {attempt})"));
+        std::thread::sleep(std::time::Duration::from_millis(20 * attempt));
+    }
+    NSFont::userFixedPitchFontOfSize(size).unwrap_or_else(fallback)
 }
