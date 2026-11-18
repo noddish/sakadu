@@ -4,11 +4,13 @@
 
 이번 시제품부터 **새 폴더 만들기, 이름 바꾸기, 휴지통으로 보내기, 복사·붙여넣기·옮기기, 끌어서 놓기, 되돌리기(⌘Z)**가 돼요. 실제 파일이 바뀌는 기능이라, 이것들은 **시험용 폴더 안에서만** 해 봐 주세요(아래 2번). 사카두는 있는 파일을 덮어쓰지 않고, 지울 때도 휴지통으로만 보내게 만들었지만, 실제 맥에서는 처음 돌려 보는 것이라 조심하는 거예요.
 
-> **보내는 사람용**: PR의 CI 결과(Checks → CI → `mac-app`)에서 아티팩트 `Sakadu-mac`을 받아 압축을 풀면 `Sakadu-…-mac-prototype.zip`이 나와요. 이 zip을 그대로 전달하면 돼요.
+> **받는 곳**: [맥 미리 보기 릴리즈](https://github.com/noddish/sakadu/releases/tag/mac-preview)에서 `Sakadu-mac.zip`을 받아요 (바로 받기: <https://github.com/noddish/sakadu/releases/download/mac-preview/Sakadu-mac.zip>). main에 합칠 때마다 모든 시험을 통과한 새 것으로 저절로 바뀌어서, 링크는 늘 같아요. 어느 때 만든 것인지는 릴리즈 글에 적혀 있어요.
+>
+> 아직 합치지 않은 PR을 확인할 때만: 그 PR의 CI 결과(Checks → CI → `mac-app`)에서 아티팩트 `Sakadu-mac`을 받아 압축을 풀면 `Sakadu-…-mac-prototype.zip`이 나와요.
 
 ## 1. 받기와 처음 열기
 
-1. `Sakadu-…-mac-prototype.zip`을 더블클릭해서 풀면 `Sakadu.app`이 나와요. 응용 프로그램 폴더로 옮기지 않아도 돼요.
+1. 받은 `Sakadu-mac.zip`을 더블클릭해서 풀면 `Sakadu.app`이 나와요. 응용 프로그램 폴더로 옮기지 않아도 돼요.
 2. `Sakadu.app`을 더블클릭하면 "열 수 없습니다" 같은 안내가 뜨고 막혀요. Apple 개발자 등록과 공증을 아직 하지 않은 시제품이라 그래요.
 3. **시스템 설정 → 개인정보 보호 및 보안**으로 가서 아래쪽 보안 항목의 'Sakadu'(이)가 차단되었다는 줄 옆 **그래도 열기**를 눌러요. 다시 열면 한 번 더 묻는데, **열기**를 누르면 돼요.
 4. macOS 13(Ventura) 이상이면 Apple Silicon 맥과 Intel 맥 모두 돌아가요.
