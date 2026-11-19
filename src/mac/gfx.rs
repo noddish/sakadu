@@ -363,6 +363,10 @@ impl Gfx {
             msg_send![fresh, initWithFileAtURL: &*url, size: CGSize::new(side, side), scale: 1.0 as CGFloat, representationTypes: QL_THUMBNAIL]
         };
         let request = request?;
+        // Finder처럼 파일 아이콘 모양으로 꾸며 받는다 (테두리, 접힌 모서리, 그림자). 꾸미지 않은 썸네일은 글·문서가
+        // 테두리 없는 흰 종이라 밝은 카드에서는 묻히고 어두운 카드에서는 흰 네모로 튄다
+        // SAFETY: QLThumbnailGenerationRequest의 BOOL 속성 iconMode의 설정 메서드
+        let _: () = unsafe { msg_send![&*request, setIconMode: true] };
         let (tx, rx) = mpsc::channel();
         // 생성기가 자기 줄에서 한 번 부른다 (실패하면 썸네일 없이). 받은 그림은 넘기기 전에 붙잡는다: 표현과 함께 사라지지 않게
         let done = RcBlock::new(move |thumb: *mut AnyObject, _error: *mut AnyObject| {
