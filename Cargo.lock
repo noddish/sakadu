@@ -239,6 +239,7 @@ dependencies = [
 name = "sakadu"
 version = "0.8.0"
 dependencies = [
+ "block2",
  "dispatch2",
  "libc",
  "objc2",

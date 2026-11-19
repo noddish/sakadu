@@ -166,7 +166,8 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         shots.push(("one", a));
 
         // 아이콘 보기: 왼쪽은 보통 아이콘(사진 폴더. 그림 파일은 썸네일로 보인다), 오른쪽은 목록.
-        // 썸네일은 settle이 바로 읽는다. CI가 만드는 내용 없는 jpg는 읽히지 않아 파일 아이콘으로 남는다
+        // 썸네일은 settle이 바로 읽는다: 그림은 직접, 메모(.md) 같은 그림이 아닌 파일은 Quick Look이 만든다.
+        // CI가 만드는 내용 없는 jpg는 읽히지 않아 파일 아이콘으로 남는다
         let mut a = base(favs.clone(), true);
         a.navigate(0, Location::Dir(d("사진/제주살이")), None);
         a.set_view(0, sakadu::pane::ViewMode::Medium);

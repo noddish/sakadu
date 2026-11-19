@@ -1,7 +1,9 @@
 //! Core Graphics·Core Text 그리기. Windows `gfx.rs`(Direct2D)와 같은 이름·좌표(왼쪽 위가 0, pt 단위)를 쓴다.
 //! 지금은 비트맵(PNG로 저장)에 그리고, 다음 단계에서 창(NSView)에 그릴 때도 같은 함수를 쓴다
 
-use objc2::rc::Retained;
+use block2::RcBlock;
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::{NSCompositingOperation, NSFont, NSFontWeightRegular, NSFontWeightSemibold, NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSWorkspace};
 use objc2_core_foundation::{CFAttributedString, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
@@ -13,9 +15,21 @@ use objc2_image_io::{
     kCGImageSourceThumbnailMaxPixelSize,
 };
 use sakadu::draw::{Color, Font, R};
+use std::ffi::CStr;
+use std::ptr::NonNull;
+use std::sync::{OnceLock, mpsc};
+use std::time::Duration;
 
 /// 고정폭 글(글 파일 미리 보기)의 줄 높이
 pub const MONO_LINE_H: f32 = 17.0;
+
+/// Quick Look 썸네일 생성기가 든 프레임워크. 실행 파일에 링크하지 않고 처음 쓸 때 연다 (열지 못해도 앱은 뜬다)
+const QL_THUMBNAILING: &CStr = c"/System/Library/Frameworks/QuickLookThumbnailing.framework/QuickLookThumbnailing";
+/// QLThumbnailGenerationRequestRepresentationTypeThumbnail: 파일 내용으로 만든 썸네일만 받는다.
+/// 파일 아이콘은 받지 않는다 (썸네일이 없는 파일은 지금처럼 사카두가 아이콘을 그린다)
+const QL_THUMBNAIL: usize = 1 << 2;
+/// 썸네일 하나를 기다리는 가장 긴 시간. 넘으면 요청을 거두고 만들지 못한 것으로 본다 (답이 없는 NAS의 파일 같은 것)
+const QL_WAIT: Duration = Duration::from_secs(15);
 
 /// 읽어 둔 그림. 뒷줄에서 읽어(Gfx::load_picture) 메인 줄에서 그린다 (CGImage는 만든 뒤 바뀌지 않아 줄 사이로 넘겨도 된다)
 pub struct Picture {
@@ -333,6 +347,43 @@ impl Gfx {
         (pic.longest() > 0).then_some(pic)
     }
 
+    /// Quick Look이 만든 썸네일을 받는다: PDF의 첫 쪽, 동영상의 한 장면, 문서·글의 첫머리처럼 그림 파일이 아닌 것.
+    /// 긴 쪽이 max_px 안에 들어오게 만든다. 만들지 못하면(썸네일을 만드는 확장이 없는 형식, 너무 오래 걸림) None.
+    /// 다 될 때까지 이 줄을 붙잡으므로 뒷줄에서만 부른다
+    pub fn load_quick_look(path: &str, max_px: u32) -> Option<Picture> {
+        let (generator_class, request_class) = quick_look_classes()?;
+        // SAFETY: +[QLThumbnailGenerator sharedGenerator] (클래스 속성)
+        let generator: Option<Retained<AnyObject>> = unsafe { msg_send![generator_class, sharedGenerator] };
+        let generator = generator?;
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        let side = max_px as CGFloat;
+        // SAFETY: alloc 뒤의 지정 초기화 메서드. 크기는 pt, 배율 1이라 픽셀 수와 같다
+        let request: Option<Retained<AnyObject>> = unsafe {
+            let fresh: Allocated<AnyObject> = msg_send![request_class, alloc];
+            msg_send![fresh, initWithFileAtURL: &*url, size: CGSize::new(side, side), scale: 1.0 as CGFloat, representationTypes: QL_THUMBNAIL]
+        };
+        let request = request?;
+        let (tx, rx) = mpsc::channel();
+        // 생성기가 자기 줄에서 한 번 부른다 (실패하면 썸네일 없이). 받은 그림은 넘기기 전에 붙잡는다: 표현과 함께 사라지지 않게
+        let done = RcBlock::new(move |thumb: *mut AnyObject, _error: *mut AnyObject| {
+            // SAFETY: 받은 것은 QLThumbnailRepresentation이거나 null이다. CGImage는 그것의 읽기 전용 속성이다
+            let img: Option<NonNull<CGImage>> = unsafe { thumb.as_ref() }.and_then(|t| NonNull::new(unsafe { msg_send![t, CGImage] }));
+            // SAFETY: 살아 있는 CGImage를 하나 더 붙잡는다 (받는 쪽이 이미 기다리지 않으면 그냥 놓는다)
+            let _ = tx.send(img.map(|p| unsafe { CFRetained::retain(p) }));
+        });
+        // SAFETY: 요청과 끝났을 때 부를 블록을 넘긴다 (생성기가 블록을 복사해 붙잡는다)
+        let _: () = unsafe { msg_send![&*generator, generateBestRepresentationForRequest: &*request, completionHandler: &*done] };
+        match rx.recv_timeout(QL_WAIT) {
+            Ok(img) => img.map(|img| Picture { img }).filter(|pic| pic.longest() > 0),
+            Err(_) => {
+                sakadu::diag::log(|| format!("quick look thumbnail gave no answer in {} s", QL_WAIT.as_secs()));
+                // SAFETY: 끝나지 않은 요청을 거둔다
+                let _: () = unsafe { msg_send![&*generator, cancelRequest: &*request] };
+                None
+            }
+        }
+    }
+
     /// 그림을 r 안에 비율을 지켜 가운데에 그린다. 자리가 그림보다 크면 늘리지 않고 제 크기(1픽셀 = 1pt)로 둔다
     pub fn picture(&self, pic: &Picture, r: R) {
         self.picture_alpha(pic, r, 1.0);
@@ -382,6 +433,23 @@ impl Gfx {
         unsafe { dest.add_image(&img, None) };
         if unsafe { dest.finalize() } { Ok(()) } else { Err("PNG를 쓰지 못함".into()) }
     }
+}
+
+/// Quick Look 썸네일 생성기와 그 요청의 클래스. 그 프레임워크를 처음 한 번 열어 찾는다 (뒷줄 여럿이 함께 불러도 한 번만 연다)
+fn quick_look_classes() -> Option<(&'static AnyClass, &'static AnyClass)> {
+    static OPENED: OnceLock<bool> = OnceLock::new();
+    let opened = *OPENED.get_or_init(|| {
+        // SAFETY: NUL로 끝나는 고정 경로다. 받은 핸들은 닫지 않는다 (앱이 끝날 때까지 쓴다)
+        let lib = unsafe { libc::dlopen(QL_THUMBNAILING.as_ptr(), libc::RTLD_LAZY) };
+        if lib.is_null() {
+            sakadu::diag::log(|| "quick look: QuickLookThumbnailing did not load".to_string());
+        }
+        !lib.is_null()
+    });
+    if !opened {
+        return None;
+    }
+    Some((AnyClass::get(c"QLThumbnailGenerator")?, AnyClass::get(c"QLThumbnailGenerationRequest")?))
 }
 
 /// 고정폭 시스템 글꼴. 맥이 가끔 빈 값을 돌려줘서(CI의 시험에서 두 번, 글꼴을 한 줄에서만 만들게 한 뒤에도 한 번)

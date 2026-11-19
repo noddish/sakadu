@@ -605,9 +605,16 @@ pub struct ThumbRequest {
     key: ThumbKey,
 }
 
-/// 요청한 썸네일을 읽는다 (창에서는 뒷줄에서 부른다). 읽지 못하면 None
+/// 요청한 썸네일을 읽는다 (창에서는 뒷줄에서 부른다). 그림 파일은 ImageIO로 줄여 읽고,
+/// 그 밖의 파일은 Quick Look에 만들어 달라고 한다 (Windows의 셸 썸네일처럼 PDF·동영상·문서도 보인다). 읽지 못하면 None
 pub fn load_thumb(req: &ThumbRequest) -> Option<Picture> {
-    Gfx::load_picture(&req.key.file.path, req.key.px)
+    let path = &req.key.file.path;
+    if is_picture(path) { Gfx::load_picture(path, req.key.px) } else { Gfx::load_quick_look(path, req.key.px) }
+}
+
+/// 그림 파일인가 (미리 보기 카드와 같은 확장자). 썸네일을 ImageIO로 직접 읽는 파일이다
+fn is_picture(path: &str) -> bool {
+    card_kind(path.rsplit('/').next().unwrap_or(path)) == Some(false)
 }
 
 /// 그림 자리(한 변 size pt)를 scale배 화면에 채울 픽셀 수를 단계로 올린 값. 가장 큰 단계보다 크면 가장 큰 단계
@@ -616,9 +623,10 @@ fn thumb_px(size: f32, scale: f32) -> u32 {
     THUMB_PX.into_iter().find(|px| *px >= need).unwrap_or(THUMB_PX[THUMB_PX.len() - 1])
 }
 
-/// 그 항목의 썸네일을 가리는 값. 썸네일은 그림 파일(미리 보기 카드와 같은 확장자)에만 있다: 폴더와 그 밖의 파일은 None
+/// 그 항목의 썸네일을 가리는 값. 썸네일은 파일에만 있다 (폴더는 None): 그림 파일은 직접 읽고, 그 밖의 파일은 Quick Look이 만든다.
+/// 썸네일이 없는 파일(Quick Look이 만들지 못하는 형식)은 읽지 못한 것으로 적어 두고 아이콘을 그린다
 fn thumb_key(tab: &Tab, e: &Entry, size: f32, scale: f32) -> Option<ThumbKey> {
-    if e.kind != Kind::File || card_kind(&e.name_string()) != Some(false) {
+    if e.kind != Kind::File {
         return None;
     }
     Some(ThumbKey { file: CardKey { path: tab.path_of(e)?, modified: e.modified, size: e.size }, px: thumb_px(size, scale) })
@@ -1301,7 +1309,7 @@ impl App {
 
     // ---------- 아이콘 보기의 썸네일 ----------
 
-    /// 지금 화면에 보이는 그림 파일들의 썸네일 (보이는 순서): 아이콘 보기인 칸마다 지금 탭의 보이는 줄.
+    /// 지금 화면에 보이는 파일들의 썸네일 (보이는 순서): 아이콘 보기인 칸마다 지금 탭의 보이는 줄.
     /// 칸 그리기(ui::paint_pane_list)가 썸네일을 그리는 항목과 같다
     fn visible_thumbs(&self) -> Vec<ThumbKey> {
         let mut out = Vec::new();
@@ -3812,7 +3820,7 @@ impl EntryArt<Gfx> for MacArt<'_> {
         }
     }
 
-    /// 그림 파일이면 읽어 둔 썸네일을 그린다. 아직 없으면(읽는 중이거나 읽지 못한 그림이면) false: 파일 아이콘이 대신 보인다.
+    /// 파일이면 읽어 둔 썸네일을 그린다. 아직 없으면(읽는 중이거나, 읽지 못했거나 썸네일이 없는 파일이면) false: 파일 아이콘이 대신 보인다.
     /// 여기서는 파일을 읽지 않는다: 없는 것은 App::take_thumbs가 지금 보이는 것 가운데서 찾아 뒷줄에 맡긴다
     fn thumbnail(&mut self, g: &mut Gfx, tab: &Tab, e: &Entry, bx: R, size: f32, opacity: f32) -> bool {
         let Some(pic) = thumb_key(tab, e, size, self.scale).and_then(|k| self.thumbs.get(&k)) else { return false };
@@ -6511,16 +6519,17 @@ mod tests {
         }
     }
 
-    /// 아이콘 보기의 썸네일: 보이는 그림 파일만, 한 번에 THUMB_JOBS개까지만 읽는다. 폴더와 그림이 아닌 파일은 요청하지 않는다
+    /// 아이콘 보기의 썸네일: 보이는 파일만, 한 번에 THUMB_JOBS개까지만 읽는다. 폴더는 요청하지 않는다.
+    /// 그림 파일은 직접 읽고, 그 밖의 파일(글, 문서)은 Quick Look에 맡긴다
     #[test]
-    fn thumbnails_are_read_a_few_at_a_time_for_visible_pictures_only() {
+    fn thumbnails_are_read_a_few_at_a_time_for_visible_files_only() {
         let (root, dir) = thumbs_demo(7);
         let (mut a, _g) = app(&dir);
         assert!(a.take_thumbs().is_empty(), "the details view shows no thumbnails");
         a.set_view(0, ViewMode::Large);
-        // 보이는 그림 파일은 일곱인데 둘만 읽기 시작하고, 나머지는 기다린다
+        // 보이는 파일은 아홉(그림 일곱, 글 파일, 문서)인데 둘만 읽기 시작하고, 나머지는 기다린다
         let mut running = a.take_thumbs();
-        assert_eq!((running.len(), a.thumbs.queue.len()), (THUMB_JOBS, 7 - THUMB_JOBS));
+        assert_eq!((running.len(), a.thumbs.queue.len()), (THUMB_JOBS, 9 - THUMB_JOBS));
         assert!(a.take_thumbs().is_empty(), "nothing more starts while two are being read");
         // 하나를 다 읽을 때마다 다음 하나가 시작된다. 읽는 중인 것은 한도를 넘지 않는다
         let mut asked: Vec<String> = Vec::new();
@@ -6531,19 +6540,22 @@ mod tests {
             assert!(running.len() <= THUMB_JOBS, "{} at once", running.len());
             assert_eq!(a.thumbs.loading.len(), running.len());
         }
-        // 요청한 것은 그림 파일 일곱뿐이다: 폴더(이름이 그림 같아도), 글 파일, 문서는 요청하지 않는다
+        // 요청한 것은 파일 아홉이다. 폴더는 이름이 그림 같아도 요청하지 않는다
         asked.sort();
-        let pictures: Vec<String> = (0..7).map(|i| util::join(&dir, &format!("사진 {i:03}.jpg"))).collect();
-        assert_eq!(asked, pictures);
+        let mut files: Vec<String> = (0..7).map(|i| util::join(&dir, &format!("사진 {i:03}.jpg"))).collect();
+        files.extend(["메모.txt", "보고서.docx"].map(|name| util::join(&dir, name)));
+        files.sort();
+        assert_eq!(asked, files);
         let t = a.pane(0).tab();
-        for name in ["폴더.png", "메모.txt", "보고서.docx"] {
-            let e = t.entries.iter().find(|e| e.name_string() == name).unwrap_or_else(|| panic!("no entry named {name}"));
-            assert!(thumb_key(t, e, THUMB, a.scale).is_none(), "{name}");
-        }
+        let folder = t.entries.iter().find(|e| e.name_string() == "폴더.png").expect("no entry named 폴더.png");
+        assert!(thumb_key(t, folder, THUMB, a.scale).is_none());
+        // 그림 파일은 직접 읽고, 글 파일과 문서는 Quick Look에 맡긴다 (확장자의 대소문자는 가리지 않는다)
+        assert!(is_picture(&util::join(&dir, "사진 000.jpg")) && is_picture("/사진/큰 사진.JPG"));
+        assert!(!is_picture(&util::join(&dir, "메모.txt")) && !is_picture(&util::join(&dir, "보고서.docx")) && !is_picture("/사진.png/설명"));
         // 다 읽은 뒤에는 요청이 없다
         assert!(a.take_thumbs().is_empty() && a.thumbs.queue.is_empty());
-        assert_eq!(a.thumbs.cache.len(), 7);
-        // 같은 폴더를 두 칸에서 아이콘으로 봐도 그림마다 한 번만 읽는다
+        assert_eq!(a.thumbs.cache.len(), 9);
+        // 같은 폴더를 두 칸에서 아이콘으로 봐도 파일마다 한 번만 읽는다
         let (mut b, _g) = app(&dir);
         b.set_view(0, ViewMode::Large);
         b.set_view(1, ViewMode::Large);
@@ -6559,7 +6571,7 @@ mod tests {
                 b.on_thumb(&r, Picture::blank(8, 8));
             }
         }
-        assert_eq!(read, 7);
+        assert_eq!(read, 9);
         // 읽을 픽셀 수의 단계: 그림 자리 × 화면 배율을 올린 값. 가장 큰 단계를 넘지 않는다
         let px = [(48.0, 1.0), (48.0, 2.0), (96.0, 1.0), (96.0, 2.0), (256.0, 1.0), (256.0, 2.0), (256.0, 3.0)].map(|(size, scale)| thumb_px(size, scale));
         assert_eq!(px, [64, 128, 128, 256, 256, 512, 512]);
@@ -6683,6 +6695,10 @@ mod tests {
     #[test]
     fn a_picture_that_could_not_be_read_is_not_asked_for_again() {
         let (root, dir) = thumbs_demo(1);
+        // 그림 하나만 남긴다 (글 파일과 문서도 썸네일을 요청한다)
+        for name in ["메모.txt", "보고서.docx"] {
+            std::fs::remove_file(root.join("사진첩").join(name)).unwrap();
+        }
         let (mut a, _g) = app(&dir);
         a.set_view(0, ViewMode::Large);
         let reqs = a.take_thumbs();
@@ -6700,6 +6716,49 @@ mod tests {
         assert_eq!(a.thumbs.cache.len(), 2, "the changed file was tried once more");
         assert!(a.thumbs.cache.values().all(|t| t.pic.is_none()));
         assert!(a.take_thumbs().is_empty() && a.thumbs.loading.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 한 쪽짜리 PDF (w×h pt, 파란 사각형 하나). 맥이 읽는 최소한의 모양: 개체 넷, 상호 참조표, 끝 표시
+    fn tiny_pdf(w: u32, h: u32) -> Vec<u8> {
+        let content = format!("0 0 1 rg 20 20 {} {} re f\n", w - 40, h - 40);
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents 4 0 R >>"),
+            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).bytes());
+        }
+        let xref = out.len();
+        // 상호 참조표의 줄은 저마다 20바이트다
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+        for o in offsets {
+            out.extend(format!("{o:010} 00000 n \n").bytes());
+        }
+        out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).bytes());
+        out
+    }
+
+    /// 그림이 아닌 파일의 썸네일은 Quick Look이 실제로 만든다 (맥 러너에서): PDF는 그 쪽 모양(세로로 긴) 그대로 요청한 크기 안에 온다.
+    /// 썸네일을 만드는 확장이 없는 형식은 아이콘을 받지 않고 None이다 (그런 파일은 사카두가 아이콘을 그린다)
+    #[test]
+    fn quick_look_makes_thumbnails_of_other_files() {
+        let (root, _home) = demo();
+        let request = |name: &str, px: u32| ThumbRequest { key: ThumbKey { file: CardKey { path: util::normalize(&root.join(name).to_string_lossy()), modified: 1, size: 1 }, px } };
+        std::fs::write(root.join("세로 문서.pdf"), tiny_pdf(200, 300)).unwrap();
+        let req = request("세로 문서.pdf", 256);
+        assert!(!is_picture(&req.key.file.path));
+        let pic = load_thumb(&req).expect("Quick Look made no thumbnail of a PDF");
+        let (w, h) = pic.size();
+        assert!(w > 0 && h > w && h <= 256, "a portrait page within 256 px, got {w}x{h}");
+        std::fs::write(root.join("모르는 형식.sakadu-test"), [0u8, 1, 2, 3, 0xFF]).unwrap();
+        let none = load_thumb(&request("모르는 형식.sakadu-test", 256));
+        assert!(none.is_none(), "an unknown format gave {:?} (an icon instead of no thumbnail?)", none.map(|p| p.size()));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6725,8 +6784,13 @@ mod tests {
             assert!((129..=256).contains(&pic.longest()), "{name}: {:?}", pic.size());
         }
         assert!(a.thumbs.get(&key("깨진 그림.jpg").unwrap()).is_none());
-        assert!(key("폴더").is_none() && key("메모.txt").is_none() && key("보고서.docx").is_none());
-        assert_eq!(a.thumbs.cache.len(), 3, "two pictures and one that could not be read");
+        // 그림이 아닌 파일 셋은 Quick Look에 맡겼다 (만들었는지는 형식에 달렸다. PDF는 아래 시험이 본다). 폴더는 썸네일이 없다
+        assert!(key("폴더").is_none());
+        for name in ["메모.txt", "글 아님.txt", "보고서.docx"] {
+            let k = key(name).unwrap_or_else(|| panic!("{name} has no thumbnail key"));
+            assert!(a.thumbs.cache.contains_key(&k), "{name} was not asked for");
+        }
+        assert_eq!(a.thumbs.cache.len(), 6, "two pictures, one that could not be read, three other files");
         // 아이콘 크기를 바꾸면 그 크기의 단계로 다시 읽는다 (보통 아이콘 48pt는 128픽셀)
         a.set_view(0, ViewMode::Medium);
         let reqs = a.take_thumbs();

@@ -63,10 +63,12 @@ objc2-image-io = { version = "0.3.2", optional = true }
 dispatch2 = { version = "0.3.1", optional = true }
 # 폴더 감시(kqueue)의 호출과 상수. 위 크레이트들이 이미 쓰는 버전이라 새로 받는 것은 없다
 libc = { version = "0.2", optional = true }
+# Quick Look 썸네일 생성기가 끝났을 때 부를 블록. objc2-app-kit이 이미 쓰는 버전이라 새로 받는 것은 없다
+block2 = { version = "0.6.2", optional = true }
 
 [features]
 # 맥 시제품 실행 파일(sakadu-mac). Windows 빌드에는 쓰지 않는다
-mac-app = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:objc2-core-graphics", "dep:objc2-core-text", "dep:objc2-image-io", "dep:dispatch2", "dep:libc"]
+mac-app = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:objc2-core-graphics", "dep:objc2-core-text", "dep:objc2-image-io", "dep:dispatch2", "dep:libc", "dep:block2"]
 
 [[bin]]
 name = "sakadu-mac"
