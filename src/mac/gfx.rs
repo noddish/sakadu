@@ -54,6 +54,22 @@ impl Picture {
         let g = Gfx::bitmap(w as f32, h as f32, 1.0)?;
         CGBitmapContextCreateImage(g.c()).map(|img| Picture { img })
     }
+
+    /// 시험용: 그림 한가운데 픽셀의 색 [빨강, 초록, 파랑, 불투명도]. 투명한 그림판에 제 크기로 그려 읽는다
+    #[cfg(test)]
+    pub fn center_color(&self) -> Option<[u8; 4]> {
+        let (w, h) = self.size();
+        let g = Gfx::bitmap(w as f32, h as f32, 1.0)?;
+        g.picture(self, R::new(0.0, 0.0, w as f32, h as f32));
+        let data = objc2_core_graphics::CGBitmapContextGetData(g.c()) as *const u8;
+        if data.is_null() {
+            return None;
+        }
+        let at = (h / 2) * objc2_core_graphics::CGBitmapContextGetBytesPerRow(g.c()) + (w / 2) * 4;
+        // SAFETY: 그림판의 픽셀은 한 줄의 바이트 수 × h이고, at은 가운데 줄의 가운데 픽셀(4바이트)이라 그 안이다
+        let px = unsafe { std::slice::from_raw_parts(data.add(at), 4) };
+        Some([px[0], px[1], px[2], px[3]])
+    }
 }
 
 pub struct Gfx {

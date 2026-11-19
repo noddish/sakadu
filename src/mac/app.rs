@@ -6744,7 +6744,7 @@ mod tests {
         out
     }
 
-    /// 그림이 아닌 파일의 썸네일은 Quick Look이 실제로 만든다 (맥 러너에서): PDF는 그 쪽 모양(세로로 긴) 그대로 요청한 크기 안에 온다.
+    /// 그림이 아닌 파일의 썸네일은 Quick Look이 실제로 만든다 (맥 러너에서): PDF는 그 쪽의 내용으로 요청한 크기 안에 온다.
     /// 썸네일을 만드는 확장이 없는 형식은 아이콘을 받지 않고 None이다 (그런 파일은 사카두가 아이콘을 그린다)
     #[test]
     fn quick_look_makes_thumbnails_of_other_files() {
@@ -6754,8 +6754,11 @@ mod tests {
         let req = request("세로 문서.pdf", 256);
         assert!(!is_picture(&req.key.file.path));
         let pic = load_thumb(&req).expect("Quick Look made no thumbnail of a PDF");
-        let (w, h) = pic.size();
-        assert!(w > 0 && h > w && h <= 256, "a portrait page within 256 px, got {w}x{h}");
+        // Finder처럼 아이콘 모양으로 꾸며 받아 정사각형 바탕에 종이가 놓여 온다 (러너에서 256×256): 모양 대신 크기와 내용을 본다
+        assert!(pic.longest() > 0 && pic.longest() <= 256, "within 256 px, got {:?}", pic.size());
+        // 한가운데는 PDF의 파란 사각형이다: 파일 아이콘이 아니라 그 파일의 내용으로 만든 썸네일
+        let [r, g, b, a] = pic.center_color().expect("could not read the thumbnail's pixels");
+        assert!(b > 180 && r < 90 && g < 120 && a > 200, "the middle of the PDF thumbnail should be its blue square, got {:?}", [r, g, b, a]);
         std::fs::write(root.join("모르는 형식.sakadu-test"), [0u8, 1, 2, 3, 0xFF]).unwrap();
         let none = load_thumb(&request("모르는 형식.sakadu-test", 256));
         assert!(none.is_none(), "an unknown format gave {:?} (an icon instead of no thumbnail?)", none.map(|p| p.size()));
