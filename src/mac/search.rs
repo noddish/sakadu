@@ -159,7 +159,7 @@ impl Finder {
         let scope = scope.map(|d| hangul::compose(d).into_owned());
         let sent = scope.as_deref().map_or_else(|| text.to_string(), |d| query::scoped_query(text, d, '/'));
         let each = if scope.is_some() { limit * SCOPE_WIDEN } else { limit };
-        let mut merged = Merged::default();
+        let mut merged = Merged::exact();
         let mut total = 0;
         {
             let tree = read(&self.shared.tree);
@@ -700,6 +700,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("{what}: not seen within {SOON:?}");
+    }
+
+    /// 대소문자를 가리는 디스크에서는 대소문자만 다른 두 파일을 둘 다 찾는다 (CI가 그런 디스크에서도 돌린다. 보통 디스크에서는 한 파일이다)
+    #[test]
+    fn search_keeps_names_that_differ_only_in_case() {
+        let root = temp("case");
+        std::fs::write(root.join("Report.txt"), b"x").unwrap();
+        std::fs::write(root.join("report.txt"), b"x").unwrap();
+        let on_disk = std::fs::read_dir(&root).unwrap().count();
+        let s = start(&root, Vec::new(), false);
+        assert!(s.settle(SOON));
+        let found = s.search("report", 10);
+        assert_eq!(found.hits.len(), on_disk, "{:?}", found.hits);
+        assert_eq!(found.total, on_disk);
+        drop(s);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

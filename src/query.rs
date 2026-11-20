@@ -51,15 +51,23 @@ pub fn result_key(text: &str, scope: Option<&str>) -> String {
 /// 조각마다 찾은 결과를 합친다. 여러 조각에 걸린 항목은 가장 높은 점수로 한 번만 남는다
 #[derive(Default)]
 pub struct Merged {
-    /// 소문자 경로 → all의 번호
+    /// 같은 항목을 가르는 열쇠(Windows는 소문자 경로, 맥은 경로 그대로) → all의 번호
     seen: HashMap<String, usize>,
     /// (점수, 폴더 여부, 경로)
     all: Vec<(i32, bool, String)>,
+    /// 대소문자까지 같은 경로만 한 항목으로 본다
+    exact: bool,
 }
 
 impl Merged {
+    /// 맥: 대소문자를 가리는 디스크에서는 Report.txt와 report.txt가 다른 파일이다.
+    /// 맥 색인의 경로는 칸마다 하나라, 글자 그대로 같으면 같은 항목이다
+    pub fn exact() -> Merged {
+        Merged { exact: true, ..Merged::default() }
+    }
+
     pub fn add(&mut self, score: i32, is_dir: bool, path: String) {
-        let key = path.to_lowercase();
+        let key = if self.exact { path.clone() } else { path.to_lowercase() };
         match self.seen.get(&key) {
             Some(&i) => self.all[i].0 = self.all[i].0.max(score),
             None => {
@@ -151,5 +159,16 @@ mod tests {
         assert_eq!(m.len(), 4);
         let out = m.into_sorted(3);
         assert_eq!(out, vec![(true, "/b/긴 폴더 이름".to_string()), (false, "/a/보고서 9.txt".to_string()), (false, "/a/보고서 10.txt".to_string())]);
+    }
+
+    /// 맥은 대소문자만 다른 경로를 다른 항목으로 둔다 (같은 경로는 한 번)
+    #[test]
+    fn exact_merge_keeps_paths_that_differ_only_in_case() {
+        let mut m = Merged::exact();
+        m.add(10, false, "/a/Report.txt".into());
+        m.add(10, false, "/a/report.txt".into());
+        m.add(20, false, "/a/report.txt".into());
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.into_sorted(5), vec![(false, "/a/report.txt".to_string()), (false, "/a/Report.txt".to_string())]);
     }
 }
