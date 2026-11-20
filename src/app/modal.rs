@@ -286,7 +286,7 @@ pub unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             // 검색 상자에 여러 줄(엑셀 열 등)을 붙여넣으면 줄마다 `|`로 이어 한 번에 찾는다
             WM_PASTE if id as i32 == ID_SEARCH => {
                 if let Some(text) = shell::clipboard_text(hwnd).filter(|t| t.trim().contains('\n')) {
-                    let q = HSTRING::from(palette::lines_to_query(&text));
+                    let q = HSTRING::from(sakadu::query::lines_to_query(&text));
                     SendMessageW(hwnd, EM_REPLACESEL, Some(WPARAM(1)), Some(LPARAM(q.as_ptr() as isize)));
                     return LRESULT(0);
                 }
