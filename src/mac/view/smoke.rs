@@ -1,6 +1,7 @@
 //! 창 시험 (`sakadu-mac --smoke`): 맥 러너에서 실제 창을 열고, 실제 창이 입력을 받는 길(뷰의 keyDown:, 편집 메뉴가 보내는
 //! copy:·paste:·undo:, 이름 상자의 Return)로 폴더 감시, 이름 바꾸기, 되돌리기, 복사·붙여넣기, 휴지통, 훑어보기를 끝까지 돌려 본다.
 //! 경로 입력(⌘L), 새 폴더(⇧⌘N), 잘라내기·붙여넣기(옮기기)도 같은 길로 해 본다.
+//! 검색(⌘F)도: 시험 폴더만 훑게 하고 켠 뒤, 검색 입력 칸에 쳐서 찾고 그 칸의 키(↓, Return, Esc)로 고르고 연다.
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
 //! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
@@ -21,6 +22,7 @@ const DELETE: u16 = 0x33;
 const Y: u16 = 0x10;
 const L: u16 = 0x25;
 const N: u16 = 0x2D;
+const F: u16 = 0x03;
 
 /// 흉내 낸 끌기 정보: 끌려 온 것을 담은 붙여넣기 판, 창 좌표의 마우스 자리, 끌어 낸 쪽이 허락한 일
 struct DragIvars {
@@ -365,7 +367,74 @@ fn script(dir: &str) -> usize {
         }
     }
     let _ = std::fs::remove_dir_all(&outside);
+
+    // 검색: 시험 폴더만 훑게 하고 ⌘F로 연다. 켜면 색인을 만들고, 입력 칸에 친 글로 찾는다.
+    // 그 칸의 ↓로 결과를 고르고, Return으로 폴더를 칸에서 연다(키보드는 칸으로). 다시 ⌘F로 칸에 돌아와 Esc로 닫는다
+    let root = dir.to_string();
+    on_main(move || with_app(|a| a.set_find_roots(vec![root])));
+    key(F, true);
+    if run.wait("cmd-F opens search with the keyboard in its field", 5, || find_state().is_some_and(|s| s.0 && s.1)) {
+        on_main(|| {
+            with_app(App::enable_find);
+            pump();
+        });
+        run.wait("turning search on indexes the test folder", 10, || find_state().is_some_and(|s| s.4));
+        let typed = type_in_search("메모");
+        run.check("typing in the search field", typed.is_ok(), || format!("{typed:?}"));
+        run.wait("typing finds the files", 5, || find_state().is_some_and(|s| s.2.len() == 2 && s.2.iter().all(|n| n.starts_with("메모"))));
+        let moved = search_command(sel!(moveDown:));
+        run.check("down in the field", moved.is_ok(), || format!("{moved:?}"));
+        run.wait("down picks the next result", 5, || find_state().is_some_and(|s| s.3 == 1));
+        let _ = type_in_search("자료");
+        run.wait("the folder is found", 5, || find_state().is_some_and(|s| s.2 == ["자료"]));
+        let _ = search_command(sel!(insertNewline:));
+        let folder = sakadu::util::join(dir, "자료");
+        run.wait("Return opens the folder in the pane and gives it the keyboard", 5, move || {
+            seen().is_some_and(|s| s.ready && s.dir == folder) && find_state().is_some_and(|s| s.0 && !s.1)
+        });
+        key(UP, true);
+        run.wait("cmd-up goes back", 5, || seen().is_some_and(|s| s.ready && s.dir == dir));
+        key(F, true);
+        run.wait("cmd-F gives the field the keyboard again", 5, || find_state().is_some_and(|s| s.1));
+        let _ = search_command(sel!(cancelOperation:));
+        run.wait("Esc closes search", 5, || find_state().is_some_and(|s| !s.0) && on_main(|| VIEW.with(|v| v.get().and_then(|v| v.ivars().search.get().cloned())).is_some_and(|f| f.isHidden())));
+    }
     run.failed
+}
+
+/// 검색이 보이는 것: (열렸는지, 입력 칸이 키보드를 가졌는지(앱이 그렇게 알고 창에서도 그렇다), 결과의 이름, 고른 줄, 다 훑었는지)
+fn find_state() -> Option<(bool, bool, Vec<String>, usize, bool)> {
+    on_main(|| {
+        let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().search.get().cloned()));
+        let typing = field.is_some_and(|f| !f.isHidden() && f.currentEditor().is_some());
+        with_app(|a| a.find_seen()).map(|(open, keys, names, sel, ready)| (open, keys && typing, names, sel, ready))
+    })
+}
+
+/// 검색 입력 칸의 글을 바꾼다: 글을 모두 고르고 그 자리에 친다 (글 상자가 바뀌었다고 알리는 것까지 치는 것과 같다)
+fn type_in_search(text: &str) -> Result<(), &'static str> {
+    let text = text.to_string();
+    on_main(move || {
+        let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().search.get().cloned())).ok_or("no search field")?;
+        let editor = field.currentEditor().ok_or("the search field does not have the keyboard")?;
+        // SAFETY: NSText의 selectAll:과 NSResponder의 insertText: (키로 친 글이 가는 길)
+        unsafe {
+            editor.selectAll(None);
+            let _: () = msg_send![&*editor, insertText: &*NSString::from_str(&text)];
+        }
+        Ok(())
+    })
+}
+
+/// 검색 입력 칸이 키를 받았을 때 하는 그대로 명령(moveDown:, insertNewline:, cancelOperation:)을 그 위임에 묻는다
+fn search_command(command: Sel) -> Result<(), &'static str> {
+    on_main(move || {
+        let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().search.get().cloned())).ok_or("no search field")?;
+        let editor = field.currentEditor().ok_or("the search field does not have the keyboard")?;
+        // SAFETY: NSResponder의 doCommandBySelector:
+        let _: () = unsafe { msg_send![&*editor, doCommandBySelector: command] };
+        Ok(())
+    })
 }
 
 /// 이름 상자(경로 입력도 같은 상자)에 글을 넣고 Return을 누른다: 필드 편집기가 Return을 받았을 때 하는 그대로

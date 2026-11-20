@@ -107,6 +107,8 @@ fn symbol_name(code: u16) -> &'static str {
         0xE712 => "ellipsis",
         0xE90D => "sidebar.right",
         0xE721 => "magnifyingglass",
+        // 체크 표시 (검색 켜기 카드의 고르기 칸)
+        0xE73E => "checkmark",
         0xE8B7 => "folder",
         0xE718 => "pin",
         0xE841 => "pin.fill",

@@ -8,7 +8,10 @@
 //! 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 복사, 옮기기, 되돌리기)은 할 일을 큐에 넣어 두면 창 쪽이 뒷줄에서 실행하고 결과를 돌려준다 (fileops.rs).
 //! 클립보드도 창 쪽이 다룬다: 앱은 담아 달라는 경로(clip_out)와 붙여넣어 달라는 표시(clip_in)만 남긴다.
 //! 끌어서 놓기도 그렇다: 앱은 끌어 낼 항목(take_drag)을 내주고, 끌려 온 것이 어디에 놓일지(drag_over)와 놓기(drop_paths)를 맡는다.
+//! 검색(⌘F)은 find.rs: 도구 막대에서 입력 칸이 늘어나고, 결과는 사이드바 자리에 보인다.
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
+
+mod find;
 
 use crate::fileops::{self, Done, Fail, Job, Op};
 use crate::gfx::{Gfx, MONO_LINE_H, Picture};
@@ -88,6 +91,12 @@ pub enum Hit {
     NewFolder,
     /// 도구 막대의 눈 (자동 미리 보기를 끄고 켠다)
     PreviewToggle,
+    /// 도구 막대의 돋보기 (검색이 닫혀 있을 때), 늘어난 입력 칸, 그 칸의 닫기
+    FindOpen,
+    FindField,
+    FindClose,
+    /// 검색 패널 안 (검색하는 동안 사이드바 자리)
+    Find(find::FindHit),
     /// 미리 보기 카드의 크게 보기 단추, 닫기 단추, 카드의 그 밖의 곳 (카드 아래 칸을 누르지 않게 카드가 받는다)
     CardExpand,
     CardClose,
@@ -889,6 +898,10 @@ pub struct App {
     thumbs: Thumbs,
     /// 화면 배율 (레티나는 2. 창 쪽이 창에서 읽어 넣는다). 썸네일을 몇 픽셀로 읽을지 정한다
     pub scale: f32,
+    /// 검색: 입력, 결과, 자체 색인 (find.rs)
+    find: find::Find,
+    /// 열어 달라는 주소 (창 쪽이 macOS '열기'로 연다. 시스템 설정의 개인정보 보호 쪽 등)
+    pub open_url: Option<String>,
 }
 
 impl App {
@@ -959,6 +972,8 @@ impl App {
             preview_seq: 0,
             thumbs: Thumbs::default(),
             scale: 2.0,
+            find: find::Find::default(),
+            open_url: None,
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
@@ -1149,6 +1164,7 @@ impl App {
     /// 쌓인 읽기 요청과 파일 작업을 바로 처리한다 (시험·그림용, 창에서는 뒷줄에서 한다)
     pub fn settle(&mut self) {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        self.settle_find();
         loop {
             let (reqs, probes, previews, thumbs, ops) = (self.take_requests(), self.take_probes(), self.take_previews(), self.take_thumbs(), self.take_ops());
             if reqs.is_empty() && probes.is_empty() && previews.is_empty() && thumbs.is_empty() && ops.is_empty() {
@@ -1176,6 +1192,13 @@ impl App {
                 self.on_thumb(&r, pic);
             }
         }
+        // 폴더를 옮겼으면 '지금 폴더' 범위의 검색을 다시 한다
+        self.settle_find();
+    }
+
+    /// 시험·그림·창 시험: 검색이 훑는 범위를 이 폴더들로 (홈 폴더 대신)
+    pub fn set_find_roots(&mut self, roots: Vec<String>) {
+        self.find.roots = Some(roots);
     }
 
     // ---------- 자동 미리 보기 카드 ----------
@@ -1837,6 +1860,10 @@ impl App {
     pub fn sync_edit(&mut self) {
         if matches!(self.edit, Editing::Item(_)) && self.item_edit().is_none() {
             self.edit = Editing::None;
+        }
+        // 경로·이름을 고치기 시작했으면 키보드는 그 상자로 갔다 (고치기를 마쳐도 검색 입력 칸으로 돌아가지 않는다)
+        if self.edit != Editing::None {
+            self.find_blur();
         }
     }
 
@@ -3167,11 +3194,12 @@ impl App {
         self.side_scroll = self.side_scroll.clamp(0.0, if max < 0.5 { 0.0 } else { max });
     }
 
-    /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다. 오른쪽 끝은 새 폴더와 자동 미리 보기의 눈.
-    /// 검색은 그 기능이 생길 때 넣는다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
+    /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다. 오른쪽 끝은 새 폴더, 자동 미리 보기의 눈, 검색.
+    /// 검색은 열면 그 자리에서 입력 칸으로 늘어난다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
     fn toolbar(&self) -> ToolbarGeom {
         let a = self.area();
-        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: true, preview: true, search: false, search_w: 0.0 })
+        let search_w = if self.find_shown() { find::FIELD_W } else { 0.0 };
+        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: true, preview: true, search: true, search_w })
     }
 
     /// 탭 칩 자리와 새 탭(+) 자리 (app.rs chips와 같다: 오른쪽 항목 수 자리 앞까지, 넘치면 지금 탭을 지킨다)
@@ -3214,6 +3242,10 @@ impl App {
             return if rail.add.contains(x, y) { Hit::SpaceAdd } else { Hit::None };
         }
         if x < SIDE_W {
+            // 검색하는 동안은 사이드바 자리가 검색 패널이다
+            if self.find_shown() {
+                return if y >= self.side_top() { Hit::Find(self.find_hit(g, x, y)) } else { Hit::None };
+            }
             if self.side_title().contains(x, y) {
                 return Hit::SideTitle;
             }
@@ -3229,7 +3261,16 @@ impl App {
             let m = self.toolbar();
             let p = self.active;
             let hits = [(m.back, Hit::Back(p)), (m.fwd, Hit::Fwd(p)), (m.layout, Hit::LayoutPick), (m.view, Hit::ViewPick), (m.new_folder, Hit::NewFolder), (m.preview, Hit::PreviewToggle)];
-            return hits.into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hit::None, |(_, h)| h);
+            if let Some((_, h)) = hits.into_iter().find(|(r, _)| r.contains(x, y)) {
+                return h;
+            }
+            // 검색: 닫혀 있으면 돋보기, 열려 있으면 입력 칸과 그 오른쪽 끝의 닫기
+            return match find::field_parts(&m) {
+                Some((_, close)) if close.contains(x, y) => Hit::FindClose,
+                Some(_) if m.search.contains(x, y) => Hit::FindField,
+                None if m.search.contains(x, y) => Hit::FindOpen,
+                _ => Hit::None,
+            };
         }
         // 미리 보기 카드는 칸 위에 떠 있다: 카드 안은 어디든 카드가 받는다 (아래 칸을 누르지 않게)
         if let Some(m) = self.card().filter(|m| card && m.card.contains(x, y)) {
@@ -3304,6 +3345,10 @@ impl App {
         self.edit = Editing::None;
         self.flash = None;
         self.press = None;
+        // 검색(돋보기, 입력 칸, 검색 패널)은 검색이 받는다. 다른 곳을 누르면 키보드만 검색 입력 칸에서 떠난다
+        if self.find_press(hit, clicks) {
+            return;
+        }
         // 두 번 누르기의 첫 번째에 누른 항목 (한 번 누르기면 아래에서 새로 적는다)
         let first = self.clicked.take();
         // ⌃-누르기는 오른쪽 단추와 같다
@@ -3396,6 +3441,8 @@ impl App {
                 }
             }
             Hit::SplitX | Hit::SplitY => self.drag = Some(hit),
+            // 검색은 위에서 받았다
+            Hit::FindOpen | Hit::FindField | Hit::FindClose | Hit::Find(_) => {}
             Hit::None | Hit::Pane(_) => {}
         }
     }
@@ -3447,6 +3494,9 @@ impl App {
 
     /// 스크롤 (dy > 0이면 아래 항목이 보이게). 마우스 아래 칸을 움직인다
     pub fn scroll(&mut self, g: &Gfx, x: f32, y: f32, dy: f32) {
+        if self.find_scroll(x, dy) {
+            return;
+        }
         if x < SIDE_W {
             self.side_scroll += dy;
             return self.clamp_side_scroll();
@@ -3479,6 +3529,8 @@ impl App {
         match (key, m.cmd, m.ctrl, m.alt) {
             // 경로 입력: ⌘L(Windows Ctrl+L), ⌘⇧G(Finder '폴더로 이동')
             (Key::Char('l'), true, false, false) => self.begin_address(p),
+            // 검색 (편집 메뉴의 '찾기'와 같다)
+            (Key::Char('f'), true, false, false) => self.open_find(),
             (Key::Char('g'), true, false, false) if m.shift => self.begin_address(p),
             (Key::Up | Key::Down | Key::Left | Key::Right, false, false, false) | (Key::Home | Key::End | Key::PageUp | Key::PageDown, false, false, false) => self.move_cursor(key, m.shift),
             (Key::Down, true, false, false) | (Key::Char('o'), true, false, false) => self.open_selected(p),
@@ -3619,6 +3671,10 @@ impl App {
             _ => RailHover::None,
         };
         paint_rail(g, t, &RailScene { geom: &rail, spaces: &spaces, current, hover, drop: None });
+        // 검색하는 동안은 레일 옆이 검색 패널이다
+        if self.find_shown() {
+            return self.paint_find(g, t);
+        }
 
         // 지금 공간의 이름. 고치는 중이면 입력 상자의 바탕과 테두리만 (글자는 창 쪽 입력 상자가 그린다)
         if self.edit == Editing::Space {
@@ -3679,6 +3735,8 @@ impl App {
             Hit::ViewPick => ToolbarHover::View,
             Hit::NewFolder => ToolbarHover::NewFolder,
             Hit::PreviewToggle => ToolbarHover::Preview,
+            Hit::FindOpen => ToolbarHover::Search,
+            Hit::FindClose => ToolbarHover::SearchClose,
             _ => ToolbarHover::None,
         };
         paint_toolbar(
@@ -3695,13 +3753,14 @@ impl App {
                 new_folder_ok: tab.loc.dir().is_some(),
                 view_ok: true,
                 preview_on: self.auto_preview,
-                search_on: false,
-                search_focus: false,
+                search_on: self.find_shown(),
+                search_focus: self.find_wants_keys(),
                 layout_open: self.menu == Some(MenuKind::Layout),
                 view_open: self.menu == Some(MenuKind::View),
                 hover,
             },
         );
+        self.paint_find_text(g, t);
     }
 
     /// 칸 하나: 이 앱의 상태로 장면을 채워 공통 칸 그리기에 넘긴다 (맥에 아직 없는 필터는 비워 둔다)

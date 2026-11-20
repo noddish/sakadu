@@ -16,8 +16,9 @@ mod fsevents;
 use crawl::{Listed, Rules};
 use fsevents::Change;
 use sakadu::hangul;
-use sakadu::index::{Hit, Query};
+use sakadu::index::Query;
 use sakadu::nametree::{NameTree, Place};
+use sakadu::query::{self, Merged};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -29,6 +30,8 @@ use std::time::{Duration, Instant};
 const LATENCY: f64 = 0.3;
 /// 훑는 동안 '색인이 바뀌었다'고 알리는 가장 짧은 간격 (검색 화면이 같은 검색어로 다시 찾는다)
 const NOTICE_EVERY: Duration = Duration::from_millis(250);
+/// '지금 폴더'로 좁혀 찾을 때 더 넉넉히 찾는 배수 (폴더 밖 결과를 걸러낸 뒤 남는 것이 있도록. Windows 검색과 같다)
+const SCOPE_WIDEN: usize = 10;
 
 pub struct Options {
     /// 훑는 범위의 맨 위 폴더들 (디스크의 실제 경로)
@@ -70,11 +73,117 @@ pub struct Status {
     pub capped: bool,
 }
 
-/// 찾은 결과: 위에서부터 limit개, 맞는 것 전체 수, 걸린 시간
+/// 찾은 결과: 위에서부터 limit개 (폴더 여부, 경로. 경로의 한글은 합친 꼴), 맞는 것 전체 수, 걸린 시간
 pub struct Found {
-    pub hits: Vec<Hit>,
+    pub hits: Vec<(bool, String)>,
     pub total: usize,
     pub took: Duration,
+}
+
+/// 처음 정한 검색 범위: 홈 폴더(라이브러리·휴지통은 훑지 않는다)와 응용 프로그램 폴더 둘. iCloud Drive는 고른 사람만.
+/// 맥이 접근을 묻는 폴더(데스크탑·문서·다운로드, iCloud Drive)도 함께 돌려준다: 나머지를 다 훑은 뒤 하나씩 읽는다
+pub fn default_scope(home: &str, icloud: bool) -> (Vec<String>, Vec<String>) {
+    let mut roots = vec![home.to_string(), "/Applications".to_string(), "/System/Applications".to_string()];
+    let mut protected: Vec<String> = ["Desktop", "Documents", "Downloads"].iter().map(|d| sakadu::util::join(home, d)).collect();
+    if icloud {
+        let drive = icloud_drive(home);
+        roots.push(drive.clone());
+        protected.push(drive);
+    }
+    (roots, protected)
+}
+
+/// iCloud Drive 폴더 (홈의 라이브러리 안)
+pub fn icloud_drive(home: &str) -> String {
+    sakadu::util::join(home, "Library/Mobile Documents/com~apple~CloudDocs")
+}
+
+/// 검색 설정 (설정 폴더의 search.txt): 켰는지, iCloud Drive도 찾는지. 기본은 꺼짐
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Setting {
+    pub on: bool,
+    pub icloud: bool,
+}
+
+impl Setting {
+    const HEADER: &str = "sakadu-search 1";
+
+    fn path() -> Option<std::path::PathBuf> {
+        sakadu::util::config_dir().map(|d| d.join("search.txt"))
+    }
+
+    pub fn load() -> Setting {
+        Setting::path().and_then(|p| std::fs::read_to_string(p).ok()).map_or_else(Setting::default, |t| Setting::parse(&t))
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = Setting::path().ok_or_else(|| std::io::Error::other("HOME 없음"))?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, self.text())
+    }
+
+    fn parse(text: &str) -> Setting {
+        let mut lines = text.lines();
+        let mut s = Setting::default();
+        if lines.next().map(str::trim) != Some(Setting::HEADER) {
+            return s;
+        }
+        for line in lines {
+            match line.split_once('=') {
+                Some(("on", v)) => s.on = v == "1",
+                Some(("icloud", v)) => s.icloud = v == "1",
+                _ => {}
+            }
+        }
+        s
+    }
+
+    fn text(&self) -> String {
+        format!("{}\non={}\nicloud={}\n", Setting::HEADER, self.on as u8, self.icloud as u8)
+    }
+}
+
+/// 찾는 쪽 손잡이: 다른 줄에서도 찾을 수 있다 (검색 화면은 입력할 때마다 뒷줄에서 찾는다). 색인이 멈춰도 마지막 모습으로 찾는다
+#[derive(Clone)]
+pub struct Finder {
+    shared: Arc<Shared>,
+}
+
+impl Finder {
+    /// 이름으로 찾는다. 검색어 규칙은 Windows 검색과 같다 (sakadu::query): '|'로 나눈 조각은 또는, 띄어 쓰면 모두 포함,
+    /// '/'가 든 낱말은 경로에서. scope가 있으면 그 폴더 아래만 남긴다
+    pub fn find(&self, text: &str, scope: Option<&str>, limit: usize) -> Found {
+        let started = Instant::now();
+        let scope = scope.map(|d| hangul::compose(d).into_owned());
+        let sent = scope.as_deref().map_or_else(|| text.to_string(), |d| query::scoped_query(text, d, '/'));
+        let each = if scope.is_some() { limit * SCOPE_WIDEN } else { limit };
+        let mut merged = Merged::default();
+        let mut total = 0;
+        {
+            let tree = read(&self.shared.tree);
+            for piece in query::unique_pieces(&sent) {
+                let (hits, n) = tree.search(&Query::parse_posix(piece), each);
+                total += n;
+                for h in hits {
+                    merged.add(h.score, h.is_dir, h.path);
+                }
+            }
+        }
+        let mut hits = merged.into_sorted(each);
+        if let Some(dir) = &scope {
+            hits.retain(|(_, p)| query::under(p, dir, '/'));
+            total = hits.len();
+        }
+        hits.truncate(limit);
+        Found { hits, total, took: started.elapsed() }
+    }
+
+    /// dir이 훑는 범위 안인가 (밖이면 '지금 폴더'로 찾아도 나오지 않는다: 홈의 라이브러리, 패키지 안, 다른 디스크)
+    pub fn covers(&self, dir: &str) -> bool {
+        !matches!(read(&self.shared.tree).locate(dir), Place::Ignore)
+    }
 }
 
 /// 읽을 폴더 하나. deep이면 그 아래 폴더도 모두 다시 읽는다 (알림을 놓쳤을 때)
@@ -143,12 +252,13 @@ impl Search {
         lock(&self.shared.status).clone()
     }
 
-    /// 이름으로 찾는다 (Windows 검색과 같은 검색어 규칙: 띄어 쓰면 모두 포함, '/'가 든 낱말은 경로에서)
+    pub fn finder(&self) -> Finder {
+        Finder { shared: self.shared.clone() }
+    }
+
+    /// 이름으로 찾는다 (Finder::find, 범위 없이)
     pub fn search(&self, text: &str, limit: usize) -> Found {
-        let started = Instant::now();
-        let query = Query::parse_posix(text);
-        let (hits, total) = read(&self.shared.tree).search(&query, limit);
-        Found { hits, total, took: started.elapsed() }
+        self.finder().find(text, None, limit)
     }
 
     /// 할 일(읽을 폴더, 반영할 알림)이 없어질 때까지 기다린다. 맥이 아직 넘기지 않은 변경 알림도 먼저 넘겨받는다.
@@ -615,15 +725,15 @@ mod tests {
         // 나뉜 꼴로 저장된 한글 이름을 합친 꼴로 찾는다
         let found = s.search("보고", 10);
         assert_eq!(found.total, 1);
-        assert!(found.hits[0].path.ends_with("/문서/주간보고.xlsx"), "{}", found.hits[0].path);
+        assert!(found.hits[0].1.ends_with("/문서/주간보고.xlsx"), "{}", found.hits[0].1);
         // 맥 디스크는 합친 꼴의 경로로도 그 파일을 연다: 색인의 경로로 파일을 열 수 있다
-        assert!(std::fs::metadata(&found.hits[0].path).is_ok(), "the composed path opens the decomposed name");
+        assert!(std::fs::metadata(&found.hits[0].1).is_ok(), "the composed path opens the decomposed name");
         // 패키지 안은 훑지 않는다
         assert_eq!(total(&s, "safari"), 1);
         // 링크는 따라가지 않는다 (자기 위 폴더를 가리켜도 훑기가 끝난다)
         let link = s.search("링크", 5);
         assert_eq!(link.total, 1);
-        assert!(!link.hits[0].is_dir);
+        assert!(!link.hits[0].0);
         // 권한이 없는 폴더는 읽지 못했다고 알린다
         assert_eq!(total(&s, "비밀"), 0);
         assert!(st.denied.iter().any(|d| d.ends_with("/잠김")), "{:?}", st.denied);
@@ -632,6 +742,15 @@ mod tests {
         assert_eq!(total(&s, "library"), 1);
         assert_eq!(total(&s, "끝"), 1);
         assert_eq!(total(&s, "보고 문서/"), 1);
+        // 또는(|), 지금 폴더로 좁히기 (그 폴더를 나뉜 꼴로 줘도), 범위 밖 폴더
+        assert_eq!(total(&s, "회의록 | 끝 | 회의록"), 2);
+        let f = s.finder();
+        let docs_nfd = text(&root.join("\u{1106}\u{116E}\u{11AB}\u{1109}\u{1165}"));
+        let here = f.find("md | xlsx | txt", Some(&docs_nfd), 50);
+        assert_eq!(here.total, 2, "{:?}", here.hits);
+        assert!(here.hits.iter().all(|(_, p)| p.contains("/문서/")));
+        assert!(f.covers(&text(&docs)) && f.covers(&text(&root.join("문서/새 폴더"))));
+        assert!(!f.covers(&text(&root.join("Library"))) && !f.covers(&text(&root.join("Safari.app/Contents"))) && !f.covers("/private"));
         drop(s);
         std::fs::set_permissions(root.join("잠김"), std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::remove_dir_all(root).unwrap();
@@ -736,6 +855,40 @@ mod tests {
         assert_eq!((total(&s, "보호된"), total(&s, "보통")), (1, 1));
         drop(s);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 홈의 라이브러리 안에 있는 iCloud Drive는 따로 고르면 그 안만 훑는다 (라이브러리의 다른 곳은 훑지 않는다)
+    #[test]
+    fn search_reads_icloud_drive_inside_the_closed_library() {
+        let home = temp("icloud");
+        let drive = icloud_drive(&text(&home));
+        std::fs::create_dir_all(&drive).unwrap();
+        std::fs::write(Path::new(&drive).join("클라우드 메모.txt"), b"x").unwrap();
+        std::fs::create_dir_all(home.join("Library/Caches")).unwrap();
+        std::fs::write(home.join("Library/Caches/캐시.txt"), b"x").unwrap();
+        let opts = Options { roots: vec![text(&home), drive.clone()], home: text(&home), protected: vec![drive.clone()], threads: 2, packages_are_files: true, max_entries: usize::MAX, watch: true };
+        let s = Search::start(opts, || {});
+        assert!(s.settle(SOON));
+        assert_eq!((total(&s, "클라우드"), total(&s, "캐시")), (1, 0));
+        std::fs::write(Path::new(&drive).join("새 클라우드 파일.txt"), b"x").unwrap();
+        eventually(&s, "a new file in iCloud Drive", |s| total(s, "새 클라우드") == 1);
+        drop(s);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn search_setting_is_off_unless_turned_on() {
+        assert_eq!(Setting::parse(""), Setting::default());
+        assert_eq!(Setting::parse("other\non=1"), Setting::default());
+        let s = Setting { on: true, icloud: true };
+        assert_eq!(Setting::parse(&s.text()), s);
+        assert_eq!(Setting::parse("sakadu-search 1\non=1\n"), Setting { on: true, icloud: false });
+        let (roots, protected) = default_scope("/Users/hong", false);
+        assert_eq!(roots, ["/Users/hong", "/Applications", "/System/Applications"]);
+        assert_eq!(protected, ["/Users/hong/Desktop", "/Users/hong/Documents", "/Users/hong/Downloads"]);
+        let (roots, protected) = default_scope("/Users/hong", true);
+        assert_eq!(roots.last().map(String::as_str), Some("/Users/hong/Library/Mobile Documents/com~apple~CloudDocs"));
+        assert_eq!(protected.len(), 4);
     }
 
     #[test]

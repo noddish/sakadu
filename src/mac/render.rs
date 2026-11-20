@@ -1,6 +1,6 @@
 //! 그림 시험: 창 없이 App을 몇 가지 상태로 만들어 PNG로 그린다 (CI에서 맥 화면을 확인하는 용도)
 
-use crate::app::{App, Hit};
+use crate::app::{App, Hit, Key};
 use sakadu::ui::Layout;
 use crate::gfx::Gfx;
 use sakadu::favorites::{Favorite, Favorites, Group};
@@ -74,7 +74,7 @@ fn write_demo_previews(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 열두 가지 × 밝은·어두운 테마를 out에 그린다.
+/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 열네 가지 × 밝은·어두운 테마를 out에 그린다.
 /// 작업 공간은 셋: 업무(파랑, 두 칸), 사진 정리(보라, 네 칸), 개인(주황, 세 칸). 공간마다 고정한 것이 다르고,
 /// 아래 '모든 공간'(바로가기와 즐겨찾기)은 어느 공간에서나 같다.
 /// 미리 보기 카드 장면에 쓸 그림과 글 파일은 demo의 사진/제주살이에 직접 만든다
@@ -204,6 +204,21 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
 
         // 글 파일의 카드: 앞부분을 보여 준다
         shots.push(("preview-text", preview(DEMO_NOTE)));
+
+        // 검색을 처음 연 모습: 꺼져 있어 사이드바 자리에 '검색 켜기' 카드가 보인다
+        let mut a = base(favs.clone(), true);
+        a.open_find();
+        shots.push(("find-intro", a));
+
+        // 검색: 데모 폴더만 훑은 색인에서 '제주'를 찾고 둘째 결과를 고른 모습 (아래 줄에 그 위치)
+        let mut a = base(favs.clone(), true);
+        a.set_find_roots(vec![root.clone()]);
+        a.open_find();
+        a.enable_find();
+        a.find_typed("제주");
+        a.settle();
+        a.find_key(Key::Down, false);
+        shots.push(("find", a));
 
         for (name, a) in shots {
             let mut g = Gfx::bitmap(W, H, SCALE).ok_or("그림판을 만들지 못함")?;
