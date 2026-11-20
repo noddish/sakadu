@@ -19,6 +19,7 @@ use sakadu::hangul;
 use sakadu::index::{Hit, Query};
 use sakadu::nametree::{NameTree, Place};
 use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -133,19 +134,7 @@ impl Search {
             let (shared, tx, rules) = (shared.clone(), tx.clone(), rules.clone());
             std::thread::spawn(move || read_folders(&shared, &tx, &rules));
         }
-        let owner = Owner {
-            shared: shared.clone(),
-            protected: opts.protected.into_iter().collect(),
-            later: VecDeque::new(),
-            in_flight: 0,
-            ready: false,
-            held: Vec::new(),
-            waiting: Vec::new(),
-            max_entries: opts.max_entries,
-            started: Instant::now(),
-            last_notice: None,
-            on_change: Box::new(on_change),
-        };
+        let owner = Owner::new(shared.clone(), opts.protected, opts.max_entries, Box::new(on_change));
         std::thread::spawn(move || owner.run(rx, first));
         Search { shared, tx, stream }
     }
@@ -211,6 +200,8 @@ struct Owner {
     protected: HashSet<String>,
     /// 처음 훑기에서 미뤄 둔 폴더 (맥이 접근을 묻는 폴더)
     later: VecDeque<Job>,
+    /// 읽으라고 넘겼지만 아직 결과가 오지 않은 폴더 (한글을 합친 경로) → 결과가 온 뒤에 한 번 더 읽을지 (Some(그 아래까지))
+    busy: HashMap<String, Option<bool>>,
     /// 읽으라고 넘겼지만 아직 결과가 오지 않은 폴더 수
     in_flight: usize,
     ready: bool,
@@ -225,6 +216,23 @@ struct Owner {
 }
 
 impl Owner {
+    fn new(shared: Arc<Shared>, protected: Vec<String>, max_entries: usize, on_change: Box<dyn Fn() + Send>) -> Owner {
+        Owner {
+            shared,
+            protected: protected.into_iter().collect(),
+            later: VecDeque::new(),
+            busy: HashMap::new(),
+            in_flight: 0,
+            ready: false,
+            held: Vec::new(),
+            waiting: Vec::new(),
+            max_entries,
+            started: Instant::now(),
+            last_notice: None,
+            on_change,
+        }
+    }
+
     fn run(mut self, rx: Receiver<Msg>, first: Vec<Job>) {
         self.push(first);
         loop {
@@ -233,12 +241,7 @@ impl Owner {
             }
             let Ok(msg) = rx.recv() else { break };
             match msg {
-                Msg::Listed(job, listed) => {
-                    self.in_flight -= 1;
-                    let next = self.apply(job, listed);
-                    self.push(next);
-                    self.notice(false);
-                }
+                Msg::Listed(job, listed) => self.listed(job, listed),
                 Msg::Changes(changes) if self.ready => {
                     lock(&self.shared.status).changes += changes.len();
                     let jobs = self.jobs_for(&changes);
@@ -254,6 +257,17 @@ impl Owner {
         work.queue.clear();
         drop(work);
         self.shared.work_ready.notify_all();
+    }
+
+    /// 폴더를 하나 읽었다: 색인에 반영하고 이어서 읽을 폴더를 넘긴다. 읽는 사이에 그 폴더의 알림이 또 왔으면 한 번 더 읽는다
+    fn listed(&mut self, job: Job, listed: Listed) {
+        self.in_flight -= 1;
+        let again = self.busy.remove(&*hangul::compose(&job.path)).flatten();
+        let again = again.map(|deep| Job { slot: job.slot, path: job.path.clone(), deep });
+        let mut next = self.apply(job, listed);
+        next.extend(again);
+        self.push(next);
+        self.notice(false);
     }
 
     /// 읽을 폴더가 떨어졌다: 미뤄 둔 폴더를 하나 읽거나, 처음 훑기를 마친다. 그래도 할 일이 없으면 기다리던 쪽에 답한다
@@ -290,12 +304,27 @@ impl Owner {
         self.send(now);
     }
 
+    /// 한 폴더는 한 번에 한 줄만 읽는다: 이미 읽는 중이면 그 결과가 온 뒤에 한 번 더 읽는다.
+    /// 함께 읽으면 늦게 시작한 쪽이 먼저 끝날 수 있고, 그러면 먼저 시작한 쪽의 옛 목록이 나중에 반영되어 색인이 옛 모습으로 남는다
     fn send(&mut self, jobs: Vec<Job>) {
-        if jobs.is_empty() {
+        let mut now = Vec::new();
+        for job in jobs {
+            match self.busy.entry(hangul::compose(&job.path).into_owned()) {
+                Entry::Occupied(mut again) => {
+                    let deep = job.deep || *again.get() == Some(true);
+                    again.insert(Some(deep));
+                }
+                Entry::Vacant(free) => {
+                    free.insert(None);
+                    now.push(job);
+                }
+            }
+        }
+        if now.is_empty() {
             return;
         }
-        self.in_flight += jobs.len();
-        lock(&self.shared.work).queue.extend(jobs);
+        self.in_flight += now.len();
+        lock(&self.shared.work).queue.extend(now);
         self.shared.work_ready.notify_all();
     }
 
@@ -340,8 +369,12 @@ impl Owner {
                 status.not_local += 1;
                 Vec::new()
             }
-            // 그 위 폴더의 알림이 색인에서 뺀다
-            Listed::Gone => Vec::new(),
+            // 폴더가 없어졌다: 그 안을 뺀다. 폴더 자체는 그 위 폴더를 다시 읽을 때 빠진다.
+            // 훑는 범위의 맨 위 폴더는 그 위를 읽지 않으니, 여기서 빼지 않으면 옮겨진 뒤에도 그 안이 검색에 남는다
+            Listed::Gone => {
+                tree.sync_dir(slot, &[]);
+                Vec::new()
+            }
             Listed::Failed => {
                 status.errors += 1;
                 Vec::new()
@@ -642,6 +675,54 @@ mod tests {
         drop(s);
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    /// 훑는 범위의 맨 위 폴더가 옮겨지면 그 안이 검색에서 빠지고, 돌아오면 다시 보인다
+    #[test]
+    fn search_forgets_a_root_that_moves_away() {
+        let parent = temp("root-moves");
+        let root = parent.join("범위");
+        std::fs::create_dir_all(root.join("속")).unwrap();
+        std::fs::write(root.join("속/떠날 파일.txt"), b"x").unwrap();
+        let s = start(&root, Vec::new(), true);
+        assert!(s.settle(SOON));
+        assert_eq!(total(&s, "떠날"), 1);
+        std::fs::rename(&root, parent.join("옮긴 범위")).unwrap();
+        eventually(&s, "a root moved away", |s| total(s, "떠날") == 0);
+        // 돌아온 뒤 그 안이 바뀌면 다시 훑는다
+        std::fs::rename(parent.join("옮긴 범위"), &root).unwrap();
+        std::fs::write(root.join("돌아옴.txt"), b"x").unwrap();
+        eventually(&s, "a root moved back", |s| total(s, "떠날") == 1 && total(s, "돌아옴") == 1);
+        drop(s);
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    /// 한 폴더는 한 번에 한 줄만 읽는다: 읽는 중에 그 폴더의 알림이 또 오면, 그 결과가 온 뒤에 한 번 더 읽는다
+    #[test]
+    fn search_reads_a_folder_again_only_after_the_last_read_ends() {
+        let mut tree = NameTree::new();
+        let root = "/sakadu-search-test/범위";
+        let slot = tree.add_root(root);
+        let shared = Arc::new(Shared { tree: RwLock::new(tree), status: Mutex::new(Status::default()), work: Mutex::new(Work::default()), work_ready: Condvar::new() });
+        let mut owner = Owner::new(shared.clone(), Vec::new(), usize::MAX, Box::new(|| {}));
+        owner.ready = true;
+        let job = |path: &str, deep| Job { slot, path: path.to_string(), deep };
+        owner.send(vec![job(root, false)]);
+        let first = lock(&shared.work).queue.pop_front().unwrap();
+        // 읽는 사이에 알림이 두 번 더 온다 (하나는 그 아래까지). 다른 폴더는 바로 읽는다
+        owner.send(vec![job(root, false)]);
+        owner.send(vec![job(root, true), job("/sakadu-search-test/다른 곳", false)]);
+        assert_eq!(owner.in_flight, 2);
+        assert_eq!(lock(&shared.work).queue.iter().map(|j| j.path.as_str()).collect::<Vec<_>>(), ["/sakadu-search-test/다른 곳"]);
+        lock(&shared.work).queue.clear();
+        owner.listed(first, Listed::Items(Vec::new()));
+        let queue = lock(&shared.work).queue.drain(..).collect::<Vec<_>>();
+        assert_eq!((queue.len(), queue[0].path.as_str(), queue[0].deep), (1, root, true));
+        assert_eq!(owner.in_flight, 2);
+        // 다시 읽은 결과가 오면 더 읽지 않는다
+        owner.listed(job(root, true), Listed::Items(Vec::new()));
+        assert!(lock(&shared.work).queue.is_empty());
+        assert_eq!(owner.in_flight, 1);
     }
 
     #[test]
