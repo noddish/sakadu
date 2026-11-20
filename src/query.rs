@@ -29,21 +29,37 @@ pub fn lines_to_query(text: &str) -> String {
 /// 경로를 띄어쓰기로 나눈 조각 가운데 구분자가 든 것만 쓴다(구분자가 없으면 이름 조건이 된다). 이 폴더 아래 경로는 이 조각들을
 /// 늘 모두 품으므로 범위 안의 결과를 잃지 않고, 정확한 범위는 받은 뒤 under()로 거른다
 pub fn scoped_query(q: &str, dir: &str, sep: char) -> String {
-    let dir = format!("{}{sep}", dir.trim_end_matches(sep));
-    let terms = dir.split_whitespace().filter(|w| w.contains(sep)).collect::<Vec<_>>().join(" ");
+    let terms = scope_terms(dir, sep);
     pieces(q).iter().map(|p| format!("{p} {terms}")).collect::<Vec<_>>().join(" | ")
 }
 
-/// path가 dir 안에 있는가 (대소문자 무시)
-pub fn under(path: &str, dir: &str, sep: char) -> bool {
-    let (p, d) = (path.to_lowercase(), dir.trim_end_matches(sep).to_lowercase());
-    p.len() > d.len() && p.starts_with(&d) && p[d.len()..].starts_with(sep)
+/// 범위 폴더의 경로 조건 (scoped_query가 조각마다 덧붙이는 것). 맥은 폴더 이름에 '|'가 들 수 있어,
+/// 검색어를 조각으로 나눈 뒤에 조각마다 이것을 덧붙인다 (경로의 '|'가 '또는'이 되지 않게)
+pub fn scope_terms(dir: &str, sep: char) -> String {
+    let dir = format!("{}{sep}", dir.trim_end_matches(sep));
+    dir.split_whitespace().filter(|w| w.contains(sep)).collect::<Vec<_>>().join(" ")
 }
 
-/// 보이는 결과가 지금 것인지 가르는 열쇠: 검색어와 범위. 범위를 바꾸면 같은 검색어여도 이전 결과로는 열지 않는다
+/// path가 dir 안에 있는가 (대소문자 무시: Windows)
+pub fn under(path: &str, dir: &str, sep: char) -> bool {
+    under_exact(&path.to_lowercase(), &dir.to_lowercase(), sep)
+}
+
+/// path가 dir 안에 있는가 (글자 그대로: 맥은 대소문자를 가리는 디스크에서 Work와 work가 다른 폴더다)
+pub fn under_exact(path: &str, dir: &str, sep: char) -> bool {
+    let d = dir.trim_end_matches(sep);
+    path.len() > d.len() && path.starts_with(d) && path[d.len()..].starts_with(sep)
+}
+
+/// 보이는 결과가 지금 것인지 가르는 열쇠: 검색어와 범위. 범위를 바꾸면 같은 검색어여도 이전 결과로는 열지 않는다 (범위는 대소문자 무시: Windows)
 pub fn result_key(text: &str, scope: Option<&str>) -> String {
+    result_key_exact(text, scope.map(str::to_lowercase).as_deref())
+}
+
+/// result_key의 범위를 글자 그대로 넣는다 (맥: 대소문자만 다른 폴더로 옮기면 다시 찾는다)
+pub fn result_key_exact(text: &str, scope: Option<&str>) -> String {
     match scope {
-        Some(d) => format!("{text}\u{1F}{}", d.to_lowercase()),
+        Some(d) => format!("{text}\u{1F}{d}"),
         None => text.to_string(),
     }
 }
@@ -159,6 +175,18 @@ mod tests {
         assert_eq!(m.len(), 4);
         let out = m.into_sorted(3);
         assert_eq!(out, vec![(true, "/b/긴 폴더 이름".to_string()), (false, "/a/보고서 9.txt".to_string()), (false, "/a/보고서 10.txt".to_string())]);
+    }
+
+    /// 맥의 범위는 글자 그대로 가른다 (Windows는 대소문자 무시)
+    #[test]
+    fn mac_scope_keeps_case() {
+        assert!(under("/a/Work/메모.txt", "/a/work", '/'));
+        assert!(!under_exact("/a/Work/메모.txt", "/a/work", '/'));
+        assert!(under_exact("/a/work/메모.txt", "/a/work/", '/'));
+        assert!(!under_exact("/a/workbook/메모.txt", "/a/work", '/'));
+        assert_eq!(result_key("보고", Some("/a/Work")), result_key("보고", Some("/a/work")));
+        assert_ne!(result_key_exact("보고", Some("/a/Work")), result_key_exact("보고", Some("/a/work")));
+        assert_eq!(scope_terms("/a/내 문서|백업", '/'), "/a/내 문서|백업/");
     }
 
     /// 맥은 대소문자만 다른 경로를 다른 항목으로 둔다 (같은 경로는 한 번)

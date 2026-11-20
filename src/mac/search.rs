@@ -156,24 +156,38 @@ impl Finder {
     /// '/'가 든 낱말은 경로에서. scope가 있으면 그 폴더 아래만 남긴다
     pub fn find(&self, text: &str, scope: Option<&str>, limit: usize) -> Found {
         let started = Instant::now();
-        let scope = scope.map(|d| hangul::compose(d).into_owned());
-        let sent = scope.as_deref().map_or_else(|| text.to_string(), |d| query::scoped_query(text, d, '/'));
         let each = if scope.is_some() { limit * SCOPE_WIDEN } else { limit };
         let mut merged = Merged::exact();
         let mut total = 0;
-        {
+        let scope = {
             let tree = read(&self.shared.tree);
-            for piece in query::unique_pieces(&sent) {
-                let (hits, n) = tree.search(&Query::parse_posix(piece), each);
+            // 범위는 색인에 든 그 폴더의 경로로 바꿔 쓴다: 한글은 합친 꼴, 대소문자는 디스크 그대로
+            // (대소문자를 가리지 않는 디스크에서 다르게 친 경로도 그 폴더이고, 가리는 디스크에서 Work와 work는 다른 폴더다)
+            let scope = scope.map(|d| {
+                let d = hangul::compose(d).into_owned();
+                match tree.locate(&d) {
+                    Place::Dir(slot) => tree.path(slot).unwrap_or(d),
+                    _ => d,
+                }
+            });
+            // 범위의 경로 조건은 검색어를 조각으로 나눈 뒤에 덧붙인다 (폴더 이름에 든 '|'가 '또는'이 되지 않게)
+            let terms = scope.as_deref().map(|d| query::scope_terms(d, '/'));
+            for piece in query::unique_pieces(text) {
+                let piece = match &terms {
+                    Some(t) => format!("{piece} {t}"),
+                    None => piece.to_string(),
+                };
+                let (hits, n) = tree.search(&Query::parse_posix(&piece), each);
                 total += n;
                 for h in hits {
                     merged.add(h.score, h.is_dir, h.path);
                 }
             }
-        }
+            scope
+        };
         let mut hits = merged.into_sorted(each);
         if let Some(dir) = &scope {
-            hits.retain(|(_, p)| query::under(p, dir, '/'));
+            hits.retain(|(_, p)| query::under_exact(p, dir, '/'));
             total = hits.len();
         }
         hits.truncate(limit);
@@ -714,6 +728,46 @@ mod tests {
         let found = s.search("report", 10);
         assert_eq!(found.hits.len(), on_disk, "{:?}", found.hits);
         assert_eq!(found.total, on_disk);
+        drop(s);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// '지금 폴더'의 이름에 '|'가 들어도 '또는'이 되지 않는다 (그 폴더 아래의 다른 파일이 걸려 나오지 않는다)
+    #[test]
+    fn search_scope_with_a_bar_in_its_name_stays_one_condition() {
+        let root = temp("bar");
+        let dir = root.join("가|나");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("보고서.txt"), b"x").unwrap();
+        std::fs::write(dir.join("사진.jpg"), b"x").unwrap();
+        std::fs::write(root.join("보고서 밖.txt"), b"x").unwrap();
+        let s = start(&root, Vec::new(), false);
+        assert!(s.settle(SOON));
+        let here = s.finder().find("보고서", Some(&text(&dir)), 50);
+        assert_eq!(here.hits, [(false, format!("{}/보고서.txt", text(&dir)))]);
+        drop(s);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// '지금 폴더'는 대소문자를 가리는 디스크에서 Work와 work를 다른 폴더로 본다.
+    /// 가리지 않는 디스크(보통)에서는 다르게 친 경로도 그 폴더라 그 아래를 찾는다
+    #[test]
+    fn search_scope_follows_the_case_of_the_disk() {
+        let root = temp("scope-case");
+        std::fs::create_dir_all(root.join("Work")).unwrap();
+        std::fs::write(root.join("Work/메모 큰.txt"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("work")).unwrap();
+        std::fs::write(root.join("work/메모 작은.txt"), b"x").unwrap();
+        let sensitive = std::fs::read_dir(&root).unwrap().count() == 2;
+        let s = start(&root, Vec::new(), false);
+        assert!(s.settle(SOON));
+        let mut here: Vec<String> = s.finder().find("메모", Some(&text(&root.join("work"))), 50).hits.into_iter().map(|h| h.1).collect();
+        here.sort();
+        if sensitive {
+            assert_eq!(here, [format!("{}/work/메모 작은.txt", text(&root))]);
+        } else {
+            assert_eq!(here, [format!("{}/Work/메모 작은.txt", text(&root)), format!("{}/Work/메모 큰.txt", text(&root))]);
+        }
         drop(s);
         std::fs::remove_dir_all(root).unwrap();
     }

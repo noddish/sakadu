@@ -30,7 +30,7 @@ const G_CHECK: u16 = 0xE73E;
 /// 찾아 달라는 요청: 창 쪽이 뒷줄에서 finder로 찾아 on_found로 돌려준다
 pub struct FindAsk {
     pub seq: u64,
-    /// 이 요청의 검색어와 범위 (query::result_key)
+    /// 이 요청의 검색어와 범위 (query::result_key_exact)
     key: String,
     pub finder: Finder,
     pub text: String,
@@ -215,7 +215,7 @@ impl App {
 
     /// 지금 검색어와 범위의 열쇠 (보이는 결과가 지금 것인지 가른다)
     fn find_now(&self) -> String {
-        query::result_key(self.find.text.trim(), self.find_scope().as_deref())
+        query::result_key_exact(self.find.text.trim(), self.find_scope().as_deref())
     }
 
     /// 보이는 결과가 지금 검색어와 범위의 것인가
