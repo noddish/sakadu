@@ -2,6 +2,7 @@
 //! copy:·paste:·undo:, 이름 상자의 Return)로 폴더 감시, 이름 바꾸기, 되돌리기, 복사·붙여넣기, 휴지통, 훑어보기를 끝까지 돌려 본다.
 //! 경로 입력(⌘L), 새 폴더(⇧⌘N), 잘라내기·붙여넣기(옮기기)도 같은 길로 해 본다.
 //! 검색(⌘F)도: 시험 폴더만 훑게 하고 켠 뒤, 검색 입력 칸에 쳐서 찾고 그 칸의 키(↓, Return, Esc)로 고르고 연다.
+//! 설정 창도: 앱 메뉴의 '설정…'이 보내는 동작으로 열고, 스위치를 눌러 본 창의 값이 바뀌는지, 본 창에서 바꾼 값을 따라오는지 본다.
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
 //! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
@@ -23,6 +24,8 @@ const Y: u16 = 0x10;
 const L: u16 = 0x25;
 const N: u16 = 0x2D;
 const F: u16 = 0x03;
+const PERIOD: u16 = 0x2F;
+const ESC: u16 = 0x35;
 
 /// 흉내 낸 끌기 정보: 끌려 온 것을 담은 붙여넣기 판, 창 좌표의 마우스 자리, 끌어 낸 쪽이 허락한 일
 struct DragIvars {
@@ -399,7 +402,71 @@ fn script(dir: &str) -> usize {
         let _ = search_command(sel!(cancelOperation:));
         run.wait("Esc closes search", 5, || find_state().is_some_and(|s| !s.0) && on_main(|| VIEW.with(|v| v.get().and_then(|v| v.ivars().search.get().cloned())).is_some_and(|f| f.isHidden())));
     }
+
+    // 설정 창: 앱 메뉴의 '설정…'이 보내는 동작(응답 사슬을 따라 앱 위임까지)으로 연다. 다시 열어도 같은 창이다.
+    // 숨김 스위치를 누르면 본 창의 값이 바뀌고, 본 창에서 ⌘⇧.를 누르면 스위치가 따라온다.
+    // 검색 스위치로 끄고 다시 켠다 (위에서 시험 폴더만 훑게 해 두었다). Esc로 닫는다
+    send_settings_action();
+    if run.wait("the settings menu action opens the settings window", 5, || on_main(|| settings::shown().is_some())) {
+        let first = on_main(|| settings::shown().map(|w| Retained::as_ptr(&w) as usize));
+        send_settings_action();
+        let again = on_main(|| settings::shown().map(|w| Retained::as_ptr(&w) as usize));
+        run.check("opening it again keeps one window", first.is_some() && first == again, || format!("{first:?} {again:?}"));
+        click_switch("hidden");
+        run.wait("the hidden switch shows hidden items in the main window", 5, || on_main(|| with_app(|a| a.prefs().hidden)) == Some(true));
+        key_with(PERIOD, NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
+        run.wait("cmd-shift-period in the main window turns the switch off", 5, || switch_on("hidden") == Some(false));
+        run.check("the search switch shows search is on", switch_on("search") == Some(true), || format!("{:?}", switch_on("search")));
+        click_switch("search");
+        run.wait("the search switch turns search off and drops the index", 5, || on_main(|| with_app(|a| (a.prefs().search_on, a.find_seen().4))) == Some((false, false)));
+        click_switch("search");
+        run.wait("turning it on again indexes the test folder", 10, || on_main(|| with_app(|a| a.prefs().search_on && a.find_seen().4)) == Some(true));
+        on_main(|| {
+            let Some(w) = settings::shown() else { return };
+            let none = NSString::from_str("");
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                NSEventType::KeyDown,
+                NSPoint::new(0.0, 0.0),
+                NSEventModifierFlags::empty(),
+                0.0,
+                w.windowNumber(),
+                None,
+                &none,
+                &none,
+                false,
+                ESC,
+            );
+            if let Some(e) = event {
+                w.sendEvent(&e);
+            }
+        });
+        run.wait("Esc closes the settings window", 5, || on_main(|| settings::shown().is_none()));
+    }
     run.failed
+}
+
+/// 앱 메뉴의 '설정…'이 보내는 동작을 메뉴처럼 보낸다 (받는 쪽을 정하지 않으면 응답 사슬을 따라 앱 위임까지 간다)
+fn send_settings_action() {
+    on_main(|| {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        // SAFETY: NSApplication의 sendAction:to:from:. 받는 쪽은 앱 위임의 sakaduSettings:다
+        let _ = unsafe { NSApplication::sharedApplication(mtm).sendAction_to_from(sel!(sakaduSettings:), None, None) };
+    });
+}
+
+/// 설정 창의 스위치를 누른다 (사람이 누른 것처럼 동작을 보낸다)
+fn click_switch(name: &'static str) {
+    on_main(move || {
+        if let Some(s) = settings::switch(name) {
+            // SAFETY: NSControl의 performClick:
+            unsafe { s.performClick(None) };
+        }
+    });
+}
+
+/// 설정 창의 스위치가 켜져 있는지
+fn switch_on(name: &'static str) -> Option<bool> {
+    on_main(move || settings::switch(name).map(|s| s.state() == NSControlStateValueOn))
 }
 
 /// 검색이 보이는 것: (열렸는지, 입력 칸이 키보드를 가졌는지(앱이 그렇게 알고 창에서도 그렇다), 결과의 이름, 고른 줄, 다 훑었는지)

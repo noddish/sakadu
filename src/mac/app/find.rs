@@ -327,10 +327,64 @@ impl App {
 
     /// '검색 켜기': 설정에 적고 훑기를 시작한다
     pub fn enable_find(&mut self) {
-        self.find.setting.on = true;
-        self.save_find_setting();
-        self.request_index();
+        self.set_find_on(true);
         self.find.focus = true;
+    }
+
+    /// 설정 창의 '이름으로 찾기'. 켜면 설정에 적고 훑기를 시작한다 (검색 입력 칸에 키보드를 주지 않는다).
+    /// 끄면 색인을 버린다: 훑던 줄과 변경 기록이 멈추고 메모리를 돌려준다. 검색 패널이 열려 있으면 다시 켜기 카드가 보인다
+    pub fn set_find_on(&mut self, on: bool) {
+        self.find.setting.on = on;
+        self.save_find_setting();
+        if on {
+            self.request_index();
+        } else {
+            self.drop_index();
+        }
+    }
+
+    /// 설정 창의 'iCloud Drive도 찾기'. 검색이 켜져 있으면 색인을 버리고 새 범위로 다시 훑는다
+    pub fn set_find_icloud(&mut self, icloud: bool) {
+        if self.find.setting.icloud == icloud {
+            return;
+        }
+        self.find.setting.icloud = icloud;
+        self.save_find_setting();
+        if self.find.setting.on {
+            self.drop_index();
+            self.request_index();
+        }
+    }
+
+    /// 색인을 버리고 결과와 상태를 비운다. 아직 오지 않은 검색 결과도 버린다 (요청 번호를 올린다)
+    fn drop_index(&mut self) {
+        let f = &mut self.find;
+        f.index = None;
+        f.start = None;
+        f.status = Status::default();
+        f.protected.clear();
+        f.outside = false;
+        f.results.clear();
+        f.total = 0;
+        f.shown = None;
+        f.asked = None;
+        f.seq += 1;
+        f.asks.clear();
+        f.enter = None;
+        f.sel = 0;
+        f.scroll = 0.0;
+    }
+
+    /// '설정에서 허용': 시스템 설정의 '파일 및 폴더'를 연다 (창 쪽이 open_url을 연다)
+    pub fn ask_folder_access(&mut self) {
+        self.open_url = Some(PRIVACY_FILES.to_string());
+    }
+
+    /// 설정 창에 보이는 검색 값: (켰는지, iCloud Drive도 찾는지, 훑는 중인지, 맥이 묻는 폴더를 읽지 못했는지)
+    pub(super) fn find_prefs(&self) -> (bool, bool, bool, bool) {
+        let s = &self.find;
+        let crawling = s.setting.on && (s.start.is_some() || (s.index.is_some() && !s.status.ready));
+        (s.setting.on, s.setting.icloud, crawling, s.setting.on && self.find_denied())
     }
 
     fn request_index(&mut self) {
@@ -550,7 +604,7 @@ impl App {
                         self.find.setting.icloud = !self.find.setting.icloud;
                         self.save_find_setting();
                     }
-                    FindHit::Allow => self.open_url = Some(PRIVACY_FILES.to_string()),
+                    FindHit::Allow => self.ask_folder_access(),
                     FindHit::Panel => {}
                 }
             }
@@ -1011,6 +1065,73 @@ mod tests {
         // 닫으면 사이드바가 돌아온다
         let (x, y) = mid(a.side_title());
         assert_eq!(a.hit(&g, x, y), Hit::SideTitle);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 설정 창의 '이름으로 찾기': 켜면 훑고(검색 입력 칸에 키보드를 주지 않는다), 끄면 색인과 결과를 버리고 패널은 켜기 카드로 돌아간다.
+    /// 다시 켜면 다시 훑어 같은 검색어로 찾는다
+    #[test]
+    fn settings_turn_search_off_and_on_again() {
+        let (root, home) = demo("prefs");
+        let (mut a, g) = app(&home);
+        let p = a.prefs();
+        assert!(!p.search_on && !p.icloud && !p.crawling && !p.denied);
+        a.set_find_on(true);
+        assert!(a.prefs().search_on && a.prefs().crawling, "crawling until the index is made");
+        assert!(!a.find_shown() && !a.find_wants_keys());
+        a.settle();
+        assert!(a.find.status.ready && !a.prefs().crawling);
+        a.open_find();
+        a.find_typed("보고");
+        a.settle();
+        assert_eq!(sorted(found(&a)), ["보고서.docx", "주간보고.txt"]);
+        a.set_find_on(false);
+        a.settle();
+        assert!(a.find.index.is_none() && found(&a).is_empty() && !a.prefs().search_on && !a.prefs().crawling);
+        let intro = a.find_intro(&g);
+        let (x, y) = mid(intro.enable);
+        assert_eq!(a.hit(&g, x, y), Hit::Find(FindHit::Enable), "the panel shows the turn-on card again");
+        a.set_find_on(true);
+        a.settle();
+        assert_eq!(sorted(found(&a)), ["보고서.docx", "주간보고.txt"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 설정 창의 'iCloud Drive도 찾기': 검색이 꺼져 있으면 값만 바꾸고, 켜져 있으면 새 범위로 다시 훑는다
+    #[test]
+    fn settings_icloud_change_reindexes_only_while_search_is_on() {
+        let (root, home) = demo("icloud");
+        let (mut a, _g) = app(&home);
+        a.set_find_icloud(true);
+        assert!(a.prefs().icloud && a.find.start.is_none() && a.find.index.is_none(), "nothing is read while search is off");
+        a.set_find_on(true);
+        a.settle();
+        assert!(a.find.status.ready);
+        a.set_find_icloud(false);
+        assert!(!a.prefs().icloud && a.find.index.is_none() && a.prefs().crawling, "a new index starts with the new scope");
+        a.settle();
+        assert!(a.find.status.ready && !a.prefs().crawling);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 설정 창의 숨김 항목 보기·자동 미리 보기는 ⌘⇧.와 눈 단추와 같은 값이다
+    #[test]
+    fn settings_share_the_hidden_key_and_the_preview_button() {
+        let (root, home) = demo("hidden");
+        std::fs::write(std::path::Path::new(&home).join(".숨김.txt"), b"x").unwrap();
+        let (mut a, _g) = app(&home);
+        assert!(!a.prefs().hidden && a.prefs().auto_preview);
+        assert!(!a.seen().names.iter().any(|n| n == ".숨김.txt"));
+        a.key(Key::Char('.'), Mods { cmd: true, shift: true, ..Mods::default() });
+        assert!(a.prefs().hidden);
+        assert!(a.seen().names.iter().any(|n| n == ".숨김.txt"));
+        a.set_hidden(false);
+        assert!(!a.prefs().hidden && !a.seen().names.iter().any(|n| n == ".숨김.txt"));
+        a.set_auto_preview(false);
+        a.set_auto_preview(false);
+        assert!(!a.prefs().auto_preview);
+        a.set_auto_preview(true);
+        assert!(a.prefs().auto_preview);
         std::fs::remove_dir_all(root).unwrap();
     }
 

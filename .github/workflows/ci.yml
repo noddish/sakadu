@@ -82,6 +82,13 @@ jobs:
         continue-on-error: true
         timeout-minutes: 2
         run: ./target/debug/sakadu-mac --snapshot mac-render/window.png --start "$DEMO/업무"
+      # 설정 창 (밝게는 검색이 꺼진 모습, 어둡게는 데모 폴더만 훑어 검색을 켠 모습)
+      - name: Settings window snapshot
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          ./target/debug/sakadu-mac --snapshot-settings mac-render/settings-light.png --start "$DEMO/업무"
+          ./target/debug/sakadu-mac --snapshot-settings mac-render/settings-dark.png --start "$DEMO/업무" --dark --search
       - name: Upload screens
         uses: actions/upload-artifact@v7
         with:
