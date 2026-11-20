@@ -182,6 +182,11 @@ impl NameTree {
         self.vol.name(slot)
     }
 
+    /// 칸이 훑는 폴더인가 (파일·링크·패키지와 훑지 않는 폴더는 아니다)
+    pub fn is_dir(&self, slot: u32) -> bool {
+        self.kind(slot) == Kind::Dir
+    }
+
     /// 이름으로 찾는다 (index::search_visible과 같은 규칙. 검색어는 Query::parse_posix로 만든다)
     pub fn search(&self, q: &Query, limit: usize) -> (Vec<Hit>, usize) {
         search_visible(&[&self.vol], q, limit, &|_, _| true)

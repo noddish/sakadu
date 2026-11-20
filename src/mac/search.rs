@@ -532,9 +532,11 @@ impl Owner {
     }
 }
 
-/// 그 일의 폴더가 지금 색인의 어느 칸인가: 읽는 사이에 색인이 바뀌어 그 칸이 다른 것이 됐으면 경로로 다시 찾는다
+/// 그 일의 폴더가 지금 색인의 어느 칸인가: 읽는 사이에 색인이 바뀌어 그 칸이 다른 것이 됐으면 경로로 다시 찾는다.
+/// 같은 경로라도 그 칸이 이제 폴더가 아니면 버린다: 읽는 사이에 그 폴더가 같은 이름의 파일로 바뀌면 빈 칸을 다시 써서
+/// 같은 칸이 그 파일이 될 수 있고, 그 칸에 옛 폴더의 목록을 붙이면 파일 아래에 없는 항목이 남는다
 fn current_slot(tree: &NameTree, job: &Job) -> Option<u32> {
-    if tree.path(job.slot).is_some_and(|p| p == hangul::compose(&job.path)) {
+    if tree.is_dir(job.slot) && tree.path(job.slot).is_some_and(|p| p == hangul::compose(&job.path)) {
         return Some(job.slot);
     }
     match tree.locate(&job.path) {
@@ -842,6 +844,27 @@ mod tests {
         owner.listed(job(root, true), Listed::Items(Vec::new()));
         assert!(lock(&shared.work).queue.is_empty());
         assert_eq!(owner.in_flight, 1);
+    }
+
+    /// 읽는 사이에 그 폴더가 같은 이름의 파일로 바뀌었으면, 늦게 온 그 폴더의 목록은 버린다 (파일 아래에 없는 항목이 붙지 않게)
+    #[test]
+    fn search_drops_a_listing_of_a_folder_that_became_a_file() {
+        let mut tree = NameTree::new();
+        let root = "/sakadu-search-test/범위";
+        let r = tree.add_root(root);
+        let d = tree.sync_dir(r, &[Item { name: "폴더".into(), kind: Kind::Dir }])[0];
+        let shared = Arc::new(Shared { tree: RwLock::new(tree), status: Mutex::new(Status::default()), work: Mutex::new(Work::default()), work_ready: Condvar::new() });
+        let mut owner = Owner::new(shared.clone(), Vec::new(), usize::MAX, Box::new(|| {}));
+        owner.ready = true;
+        owner.send(vec![Job { slot: d, path: format!("{root}/폴더"), deep: false }]);
+        let job = lock(&shared.work).queue.pop_front().unwrap();
+        // 그 폴더를 읽는 사이에 다른 줄이 위 폴더를 다시 읽었더니 같은 이름이 파일이 되었다 (빈 칸을 다시 써 같은 칸일 수 있다)
+        write(&shared.tree).sync_dir(r, &[Item { name: "폴더".into(), kind: Kind::File }]);
+        owner.listed(job, Listed::Items(vec![Item { name: "유령.txt".into(), kind: Kind::File }]));
+        let tree = read(&shared.tree);
+        assert_eq!(tree.search(&Query::parse_posix("유령"), 10).1, 0);
+        assert_eq!(tree.search(&Query::parse_posix("폴더"), 10).1, 1, "the file that replaced the folder stays");
+        assert!(lock(&shared.work).queue.is_empty());
     }
 
     #[test]
