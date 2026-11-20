@@ -2,7 +2,8 @@
 //! 인자 없이 실행하면 창을 띄운다. CI 확인용으로 두 가지가 더 있다:
 //! `--render <데모 폴더> --out <출력 폴더>`는 창 없이 여러 상태를 PNG로 그리고,
 //! `--snapshot <PNG> --start <폴더>`는 실제 창을 열어 창 틀(신호등 포함)까지 그린 뒤 끝낸다.
-//! `--smoke`는 실제 창을 열고 임시 시험 폴더에서 키와 편집 메뉴 동작으로 파일 작업을 끝까지 돌려 본다 (결과를 찍고 끝낸다)
+//! `--smoke`는 실제 창을 열고 임시 시험 폴더에서 키와 편집 메뉴 동작으로 파일 작업을 끝까지 돌려 본다 (결과를 찍고 끝낸다).
+//! `--index-bench <폴더>…`는 검색 색인을 만들어 보고 개수·시간·메모리·검색 시간을 찍는다 (이름은 찍지 않는다)
 
 #[cfg(target_os = "macos")]
 mod app;
@@ -12,6 +13,8 @@ mod fileops;
 mod gfx;
 #[cfg(target_os = "macos")]
 mod render;
+#[cfg(target_os = "macos")]
+mod search;
 #[cfg(target_os = "macos")]
 mod view;
 #[cfg(target_os = "macos")]
@@ -28,6 +31,10 @@ fn main() {
         for path in render::render_all(&demo, &out).unwrap_or_else(|e| panic!("그림: {e}")) {
             println!("{}", path.display());
         }
+        return;
+    }
+    if args.iter().any(|a| a == "--index-bench") {
+        search::bench(&args);
         return;
     }
     if args.iter().any(|a| a == "--smoke") {

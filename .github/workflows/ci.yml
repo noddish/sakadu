@@ -30,6 +30,7 @@ jobs:
       - name: Test mac prototype
         run: cargo test --features mac-app --bin sakadu-mac --locked
       # 파일 작업 시험을 대소문자를 가리는 볼륨에서 한 번 더 (맥 기본 볼륨은 가리지 않는다). 시험의 임시 폴더를 그 볼륨에 둔다.
+      # 검색 시험도 (자모로 나뉜 한글 이름을 합친 꼴의 경로로 여는지, 그 볼륨에서도 변경 기록이 오는지).
       # 그 볼륨과 러너의 기본 볼륨 사이로 '다른 디스크로 옮기기·끌어다 놓기'도 본다 (SAKADU_TEST_OTHER_VOLUME).
       # 러너에서 디스크 이미지를 만들 수 없으면 이 단계만 실패로 남긴다
       - name: File operation tests on a case-sensitive volume
@@ -42,7 +43,7 @@ jobs:
           test "$(ls "$RUNNER_TEMP/case/tmp/probe" | wc -l)" -eq 2
           TMPDIR="$RUNNER_TEMP/case/tmp" cargo test --lib --locked -- fileops listing pane
           mkdir -p "$RUNNER_TEMP/other-volume"
-          SAKADU_TEST_OTHER_VOLUME="$RUNNER_TEMP/other-volume" TMPDIR="$RUNNER_TEMP/case/tmp" cargo test --features mac-app --bin sakadu-mac --locked -- fileops rename new_folder
+          SAKADU_TEST_OTHER_VOLUME="$RUNNER_TEMP/other-volume" TMPDIR="$RUNNER_TEMP/case/tmp" cargo test --features mac-app --bin sakadu-mac --locked -- fileops rename new_folder search
           hdiutil detach "$RUNNER_TEMP/case"
       - name: Build mac prototype
         run: cargo build --features mac-app --bin sakadu-mac --locked
@@ -151,6 +152,19 @@ jobs:
       - name: Intel slice under Rosetta
         continue-on-error: true
         run: arch -x86_64 dist/Sakadu.app/Contents/MacOS/sakadu-mac --render "$RUNNER_TEMP/demo" --out dist/check/intel
+      # 맥 검색 색인 측정 (참고용): 실제 폴더를 훑어 개수·시간·메모리·검색 시간만 찍는다 (파일 이름은 찍지 않는다).
+      # 패키지 안까지 훑는 /Applications는 줄 수를 바꿔 가며 잰다 (첫 번은 디스크 캐시를 데우는 몫). '/'는 이름 수에 상한을 둔다.
+      # 시간 제한을 넘기면 그때까지의 숫자를 찍고 끝난다. 결과는 mac-app-checks의 index-bench.txt
+      - name: Index bench
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          B=dist/Sakadu.app/Contents/MacOS/sakadu-mac
+          {
+            "$B" --index-bench --time-limit 60 /Applications /System/Applications
+            for t in 3 1 2 3; do "$B" --index-bench --no-skip --threads "$t" --time-limit 120 /Applications; done
+            "$B" --index-bench --time-limit 180 --max-entries 3000000 /
+          } 2>&1 | tee dist/check/index-bench.txt
       - name: Zip
         run: ditto -c -k --keepParent dist/Sakadu.app "dist/Sakadu-${VERSION}-mac-prototype.zip"
       - name: Upload app

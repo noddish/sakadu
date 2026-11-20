@@ -177,6 +177,11 @@ impl NameTree {
         self.vol.path(slot)
     }
 
+    /// 칸의 이름 (한글은 합친 꼴)
+    pub fn name(&self, slot: u32) -> Option<&str> {
+        self.vol.name(slot)
+    }
+
     /// 이름으로 찾는다 (index::search_visible과 같은 규칙. 검색어는 Query::parse_posix로 만든다)
     pub fn search(&self, q: &Query, limit: usize) -> (Vec<Hit>, usize) {
         search_visible(&[&self.vol], q, limit, &|_, _| true)
