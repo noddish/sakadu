@@ -150,8 +150,14 @@ struct Lookup<'a> {
     entries: &'a [Entry],
     keys: &'a [String],
     exact: std::collections::HashMap<&'a str, usize>,
-    /// 소문자 이름 → 그 이름의 항목. 대소문자만 다른 항목이 여럿이면 None. 글자 그대로 찾지 못한 이름이 있을 때만 만든다
+    /// 느슨한 이름(한글을 합친 꼴의 소문자) → 그 이름의 항목. 그런 항목이 여럿이면 None. 글자 그대로 찾지 못한 이름이 있을 때만 만든다.
+    /// 맥에서 만든 한글 이름은 자모가 나뉜 꼴로 저장된 것이 많고, 검색 결과의 이름은 합친 꼴이라 글자 그대로는 다르다
     loose: Option<std::collections::HashMap<String, Option<usize>>>,
+}
+
+/// 대소문자와 한글 자모 나뉨을 가리지 않는 이름
+fn loose_key(name: &str) -> String {
+    crate::hangul::compose(name).to_lowercase()
 }
 
 impl<'a> Lookup<'a> {
@@ -169,11 +175,11 @@ impl<'a> Lookup<'a> {
         let loose = self.loose.get_or_insert_with(|| {
             let mut m = std::collections::HashMap::with_capacity(keys.len());
             for (i, k) in keys.iter().enumerate() {
-                m.entry(k.to_lowercase()).and_modify(|v| *v = None).or_insert(Some(i));
+                m.entry(loose_key(k)).and_modify(|v| *v = None).or_insert(Some(i));
             }
             m
         });
-        let i = (*loose.get(&key.to_lowercase())?)?;
+        let i = (*loose.get(&loose_key(key))?)?;
         let now = self.entries[i].file_id;
         (id == 0 || now == 0 || now == id).then_some(i)
     }
@@ -684,6 +690,18 @@ mod tests {
         assert_eq!(load(vec![with_id("PHOTO.JPG", 11)], snap.clone()), (1, Some("PHOTO.JPG".to_string())));
         // 파일 번호를 모르는 목록(Windows)은 이름만으로 고른다
         assert_eq!(load(vec![with_id("photo.jpg", 0)], snap).0, 1);
+    }
+
+    /// 검색 결과(한글을 합친 꼴의 이름)로 폴더를 열면, 자모가 나뉜 꼴로 저장된 그 항목을 고른다
+    #[test]
+    fn restore_finds_a_decomposed_hangul_name() {
+        // 주간보고.txt (나뉜 꼴)
+        let nfd = "\u{110C}\u{116E}\u{1100}\u{1161}\u{11AB}\u{1107}\u{1169}\u{1100}\u{1169}.txt";
+        let mut t = Tab::new(1, Location::Dir("/t".into()));
+        t.restore = Some(Restore::select("주간보고.txt"));
+        t.set_entries(vec![with_id("a.txt", 1), with_id(nfd, 2)], Sort::default(), false);
+        assert_eq!(t.cursor_entry().map(Entry::name_string).as_deref(), Some(nfd));
+        assert_eq!(t.selection_stats().0, 1);
     }
 
     /// 성능 측정: QP_BENCH_DIR 폴더를 열거·정렬·필터하는 시간 (cargo test --release -- --ignored --nocapture)

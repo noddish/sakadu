@@ -136,6 +136,10 @@ jobs:
             <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
             <key>NSHighResolutionCapable</key><true/>
             <key>NSHumanReadableCopyright</key><string>GPL-3.0-or-later</string>
+            <key>NSDesktopFolderUsageDescription</key><string>사카두에서 데스크탑의 파일을 보고 이름으로 찾을 수 있게 해요.</string>
+            <key>NSDocumentsFolderUsageDescription</key><string>사카두에서 문서 폴더의 파일을 보고 이름으로 찾을 수 있게 해요.</string>
+            <key>NSDownloadsFolderUsageDescription</key><string>사카두에서 다운로드 폴더의 파일을 보고 이름으로 찾을 수 있게 해요.</string>
+            <key>NSFileProviderDomainUsageDescription</key><string>사카두에서 iCloud Drive의 파일을 보고 이름으로 찾을 수 있게 해요.</string>
           </dict>
           </plist>
           EOF

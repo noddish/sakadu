@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::service::{self, SearchError, SearchResponse};
+use sakadu::query::{self, Merged, pieces as query_pieces, result_key as pal_key, unique_pieces};
 use windows::Win32::UI::Controls::EM_GETSEL;
 use windows::Win32::UI::Shell::ShellExecuteW;
 
@@ -115,10 +116,10 @@ fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>, scope: Option<Strin
         let reply = match &query {
             Some(q) => {
                 let limit = if scope.is_some() { SCOPE_LIMIT } else { PAL_LIMIT };
-                let sent = scope.as_deref().map_or_else(|| q.clone(), |d| scoped_query(q, d));
+                let sent = scope.as_deref().map_or_else(|| q.clone(), |d| query::scoped_query(q, d, '\\'));
                 SearchReply::Results(search_all(&sent, &folders, limit).map(|mut r| {
                     if let Some(dir) = &scope {
-                        r.hits.retain(|(_, p)| under(p, dir));
+                        r.hits.retain(|(_, p)| query::under(p, dir, '\\'));
                         r.total = r.hits.len();
                         r.hits.truncate(PAL_LIMIT);
                     }
@@ -131,43 +132,9 @@ fn spawn_search(hwnd: HWND, seq: u64, query: Option<String>, scope: Option<Strin
     });
 }
 
-/// 현재 폴더 범위를 검색어 조각마다 경로 조건으로 덧붙인다. 서비스와 넣은 폴더는 '\'가 든 낱말을 전체 경로에서 찾으며
-/// 순위를 매기고 자르기 전에 거르므로, 다른 곳의 일치 항목이 많아도 이 폴더 아래 항목을 놓치지 않는다.
-/// 경로를 띄어쓰기로 나눈 조각 가운데 '\'가 든 것만 쓴다('\'가 없으면 이름 조건이 된다). 이 폴더 아래 경로는 이 조각들을
-/// 늘 모두 품으므로 범위 안의 결과를 잃지 않고, 정확한 범위는 받은 뒤 under()로 거른다
-fn scoped_query(q: &str, dir: &str) -> String {
-    let dir = format!("{}\\", dir.trim_end_matches('\\'));
-    let terms = dir.split_whitespace().filter(|w| w.contains('\\')).collect::<Vec<_>>().join(" ");
-    query_pieces(q).iter().map(|p| format!("{p} {terms}")).collect::<Vec<_>>().join(" | ")
-}
-
-/// 보이는 결과가 지금 것인지 가르는 열쇠: 검색어와 범위. 범위를 바꾸면 같은 검색어여도 이전 결과로는 열지 않는다
-fn pal_key(text: &str, scope: Option<&str>) -> String {
-    match scope {
-        Some(d) => format!("{text}\u{1F}{}", d.to_lowercase()),
-        None => text.to_string(),
-    }
-}
-
-/// path가 dir 안에 있는가 (대소문자 무시)
-fn under(path: &str, dir: &str) -> bool {
-    let (p, d) = (path.to_lowercase(), dir.trim_end_matches('\\').to_lowercase());
-    p.len() > d.len() && p.starts_with(&d) && p.as_bytes()[d.len()] == b'\\'
-}
-
 /// 드라이브 글자들을 "D:, E:"처럼
 fn drive_list(letters: &str) -> String {
     letters.chars().map(|c| format!("{c}:")).collect::<Vec<_>>().join(", ")
-}
-
-/// 검색어를 `|`로 나눈 조각들(또는). 조각 안의 띄어 쓴 낱말은 모두 포함해야 한다
-pub(super) fn query_pieces(q: &str) -> Vec<&str> {
-    q.split('|').map(str::trim).filter(|p| !p.is_empty()).collect()
-}
-
-/// 여러 줄 텍스트(엑셀 열 등)를 한 줄 검색어로: 줄마다 `|`로 잇는다
-pub(super) fn lines_to_query(text: &str) -> String {
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" | ")
 }
 
 /// 한 조각의 결과: (점수, 폴더 여부, 경로), 전체 개수, 걸린 시간, 서비스 준비 여부, 읽지 못한 드라이브
@@ -177,13 +144,6 @@ struct Found {
     micros: u64,
     ready: bool,
     failed: String,
-}
-
-/// 같은 검색어 조각은 한 번만 찾는다 (엑셀 열에는 같은 값이 자주 되풀이된다).
-/// 대소문자·띄어쓰기 차이만 있는 조각은 찾는 결과가 같으므로 같은 것으로 본다
-pub(super) fn unique_pieces(q: &str) -> Vec<&str> {
-    let mut seen = HashSet::new();
-    query_pieces(q).into_iter().filter(|p| seen.insert(p.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase())).collect()
 }
 
 /// 한 조각을 디스크 인덱스(검색 서비스 결과 local)와 검색에 넣은 폴더에서 찾는다
@@ -215,8 +175,7 @@ fn search_piece(q: &str, local: Result<SearchResponse, SearchError>, folders: &c
 /// 조각마다 찾아 합친다. 여러 조각에 걸린 항목은 가장 높은 점수로 한 번만 남는다.
 /// 전체 개수는 조각별 개수의 합이라 겹치는 항목이 있으면 실제보다 조금 클 수 있다
 fn search_all(q: &str, folders: &crate::folders::Folders, limit: usize) -> Result<SearchResponse, SearchError> {
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    let mut all: Vec<(i32, bool, String)> = Vec::new();
+    let mut all = Merged::default();
     let (mut total, mut micros, mut error) = (0, 0, None);
     let (mut ready, mut failed) = (true, String::new());
     let pieces = unique_pieces(q);
@@ -233,14 +192,8 @@ fn search_all(q: &str, folders: &crate::folders::Folders, limit: usize) -> Resul
                         failed.push(c);
                     }
                 }
-                for hit in hits {
-                    match seen.get(&hit.2.to_lowercase()) {
-                        Some(&i) => all[i].0 = all[i].0.max(hit.0),
-                        None => {
-                            seen.insert(hit.2.to_lowercase(), all.len());
-                            all.push(hit);
-                        }
-                    }
+                for (score, is_dir, path) in hits {
+                    all.add(score, is_dir, path);
                 }
             }
             Err(e) => error = Some(e),
@@ -249,9 +202,7 @@ fn search_all(q: &str, folders: &crate::folders::Folders, limit: usize) -> Resul
     if let (true, Some(e)) = (all.is_empty(), error) {
         return Err(e);
     }
-    all.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.len().cmp(&b.2.len())).then_with(|| crate::favorites::natural(&a.2, &b.2)));
-    all.truncate(limit);
-    Ok(SearchResponse { total, micros, hits: all.into_iter().map(|(_, d, p)| (d, p)).collect(), ready, failed })
+    Ok(SearchResponse { total, micros, hits: all.into_sorted(limit), ready, failed })
 }
 
 const PAL_MENU_OPEN: u32 = 1;
@@ -1229,29 +1180,6 @@ pub(super) fn kbd(gfx: &Gfx, t: &Theme, x: f32, cy: f32, label: &str) -> f32 {
 mod tests {
     use super::*;
 
-    /// 현재 폴더 범위는 검색어 조각마다 경로 조건('\'가 든 낱말)으로 붙는다. 띄어쓰기 뒤 '\'가 없는 조각은 빼고(이름 조건이 되므로)
-    /// 정확한 범위는 받은 뒤 거른다
-    #[test]
-    fn scope_becomes_path_terms() {
-        assert_eq!(scoped_query("보고서", r"C:\업무\월간"), r"보고서 C:\업무\월간\");
-        assert_eq!(scoped_query("보고서", r"C:\업무\월간\"), r"보고서 C:\업무\월간\");
-        assert_eq!(scoped_query("a | b c", r"C:\Sakadu 데모\사진"), r"a C:\Sakadu 데모\사진\ | b c C:\Sakadu 데모\사진\");
-        assert_eq!(scoped_query("x", r"C:\My Big Folder\월간"), r"x C:\My Folder\월간\");
-        assert_eq!(scoped_query("x", r"\\nas\공유\팀"), r"x \\nas\공유\팀\");
-        assert_eq!(scoped_query("x", r"C:\"), r"x C:\");
-        // 범위가 다르면 같은 검색어여도 다른 결과로 본다
-        assert_ne!(pal_key("보고", Some(r"C:\a")), pal_key("보고", None));
-        assert_ne!(pal_key("보고", Some(r"C:\a")), pal_key("보고", Some(r"C:\b")));
-        assert_eq!(pal_key("보고", Some(r"C:\A")), pal_key("보고", Some(r"c:\a")));
-    }
-
-    #[test]
-    fn pieces_split_on_bar() {
-        assert_eq!(query_pieces("견적 2026 | 계약서 |  | 0420"), vec!["견적 2026", "계약서", "0420"]);
-        assert_eq!(query_pieces("업무\\ 보고"), vec!["업무\\ 보고"]);
-        assert!(query_pieces(" | ").is_empty());
-    }
-
     /// 실제 검색 서비스로 "또는" 검색: 조각별 결과가 합쳐지고 겹치는 항목은 한 번만 (cargo test or_search -- --ignored --nocapture)
     #[test]
     #[ignore]
@@ -1296,12 +1224,6 @@ mod tests {
         assert_eq!(g.arrived("보고서", "보고서", 5), None);
     }
 
-    #[test]
-    fn repeated_pieces_are_searched_once() {
-        assert_eq!(unique_pieces("견적 | 계약 | 견적 |  견적  | 계약서 | 견적"), vec!["견적", "계약", "계약서"]);
-        assert_eq!(unique_pieces("견적  2026 | 견적 2026 | ABC | abc"), vec!["견적  2026", "ABC"]);
-    }
-
     /// 실제 검색 서비스: 같은 줄이 되풀이된 여러 줄 검색도 결과·순서가 한 번씩 찾은 것과 같다 (cargo test dedup_keeps -- --ignored)
     #[test]
     #[ignore]
@@ -1313,20 +1235,5 @@ mod tests {
         println!("{} hit(s)", once.len());
         assert!(!once.is_empty());
         assert_eq!(once, repeated);
-    }
-
-    #[test]
-    fn scope_keeps_only_paths_under_the_folder() {
-        assert!(under("C:\\업무\\견적.xlsx", "c:\\업무"));
-        assert!(under("C:\\OneDrive - Personal\\a b\\x.txt", "C:\\OneDrive - Personal\\a b"));
-        assert!(under("C:\\업무\\2026\\견적.xlsx", "C:\\업무\\"));
-        assert!(!under("C:\\업무2\\견적.xlsx", "C:\\업무"));
-        assert!(!under("C:\\업무", "C:\\업무"));
-    }
-
-    #[test]
-    fn pasted_lines_become_alternatives() {
-        let excel = "20260420_160559\r\n20260407_091344\r\n\r\n  견적서 \r\n";
-        assert_eq!(lines_to_query(excel), "20260420_160559 | 20260407_091344 | 견적서");
     }
 }

@@ -1,4 +1,6 @@
-//! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름, 항목 이름).
+//! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름, 항목 이름)와
+//! 검색 입력 칸(NSTextField 하나 더: 검색하는 동안 늘 보이고, 칸에서 일하는 동안에도 검색어를 지킨다).
+//! 검색은 자체 색인(search.rs)을 이 쪽이 띄우고, 입력할 때마다 뒷줄에서 찾는다.
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인·미리 보기 카드의 그림과 글 읽기·아이콘 보기의 썸네일 읽기는
 //! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다. 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 복사, 되돌리기)은 뒷줄 하나가 맡긴 순서대로 하나씩 한다.
 //! 클립보드에는 파일 주소로 담고 읽는다 (Finder와 주고받을 수 있다).
@@ -102,6 +104,10 @@ pub struct ViewIvars {
     field: OnceCell<Retained<NSTextField>>,
     /// 입력 상자가 지금 무엇을 담고 있는지: 어느 칸의 경로인지, 작업 공간 이름인지, 어느 항목의 이름인지 (App::edit_key. 바뀌면 다시 채운다)
     field_pane: std::cell::Cell<Option<u64>>,
+    /// 검색 입력 칸 (도구 막대에서 늘어난 칸의 글자 자리)
+    search: OnceCell<Retained<NSTextField>>,
+    /// 지난번에 맞출 때 검색 입력 칸이 키보드를 갖고 있었는지. 그 사이 키보드를 가져갔으면 사용자가 그 칸을 누른 것이다
+    search_keys: std::cell::Cell<bool>,
 }
 
 define_class!(
@@ -320,11 +326,11 @@ define_class!(
         }
 
         /// 편집 메뉴의 실행 취소(⌘Z): 키 입력이 목록에 있을 때 가장 나중에 한 파일 작업(이름 바꾸기, 새 폴더, 휴지통, 복사)을 되돌린다.
-        /// 이름이나 경로를 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라 친 글자를 되돌린다:
+        /// 이름이나 경로, 검색어를 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라 친 글자를 되돌린다:
         /// 이 뷰가 받지 않았을 때 창이 하던 대로, 창의 되돌리기 관리자에 넘긴다
         #[unsafe(method(undo:))]
         fn undo(&self, _sender: Option<&objc2::runtime::AnyObject>) {
-            if with_app(|a| a.edit != crate::app::Editing::None).unwrap_or(false) {
+            if with_app(|a| a.edit != crate::app::Editing::None || a.find_wants_keys()).unwrap_or(false) {
                 if let Some(typed) = self.undoManager()
                     && typed.canUndo()
                 {
@@ -337,6 +343,13 @@ define_class!(
                 return;
             }
             with_app(App::undo);
+            self.after_input();
+        }
+
+        /// 편집 메뉴의 찾기(⌘F): 검색을 열고 키보드를 입력 칸에 둔다
+        #[unsafe(method(sakaduFind:))]
+        fn sakadu_find(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            with_app(App::open_find);
             self.after_input();
         }
 
@@ -361,7 +374,10 @@ define_class!(
     unsafe impl NSControlTextEditingDelegate for SakaduView {
         /// Return은 확정, Esc는 취소. 한글을 조합하는 중의 Return은 맥이 조합을 마치는 데 써서 여기로 오지 않는다
         #[unsafe(method(control:textView:doCommandBySelector:))]
-        fn do_command(&self, _control: &NSControl, _text_view: &NSTextView, command: Sel) -> Bool {
+        fn do_command(&self, control: &NSControl, _text_view: &NSTextView, command: Sel) -> Bool {
+            if self.is_search(control as *const NSControl as *const AnyObject) {
+                return Bool::new(self.search_command(command));
+            }
             if command == sel!(insertNewline:) {
                 let text = self.ivars().field.get().map(|f| f.stringValue().to_string()).unwrap_or_default();
                 with_app(|a| a.commit_address(&text));
@@ -374,13 +390,39 @@ define_class!(
             Bool::YES
         }
 
-        /// 다른 곳을 눌러 입력을 마치면 취소
+        /// 다른 곳을 눌러 입력을 마치면 취소. 검색 입력 칸은 키보드만 떠나고 검색은 그대로다
         #[unsafe(method(controlTextDidEndEditing:))]
-        fn did_end_editing(&self, _n: &NSNotification) {
+        fn did_end_editing(&self, n: &NSNotification) {
+            if self.is_search_note(n) {
+                self.ivars().search_keys.set(false);
+                if !SYNCING.get() {
+                    with_app(App::find_blur);
+                    self.setNeedsDisplay(true);
+                }
+                return;
+            }
             // 상자를 맞추는 중(띄우기, 옮기기, 감추기)에 맥이 편집을 끝냈다 다시 시작하는 것은 사용자가 입력을 그만둔 것이 아니다
             if !SYNCING.get() && with_app(App::end_editing).unwrap_or(false) {
                 self.after_input();
             }
+        }
+
+        /// 검색 입력 칸의 글이 바뀌었다: 글자마다 찾는다 (한글은 조합 중인 글자까지)
+        #[unsafe(method(controlTextDidChange:))]
+        fn did_change(&self, n: &NSNotification) {
+            if !self.is_search_note(n) {
+                return;
+            }
+            let Some(field) = self.ivars().search.get() else { return };
+            // 조합 중인 글자까지 든 편집기의 글을 읽는다 (상자의 값을 읽으면 편집이 확정되어 조합이 끊길 수 있다)
+            let text = field.currentEditor().map_or_else(|| field.stringValue().to_string(), |e| e.string().to_string());
+            with_app(|a| {
+                a.open_find();
+                a.find_typed(&text);
+            });
+            self.ivars().search_keys.set(true);
+            pump();
+            self.setNeedsDisplay(true);
         }
     }
 
@@ -456,18 +498,30 @@ define_class!(
 impl SakaduView {
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let measure = Gfx::bitmap(8.0, 8.0, 1.0).expect("글자 폭을 잴 그림판");
-        let this = Self::alloc(mtm).set_ivars(ViewIvars { measure, field: OnceCell::new(), field_pane: std::cell::Cell::new(None) });
+        let this = Self::alloc(mtm).set_ivars(ViewIvars {
+            measure,
+            field: OnceCell::new(),
+            field_pane: std::cell::Cell::new(None),
+            search: OnceCell::new(),
+            search_keys: std::cell::Cell::new(false),
+        });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
-        // 입력 상자: 테두리·바탕 없이 (바탕과 강조 색 테두리는 App이 그린다)
-        let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
-        field.setBezeled(false);
-        field.setBordered(false);
-        field.setDrawsBackground(false);
-        field.setFocusRingType(NSFocusRingType::None);
-        field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        field.setHidden(true);
-        unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*view))) };
-        view.addSubview(&field);
+        // 입력 상자와 검색 입력 칸: 테두리·바탕 없이 (바탕과 강조 색 테두리는 App이 그린다)
+        let plain_field = || {
+            let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
+            field.setBezeled(false);
+            field.setBordered(false);
+            field.setDrawsBackground(false);
+            field.setFocusRingType(NSFocusRingType::None);
+            field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+            field.setHidden(true);
+            unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*view))) };
+            view.addSubview(&field);
+            field
+        };
+        let field = plain_field();
+        let search = plain_field();
+        let _ = view.ivars().search.set(search);
         // 끌려 오는 파일을 받는다 (Finder, 다른 앱, 사카두의 다른 칸)
         view.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
         let _ = view.ivars().field.set(field);
@@ -560,6 +614,48 @@ impl SakaduView {
         handled
     }
 
+    /// obj가 검색 입력 칸인가
+    fn is_search(&self, obj: *const AnyObject) -> bool {
+        self.ivars().search.get().is_some_and(|f| std::ptr::eq(Retained::as_ptr(f) as *const AnyObject, obj))
+    }
+
+    /// 알림이 검색 입력 칸에서 왔는가
+    fn is_search_note(&self, n: &NSNotification) -> bool {
+        n.object().is_some_and(|o| self.is_search(Retained::as_ptr(&o)))
+    }
+
+    /// 검색 입력 칸에서 누른 키: ↑↓ 결과 고르기, Return 열기, ⌘Return 칸에서 보기, Esc 닫기. 받았으면 true (나머지는 글 상자가 한다)
+    fn search_command(&self, command: Sel) -> bool {
+        let event = NSApplication::sharedApplication(self.mtm()).currentEvent();
+        let cmd = event.as_ref().is_some_and(|e| e.modifierFlags().contains(NSEventModifierFlags::Command));
+        // ⌘Return은 글 상자에 정해진 일이 없어 noop:으로 온다: 지금 누른 키가 Return인지 본다
+        let returned = event.as_ref().is_some_and(|e| e.r#type() == NSEventType::KeyDown && matches!(e.keyCode(), 0x24 | 0x4C));
+        let key = if command == sel!(moveUp:) {
+            Key::Up
+        } else if command == sel!(moveDown:) {
+            Key::Down
+        } else if command == sel!(scrollPageUp:) || command == sel!(pageUp:) {
+            Key::PageUp
+        } else if command == sel!(scrollPageDown:) || command == sel!(pageDown:) {
+            Key::PageDown
+        } else if command == sel!(insertNewline:) || (command == sel!(noop:) && returned) {
+            Key::Return
+        } else if command == sel!(cancelOperation:) {
+            Key::Esc
+        } else {
+            return false;
+        };
+        let handled = with_app(|a| {
+            a.open_find();
+            a.find_key(key, cmd)
+        })
+        .unwrap_or(false);
+        if handled {
+            self.after_input();
+        }
+        handled
+    }
+
     /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다. 메뉴를 열어 달라고 했으면 연다
     fn after_input(&self) {
         pump();
@@ -602,7 +698,48 @@ impl SakaduView {
     fn sync_field(&self) {
         SYNCING.set(true);
         self.place_field();
+        self.place_search();
         SYNCING.set(false);
+    }
+
+    /// 검색 입력 칸을 App에 맞춘다: 검색이 열려 있으면 도구 막대의 늘어난 칸에 보이고, 검색이 키보드를 원하면 키보드를 준다.
+    /// 칸에서 일하라고 키보드를 내주었으면(결과를 칸에서 열었을 때) 뷰가 키보드를 받는다
+    fn place_search(&self) {
+        let Some(field) = self.ivars().search.get() else { return };
+        // 지난번에 맞춘 뒤 사용자가 입력 칸을 눌러 키보드를 가져갔으면 App에 알린다
+        let typing = field.currentEditor().is_some();
+        if typing && !self.ivars().search_keys.get() {
+            with_app(App::open_find);
+        }
+        let Some((rect, text, wants, color)) = with_app(|a| (a.find_field_rect(), a.find_text().to_string(), a.find_wants_keys(), a.theme.text)) else { return };
+        let window = self.window();
+        match rect {
+            Some(r) => {
+                let h = 18.0;
+                field.setFrame(NSRect::new(NSPoint::new(r.l as f64, (r.t + (r.h() - h) / 2.0) as f64), NSSize::new(r.w().max(0.0) as f64, h as f64)));
+                field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(color.r as f64, color.g as f64, color.b as f64, 1.0)));
+                if field.isHidden() {
+                    field.setStringValue(&NSString::from_str(&text));
+                    field.setHidden(false);
+                }
+                // 키보드를 주면 글 전체가 골라진다: 새로 치면 바뀌고, 이어 쓰려면 →
+                if wants && !typing {
+                    if let Some(w) = &window {
+                        w.makeFirstResponder(Some(field));
+                    }
+                } else if !wants && typing && let Some(w) = &window {
+                    w.makeFirstResponder(Some(self));
+                }
+            }
+            None if !field.isHidden() => {
+                field.setHidden(true);
+                if typing && let Some(w) = &window {
+                    w.makeFirstResponder(Some(self));
+                }
+            }
+            None => {}
+        }
+        self.ivars().search_keys.set(field.currentEditor().is_some());
     }
 
     fn place_field(&self) {
@@ -862,6 +999,7 @@ fn sync_look() {
 /// 쌓인 폴더 읽기 요청은 뒷줄에서 읽어 메인 줄로 돌려받고, 열어 달라는 파일은 macOS '열기'로 연다
 /// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다). 미리 보기 카드의 그림과 글도 뒷줄에서 읽는다
 fn pump() {
+    pump_find();
     // 클립보드: 담아 달라는 것을 담고, 붙여넣어 달라고 했으면 읽어서 넘긴다 (그러면 아래에서 맡길 작업이 생긴다)
     if let Some((out, cut, wanted, left)) = with_app(|a| (a.clip_out.take(), std::mem::take(&mut a.clip_cut), a.clip_in.take(), a.clip_left.take())) {
         // 잘라 둔 것을 옮기는 묶음이 끝났다: 옮겨 간 것은 클립보드에서 빼고, 옮기지 못한 것만 잘라 둔 채로 남긴다
@@ -965,6 +1103,47 @@ fn pump() {
         if !NSWorkspace::sharedWorkspace().openURL(&url) {
             sakadu::diag::log(|| format!("open failed: {f}"));
         }
+    }
+    // 시스템 설정 같은 주소 (검색의 '설정에서 허용')
+    if let Some(Some(u)) = with_app(|a| a.open_url.take())
+        && let Some(url) = NSURL::URLWithString(&NSString::from_str(&u))
+        && !NSWorkspace::sharedWorkspace().openURL(&url)
+    {
+        sakadu::diag::log(|| format!("open failed: {u}"));
+    }
+}
+
+/// 검색: 색인을 시작해 달라고 했으면 시작하고(색인이 바뀔 때마다 같은 검색어로 다시 찾게 알림을 건다),
+/// 쌓인 검색은 뒷줄에서 찾아 메인 줄로 돌려받는다
+fn pump_find() {
+    if let Some(Some(opts)) = with_app(App::take_index_start) {
+        let index = crate::search::Search::start(opts, || {
+            DispatchQueue::main().exec_async(|| {
+                with_app(App::index_changed);
+                pump();
+                redraw();
+            });
+        });
+        with_app(|a| a.set_index(index));
+    }
+    let asks = with_app(|a| {
+        a.find_sync();
+        a.take_find_asks()
+    })
+    .unwrap_or_default();
+    for ask in asks {
+        std::thread::spawn(move || {
+            let found = ask.run();
+            DispatchQueue::main().exec_async(move || {
+                with_app(|a| a.on_found(&ask, found));
+                // 결과보다 먼저 누른 Return이 폴더를 열었을 수 있다
+                pump();
+                if let Some(v) = VIEW.with(|v| v.get().cloned()) {
+                    v.sync_field();
+                }
+                redraw();
+            });
+        });
     }
 }
 
@@ -1070,6 +1249,7 @@ fn key_of(code: u16) -> Option<Key> {
         0x05 => Key::Char('g'),
         0x1F => Key::Char('o'),
         0x0F => Key::Char('r'),
+        0x03 => Key::Char('f'),
         0x11 => Key::Char('t'),
         0x0D => Key::Char('w'),
         0x21 => Key::Char('['),
@@ -1200,6 +1380,7 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
     if start.is_none() {
         app.persist = true;
         app.open_saved(sakadu::workspaces::load(), sakadu::session::load().as_ref(), &home);
+        app.load_find_setting();
     }
     app.lights_bottom = lights_bottom(&window);
     window.setTitle(&NSString::from_str(&app.title()));
@@ -1249,6 +1430,8 @@ fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
     item(&e, "복사하기", sel!(copy:), "c", None);
     item(&e, "붙여넣기", sel!(paste:), "v", None);
     item(&e, "전체 선택", sel!(selectAll:), "a", None);
+    e.addItem(&NSMenuItem::separatorItem(mtm));
+    item(&e, "찾기", sel!(sakaduFind:), "f", None);
     let w = submenu(&bar, "윈도우");
     item(&w, "최소화", sel!(performMiniaturize:), "m", None);
     item(&w, "확대/축소", sel!(performZoom:), "", None);

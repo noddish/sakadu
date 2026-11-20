@@ -187,9 +187,41 @@ impl NameTree {
         self.kind(slot) == Kind::Dir
     }
 
-    /// 이름으로 찾는다 (index::search_visible과 같은 규칙. 검색어는 Query::parse_posix로 만든다)
+    /// 이름으로 찾는다 (index::search_visible과 같은 규칙. 검색어는 Query::parse_posix로 만든다).
+    /// 맨 위 폴더보다 위의 폴더("/Users", 맥 임시 폴더의 "/private/var/folders/…")는 훑는 범위 밖이라 결과에 넣지 않는다
     pub fn search(&self, q: &Query, limit: usize) -> (Vec<Hit>, usize) {
-        search_visible(&[&self.vol], q, limit, &|_, _| true)
+        let above = self.above_roots();
+        search_visible(&[&self.vol], q, limit, &|_, i| !above.contains(&i))
+    }
+
+    /// 맨 위 폴더들로 가는 길목 가운데 어느 맨 위 폴더 안에도 들지 않는 칸 (add_root가 만든다. 맨 위 폴더마다 몇 개뿐이다)
+    fn above_roots(&self) -> Vec<u32> {
+        let mut above = Vec::new();
+        for &r in &self.roots {
+            let mut cur = self.vol.parent_of(r);
+            while let Some(p) = cur.filter(|&p| p != ROOT_RECORD) {
+                if !self.inside_root(p) && !above.contains(&p) {
+                    above.push(p);
+                }
+                cur = self.vol.parent_of(p);
+            }
+        }
+        above
+    }
+
+    /// 칸이 맨 위 폴더이거나 그 안에 있는가
+    fn inside_root(&self, slot: u32) -> bool {
+        let mut cur = Some(slot);
+        while let Some(s) = cur {
+            if self.roots.contains(&s) {
+                return true;
+            }
+            if s == ROOT_RECORD {
+                break;
+            }
+            cur = self.vol.parent_of(s);
+        }
+        false
     }
 
     /// 인덱스에 든 이름 수
@@ -462,6 +494,31 @@ mod tests {
         assert_eq!(t.locate("/Users/hong/Library/Mobile Documents/com~apple~CloudDocs"), Place::Dir(fresh[0]));
         assert_eq!(found(&t, "여행").0, ["/Users/hong/Library/Mobile Documents/com~apple~CloudDocs/여행 계획.pages"]);
         assert_eq!(t.locate("/Users/hong/Library/Caches"), Place::Ignore, "the rest of Library stays closed");
+    }
+
+    /// 맨 위 폴더보다 위의 폴더들은 범위 밖이라 찾지 않는다 (맥 임시 폴더의 이름처럼 아무 글자나 들 수 있다).
+    /// 맨 위 폴더 자신과, 다른 맨 위 폴더 안에 든 길목(홈 안의 Library)은 찾는다
+    #[test]
+    fn search_leaves_out_folders_above_the_roots() {
+        let mut t = NameTree::new();
+        let home = t.add_root("/private/var/folders/md/T/홈");
+        t.sync_dir(home, &items(&[("회의록.md", Kind::File), ("Library", Kind::Closed)]));
+        let icloud = t.add_root("/private/var/folders/md/T/홈/Library/Mobile Documents/md 메모");
+        t.sync_dir(icloud, &items(&[("할 일.md", Kind::File)]));
+        let (mut paths, total) = found(&t, "md");
+        paths.sort();
+        assert_eq!(
+            paths,
+            ["/private/var/folders/md/T/홈/Library/Mobile Documents/md 메모", "/private/var/folders/md/T/홈/Library/Mobile Documents/md 메모/할 일.md", "/private/var/folders/md/T/홈/회의록.md"]
+        );
+        assert_eq!(total, 3);
+        assert_eq!(found(&t, "folders").1, 0);
+        assert_eq!(found(&t, "홈").1, 1, "the root itself");
+        assert_eq!(found(&t, "Mobile Documents").1, 1, "inside the home root");
+        // '/' 전체가 범위면 위가 없다
+        let root = t.add_root("/");
+        t.sync_dir(root, &items(&[("private", Kind::Dir)]));
+        assert_eq!(found(&t, "folders").1, 1);
     }
 
     #[test]
