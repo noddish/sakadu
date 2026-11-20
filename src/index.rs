@@ -2,6 +2,7 @@
 //! MFT를 FSCTL_ENUM_USN_DATA로 한 번 열거해 만들고, USN 저널(FSCTL_READ_USN_JOURNAL)로 실시간 갱신한다.
 //! 항목 번호는 MFT 레코드 번호(파일 참조 번호 하위 48비트)를 그대로 써서 해시 표 없이 바로 찾는다.
 //! 볼륨을 여는 데 관리자 권한이 필요하므로 검색 서비스(service.rs) 안에서 돌린다.
+//! 맥은 같은 인덱스를 '/'로 나눈 경로로 쓴다 (`Volume::posix`, `Query::parse_posix`): 칸 번호는 nametree.rs가 매긴다.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -20,6 +21,8 @@ pub fn record_of(frn: u64) -> u32 {
 /// 한 볼륨의 이름 인덱스
 pub struct Volume {
     pub letter: char,
+    /// 경로 모양: false는 Windows("C:\a\b"), true는 맥("/a/b", 드라이브 글자 없음)
+    posix: bool,
     parent: Vec<u32>,
     name_off: Vec<u32>,
     name_len: Vec<u16>,
@@ -35,8 +38,18 @@ pub struct Volume {
 
 impl Volume {
     pub fn new(letter: char) -> Volume {
+        Volume::with(letter, false)
+    }
+
+    /// 맥의 인덱스: 경로는 "/Users/hong/문서"처럼 '/'로 나눈다. ROOT_RECORD 칸이 '/'이다
+    pub fn posix() -> Volume {
+        Volume::with('/', true)
+    }
+
+    fn with(letter: char, posix: bool) -> Volume {
         Volume {
             letter,
+            posix,
             parent: Vec::new(),
             name_off: Vec::new(),
             name_len: Vec::new(),
@@ -51,6 +64,11 @@ impl Volume {
 
     pub fn len(&self) -> usize {
         self.live
+    }
+
+    /// 경로 구분자
+    fn sep(&self) -> char {
+        if self.posix { '/' } else { '\\' }
     }
 
     fn ensure(&mut self, rec: u32) {
@@ -102,6 +120,12 @@ impl Volume {
         self.flags[i as usize] & FLAG_DIR != 0
     }
 
+    /// 칸 i의 이름 (지운 칸이거나 없는 칸이면 None)
+    pub fn name(&self, i: u32) -> Option<&str> {
+        let c = i as usize;
+        if c < self.flags.len() && self.used(c) { std::str::from_utf8(self.name_bytes(c)).ok() } else { None }
+    }
+
     /// "C:\폴더\파일" 형태의 전체 경로. 부모 사슬이 끊겼으면 None (삭제 중인 항목 등)
     /// 항목 칸 수 (지운 칸 포함). 칸 번호별로 따로 기억해 둘 때 크기로 쓴다
     pub fn slots(&self) -> usize {
@@ -124,13 +148,13 @@ impl Volume {
         let mut cur = i;
         for _ in 0..512 {
             if cur == ROOT_RECORD {
-                let mut s = format!("{}:", self.letter);
+                let mut s = if self.posix { String::new() } else { format!("{}:", self.letter) };
                 for p in parts.iter().rev() {
-                    s.push('\\');
+                    s.push(self.sep());
                     s.push_str(std::str::from_utf8(p).ok()?);
                 }
                 if parts.is_empty() {
-                    s.push('\\');
+                    s.push(self.sep());
                 }
                 return Some(s);
             }
@@ -257,8 +281,10 @@ pub struct Hit {
 pub struct Query {
     /// 이름에 모두 들어 있어야 하는 낱말(소문자)
     terms: Vec<Vec<u8>>,
-    /// '\'가 들어간 낱말은 전체 경로에서 찾는다
+    /// '\'(맥은 '/')가 들어간 낱말은 전체 경로에서 찾는다
     path_terms: Vec<String>,
+    /// 맥의 경로('/')로 찾는다 (Volume::posix와 함께 쓴다)
+    posix: bool,
 }
 
 impl Query {
@@ -273,7 +299,23 @@ impl Query {
                 terms.push(w.into_bytes());
             }
         }
-        Query { terms, path_terms }
+        Query { terms, path_terms, posix: false }
+    }
+
+    /// 맥의 검색어: '/'가 든 낱말이 경로 낱말이다 ('\'는 이름의 글자일 뿐이다).
+    /// 한글은 합친 꼴로 바꾼다: 인덱스의 이름도 합쳐 넣는다 (nametree.rs)
+    pub fn parse_posix(q: &str) -> Query {
+        let mut terms = Vec::new();
+        let mut path_terms = Vec::new();
+        for w in q.split_whitespace() {
+            let w = crate::hangul::compose(&w.to_lowercase()).into_owned();
+            if w.contains('/') {
+                path_terms.push(w);
+            } else {
+                terms.push(w.into_bytes());
+            }
+        }
+        Query { terms, path_terms, posix: true }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -290,7 +332,7 @@ impl Query {
     /// 1차 점수에 전체 경로를 반영한 최종 점수. 경로가 경로 낱말을 모두 포함하지 않으면 None
     pub fn path_score(&self, name_score: i32, path: &str) -> Option<i32> {
         let lower = path.to_lowercase();
-        self.path_terms.iter().all(|t| lower.contains(t.as_str())).then(|| name_score - path_penalty(&lower))
+        self.path_terms.iter().all(|t| lower.contains(t.as_str())).then(|| name_score - path_penalty(&lower, self.posix))
     }
 }
 
@@ -342,8 +384,12 @@ fn name_score(name: &[u8], terms: &[Vec<u8>], is_dir: bool) -> Option<i32> {
     Some(s)
 }
 
-/// 시스템·개발 도구 폴더 안의 결과는 아래로 (사용자 파일이 먼저 보이게)
-fn path_penalty(lower_path: &str) -> i32 {
+/// 시스템·개발 도구 폴더 안의 결과는 아래로 (사용자 파일이 먼저 보이게). posix는 맥의 경로
+fn path_penalty(lower_path: &str, posix: bool) -> i32 {
+    if posix {
+        let depth = lower_path.matches('/').count() as i32;
+        return depth * 4 + if noisy_posix(lower_path) { 400 } else { 0 };
+    }
     const NOISY: [&str; 10] = [
         "\\windows\\",
         "\\appdata\\",
@@ -361,6 +407,14 @@ fn path_penalty(lower_path: &str) -> i32 {
     depth * 4 + noisy
 }
 
+/// 맥에서 아래로 내릴 결과: 숨김 항목('.'으로 시작하는 이름, 그 안), 라이브러리(앱의 데이터·캐시), 개발 도구 폴더.
+/// iCloud Drive는 라이브러리 안에 있어도 사용자 파일이라 내리지 않는다
+fn noisy_posix(lower_path: &str) -> bool {
+    const NOISY: [&str; 2] = ["/node_modules/", "/__pycache__/"];
+    let library = lower_path.contains("/library/") && !lower_path.contains("/library/mobile documents/");
+    lower_path.contains("/.") || library || NOISY.iter().any(|n| lower_path.contains(n))
+}
+
 // 폴더별 경로 조건 판정 (search 한 번 동안 memo에 기억). 0은 아직 모름, DIR_FAIL은 그 폴더 바로 아래 항목은 맞을 수 없음,
 // 그 밖에는 DIR_KNOWN에 "이름 앞부분까지 봐야 하는 낱말" 비트(낱말 j → 1 << (j + 2))를 더한 값
 const DIR_FAIL: u32 = 1;
@@ -368,9 +422,9 @@ const DIR_KNOWN: u32 = 2;
 /// 폴더별 판정에 비트로 담을 수 있는 경로 낱말 수
 const MEMO_TERMS: usize = 30;
 
-/// 경로 낱말에서 마지막 '\' 뒤 부분 (이름 앞부분과 맞춰 볼 부분)
-fn after_last_sep(t: &str) -> &str {
-    &t[t.rfind('\\').map_or(0, |k| k + 1)..]
+/// 경로 낱말에서 마지막 구분자 뒤 부분 (이름 앞부분과 맞춰 볼 부분)
+fn after_last_sep(t: &str, sep: char) -> &str {
+    &t[t.rfind(sep).map_or(0, |k| k + 1)..]
 }
 
 fn starts_with_lower(name: &str, prefix: &str) -> bool {
@@ -416,8 +470,11 @@ impl PrefixBuf {
             Some(&(_, end)) => self.s.truncate(end),
             None => {
                 self.s.clear();
-                self.s.push(vol.letter.to_ascii_lowercase());
-                self.s.push_str(":\\");
+                if !vol.posix {
+                    self.s.push(vol.letter.to_ascii_lowercase());
+                    self.s.push(':');
+                }
+                self.s.push(vol.sep());
             }
         }
         while let Some(c) = self.chain.pop() {
@@ -426,7 +483,7 @@ impl PrefixBuf {
                 return false;
             };
             self.s.extend(name.chars().flat_map(char::to_lowercase));
-            self.s.push('\\');
+            self.s.push(vol.sep());
             self.parts.push((c, self.s.len()));
         }
         true
@@ -434,8 +491,8 @@ impl PrefixBuf {
 }
 
 /// 항목 i의 전체 경로가 경로 낱말을 모두 포함하는가.
-/// 경로는 "폴더 경로\" + 이름이고 이름에는 '\'가 없으므로, 낱말은 폴더 쪽에 통째로 들어 있거나
-/// 마지막 '\'까지가 폴더 쪽 끝과 같고 나머지가 이름 앞부분이어야 한다. 폴더 쪽 판정은 폴더마다 한 번만 한다
+/// 경로는 "폴더 경로\" + 이름이고 이름에는 '\'(맥은 '/')가 없으므로, 낱말은 폴더 쪽에 통째로 들어 있거나
+/// 마지막 구분자까지가 폴더 쪽 끝과 같고 나머지가 이름 앞부분이어야 한다. 폴더 쪽 판정은 폴더마다 한 번만 한다
 fn path_matches(vol: &Volume, i: usize, terms: &[String], memo: &[AtomicU32], buf: &mut PrefixBuf) -> bool {
     let p = vol.parent[i] as usize;
     if i == ROOT_RECORD as usize || p >= memo.len() {
@@ -453,7 +510,7 @@ fn path_matches(vol: &Volume, i: usize, terms: &[String], memo: &[AtomicU32], bu
                 if buf.s.contains(t.as_str()) {
                     continue;
                 }
-                let rest = after_last_sep(t);
+                let rest = after_last_sep(t, vol.sep());
                 if rest.is_empty() || !buf.s.ends_with(&t[..t.len() - rest.len()]) {
                     state = DIR_FAIL;
                     break;
@@ -467,7 +524,7 @@ fn path_matches(vol: &Volume, i: usize, terms: &[String], memo: &[AtomicU32], bu
         return false;
     }
     let Ok(name) = std::str::from_utf8(vol.name_bytes(i)) else { return false };
-    terms.iter().enumerate().all(|(j, t)| state & (1 << (j + 2)) == 0 || starts_with_lower(name, after_last_sep(t)))
+    terms.iter().enumerate().all(|(j, t)| state & (1 << (j + 2)) == 0 || starts_with_lower(name, after_last_sep(t, vol.sep())))
 }
 
 /// 여러 볼륨에서 찾는다. (상위 결과, 전체 일치 개수). 테스트용 (실행 파일 쪽 acl.rs 테스트도 쓰므로 늘 빌드한다)
@@ -539,7 +596,7 @@ pub fn search_visible(vols: &[&Volume], q: &Query, limit: usize, visible: &(dyn 
         .into_iter()
         .filter_map(|(s, vi, i)| {
             let path = vols[vi].path(i)?;
-            Some(Hit { score: s - path_penalty(&path.to_lowercase()), is_dir: vols[vi].is_dir(i), path })
+            Some(Hit { score: s - path_penalty(&path.to_lowercase(), vols[vi].posix), is_dir: vols[vi].is_dir(i), path })
         })
         .collect();
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.len().cmp(&b.path.len())));
@@ -955,5 +1012,57 @@ mod tests {
         v.compact_if_needed();
         assert_eq!(v.path(10 + 7).as_deref(), Some("D:\\renamed-7.txt"));
         assert_eq!(v.garbage, 0);
+    }
+
+    /// 맥의 인덱스: 홈의 문서, 숨김 폴더, 라이브러리의 캐시, 라이브러리 안의 iCloud Drive에 같은 이름의 파일
+    fn sample_posix() -> Volume {
+        let mut v = Volume::posix();
+        v.upsert(100, ROOT, "Users", true);
+        v.upsert(101, 100, "hong", true);
+        v.upsert(102, 101, "문서", true);
+        v.upsert(103, 102, "보고서.pdf", false);
+        v.upsert(104, 101, ".cache", true);
+        v.upsert(105, 104, "보고서.pdf", false);
+        v.upsert(106, 101, "Library", true);
+        v.upsert(107, 106, "Caches", true);
+        v.upsert(108, 107, "보고서.pdf", false);
+        v.upsert(109, 106, "Mobile Documents", true);
+        v.upsert(110, 109, "보고서.pdf", false);
+        v.upsert(111, 101, "a\\b.txt", false);
+        v
+    }
+
+    #[test]
+    fn posix_paths_and_ranking() {
+        let v = sample_posix();
+        assert_eq!(v.path(103).as_deref(), Some("/Users/hong/문서/보고서.pdf"));
+        assert_eq!(v.path(ROOT_RECORD).as_deref(), Some("/"));
+        assert_eq!(v.name(102), Some("문서"));
+        assert_eq!(v.name(999), None);
+        // 숨김 폴더와 라이브러리 안은 아래로, iCloud Drive는 라이브러리 안이어도 사용자 파일이라 위로
+        let (hits, total) = search(&[&v], &Query::parse_posix("보고서"), 10);
+        assert_eq!(total, 4);
+        let order: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(&order[..2], ["/Users/hong/문서/보고서.pdf", "/Users/hong/Library/Mobile Documents/보고서.pdf"]);
+        assert!(order[2..].iter().all(|p| p.contains("/.cache/") || p.contains("/Caches/")), "{order:?}");
+    }
+
+    #[test]
+    fn posix_path_terms_use_slashes() {
+        let v = sample_posix();
+        for (q, n) in [("보고서 문서/", 1), ("hong/문서/", 1), ("/users/hong/", 10), ("문서/보고", 1), ("보고서 library/", 2), ("보고서 문서\\", 0)] {
+            let (hits, total) = search(&[&v], &Query::parse_posix(q), 20);
+            assert_eq!((hits.len(), total), (n, n), "{q}: {hits:?}");
+        }
+        // '\'는 맥에서 이름의 글자일 뿐이다 (Windows 검색어는 '/'를 '\'로 바꾼다)
+        let (hits, _) = search(&[&v], &Query::parse_posix("a\\b"), 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "/Users/hong/a\\b.txt");
+        let mut buf = PrefixBuf::default();
+        for d in [102, 100, ROOT_RECORD, 107] {
+            assert!(buf.build(&v, d));
+            let path = v.path(d).unwrap().to_lowercase();
+            assert_eq!(buf.s, if d == ROOT_RECORD { path } else { path + "/" });
+        }
     }
 }
