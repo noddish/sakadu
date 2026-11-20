@@ -68,8 +68,9 @@ pub struct Find {
     /// 고른 결과 줄, 결과 목록의 스크롤
     sel: usize,
     scroll: f32,
-    /// 결과보다 먼저 누른 Return (true면 ⌘Return). 그 검색어의 결과가 오면 한 번 처리한다
-    enter: Option<bool>,
+    /// 결과보다 먼저 누른 Return (true면 ⌘Return)과 그때의 검색어·범위 열쇠. 그 열쇠의 결과가 오면 한 번 처리하고,
+    /// 다른 열쇠의 결과가 오면 버린다 (Return 뒤에 범위를 바꾸거나 칸이 다른 폴더로 가면 새 결과를 저절로 열지 않는다)
+    enter: Option<(bool, String)>,
     index: Option<Search>,
     /// 색인을 시작해 달라는 요청 (창 쪽이 시작해 set_index로 넘긴다: 색인이 바뀔 때 다시 그려 달라는 알림을 창 쪽이 건다)
     start: Option<Options>,
@@ -179,7 +180,7 @@ impl App {
             Key::Up | Key::Down | Key::PageUp | Key::PageDown => self.find_move(key),
             Key::Return if self.find.text.trim().is_empty() || !self.find.setting.on => {}
             // 결과가 아직 이 검색어의 것이 아니면, 그 결과가 올 때 연다 (먼저 떠 있던 다른 검색어의 결과를 열지 않는다)
-            Key::Return if !self.find_current() => self.find.enter = Some(cmd),
+            Key::Return if !self.find_current() => self.find.enter = Some((cmd, self.find_now())),
             Key::Return => self.open_found(self.find.sel, cmd),
             Key::Esc => self.close_find(),
             _ => return false,
@@ -228,6 +229,8 @@ impl App {
         let text = self.find.text.trim().to_string();
         if text.is_empty() {
             let f = &mut self.find;
+            // 아직 찾는 중인 앞 검색어의 결과가 늦게 와서 빈 칸 아래를 다시 채우지 않게 그 요청을 버린다
+            f.seq += 1;
             f.results.clear();
             f.total = 0;
             f.sel = 0;
@@ -272,7 +275,8 @@ impl App {
             f.scroll = 0.0;
         }
         self.find_clamp_scroll();
-        if let Some(reveal) = self.find.enter.take()
+        if let Some((reveal, key)) = self.find.enter.take()
+            && key == ask.key
             && !self.find.results.is_empty()
         {
             self.open_found(self.find.sel, reveal);
@@ -873,6 +877,59 @@ mod tests {
         // Esc는 닫는다: 사이드바가 돌아온다
         assert!(a.find_key(Key::Esc, false));
         assert!(!a.find_shown());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 찾는 중에 검색어를 지우면, 늦게 온 앞 검색어의 결과는 버린다 (빈 칸 아래에 결과가 남아 열리지 않게)
+    #[test]
+    fn search_drops_late_results_after_the_query_is_cleared() {
+        let (root, home) = demo("clear");
+        let (mut a, _g) = app(&home);
+        a.open_find();
+        a.enable_find();
+        a.settle();
+        a.find_typed("보고");
+        let asks = a.take_find_asks();
+        assert_eq!(asks.len(), 1);
+        a.find_typed("");
+        a.settle();
+        for ask in asks {
+            let late = ask.run();
+            a.on_found(&ask, late);
+        }
+        assert!(found(&a).is_empty());
+        a.find_sync();
+        assert!(a.take_find_asks().is_empty() && found(&a).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 결과보다 먼저 누른 Return은 그때의 검색어와 범위의 결과만 연다: 그 뒤에 범위를 바꾸면 새 결과를 저절로 열지 않는다
+    #[test]
+    fn search_return_waits_only_for_its_own_results() {
+        let (root, home) = demo("enter");
+        let (mut a, g) = app(&home);
+        a.open_find();
+        a.enable_find();
+        a.navigate(a.active, Location::Dir(util::join(&home, "업무")), None);
+        a.settle();
+        a.find_typed("회의록");
+        assert!(a.find_key(Key::Return, false));
+        assert!(a.open_files.is_empty());
+        let here = a.find_scope_rect(true);
+        click(&mut a, &g, here);
+        a.settle();
+        assert_eq!(found(&a), ["회의록.md"]);
+        assert!(a.open_files.is_empty(), "the Return was for the other scope");
+        // 칸이 다른 폴더로 가도 같다
+        a.find_typed("보고");
+        assert!(a.find_key(Key::Return, false));
+        a.navigate(a.active, Location::Dir(util::join(&home, "업무/2026 4분기")), None);
+        a.settle();
+        assert_eq!(found(&a), ["보고서.docx"]);
+        assert!(a.open_files.is_empty(), "the Return was for the folder before");
+        // 그 결과에 다시 누르면 연다
+        assert!(a.find_key(Key::Return, false));
+        assert_eq!(a.open_files, [util::join(&home, "업무/2026 4분기/보고서.docx")]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
