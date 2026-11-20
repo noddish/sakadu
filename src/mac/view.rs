@@ -326,11 +326,11 @@ define_class!(
         }
 
         /// 편집 메뉴의 실행 취소(⌘Z): 키 입력이 목록에 있을 때 가장 나중에 한 파일 작업(이름 바꾸기, 새 폴더, 휴지통, 복사)을 되돌린다.
-        /// 이름이나 경로를 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라 친 글자를 되돌린다:
+        /// 이름이나 경로, 검색어를 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라 친 글자를 되돌린다:
         /// 이 뷰가 받지 않았을 때 창이 하던 대로, 창의 되돌리기 관리자에 넘긴다
         #[unsafe(method(undo:))]
         fn undo(&self, _sender: Option<&objc2::runtime::AnyObject>) {
-            if with_app(|a| a.edit != crate::app::Editing::None).unwrap_or(false) {
+            if with_app(|a| a.edit != crate::app::Editing::None || a.find_wants_keys()).unwrap_or(false) {
                 if let Some(typed) = self.undoManager()
                     && typed.canUndo()
                 {
@@ -346,7 +346,6 @@ define_class!(
             self.after_input();
         }
 
-        /// 메뉴(도구 막대 단추, 작업 공간 아이콘, 사이드바 줄, 목록)에서 고른 줄. tag에 메뉴 종류와 줄 번호가 들어 있다 (MenuKind::tag)
         /// 편집 메뉴의 찾기(⌘F): 검색을 열고 키보드를 입력 칸에 둔다
         #[unsafe(method(sakaduFind:))]
         fn sakadu_find(&self, _sender: Option<&objc2::runtime::AnyObject>) {
@@ -354,6 +353,7 @@ define_class!(
             self.after_input();
         }
 
+        /// 메뉴(도구 막대 단추, 작업 공간 아이콘, 사이드바 줄, 목록)에서 고른 줄. tag에 메뉴 종류와 줄 번호가 들어 있다 (MenuKind::tag)
         #[unsafe(method(pickMenu:))]
         fn pick_menu(&self, sender: &NSMenuItem) {
             let Some((kind, item)) = MenuKind::from_tag(sender.tag()) else { return };

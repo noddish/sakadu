@@ -946,7 +946,7 @@ mod tests {
         a.navigate(a.active, Location::Dir(util::join(&home, "업무")), None);
         a.find_typed("docx | md | jpg");
         a.settle();
-        assert_eq!(found(&a).len(), 3);
+        assert_eq!(sorted(found(&a)), ["보고서.docx", "사진.jpg", "회의록.md"]);
         let here = a.find_scope_rect(true);
         let (x, y) = mid(here);
         assert_eq!(a.hit(&g, x, y), Hit::Find(FindHit::Scope(true)));
@@ -966,7 +966,7 @@ mod tests {
         let all = a.find_scope_rect(false);
         click(&mut a, &g, all);
         a.settle();
-        assert_eq!(found(&a).len(), 3);
+        assert_eq!(sorted(found(&a)), ["보고서.docx", "사진.jpg", "회의록.md"]);
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
     }
