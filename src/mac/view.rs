@@ -8,6 +8,7 @@
 //! 끌려 온 파일은 App에 어디에 놓일지 묻고 놓는다.
 //! 훑어보기(스페이스, ⌘Y)는 맥의 훑어보기 창(QLPreviewPanel)에 고른 파일을 띄운다. 그 창의 내용은 이 뷰가 댄다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다.
+//! 설정 창(앱 메뉴의 '설정…', ⌘,)은 본 창과 따로 뜬다 (settings.rs).
 //! 창 시험(smoke)은 이 창을 그대로 열고 실제 입력의 길로 파일 작업을 돌려 본다 (CI의 맥 러너에서)
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods, Paste};
@@ -34,6 +35,7 @@ use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+mod settings;
 mod smoke;
 
 thread_local! {
@@ -669,6 +671,7 @@ impl SakaduView {
         }
         self.sync_field();
         self.setNeedsDisplay(true);
+        settings::refresh();
         if let Some((kind, anchor)) = with_app(|a| a.take_menu()).flatten() {
             self.pop_menu(kind, anchor);
         }
@@ -879,6 +882,7 @@ fn redraw() {
         }
     });
     sync_look();
+    settings::refresh();
 }
 
 /// 훑어보기 창의 클래스. Quartz 프레임워크(훑어보기 창이 든 QuickLookUI를 품는다)를 처음 한 번 열어 찾는다.
@@ -1343,6 +1347,20 @@ define_class!(
             pump();
             redraw();
         }
+
+        /// 본 창이 닫힌다: 설정 창도 닫는다 (마지막 창이 닫히면 앱이 끝나는 동작을 그대로 둔다)
+        #[unsafe(method(windowWillClose:))]
+        fn will_close(&self, _n: &NSNotification) {
+            settings::close();
+        }
+    }
+
+    impl Delegate {
+        /// 앱 메뉴의 '설정…'(⌘,): 어느 창이 앞에 있어도 앱 위임까지 온다
+        #[unsafe(method(sakaduSettings:))]
+        fn sakadu_settings(&self, _sender: Option<&AnyObject>) {
+            settings::open(self.mtm());
+        }
     }
 );
 
@@ -1397,7 +1415,7 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
     window
 }
 
-/// 앱 메뉴: Sakadu(정보·가리기·끝내기), 편집(실행 취소·오려두기·복사·붙여넣기·모두 선택), 윈도(최소화·확대/축소).
+/// 앱 메뉴: Sakadu(정보·설정·가리기·끝내기), 편집(실행 취소·오려두기·복사·붙여넣기·모두 선택), 윈도(최소화·확대/축소).
 /// 편집 메뉴의 줄은 키 입력을 가진 쪽이 받는다: 입력 상자에서는 글자에, 목록에서는 실행 취소가 파일 작업 되돌리기, 전체 선택이 모든 줄 고르기
 fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
     let item = |menu: &NSMenu, title: &str, action: Sel, key: &str, mods: Option<NSEventModifierFlags>| {
@@ -1416,6 +1434,8 @@ fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
     let bar = NSMenu::new(mtm);
     let m = submenu(&bar, "Sakadu");
     item(&m, "Sakadu 정보", sel!(orderFrontStandardAboutPanel:), "", None);
+    m.addItem(&NSMenuItem::separatorItem(mtm));
+    item(&m, "설정…", sel!(sakaduSettings:), ",", None);
     m.addItem(&NSMenuItem::separatorItem(mtm));
     item(&m, "Sakadu 가리기", sel!(hide:), "h", None);
     item(&m, "기타 가리기", sel!(hideOtherApplications:), "h", Some(NSEventModifierFlags::Command | NSEventModifierFlags::Option));
@@ -1461,6 +1481,11 @@ pub fn snapshot(out: &std::path::Path, start: String) -> Result<(), String> {
         }
         a.settle();
     });
+    save_window(&window, out)
+}
+
+/// 창을 창 틀(신호등, 제목 표시줄)까지 그려 PNG로 저장한다
+fn save_window(window: &NSWindow, out: &std::path::Path) -> Result<(), String> {
     window.displayIfNeeded();
     let frame_view = window.contentView().and_then(|v| unsafe { v.superview() }).ok_or("창 틀을 찾지 못함")?;
     let b = frame_view.bounds();
@@ -1468,6 +1493,26 @@ pub fn snapshot(out: &std::path::Path, start: String) -> Result<(), String> {
     frame_view.cacheDisplayInRect_toBitmapImageRep(b, &rep);
     let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }.ok_or("PNG로 바꾸지 못함")?;
     std::fs::write(out, data.to_vec()).map_err(|e| e.to_string())
+}
+
+/// 설정 창 확인용 (CI): 본 창을 start 폴더로 열고 설정 창을 띄워 그 창을 PNG로 저장한다.
+/// search면 검색을 켠 모습으로 (start 폴더만 훑는다: 러너의 홈 폴더를 훑으면 아무도 누르지 않는 권한 창이 뜰 수 있다)
+pub fn snapshot_settings(out: &std::path::Path, start: String, dark: bool, search: bool) -> Result<(), String> {
+    let mtm = MainThreadMarker::new().ok_or("메인 줄이 아님")?;
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    let _main = open_window(mtm, Some(start.clone()));
+    with_app(|a| {
+        if search {
+            a.set_find_roots(vec![start]);
+            a.set_find_on(true);
+        }
+        a.settle();
+    });
+    settings::open(mtm);
+    settings::set_dark(dark);
+    let window = settings::shown().ok_or("설정 창이 뜨지 않음")?;
+    save_window(&window, out)
 }
 
 /// 창 시험: 임시 폴더에 시험 폴더를 만들고, 보통 실행과 같은 길로 창을 그 폴더에 연 뒤 시험 대본을 돌린다 (smoke.rs).

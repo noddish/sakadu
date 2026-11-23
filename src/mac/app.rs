@@ -316,6 +316,20 @@ pub struct Seen {
     pub busy: bool,
 }
 
+/// 설정 창에 보이는 값. 창 쪽이 이것으로 스위치와 글을 맞춘다 (입력과 뒷줄 결과를 처리할 때마다)
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub struct Prefs {
+    pub hidden: bool,
+    pub auto_preview: bool,
+    /// 이름으로 찾기를 켰다
+    pub search_on: bool,
+    pub icloud: bool,
+    /// 색인을 훑는 중이다 (켰는데 아직 처음 훑기를 마치지 않았다)
+    pub crawling: bool,
+    /// 맥이 묻는 폴더(데스크탑·문서·다운로드·iCloud Drive)를 읽지 못했다
+    pub denied: bool,
+}
+
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
 /// 그래서 몇 개 중 몇 개인지 보이고, 항목 사이에서 그만둘 수 있다
 struct Batch {
@@ -2644,6 +2658,26 @@ impl App {
         for p in 0..layout.count() {
             self.load_if_new(p);
             self.clamp_scroll(p);
+        }
+    }
+
+    /// 설정 창에 보이는 값
+    pub fn prefs(&self) -> Prefs {
+        let (search_on, icloud, crawling, denied) = self.find_prefs();
+        Prefs { hidden: self.show_hidden, auto_preview: self.auto_preview, search_on, icloud, crawling, denied }
+    }
+
+    /// 설정 창의 '숨김 항목 보기' (⌘⇧.와 같은 값)
+    pub fn set_hidden(&mut self, on: bool) {
+        if self.show_hidden != on {
+            self.toggle_hidden();
+        }
+    }
+
+    /// 설정 창의 '자동 미리 보기' (도구 막대의 눈 단추와 같은 값)
+    pub fn set_auto_preview(&mut self, on: bool) {
+        if self.auto_preview != on {
+            self.toggle_auto_preview();
         }
     }
 
