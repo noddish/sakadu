@@ -350,6 +350,26 @@ impl App {
         (!rows.is_empty()).then(|| rows.iter().position(|r| y < (r.t + r.b) / 2.0).unwrap_or(rows.len()))
     }
 
+    /// 끄는 위치 y가 이 공간에 고정한 쪽(true, '모든 공간' 이름 줄보다 위)인지 '모든 공간' 쪽(false)인지. 목록 밖이면 None
+    pub(super) fn side_drop_to_pins(&self, y: f32) -> Option<bool> {
+        let list = self.side_list();
+        if y < list.t || y > list.b {
+            return None;
+        }
+        let (slots, _) = self.side_slots();
+        let head = slots.iter().find(|(_, s)| matches!(s, Slot::Item(Side::CommonHead))).map(|(r, _)| self.side_at(*r))?;
+        Some(y < head.t)
+    }
+
+    /// 끌고 있는 줄이 다른 쪽에 놓이는지: 즐겨찾기 항목이 고정한 쪽 위면 Some(true), 고정한 줄이 '모든 공간' 위면 Some(false)
+    fn side_cross_drop(&self) -> Option<bool> {
+        match self.drag {
+            Drag::FavMove { from: Row::Item { .. }, y } => self.side_drop_to_pins(y).filter(|to_pins| *to_pins),
+            Drag::PinMove { y, .. } => self.side_drop_to_pins(y).filter(|to_pins| !*to_pins),
+            _ => None,
+        }
+    }
+
     /// 끄는 위치 y 아래 즐겨찾기 줄과 그 줄의 아래쪽 절반인지. 첫 줄 위면 첫 줄 위쪽, 마지막 줄 아래면 마지막 줄 아래쪽
     pub(super) fn fav_drop_row(&self, y: f32) -> Option<(Row, bool)> {
         let (slots, _) = self.side_slots();
@@ -906,17 +926,28 @@ impl App {
             _ => None,
         };
         let renaming_space = self.edit_mode == EditMode::WorkspaceRename;
+        // 다른 쪽(고정한 것 ↔ '모든 공간')으로 옮기는 중이면 놓일 쪽 전체를 강조하고, 놓일 자리에 선을 긋는다
+        let cross = self.side_cross_drop();
+        let cross_at = match (cross, &self.drag) {
+            (Some(true), Drag::FavMove { y, .. }) => Some((None, self.pin_drop_slot(*y).unwrap_or(0))),
+            (Some(false), Drag::PinMove { y, .. }) => self.fav_drop_row(*y).map(|(at, below)| (Some((at, below)), 0)),
+            _ => None,
+        };
         // 끌어서 옮기는 중: (끄는 줄, 놓을 줄, 아래쪽 절반)
         let moving = match self.drag {
-            Drag::FavMove { from, y } => self.fav_drop_row(y).map(|(at, below)| (from, at, below)),
+            Drag::FavMove { from, y } if cross.is_none() => self.fav_drop_row(y).map(|(at, below)| (from, at, below)),
             _ => None,
         };
         // 고정한 줄을 끌어서 옮기는 중: (끄는 줄, 끼워 넣을 자리). 제자리(그 줄의 바로 앞뒤)면 선을 그리지 않는다
         let pin_moving = match self.drag {
-            Drag::PinMove { from, y } => self.pin_drop_slot(y).map(|slot| (from, slot)),
+            Drag::PinMove { from, y } if cross.is_none() => self.pin_drop_slot(y).map(|slot| (from, slot)),
             _ => None,
         };
-        let side_drop = self.side_drop;
+        let side_drop = match cross {
+            Some(true) => Some(Side::PinEmpty),
+            Some(false) => Some(Side::FavEmpty),
+            None => self.side_drop,
+        };
         // 아이콘은 형식 캐시에서 (가변 빌림이 필요해 먼저 모아 둔다)
         let ext_of = |path: &str| util::file_name(path).rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
         let kinds: Vec<(bool, String)> = fav_rows
@@ -1112,6 +1143,19 @@ impl App {
                 let ly = ly + dy;
                 g.fill_round(R::new(dx + ROW_L + 8.0, ly - 1.5, dx + rr - 8.0, ly + 1.5), 1.5, t.accent);
             }
+        }
+        // 다른 쪽으로 옮길 자리: 고정한 줄 사이, 또는 즐겨찾기 줄 위·아래 (그룹 머리 줄 위면 그 그룹으로: 선 없이 쪽 강조만)
+        let cross_line = match cross_at {
+            Some((None, slot)) => {
+                let rows: Vec<R> = slots.iter().filter(|(_, s)| matches!(s, Slot::Item(Side::Pin(_)))).map(|(r, _)| *r).collect();
+                rows.get(slot).map(|r| r.t).or_else(|| rows.last().map(|r| r.b))
+            }
+            Some((Some((at @ Row::Item { .. }, below)), _)) => fav_rect_in(&slots, at).map(|r| if below { r.b } else { r.t }),
+            _ => None,
+        };
+        if let Some(ly) = cross_line {
+            let ly = ly + dy;
+            g.fill_round(R::new(dx + ROW_L + 8.0, ly - 1.5, dx + rr - 8.0, ly + 1.5), 1.5, t.accent);
         }
         // 파일을 끌어 놓으려 할 때: 놓일 쪽(이 공간에 고정하는 위쪽, 또는 '모든 공간')의 줄 전체를 강조
         let area_of = |want: fn(Side) -> bool| {

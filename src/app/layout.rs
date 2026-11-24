@@ -204,6 +204,9 @@ impl App {
         if let Some(h) = self.preview_hit(x, y) {
             return h;
         }
+        if split_cross(self.area(), self.split, self.layout).is_some_and(|r| r.contains(x, y)) {
+            return Hit::SplitXY;
+        }
         let (sx, sy) = self.splitters();
         if sx.is_some_and(|r| r.contains(x, y)) {
             return Hit::SplitX;

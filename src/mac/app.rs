@@ -117,6 +117,8 @@ pub enum Hit {
     Pane(usize),
     SplitX,
     SplitY,
+    /// 두 나눔선이 만나는 곳 (4칸 가운데, 3칸 T자): 두 선을 함께 끈다
+    SplitXY,
     /// 열린 메뉴 안 (고를 수 있는 줄이면 그 번호). 메뉴가 열려 있으면 메뉴 밖은 Hit::None이다
     Menu(Option<usize>),
 }
@@ -3398,6 +3400,9 @@ impl App {
                 Hit::Card
             };
         }
+        if split_cross(self.area(), self.split, self.layout).is_some_and(|r| r.contains(x, y)) {
+            return Hit::SplitXY;
+        }
         let (sx, sy) = self.splitters();
         if sx.is_some_and(|r| r.contains(x, y)) {
             return Hit::SplitX;
@@ -3577,7 +3582,7 @@ impl App {
                     self.panes[p].tab_mut().clear_selection();
                 }
             }
-            Hit::SplitX | Hit::SplitY => self.drag = Some(hit),
+            Hit::SplitX | Hit::SplitY | Hit::SplitXY => self.drag = Some(hit),
             // 검색은 위에서 받았다
             Hit::FindOpen | Hit::FindField | Hit::FindClose | Hit::Find(_) => {}
             Hit::None | Hit::Pane(_) | Hit::Menu(_) => {}
@@ -3601,6 +3606,9 @@ impl App {
         match self.drag {
             Some(Hit::SplitX) => self.split.0 = ((x - GAP / 2.0 - a.l) / (a.w() - GAP)).clamp(0.15, 0.85),
             Some(Hit::SplitY) => self.split.1 = ((y - GAP / 2.0 - a.t) / (a.h() - GAP)).clamp(0.15, 0.85),
+            Some(Hit::SplitXY) => {
+                self.split = (((x - GAP / 2.0 - a.l) / (a.w() - GAP)).clamp(0.15, 0.85), ((y - GAP / 2.0 - a.t) / (a.h() - GAP)).clamp(0.15, 0.85));
+            }
             _ => return,
         }
         for p in 0..self.layout.count() {
@@ -3767,10 +3775,15 @@ impl App {
         for (p, r) in self.pane_rects() {
             self.paint_pane(g, t, p, r);
         }
-        if matches!(self.hover, Hit::SplitX | Hit::SplitY) || self.drag.is_some() {
+        if matches!(self.hover, Hit::SplitX | Hit::SplitY | Hit::SplitXY) || self.drag.is_some() {
             let (sx, sy) = self.splitters();
-            let s = if matches!(self.drag.unwrap_or(self.hover), Hit::SplitX) { sx } else { sy };
-            if let Some(s) = s {
+            // 가운데를 끌면 두 선을 함께 밝힌다
+            let lines = match self.drag.unwrap_or(self.hover) {
+                Hit::SplitX => [sx, None],
+                Hit::SplitXY => [sx, sy],
+                _ => [sy, None],
+            };
+            for s in lines.into_iter().flatten() {
                 let line = if s.w() < s.h() { R::new(s.l + GAP / 2.0 - 1.0, s.t + 12.0, s.l + GAP / 2.0 + 1.0, s.b - 12.0) } else { R::new(s.l + 12.0, s.t + GAP / 2.0 - 1.0, s.r - 12.0, s.t + GAP / 2.0 + 1.0) };
                 g.fill_round(line, 1.0, alpha(t.accent, 0.6));
             }
@@ -4276,6 +4289,16 @@ mod tests {
         a.mouse_dragged(10_000.0, 0.0);
         a.mouse_up();
         assert!((a.split.0 - 0.85).abs() < 1e-4);
+        // 4칸의 가운데를 끌면 두 선이 함께 움직인다
+        a.set_layout(Layout::Four);
+        let c = split_cross(a.area(), a.split, a.layout).unwrap();
+        let (cx, cy) = ((c.l + c.r) / 2.0, (c.t + c.b) / 2.0);
+        assert_eq!(a.hit(&g, cx, cy), Hit::SplitXY);
+        a.mouse_down(&g, cx, cy, Mods::default(), 1);
+        a.mouse_dragged(-10_000.0, -10_000.0);
+        a.mouse_up();
+        assert!((a.split.0 - 0.15).abs() < 1e-4 && (a.split.1 - 0.15).abs() < 1e-4, "{:?}", a.split);
+        a.set_layout(Layout::TwoV);
         let (x, y) = row_point(&a, 0, 0);
         a.scroll(&g, x, y, 500.0);
         assert_eq!(a.pane(0).tab().scroll, 0.0, "a short list does not scroll");

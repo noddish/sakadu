@@ -285,8 +285,13 @@ impl App {
                 self.split.1 = ((y - a.t) / (a.h() - GAP)).clamp(0.15, 0.85);
                 self.after_resize_drag();
             }
-            Drag::Col { pane, col, start_x, start_w } => {
-                self.panes[pane].cols[col] = (start_w + (start_x - x)).clamp(60.0, 400.0);
+            Drag::SplitXY => {
+                let a = self.area();
+                self.split = (((x - a.l) / (a.w() - GAP)).clamp(0.15, 0.85), ((y - a.t) / (a.h() - GAP)).clamp(0.15, 0.85));
+                self.after_resize_drag();
+            }
+            Drag::Col { pane, col, prev, start_x, start } => {
+                self.panes[pane].cols = drag_column(start, col, prev, start_x - x);
                 self.invalidate();
             }
             Drag::Thumb { pane, grab } => {
@@ -443,6 +448,9 @@ impl App {
         if self.cmd.is_some() {
             return self.cmd_click(hit);
         }
+        // 검색 칸·검색 패널 밖을 누르면 X를 누른 것처럼 검색을 닫는다. 검색 패널은 칸을 밀어내므로, 누르는 순간 닫으면
+        // 칸이 옮겨져 다른 것이 눌린다: 누른 일을 먼저 하고 버튼을 뗄 때 닫는다
+        self.pal_close_on_up = self.pal_shown() && !self.in_search(hit, x, y);
         // 시작 화면 항목은 누른 순간의 위치를 연다 (아래의 이름 확정 등으로 목록이 바뀌어도)
         let start_target = match hit {
             Hit::Start(p, i) => self.start_target(p, i),
@@ -533,6 +541,7 @@ impl App {
             Hit::View(p) => self.toggle_view_menu(p),
             Hit::SplitX => capture(self, Drag::SplitX),
             Hit::SplitY => capture(self, Drag::SplitY),
+            Hit::SplitXY => capture(self, Drag::SplitXY),
             Hit::Tab(p, t) => {
                 self.activate_tab(p, t);
                 capture(self, Drag::TabPress { pane: p, tab: t, x, y });
@@ -559,8 +568,11 @@ impl App {
             Hit::Star(p) => self.toggle_star(p),
             Hit::Header(p, key) => self.toggle_sort(p, key),
             Hit::HeaderResize(p, col) => {
-                let start_w = self.panes[p].cols[col];
-                capture(self, Drag::Col { pane: p, col, start_x: x, start_w });
+                // 선 왼쪽에 보이는 열 (좁은 칸에서는 숨은 열이 있다). 없으면 이름 칸
+                let Some(r) = self.pane_rect(p) else { return };
+                let shown = columns(geom(r).list, self.panes[p].cols).resizable();
+                let prev = (0..col).rev().find(|&i| shown[i].is_some());
+                capture(self, Drag::Col { pane: p, col, prev, start_x: x, start: self.panes[p].cols });
             }
             Hit::Thumb(p) => {
                 let Some((list, grid)) = self.grid(p) else { return };
@@ -635,6 +647,37 @@ impl App {
     }
 
     pub(super) fn on_lbutton_up(&mut self) {
+        self.release_press();
+        if std::mem::take(&mut self.pal_close_on_up) && self.pal_shown() {
+            self.close_palette();
+            // 칸이 옮겨졌으니 두 번 클릭의 둘째 누름이 그 자리의 다른 것을 누르지 않게 버린다
+            self.swallow_dbl = true;
+        }
+    }
+
+    /// 누른 곳이 검색에 속하는지: 검색 칸·닫기·돋보기, 검색 패널(결과·범위·고정·너비), 설정 창, 작업 공간 바꾸기(화면을 통째로 바꾼다)
+    fn in_search(&self, hit: Hit, x: f32, y: f32) -> bool {
+        self.pal_rect().contains(x, y)
+            || self.toolbar().search.contains(x, y)
+            || matches!(
+                hit,
+                Hit::SearchField
+                    | Hit::PalClose
+                    | Hit::SearchButton
+                    | Hit::PalRow(_)
+                    | Hit::PalScope(_)
+                    | Hit::PalInstall
+                    | Hit::PalAddFolder
+                    | Hit::SidePin
+                    | Hit::SideResize
+                    | Hit::SidePanel
+                    | Hit::Set(_)
+                    | Hit::Rail(_)
+                    | Hit::RailAdd
+            )
+    }
+
+    fn release_press(&mut self) {
         if self.fav_mouse_up(key_down(VK_CONTROL)) {
             return;
         }
@@ -884,6 +927,7 @@ impl App {
         let id = match self.drag {
             Drag::SplitX | Drag::Col { .. } | Drag::SideW { .. } => IDC_SIZEWE,
             Drag::SplitY => IDC_SIZENS,
+            Drag::SplitXY => IDC_SIZEALL,
             _ => {
                 let mut pt = POINT::default();
                 unsafe {
@@ -898,6 +942,7 @@ impl App {
                 match hit {
                     Hit::SplitX | Hit::HeaderResize(..) | Hit::SideResize => IDC_SIZEWE,
                     Hit::SplitY => IDC_SIZENS,
+                    Hit::SplitXY => IDC_SIZEALL,
                     Hit::CrumbEmpty(_) => IDC_IBEAM,
                     _ if waiting => IDC_APPSTARTING,
                     _ => IDC_ARROW,

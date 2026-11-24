@@ -138,6 +138,10 @@ impl App {
                 None
             }
             WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => {
+                // 도구 막대의 빈 곳(창을 끄는 자리)을 눌러도 검색 칸 밖을 누른 것이다: 검색을 닫는다
+                if wp.0 as u32 == HTCAPTION && self.pal_shown() {
+                    self.close_palette();
+                }
                 let b = over?;
                 self.caption_pressed = Some(b);
                 self.invalidate();
