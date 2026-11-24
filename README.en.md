@@ -13,11 +13,11 @@ A Windows file manager that keeps several folders open side by side and finds an
 ## Features
 
 - **Instant search**: press Ctrl+F, type a few letters, and results from the whole disk show up right away (10–20 ms over 1.8 million entries). Results stay in the left panel so you can open them one by one. Add a shared folder or USB drive and it's searched too.
-- **Several folders in one window**: split into 2, 3 or 4 panes, each with its own tabs. Drag a tab to move it to another pane.
+- **Several folders in one window**: split into 2, 3 or 4 panes, each with its own tabs and its own view (details, list or icons). Drag a tab to move it to another pane, or drag the point where the dividers meet to resize both ways at once.
 - **Ctrl+K command menu**: jump to an open tab, pinned place or recent location, or find and run a command by name (Korean initial consonants work too).
 - **Works like Explorer**: right-click menus, the copy progress dialog and drag and drop behave as they do in Explorer. Moved something by mistake? Use the **되돌리기** (undo) button on the notice, or Ctrl+Z.
-- **Look before you open**: select a picture or text file and a preview card appears at the bottom of the neighbouring pane. PDFs and Office documents open in the preview pane (Alt+P), where you can pin a reference file to keep it in view.
-- **Workspaces**: switch workspaces from the rail on the left. Each one remembers its own layout (panes and tabs), pinned places and color. A new tab opens on your pinned places and recent locations.
+- **Look before you open**: select a file and a preview card appears at the bottom of the neighbouring pane: pictures and text, and also the first page of PDFs and PowerPoint files, a frame of a video, Hangul (hwp) documents and SVG. Excel and Word files open in the preview pane (Alt+P), where you can pin a reference file to keep it in view.
+- **Workspaces**: switch workspaces from the rail on the left. Each one remembers its own layout (panes and tabs), pinned places and color. Drag pinned places and the favorites under '모든 공간' (all spaces) to reorder them, put them into groups or move them between the two. A new tab opens on your pinned places and recent locations.
 - **NAS**: shares that need a sign-in open through the Windows sign-in dialog, and a dropped connection shows the last list you saw.
 - **Light**: no runtime or web view; it's Rust drawing with Direct2D. Dark mode follows your Windows setting.
 
