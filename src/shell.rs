@@ -97,6 +97,10 @@ pub fn folder_drop_target(hwnd: HWND, dir: &str) -> Result<IDropTarget> {
 pub const MENU_FIRST: u32 = 1;
 const MENU_LAST: u32 = 0x6FFF;
 pub const MENU_CUSTOM: u32 = 0x7000;
+/// 사카두 모양 탐색기 메뉴의 맨 아래 'Windows 메뉴로 보기': 누르면 그 자리에 Windows 메뉴를 그대로 띄운다
+const MENU_NATIVE: u32 = 0x7F00;
+/// 하위 메뉴를 몇 겹까지 읽을지
+const MENU_DEPTH: u32 = 4;
 const CMIC_MASK_UNICODE: u32 = 0x0000_4000;
 
 thread_local! {
@@ -138,6 +142,9 @@ pub struct Picked {
 pub struct ShellMenu {
     cm: IContextMenu,
     menu: HMENU,
+    /// 사카두 모양으로 띄울 줄과 그 아이콘 (만들 때 탐색기 메뉴에서 읽는다)
+    entries: Vec<crate::popup::Entry>,
+    icons: Vec<crate::popup::Icon>,
 }
 
 impl ShellMenu {
@@ -159,14 +166,24 @@ impl ShellMenu {
             if !custom.is_empty() {
                 let _ = InsertMenuW(menu, custom.len() as u32, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null());
             }
-            Ok(ShellMenu { cm, menu })
+            // 사카두 모양으로 띄울 줄을 지금 읽는다 (오른쪽 단추를 누를 때 미리 만들므로, 뗄 때 바로 뜬다).
+            // 맨 아래에는 Windows 메뉴를 그대로 띄우는 줄: 어떤 프로그램의 줄이 사카두 모양으로 다 나오지 않아도 쓸 수 있게
+            let mut icons = Vec::new();
+            let mut entries = read_menu(&cm, menu, 0, &mut icons);
+            entries.push(crate::popup::Entry::Sep);
+            entries.push(crate::popup::Entry::item(MENU_NATIVE, "Windows 메뉴로 보기"));
+            Ok(ShellMenu { cm, menu, entries, icons })
         }
     }
 
+    /// 사카두 모양으로 띄운다. 'Windows 메뉴로 보기'를 고르면 같은 자리에 Windows 메뉴를 띄운다
     pub fn track(&self, hwnd: HWND, pt: POINT) -> Option<Picked> {
-        ACTIVE_MENU.with(|m| *m.borrow_mut() = Some(self.cm.clone()));
-        let cmd = unsafe { TrackPopupMenuEx(self.menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None) }.0 as u32;
-        ACTIVE_MENU.with(|m| *m.borrow_mut() = None);
+        let mut cmd = crate::popup::show_with_icons(hwnd, pt, &self.entries, false, &self.icons);
+        if cmd == MENU_NATIVE {
+            ACTIVE_MENU.with(|m| *m.borrow_mut() = Some(self.cm.clone()));
+            cmd = unsafe { TrackPopupMenuEx(self.menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None) }.0 as u32;
+            ACTIVE_MENU.with(|m| *m.borrow_mut() = None);
+        }
         if cmd == 0 {
             return None;
         }
@@ -194,6 +211,113 @@ impl Drop for ShellMenu {
         unsafe {
             let _ = DestroyMenu(self.menu);
         }
+    }
+}
+
+/// 탐색기 메뉴(HMENU)의 줄을 사카두 메뉴 줄로 읽는다: 글(밑줄 글자·단축키는 뺀다), 체크, 쓸 수 없음, 아이콘, 하위 메뉴.
+/// 하위 메뉴(보내기, 연결 프로그램, 다른 프로그램의 메뉴)는 열 때 채워지는 것이 많아, 셸에 '열린다'고 알려 채운 뒤 읽는다.
+/// 프로그램이 스스로 그리는 줄 가운데 글이 없는 것은 넣지 않는다 ('Windows 메뉴로 보기'로 볼 수 있다)
+fn read_menu(cm: &IContextMenu, menu: HMENU, depth: u32, icons: &mut Vec<crate::popup::Icon>) -> Vec<crate::popup::Entry> {
+    use crate::popup::Entry;
+    use sakadu::ui::menu::{MenuIcon, MenuLine};
+    let mut out = Vec::new();
+    let n = unsafe { GetMenuItemCount(Some(menu)) };
+    for i in 0..n.max(0) as u32 {
+        let mut info = MENUITEMINFOW {
+            cbSize: size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_BITMAP | MIIM_STRING,
+            ..Default::default()
+        };
+        // 먼저 글 길이를 묻고, 그만큼 받을 자리를 주고 다시 읽는다
+        if unsafe { GetMenuItemInfoW(menu, i, true, &mut info) }.is_err() {
+            continue;
+        }
+        if info.fType.0 & MFT_SEPARATOR.0 != 0 {
+            out.push(Entry::Sep);
+            continue;
+        }
+        let mut buf = vec![0u16; info.cch as usize + 1];
+        info.dwTypeData = PWSTR(buf.as_mut_ptr());
+        info.cch = buf.len() as u32;
+        if info.cch > 1 && unsafe { GetMenuItemInfoW(menu, i, true, &mut info) }.is_err() {
+            continue;
+        }
+        let label = crate::popup::plain(&util::from_wide(&buf));
+        if label.trim().is_empty() {
+            continue;
+        }
+        let mut line = MenuLine::new(label);
+        line.checked = info.fState.0 & MFS_CHECKED.0 != 0;
+        line.disabled = info.fState.0 & MFS_DISABLED.0 != 0;
+        if let Some(icon) = bitmap_icon(info.hbmpItem) {
+            line.icon = MenuIcon::Image(icons.len() as u32);
+            icons.push(icon);
+        }
+        if !info.hSubMenu.is_invalid() && depth < MENU_DEPTH {
+            init_submenu(cm, info.hSubMenu, i);
+            let items = read_menu(cm, info.hSubMenu, depth + 1, icons);
+            line.sub = true;
+            line.disabled |= items.iter().all(|e| matches!(e, Entry::Sep));
+            out.push(Entry::Sub(line, items));
+        } else if info.hSubMenu.is_invalid() {
+            out.push(Entry::Item(info.wID, line));
+        }
+    }
+    out
+}
+
+/// 하위 메뉴가 열린다고 셸에 알려 그 줄을 채우게 한다 (Windows 메뉴가 하위 메뉴를 열 때 보내는 WM_INITMENUPOPUP)
+fn init_submenu(cm: &IContextMenu, sub: HMENU, index: u32) {
+    let (wp, lp) = (WPARAM(sub.0 as usize), LPARAM(index as isize));
+    unsafe {
+        if let Ok(cm3) = cm.cast::<IContextMenu3>() {
+            let mut res = LRESULT(0);
+            let _ = cm3.HandleMenuMsg2(WM_INITMENUPOPUP, wp, lp, Some(&mut res));
+        } else if let Ok(cm2) = cm.cast::<IContextMenu2>() {
+            let _ = cm2.HandleMenuMsg(WM_INITMENUPOPUP, wp, lp);
+        }
+    }
+}
+
+/// 메뉴 줄의 비트맵을 아이콘 픽셀(미리 곱한 BGRA)로. 비트맵이 없거나 Windows가 그리는 특별한 값(HBMMENU_*)이면 None
+fn bitmap_icon(hbm: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<crate::popup::Icon> {
+    use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, GetObjectW, ReleaseDC};
+    let v = hbm.0 as isize;
+    if (-1..=11).contains(&v) {
+        return None;
+    }
+    unsafe {
+        let mut bm = BITMAP::default();
+        if GetObjectW(hbm.into(), size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut c_void)) == 0 {
+            return None;
+        }
+        let (w, h) = (bm.bmWidth, bm.bmHeight.abs());
+        if w <= 0 || h <= 0 || w > 256 || h > 256 {
+            return None;
+        }
+        let mut bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+            ..Default::default()
+        };
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        let dc = GetDC(None);
+        let lines = GetDIBits(dc, hbm, 0, h as u32, Some(px.as_mut_ptr() as *mut c_void), &mut bi, DIB_RGB_COLORS);
+        ReleaseDC(None, dc);
+        if lines == 0 {
+            return None;
+        }
+        // 알파가 없는 비트맵은 불투명으로. 알파가 있는데 미리 곱하지 않은 값이면 곱한다 (그리기 판은 미리 곱한 값을 받는다)
+        if bm.bmBitsPixel != 32 || px.chunks(4).all(|c| c[3] == 0) {
+            px.chunks_mut(4).for_each(|c| c[3] = 255);
+        } else if px.chunks(4).any(|c| c[0] > c[3] || c[1] > c[3] || c[2] > c[3]) {
+            for c in px.chunks_mut(4) {
+                let a = c[3] as u32;
+                for v in &mut c[..3] {
+                    *v = (*v as u32 * a / 255) as u8;
+                }
+            }
+        }
+        Some(crate::popup::Icon { w: w as u32, h: h as u32, pixels: px })
     }
 }
 
@@ -904,6 +1028,48 @@ mod tests {
     use super::*;
     use std::time::Instant;
     use windows::Win32::System::SystemServices::{MK_CONTROL, MK_LBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
+
+    /// 임시 파일의 탐색기 메뉴를 창 없이 만들어 사카두 메뉴 줄로 읽는다: 이름이 있는 줄들, 사카두가 넣은 줄이 맨 위,
+    /// 맨 아래는 'Windows 메뉴로 보기'. 고를 수 있는 줄의 번호는 탐색기 메뉴의 번호 범위 안이다
+    #[test]
+    fn explorer_menus_are_read_into_sakadu_menu_lines() {
+        use crate::popup::Entry;
+        let _com = ComInit::sta();
+        let dir = std::env::temp_dir().join(format!("sakadu-shellmenu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("메모.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let cm: IContextMenu = ui_object(HWND::default(), std::slice::from_ref(&path)).unwrap();
+        let menu = ShellMenu::new(cm, false, &[(MENU_CUSTOM + 1, "즐겨찾기에 추가")]).unwrap();
+        let labels: Vec<&str> = menu
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Item(_, l) | Entry::Sub(l, _) => Some(l.label.as_str()),
+                Entry::Sep => None,
+            })
+            .collect();
+        assert!(labels.len() >= 4, "{labels:?}");
+        assert_eq!(labels.first(), Some(&"즐겨찾기에 추가"));
+        assert_eq!(labels.last(), Some(&"Windows 메뉴로 보기"));
+        assert!(labels.iter().all(|l| !l.trim().is_empty() && !l.contains('&') && !l.contains('\t')), "{labels:?}");
+        fn ids(entries: &[Entry], out: &mut Vec<u32>) {
+            for e in entries {
+                match e {
+                    Entry::Item(id, _) => out.push(*id),
+                    Entry::Sub(_, items) => ids(items, out),
+                    Entry::Sep => {}
+                }
+            }
+        }
+        let mut all = Vec::new();
+        ids(&menu.entries, &mut all);
+        assert!(all.iter().all(|id| (MENU_FIRST..=MENU_LAST).contains(id) || *id >= MENU_CUSTOM), "{all:?}");
+        drop(menu);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 여러 폴더의 파일을 담은 CF_HDROP 내용을 셸이 그대로 읽는지 (클립보드는 건드리지 않는다)
     #[test]

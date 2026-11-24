@@ -32,6 +32,8 @@ pub enum MenuIcon {
     View(ViewMode),
     /// 색 동그라미 (작업 공간 색)
     Swatch(Color),
+    /// 부르는 쪽이 그리는 그림 (그 번호). 자리만 비워 둔다 (Windows 탐색기 메뉴의 아이콘)
+    Image(u32),
 }
 
 /// 메뉴 줄 하나
@@ -80,6 +82,12 @@ impl MenuLine {
 /// 줄들을 다 담는 높이 (안쪽 여백 포함)
 pub fn menu_height(lines: &[MenuLine]) -> f32 {
     MENU_PAD * 2.0 + lines.iter().map(|l| MENU_ROW_H + if l.sep_before { MENU_SEP_H } else { 0.0 }).sum::<f32>()
+}
+
+/// 줄 앞 그림의 자리 (16×16, 체크 자리 다음)
+pub fn menu_icon_rect(row: R) -> R {
+    let (cx, cy) = (row.l + CHECK_W + (ICON_W - 4.0) / 2.0, (row.t + row.b) / 2.0);
+    R::new(cx - 8.0, cy - 8.0, cx + 8.0, cy + 8.0)
 }
 
 /// 이름이 시작하는 자리 (줄 왼쪽에서): 체크 자리, 그림이 있는 메뉴면 그림 자리까지
@@ -238,7 +246,7 @@ pub fn paint_menu(g: &impl Canvas, t: &Theme, s: &MenuScene) {
         }
         let icon = R::new(ir.l + CHECK_W, ir.t, ir.l + CHECK_W + ICON_W - 4.0, ir.b);
         match line.icon {
-            MenuIcon::None => {}
+            MenuIcon::None | MenuIcon::Image(_) => {}
             MenuIcon::Glyph(code) => g.glyph(code, icon, false, dim),
             MenuIcon::Layout(l) => draw_layout_icon(g, icon, l, dim),
             MenuIcon::View(v) => draw_view_icon(g, icon, v, dim),
