@@ -8,7 +8,7 @@
 use crate::gfx::{Gfx, TextLook};
 use crate::theme::{Theme, colorref};
 use sakadu::draw::R;
-use sakadu::ui::menu::{MENU_PAD, MenuLine, MenuScene, menu_height, menu_hit, menu_max_scroll, menu_reveal, menu_rows, menu_step, menu_width, paint_menu};
+use sakadu::ui::menu::{MENU_PAD, MenuIcon, MenuLine, MenuScene, menu_height, menu_hit, menu_icon_rect, menu_max_scroll, menu_reveal, menu_rows, menu_step, menu_width, paint_menu};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -55,13 +55,38 @@ pub fn from_pairs(items: &[(u32, &str)]) -> Vec<Entry> {
     items.iter().map(|(id, l)| if *id == 0 { Entry::Sep } else { Entry::item(*id, l) }).collect()
 }
 
-/// Windows 메뉴 글을 메뉴 줄로: 탭 뒤는 오른쪽 끝의 흐린 글(단축키), &&는 &, 홑 &(밑줄 글자 표시)는 뺀다
+/// Windows 메뉴 글을 메뉴 줄로: 탭 뒤는 오른쪽 끝의 흐린 글, 밑줄 글자 표시는 뺀다 (clean)
 fn line(label: &str) -> MenuLine {
-    let clean = |s: &str| s.replace("&&", "\u{1}").replace('&', "").replace('\u{1}', "&");
     match label.split_once('\t') {
         Some((name, hint)) => MenuLine::new(clean(name)).hint(clean(hint)),
         None => MenuLine::new(clean(label)),
     }
+}
+
+/// 메뉴 글의 밑줄 글자 표시를 뺀다: "열기(&O)"처럼 괄호에 든 것은 괄호째, 그 밖의 홑 &는 &만. &&는 &
+fn clean(s: &str) -> String {
+    let mut s = s.replace("&&", "\u{1}");
+    while let Some(i) = s.find("(&") {
+        let mut rest = s[i + 2..].chars();
+        match (rest.next(), rest.next()) {
+            (Some(c), Some(')')) => s.replace_range(i..i + 3 + c.len_utf8(), ""),
+            _ => break,
+        }
+    }
+    s.replace('&', "").replace('\u{1}', "&").trim_end().to_string()
+}
+
+/// 탐색기 메뉴 글: 탭 뒤(단축키)는 버리고 밑줄 글자 표시를 뺀다
+pub fn plain(label: &str) -> String {
+    clean(label.split_once('\t').map_or(label, |(name, _)| name))
+}
+
+/// 줄 앞 그림 (미리 곱한 BGRA 픽셀). 줄의 MenuIcon::Image(번호)가 이 목록의 번호다
+#[derive(Clone)]
+pub struct Icon {
+    pub w: u32,
+    pub h: u32,
+    pub pixels: Vec<u8>,
 }
 
 /// 메뉴를 그릴 모양: 테마, 글꼴, 크기, 글자 표시 (본 창의 설정)
@@ -100,6 +125,8 @@ struct Level {
     scroll: f32,
     /// 이 하위 메뉴를 연 위 메뉴의 줄
     from: Option<usize>,
+    /// 줄마다의 그림 (MenuIcon::Image)
+    icons: Vec<Option<Icon>>,
 }
 
 impl Level {
@@ -135,6 +162,20 @@ impl Level {
         }
         self.gfx.clear(theme.pane);
         paint_menu(&self.gfx, theme, &MenuScene { rect: self.menu(), lines: &self.lines, sel: self.sel, scroll: self.scroll, card: false });
+        // 줄 앞 그림: 메뉴 창마다 그 창의 그리기 판에 한 번 올리고 그린다 (판을 새로 만들었으면 다시 올린다)
+        let rows = menu_rows(self.menu(), &self.lines, self.scroll);
+        for (j, icon) in self.icons.iter().enumerate() {
+            let Some(icon) = icon else { continue };
+            let r = menu_icon_rect(rows[j]);
+            if r.t < 0.0 || r.b > self.h {
+                continue;
+            }
+            let key = j.to_string();
+            let opacity = if self.lines[j].disabled { 0.4 } else { 1.0 };
+            if !self.gfx.thumb(&key, r, opacity) && self.gfx.add_thumb(key.clone(), icon.w, icon.h, &icon.pixels) {
+                self.gfx.thumb(&key, r, opacity);
+            }
+        }
         self.gfx.end();
     }
 
@@ -153,12 +194,13 @@ impl Level {
     }
 }
 
-/// 떠 있는 메뉴 (한 번에 하나): 창들, 맨 위 줄 목록, 그리는 모양, 본 창
+/// 떠 있는 메뉴 (한 번에 하나): 창들, 그리는 모양, 본 창, 줄 앞 그림들
 struct Open {
     levels: Vec<Level>,
     style: Style,
     dpi: f32,
     owner: HWND,
+    icons: Vec<Icon>,
 }
 
 thread_local! {
@@ -190,14 +232,19 @@ enum Step {
 /// 메뉴를 띄우고 고른 번호를 돌려준다 (고르지 않았으면 0). pt는 화면 좌표의 메뉴 왼쪽 위.
 /// above면 pt 위로 띄운다 (작업 표시줄의 알림 영역 메뉴). App을 빌린 채로 부르지 않는다
 pub fn show(owner: HWND, pt: POINT, entries: &[Entry], above: bool) -> u32 {
+    show_with_icons(owner, pt, entries, above, &[])
+}
+
+/// show와 같고, 줄 앞 그림(MenuIcon::Image의 번호)을 함께 준다
+pub fn show_with_icons(owner: HWND, pt: POINT, entries: &[Entry], above: bool, icons: &[Icon]) -> u32 {
     if OPEN.with(|o| o.borrow().is_some()) || !register() {
         return 0;
     }
     let style = crate::with_app(|a| a.menu_style()).unwrap_or_default();
     let dpi = unsafe { GetDpiForWindow(owner) }.max(96) as f32 * style.zoom;
-    let Some(root) = open_level(owner, entries, &[], &style, dpi, Place::At(pt, above)) else { return 0 };
+    let Some(root) = open_level(owner, entries, &[], &style, dpi, Place::At(pt, above), icons) else { return 0 };
     let root_hwnd = root.hwnd;
-    OPEN.with(|o| *o.borrow_mut() = Some(Open { levels: vec![root], style, dpi, owner }));
+    OPEN.with(|o| *o.borrow_mut() = Some(Open { levels: vec![root], style, dpi, owner, icons: icons.to_vec() }));
     LOST_CAPTURE.set(false);
     unsafe {
         SetCapture(root_hwnd);
@@ -352,7 +399,7 @@ fn point(o: &mut Open, root: &[Entry], i: usize, j: usize, first: bool) {
         let path = path.clone();
         let row = o.levels[i].row_rect(j);
         let parent = o.levels[i].rect;
-        if let Some(mut sub) = open_level(o.owner, entries_at(root, &path), &path, &o.style, o.dpi, Place::Beside(row, parent)) {
+        if let Some(mut sub) = open_level(o.owner, entries_at(root, &path), &path, &o.style, o.dpi, Place::Beside(row, parent), &o.icons) {
             sub.from = Some(j);
             if first {
                 sub.sel = menu_step(&sub.lines, None, true);
@@ -481,7 +528,7 @@ fn work_area(p: POINT) -> RECT {
 }
 
 /// 메뉴 창 하나를 연다 (path는 맨 위 줄 목록에서 이 줄 목록의 자리). 줄이 없으면 None
-fn open_level(owner: HWND, entries: &[Entry], path: &[usize], style: &Style, dpi: f32, place: Place) -> Option<Level> {
+fn open_level(owner: HWND, entries: &[Entry], path: &[usize], style: &Style, dpi: f32, place: Place, icons: &[Icon]) -> Option<Level> {
     let mut lines = Vec::new();
     let mut picks = Vec::new();
     let mut sep = false;
@@ -503,6 +550,7 @@ fn open_level(owner: HWND, entries: &[Entry], path: &[usize], style: &Style, dpi
     if lines.is_empty() {
         return None;
     }
+    let line_icons = lines.iter().map(|l| if let MenuIcon::Image(k) = l.icon { icons.get(k as usize).cloned() } else { None }).collect();
     let mut gfx = Gfx::new(dpi, HIMAGELIST::default(), &style.font).ok()?;
     gfx.set_text_look(TextLook::from_key(&style.text));
     let scale = dpi / 96.0;
@@ -540,7 +588,7 @@ fn open_level(owner: HWND, entries: &[Entry], path: &[usize], style: &Style, dpi
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border as *const _ as *const c_void, size_of::<COLORREF>() as u32);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
-    Some(Level { hwnd, gfx, lines, picks, rect: RECT { left: x, top: y, right: x + wpx, bottom: y + hpx }, w, h: hpx as f32 / scale, sel: None, scroll: 0.0, from: None })
+    Some(Level { hwnd, gfx, lines, picks, rect: RECT { left: x, top: y, right: x + wpx, bottom: y + hpx }, w, h: hpx as f32 / scale, sel: None, scroll: 0.0, from: None, icons: line_icons })
 }
 
 #[cfg(test)]
@@ -554,6 +602,11 @@ mod tests {
         assert_eq!((l.label.as_str(), l.hint.as_str()), ("이름 바꾸기", "F2"));
         assert_eq!(line("R&&D 폴더").label, "R&D 폴더");
         assert_eq!(line("&열기").label, "열기");
+        // 탐색기 메뉴 글: 괄호에 든 밑줄 글자는 괄호째, 탭 뒤 단축키는 버린다
+        assert_eq!(plain("열기(&O)"), "열기");
+        assert_eq!(plain("다른 이름으로 저장(&A)..."), "다른 이름으로 저장...");
+        assert_eq!(plain("복사(&C)\tCtrl+C"), "복사");
+        assert_eq!(plain("7-Zip"), "7-Zip");
         let e = from_pairs(&[(1, "열기"), (0, ""), (2, "닫기")]);
         assert!(matches!(e.as_slice(), [Entry::Item(1, _), Entry::Sep, Entry::Item(2, _)]));
     }
