@@ -1,13 +1,10 @@
 //! 도구 막대의 펼치는 메뉴: 보기 방식 단추나 칸 나누기 단추를 누르면 그 아래에 뜬다.
-//! Windows 기본 메뉴 대신 떠 있는 패널과 같은 결(그림자·둥근 모서리·테마 색)로 직접 그린다
+//! Windows 기본 메뉴 대신 사카두 메뉴(공통 sakadu::ui::menu, 맥과 같은 모양)로 직접 그린다
 
 use super::*;
 use crate::keys::Action;
+use sakadu::ui::menu::{MenuIcon, MenuLine, MenuScene, menu_height, menu_hit, menu_place, menu_width, paint_menu};
 
-const ITEM_H: f32 = 32.0;
-const PAD: f32 = 4.0;
-const MENU_W: f32 = 240.0;
-const G_CHECK: u16 = 0xE73E;
 const LAYOUT_KEYS: [Action; 5] = [Action::Layout1, Action::Layout2, Action::Layout3, Action::Layout4, Action::Layout5];
 
 /// 어느 메뉴인지
@@ -50,6 +47,24 @@ fn view_action(v: ViewMode) -> Action {
 }
 
 impl App {
+    /// 메뉴의 줄: 모양 그림, 이름, 지금 것 체크, 단축키. 보기 방식 메뉴의 맨 아래는 구분선 뒤의 숨김 항목 보기
+    fn view_menu_lines(&self, m: ViewMenu) -> Vec<MenuLine> {
+        let key = |a: Action| self.keys.get(a).map(|c| c.label()).unwrap_or_default();
+        match m.kind {
+            MenuKind::View => {
+                let current = self.panes[m.pane].view;
+                let mut v: Vec<_> = ViewMode::ALL.iter().map(|v| MenuLine::new(v.label()).icon(MenuIcon::View(*v)).checked(*v == current).hint(key(view_action(*v)))).collect();
+                v.push(MenuLine::new("숨김 항목 보기").icon(MenuIcon::Glyph(G_HIDDEN)).checked(self.show_hidden).hint(key(Action::Hidden)).sep(true));
+                v
+            }
+            MenuKind::Layout => Layout::ALL
+                .iter()
+                .zip(LAYOUT_KEYS)
+                .map(|(l, a)| MenuLine::new(crate::keys::name(a)).icon(MenuIcon::Layout(*l)).checked(*l == self.layout).hint(key(a)))
+                .collect(),
+        }
+    }
+
     /// 메뉴 자리: 누른 단추 바로 아래, 오른쪽 끝을 단추에 맞춘다. 창 밖으로 나가지 않게
     pub(super) fn view_menu_rect(&self) -> Option<R> {
         let m = self.view_menu?;
@@ -58,16 +73,10 @@ impl App {
         }
         let bar = self.toolbar();
         let b = if m.kind == MenuKind::View { bar.view } else { bar.layout };
-        let h = PAD * 2.0 + ITEM_H * m.kind.len() as f32;
-        let w = MENU_W.min(self.w - 2.0 * MARGIN);
-        let l = (b.r - w).max(MARGIN);
-        let t = (b.b + 4.0).min(self.h - h - MARGIN).max(MARGIN);
-        Some(R::new(l, t, l + w, t + h))
-    }
-
-    fn view_menu_item(menu: R, i: usize) -> R {
-        let t = menu.t + PAD + i as f32 * ITEM_H;
-        R::new(menu.l + PAD, t, menu.r - PAD, t + ITEM_H)
+        let lines = self.view_menu_lines(m);
+        let bounds = R::new(MARGIN, MARGIN, (self.w - MARGIN).max(MARGIN + 1.0), (self.h - MARGIN).max(MARGIN + 1.0));
+        let w = menu_width(&self.gfx, &lines, bounds.w().min(320.0));
+        Some(menu_place(R::new(b.r - w, b.t, b.r, b.b), w, menu_height(&lines), bounds))
     }
 
     pub(super) fn view_menu_hit(&self, x: f32, y: f32) -> Option<Hit> {
@@ -75,8 +84,8 @@ impl App {
         if !r.contains(x, y) {
             return None;
         }
-        let n = self.view_menu?.kind.len();
-        Some((0..n).find(|&i| Self::view_menu_item(r, i).contains(x, y)).map_or(Hit::ViewMenuPanel, Hit::ViewMenuItem))
+        let lines = self.view_menu_lines(self.view_menu?);
+        Some(menu_hit(r, &lines, 0.0, x, y).map_or(Hit::ViewMenuPanel, Hit::ViewMenuItem))
     }
 
     fn open_menu(&mut self, kind: MenuKind, pane: usize, sel: usize) {
@@ -189,56 +198,11 @@ impl App {
 
     pub(super) fn paint_view_menu(&mut self) {
         let (Some(r), Some(m)) = (self.view_menu_rect(), self.view_menu) else { return };
-        let t = self.theme;
-        // 줄마다: (이름, 지금 것인지, 단축키 글자)
-        let key = |a: Action| self.keys.get(a).map(|c| c.label()).unwrap_or_default();
-        let items: Vec<(&str, bool, String)> = match m.kind {
-            MenuKind::View => {
-                let current = self.panes[m.pane].view;
-                let mut v: Vec<_> = ViewMode::ALL.iter().map(|v| (v.label(), *v == current, key(view_action(*v)))).collect();
-                v.push(("숨김 항목 보기", self.show_hidden, key(Action::Hidden)));
-                v
-            }
-            MenuKind::Layout => Layout::ALL.iter().zip(LAYOUT_KEYS).map(|(l, a)| (crate::keys::name(a), *l == self.layout, key(a))).collect(),
-        };
+        let lines = self.view_menu_lines(m);
         let gfx = &self.gfx;
         // 열릴 때 위에서 4px 내려오며 나타난다
         let pushed = anim_progress(self.view_menu_at, MENU_FADE_MS).is_some_and(|f| gfx.push_fade(f, 0.0, -(1.0 - f) * 4.0));
-
-        // 그림자 + 본체 (떠 있는 다른 것과 같은 그림자)
-        if !t.high_contrast {
-            soft_shadow(gfx, r, R_PANE, 12.0, 0.16, t.dark);
-        }
-        gfx.fill_round(r, R_PANE, t.pane);
-        gfx.stroke_round(r.inset(0.5, 0.5), R_PANE, t.pane_border, 1.0);
-
-        for (i, (label, on, keys)) in items.iter().enumerate() {
-            let ir = Self::view_menu_item(r, i);
-            if i == m.sel {
-                gfx.fill_round(ir, R_ROW, t.hover);
-            }
-            // 보기 방식과 숨김 항목 사이의 가는 선
-            if m.kind == MenuKind::View && i == ViewMode::ALL.len() {
-                gfx.fill(R::new(ir.l + 6.0, ir.t, ir.r - 6.0, ir.t + 1.0), t.border);
-            }
-            if *on {
-                gfx.glyph(G_CHECK, R::new(ir.l + 4.0, ir.t, ir.l + 26.0, ir.b), true, t.text);
-            }
-            // 그림: 고를 모양을 이름 앞에
-            let icon = R::new(ir.l + 28.0, ir.t, ir.l + 52.0, ir.b);
-            match m.kind {
-                MenuKind::View => match ViewMode::ALL.get(i) {
-                    Some(v) => draw_view_icon(gfx, icon, *v, t.dim),
-                    None => gfx.glyph(G_HIDDEN, icon, false, t.dim),
-                },
-                MenuKind::Layout => draw_layout_icon(gfx, icon, Layout::ALL[i], t.dim),
-            }
-            let key_w = if keys.is_empty() { 0.0 } else { gfx.measure(keys, Font::Small) + 12.0 };
-            gfx.text(label, R::new(ir.l + 60.0, ir.t, ir.r - key_w - 8.0, ir.b), Font::Normal, t.text);
-            if key_w > 0.0 {
-                gfx.text(keys, R::new(ir.r - key_w, ir.t, ir.r - 10.0, ir.b), Font::Small, t.dim);
-            }
-        }
+        paint_menu(gfx, &self.theme, &MenuScene { rect: r, lines: &lines, sel: Some(m.sel), scroll: 0.0 });
         if pushed {
             gfx.pop_fade();
         }

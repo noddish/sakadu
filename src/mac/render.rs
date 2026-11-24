@@ -1,6 +1,6 @@
 //! 그림 시험: 창 없이 App을 몇 가지 상태로 만들어 PNG로 그린다 (CI에서 맥 화면을 확인하는 용도)
 
-use crate::app::{App, Hit, Key};
+use crate::app::{App, Hit, Key, MenuKind};
 use sakadu::ui::Layout;
 use crate::gfx::Gfx;
 use sakadu::favorites::{Favorite, Favorites, Group};
@@ -219,6 +219,14 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         a.settle();
         a.find_key(Key::Down, false);
         shots.push(("find", a));
+
+        // 메뉴 (앱이 그린다): 보기 방식 단추의 메뉴, 파일 줄을 오른쪽 단추로 누른 메뉴, 작업 공간 아이콘의 색 메뉴. 한 줄을 가리킨 모습
+        let measure = Gfx::bitmap(8.0, 8.0, 1.0).ok_or("그림판을 만들지 못함")?;
+        for (name, kind, sel) in [("menu-view", MenuKind::View, 1), ("menu-rows", MenuKind::Rows, 3), ("menu-space", MenuKind::Space(1), 2)] {
+            let mut a = base(favs.clone(), true);
+            a.open_menu_for_render(&measure, kind, sel);
+            shots.push((name, a));
+        }
 
         for (name, a) in shots {
             let mut g = Gfx::bitmap(W, H, SCALE).ok_or("그림판을 만들지 못함")?;

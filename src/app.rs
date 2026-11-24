@@ -6,11 +6,11 @@
 use crate::gfx::{Font, Gfx, R};
 pub(crate) use sakadu::ui::glyph::*;
 pub(crate) use sakadu::ui::*;
-pub(crate) use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, draw_view_icon, paint_toolbar, search_field_parts, toolbar_geom, toolbar_need};
+pub(crate) use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, paint_toolbar, search_field_parts, toolbar_geom, toolbar_need};
 use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time, list_dir};
 use crate::pane::*;
 use crate::shell::{self, FileOp, key_down, list_computer};
-use crate::theme::{Color, FOCUS_W, R_CTRL, R_PANE, R_ROW, Theme, alpha, colorref};
+use crate::theme::{Color, FOCUS_W, R_CTRL, R_ROW, Theme, alpha, colorref};
 use crate::{WM_APP_ICONS, WM_APP_LISTED, WM_APP_NOTIFY, WM_APP_SEARCH, session, util, with_app};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};

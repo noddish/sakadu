@@ -11,7 +11,7 @@
 //! 설정 창(앱 메뉴의 '설정…', ⌘,)은 본 창과 따로 뜬다 (settings.rs).
 //! 창 시험(smoke)은 이 창을 그대로 열고 실제 입력의 길로 파일 작업을 돌려 본다 (CI의 맥 러너에서)
 
-use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, MenuKind, Mods, Paste};
+use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, Mods, Paste};
 use sakadu::ui::ROW_H;
 use crate::gfx::Gfx;
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -355,14 +355,6 @@ define_class!(
             self.after_input();
         }
 
-        /// 메뉴(도구 막대 단추, 작업 공간 아이콘, 사이드바 줄, 목록)에서 고른 줄. tag에 메뉴 종류와 줄 번호가 들어 있다 (MenuKind::tag)
-        #[unsafe(method(pickMenu:))]
-        fn pick_menu(&self, sender: &NSMenuItem) {
-            let Some((kind, item)) = MenuKind::from_tag(sender.tag()) else { return };
-            with_app(|a| a.pick_menu(kind, item));
-            self.after_input();
-        }
-
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
         fn appearance_changed(&self) {
             let (dark, accent) = system(self.mtm());
@@ -648,6 +640,10 @@ impl SakaduView {
             return false;
         };
         let handled = with_app(|a| {
+            // 메뉴가 열려 있으면 메뉴가 받는다 (검색 입력 칸에 키보드를 둔 채 도구 막대 메뉴를 열 수 있다)
+            if a.menu_shown().is_some() {
+                return a.key(key, Mods::default());
+            }
             a.open_find();
             a.find_key(key, cmd)
         })
@@ -658,7 +654,7 @@ impl SakaduView {
         handled
     }
 
-    /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다. 메뉴를 열어 달라고 했으면 연다
+    /// 입력 뒤: 쌓인 폴더 읽기를 뒷줄로 보내고, 열 파일을 열고, 제목을 맞추고, 다시 그린다
     fn after_input(&self) {
         pump();
         // 훑어보기 창을 열거나 닫아 달라고 했으면 (스페이스, ⌘Y). App을 빌리지 않은 채로 한다: 창이 열리며 이 뷰에 묻는다
@@ -672,29 +668,6 @@ impl SakaduView {
         self.sync_field();
         self.setNeedsDisplay(true);
         settings::refresh();
-        if let Some((kind, anchor)) = with_app(|a| a.take_menu()).flatten() {
-            self.pop_menu(kind, anchor);
-        }
-    }
-
-    /// 단추(도구 막대 단추, 작업 공간 아이콘)나 사이드바 줄 아래에 맥 기본 메뉴를 연다: 이름, 지금 것에 체크. 고르면 pickMenu:로 온다.
-    /// 메뉴가 떠 있는 동안 이 함수는 돌아오지 않으므로 App을 빌린 채로 부르지 않는다
-    fn pop_menu(&self, kind: MenuKind, anchor: sakadu::draw::R) {
-        let mtm = self.mtm();
-        let Some((items, brk)) = with_app(|a| (a.menu_items(kind), a.menu_break(kind))) else { return };
-        let menu = NSMenu::new(mtm);
-        for (i, (title, on)) in items.iter().enumerate() {
-            // 구분선: 보기 방식과 숨김 항목 보기 사이, 공간 색과 그 밖의 줄 사이, 고정한 줄을 옮기는 줄과 그 밖의 줄 사이
-            if brk == Some(i) {
-                menu.addItem(&NSMenuItem::separatorItem(mtm));
-            }
-            let it = unsafe { menu.addItemWithTitle_action_keyEquivalent(&NSString::from_str(title), Some(sel!(pickMenu:)), &NSString::from_str("")) };
-            unsafe { it.setTarget(Some(self)) };
-            it.setTag(kind.tag(i));
-            it.setState(if *on { NSControlStateValueOn } else { NSControlStateValueOff });
-        }
-        // 뷰는 위아래를 뒤집어 쓰므로(왼쪽 위가 0) 단추(줄) 아래 끝이 곧 메뉴의 위
-        menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(anchor.l as f64, anchor.b as f64 + 4.0), Some(self));
     }
 
     /// 입력 상자를 App 상태에 맞춘다: 입력 중이면 그 자리(칸의 경로 자리, 사이드바의 공간 이름 자리, 목록 줄의 이름 자리)에 보이고 키 입력을 받는다
