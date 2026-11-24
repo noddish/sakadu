@@ -559,8 +559,8 @@ impl Gfx {
         }
     }
 
-    /// 앱 아이콘을 색 c로 r에 그린다. 아이콘은 한 가지 색 그림이라 모양(알파)만 쓰고 색은 붓으로 칠한다
-    /// (밝은 테마에서는 어둡게, 어두운 테마에서는 밝게)
+    /// 앱 아이콘을 색 c로 r에 그린다. 아이콘의 검은 부분(폴더)만 모양으로 쓰고 색은 붓으로 칠한다
+    /// (밝은 테마에서는 어둡게, 어두운 테마에서는 밝게). 흰 번개는 비어 보이고 흰 테두리는 빠진다 (app_icon_mask)
     pub fn app_icon(&mut self, r: R, c: Color) {
         if self.rt.is_none() {
             return;
@@ -589,7 +589,17 @@ impl Gfx {
                 let src = self.wic.CreateBitmapFromHICON(hicon)?;
                 let conv = self.wic.CreateFormatConverter()?;
                 conv.Initialize(&src, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeMedianCut)?;
-                self.rt().CreateBitmapFromWicBitmap(&conv, None)
+                let (mut w, mut h) = (0u32, 0u32);
+                conv.GetSize(&mut w, &mut h)?;
+                let mut pixels = vec![0u8; (w * h * 4) as usize];
+                conv.CopyPixels(std::ptr::null(), w * 4, &mut pixels)?;
+                app_icon_mask(&mut pixels);
+                let props = D2D1_BITMAP_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                };
+                self.rt().CreateBitmap(D2D_SIZE_U { width: w, height: h }, Some(pixels.as_ptr() as *const _), w * 4, &props)
             })();
             let _ = DestroyIcon(hicon);
             bmp.ok()
@@ -679,5 +689,37 @@ impl Gfx {
             let _ = DestroyIcon(hicon);
             bmp.ok()
         }
+    }
+}
+
+/// 앱 아이콘(검은 폴더, 흰 번개, 흰 테두리)을 한 색으로 칠할 모양으로: 불투명하고 어두운 곳만 남긴다.
+/// 미리 곱한 BGRA를 받아, 모양 = 알파 × (1 - 밝기)를 네 채널 모두에 넣는다 (FillOpacityMask는 알파만 본다).
+/// 알파만 쓰면 흰 번개와 흰 테두리까지 같은 색 덩어리가 되어 작은 크기에서 번져 보인다
+fn app_icon_mask(px: &mut [u8]) {
+    for c in px.as_chunks_mut::<4>().0 {
+        // 미리 곱한 값이라 밝기도 알파가 곱해진 값이다 (0..=a)
+        let lum = 0.0722 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.2126 * c[2] as f32;
+        let m = (c[3] as f32 - lum).clamp(0.0, 255.0).round() as u8;
+        *c = [m, m, m, m];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 검은 폴더는 남고, 흰 번개·테두리와 빈 곳은 빠지고, 반투명한 가장자리는 그만큼만 남는다
+    #[test]
+    fn app_icon_keeps_only_the_dark_shape() {
+        let mut px = vec![
+            0, 0, 0, 255, // 검정
+            255, 255, 255, 255, // 흰 번개
+            0, 0, 0, 0, // 빈 곳
+            0, 0, 0, 128, // 반투명 검정 (가장자리)
+            128, 128, 128, 255, // 회색 (검정과 흰색 사이)
+        ];
+        app_icon_mask(&mut px);
+        let alpha: Vec<u8> = px.chunks(4).map(|c| c[3]).collect();
+        assert_eq!(alpha, [255, 0, 0, 128, 127]);
     }
 }

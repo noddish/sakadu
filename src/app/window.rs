@@ -112,11 +112,8 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
-        for w in self.watches.iter_mut() {
-            if let Some((id, _)) = w.take() {
-                shell::unwatch(id);
-            }
-        }
+        self.watches = Default::default();
+        shell::stop_watches();
         unsafe {
             let _ = RevokeDragDrop(self.hwnd);
             let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_SEARCH);

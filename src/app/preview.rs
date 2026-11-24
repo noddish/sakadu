@@ -4,7 +4,8 @@
 //! 처리기가 없으면 큰 아이콘과 정보.
 //! 머리의 핀으로 파일을 고정하면 선택을 바꿔도 그 파일을 계속 보여 준다. 고정한 파일은 파일 번호로 기억해,
 //! 이름이 바뀌거나 옮겨지면 새 경로를 따라가고 지워지면 고정을 푼다 (확인은 뒤에서).
-//! 미리 보기 처리기는 다른 프로세스에서 돌고 호출 중에 메시지를 돌리므로 App 빌림 밖(execute)에서만 다룬다.
+//! 미리 보기 처리기는 다른 프로세스(prevhost)에서 돈다. 열기·크기 맞추기·닫기는 따로 도는 일꾼 스레드가 해서,
+//! 큰 엑셀·PDF를 처리기가 오래 읽어도 창은 멈추지 않는다. 처리기가 다 그리기 전까지는 '불러오는 중…'을 보인다.
 
 use super::*;
 use crate::thumbs::Request;
@@ -85,15 +86,31 @@ pub(super) struct Preview {
     seq: u64,
     scroll: f32,
     layout: Option<(f32, IDWriteTextLayout)>,
-    /// 처리기 창(호스트)을 둔 자리(클라이언트 픽셀). 숨겼으면 None
+    /// 처리기 창(호스트)을 둔 자리(클라이언트 픽셀). 처리기를 쓰지 않으면 None
     host_rect: Option<RECT>,
+    /// 처리기가 다 열려 그렸다. 그 전에는 호스트 창을 숨기고 '불러오는 중…'을 보인다
+    handler_ready: bool,
+    /// 호스트 창을 보이고 있다
+    host_shown: bool,
     /// 지금 대상을 읽기 시작한 때 ('불러오는 중…'은 0.3초가 지나야 보인다)
     since: std::time::Instant,
 }
 
 impl Preview {
     pub(super) fn new() -> Preview {
-        Preview { target: None, pin: None, dims: None, content: Content::Waiting, seq: next_seq(), scroll: 0.0, layout: None, host_rect: None, since: std::time::Instant::now() }
+        Preview {
+            target: None,
+            pin: None,
+            dims: None,
+            content: Content::Waiting,
+            seq: next_seq(),
+            scroll: 0.0,
+            layout: None,
+            host_rect: None,
+            handler_ready: false,
+            host_shown: false,
+            since: std::time::Instant::now(),
+        }
     }
 }
 
@@ -107,6 +124,9 @@ pub enum PreviewMsg {
     Zone { seq: u64, clsid: GUID, internet: bool },
     /// 고정한 파일의 지금 자리. 찾지 못했으면(지워짐·휴지통) None
     Pin { round: u64, found: Option<Found> },
+    /// 미리 보기 처리기가 열려 그렸다 / 열지 못했다 (일꾼 스레드에서)
+    HandlerReady { seq: u64 },
+    HandlerFailed { seq: u64 },
 }
 
 pub struct Found {
@@ -394,19 +414,25 @@ impl App {
             _ => None,
         };
         let Some(pv) = self.preview.as_mut() else { return };
-        if want != pv.host_rect {
+        let show = want.is_some() && pv.handler_ready;
+        if want != pv.host_rect || show != pv.host_shown {
+            let moved = want != pv.host_rect;
             pv.host_rect = want;
+            pv.host_shown = show;
             unsafe {
                 match want {
                     Some(r) => {
-                        let _ = SetWindowPos(self.preview_host, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                        let vis = if show { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
+                        let _ = SetWindowPos(self.preview_host, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE | vis);
                     }
                     None => {
                         let _ = ShowWindow(self.preview_host, SW_HIDE);
                     }
                 }
             }
-            self.pending.push(Deferred::PreviewSync);
+            if moved || !same {
+                self.pending.push(Deferred::PreviewSync);
+            }
         } else if !same {
             self.pending.push(Deferred::PreviewSync);
         }
@@ -468,7 +494,10 @@ impl App {
             PreviewMsg::Zone { seq, clsid, internet } if seq == pv.seq => {
                 crate::diag::log(|| format!("preview: mark of the web = {internet}"));
                 pv.content = if internet { Content::Blocked } else { Content::Handler(clsid) };
+                pv.handler_ready = false;
             }
+            PreviewMsg::HandlerReady { seq } if seq == pv.seq => pv.handler_ready = true,
+            PreviewMsg::HandlerFailed { seq } => return self.handler_failed(seq),
             PreviewMsg::Pin { round, found } => return self.on_pin_checked(round, found),
             _ => return,
         }
@@ -682,7 +711,8 @@ impl App {
             seq: pv.seq,
             path: t.path.clone(),
             clsid: *clsid,
-            host: self.preview_host,
+            host: shell::SendHwnd(self.preview_host),
+            owner: shell::SendHwnd(self.hwnd),
             rect: RECT { left: 0, top: 0, right: r.right - r.left, bottom: r.bottom - r.top },
             bg: colorref(self.theme.pane),
             fg: colorref(self.theme.text),
@@ -772,7 +802,17 @@ impl App {
             false
         };
         match &pv.content {
-            Content::Waiting | Content::Handler(_) => {}
+            Content::Waiting => {}
+            Content::Handler(_) if pv.handler_ready => {}
+            Content::Handler(_) => {
+                // 큰 엑셀·PDF는 처리기가 오래 읽는다: 창은 그대로 쓸 수 있고, 다 그리면 처리기 창이 덮는다
+                let waited = pv.since.elapsed().as_millis();
+                if waited >= 300 {
+                    gfx.text("불러오는 중…", body, Font::Hint, t.faint);
+                } else {
+                    unsafe { SetTimer(Some(hwnd), TIMER_REDRAW, (300 - waited) as u32, None) };
+                }
+            }
             Content::Image => {
                 let px = image_px(body.w().max(body.h()), scale);
                 if !image(gfx, body, px) {
@@ -826,84 +866,126 @@ pub(super) fn thumb_key(path: &str, modified: u64, px: u32) -> String {
 
 // ---------- 미리 보기 처리기 (App 빌림 밖에서) ----------
 
+#[derive(Clone)]
 struct Wanted {
     seq: u64,
     path: String,
     clsid: GUID,
-    host: HWND,
+    /// 처리기가 그려 넣을 창과 결과를 알릴 창
+    host: shell::SendHwnd,
+    owner: shell::SendHwnd,
     rect: RECT,
     bg: COLORREF,
     fg: COLORREF,
 }
 
-struct Loaded {
-    seq: u64,
-    handler: IPreviewHandler,
-    rect: RECT,
+/// 처리기 일꾼에게 보내는 일
+enum HandlerCmd {
+    /// 이 파일의 처리기를 연다 (열려 있던 것은 닫는다)
+    Show(Wanted),
+    /// 열려 있는 처리기(순번)의 크기를 맞춘다
+    Resize(u64, RECT),
+    Unload,
+    /// 앱을 닫는다: 처리기를 닫고 알린 뒤 끝낸다
+    Quit(std::sync::mpsc::Sender<()>),
 }
 
 thread_local! {
-    static LOADED: RefCell<Option<Loaded>> = const { RefCell::new(None) };
-    /// 처리기를 여는 동안(다른 프로세스 호출 중 메시지가 돈다) 다시 들어온 요청은 끝난 뒤 한 번 더 맞춘다
-    static BUSY: Cell<bool> = const { Cell::new(false) };
-    static AGAIN: Cell<bool> = const { Cell::new(false) };
+    /// 일꾼에게 마지막으로 보낸 상태 (순번, 자리). 같은 일을 다시 보내지 않는다
+    static SENT: Cell<Option<(u64, RECT)>> = const { Cell::new(None) };
+    static WORKER: RefCell<Option<std::sync::mpsc::Sender<HandlerCmd>>> = const { RefCell::new(None) };
 }
 
-/// 띄워 둔 처리기를 App이 원하는 상태(없음 / 다른 파일 / 크기 변경)에 맞춘다
+fn send_handler(cmd: HandlerCmd) {
+    WORKER.with(|w| {
+        let mut w = w.borrow_mut();
+        let tx = w.get_or_insert_with(|| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || handler_worker(rx));
+            tx
+        });
+        let _ = tx.send(cmd);
+    });
+}
+
+/// 띄워 둔 처리기를 App이 원하는 상태(없음 / 다른 파일 / 크기 변경)에 맞추도록 일꾼에게 맡긴다 (창은 기다리지 않는다)
 pub(super) fn sync_handler() {
-    if BUSY.get() {
-        AGAIN.set(true);
+    let want = with_app(|a| a.handler_wanted()).flatten();
+    let sent = SENT.get();
+    let cmd = match (&want, sent) {
+        (Some(w), Some((seq, rect))) if w.seq == seq => (w.rect != rect).then_some(HandlerCmd::Resize(seq, w.rect)),
+        (Some(w), _) => Some(HandlerCmd::Show(w.clone())),
+        (None, Some(_)) => Some(HandlerCmd::Unload),
+        (None, None) => None,
+    };
+    SENT.set(want.map(|w| (w.seq, w.rect)));
+    if let Some(cmd) = cmd {
+        send_handler(cmd);
+    }
+}
+
+/// 창을 닫을 때: 처리기를 닫고 잠깐(최대 2초) 기다린다. 큰 파일을 읽는 중이라 늦으면 기다리지 않고 닫는다
+pub fn unload_handler() {
+    SENT.set(None);
+    if WORKER.with(|w| w.borrow().is_none()) {
         return;
     }
-    BUSY.set(true);
-    loop {
-        AGAIN.set(false);
-        let want = with_app(|a| a.handler_wanted()).flatten();
-        let cur = LOADED.with(|l| l.borrow().as_ref().map(|l| (l.seq, l.rect)));
-        match (&want, cur) {
-            (Some(w), Some((seq, rect))) if w.seq == seq => {
-                if w.rect != rect {
-                    LOADED.with(|l| {
-                        if let Some(l) = l.borrow_mut().as_mut() {
-                            l.rect = w.rect;
-                            unsafe {
-                                let _ = l.handler.SetRect(&w.rect);
-                            }
-                        }
-                    });
-                }
+    let (ack, done) = std::sync::mpsc::channel();
+    send_handler(HandlerCmd::Quit(ack));
+    WORKER.with(|w| *w.borrow_mut() = None);
+    let _ = done.recv_timeout(std::time::Duration::from_secs(2));
+}
+
+/// 처리기 일꾼: 밀린 일은 마지막 열기(또는 닫기)부터만 한다 (파일을 빠르게 옮겨 다니면 지나간 파일은 열지 않는다)
+fn handler_worker(rx: std::sync::mpsc::Receiver<HandlerCmd>) {
+    let _com = shell::ComInit::sta();
+    let mut loaded: Option<(u64, IPreviewHandler)> = None;
+    let unload = |loaded: &mut Option<(u64, IPreviewHandler)>| {
+        if let Some((_, h)) = loaded.take() {
+            unsafe {
+                let _ = h.Unload();
             }
-            _ => {
-                unload_handler();
-                if let Some(w) = want {
+        }
+    };
+    while let Ok(first) = rx.recv() {
+        let mut cmds: Vec<HandlerCmd> = std::iter::once(first).chain(rx.try_iter()).collect();
+        let start = cmds.iter().rposition(|c| !matches!(c, HandlerCmd::Resize(..))).unwrap_or(0);
+        for cmd in cmds.drain(start..) {
+            match cmd {
+                HandlerCmd::Show(w) => {
+                    unload(&mut loaded);
                     let t = std::time::Instant::now();
-                    match unsafe { open_handler(&w) } {
-                        Ok(handler) => {
+                    crate::diag::log(|| format!("preview handler: opening seq {}", w.seq));
+                    let msg = match unsafe { open_handler(&w) } {
+                        Ok(h) => {
                             crate::diag::log(|| format!("preview handler: opened in {:?}", t.elapsed()));
-                            LOADED.with(|l| *l.borrow_mut() = Some(Loaded { seq: w.seq, handler, rect: w.rect }));
+                            loaded = Some((w.seq, h));
+                            PreviewMsg::HandlerReady { seq: w.seq }
                         }
                         Err(e) => {
                             crate::diag::log(|| format!("preview handler: failed {e:?}"));
-                            with_app(|a| a.handler_failed(w.seq));
+                            PreviewMsg::HandlerFailed { seq: w.seq }
+                        }
+                    };
+                    shell::post_box(w.owner.get(), WM_APP_PREVIEW, Box::new(msg));
+                }
+                HandlerCmd::Resize(seq, rect) => {
+                    if let Some((_, h)) = loaded.as_ref().filter(|(s, _)| *s == seq) {
+                        unsafe {
+                            let _ = h.SetRect(&rect);
                         }
                     }
                 }
+                HandlerCmd::Unload => unload(&mut loaded),
+                HandlerCmd::Quit(ack) => {
+                    unload(&mut loaded);
+                    let _ = ack.send(());
+                    return;
+                }
             }
         }
-        if !AGAIN.get() {
-            break;
-        }
     }
-    BUSY.set(false);
-}
-
-/// 창을 닫을 때와 다른 파일로 바뀔 때
-pub fn unload_handler() {
-    if let Some(old) = LOADED.with(|l| l.borrow_mut().take()) {
-        unsafe {
-            let _ = old.handler.Unload();
-        }
-    }
+    unload(&mut loaded);
 }
 
 unsafe fn open_handler(w: &Wanted) -> windows::core::Result<IPreviewHandler> {
@@ -925,7 +1007,7 @@ unsafe fn open_handler(w: &Wanted) -> windows::core::Result<IPreviewHandler> {
             let _ = v.SetBackgroundColor(w.bg);
             let _ = v.SetTextColor(w.fg);
         }
-        h.SetWindow(w.host, &w.rect)?;
+        h.SetWindow(w.host.get(), &w.rect)?;
         h.DoPreview()?;
         Ok(h)
     }

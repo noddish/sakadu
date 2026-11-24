@@ -39,6 +39,7 @@ impl App {
     }
 
     pub(super) fn on_listed(&mut self, l: Listed) {
+        let _stage = crate::stall::stage("목록 반영");
         let Some((p, t)) = self.find_tab(l.tab) else { return };
         let (sort, hidden) = (self.panes[p].sort, self.show_hidden);
         let is_active = t == self.panes[p].active;
@@ -194,9 +195,10 @@ impl App {
     }
 
     pub(super) fn sync_watches(&mut self) {
-        for p in 0..4 {
-            // 다 읽은 폴더만 감시한다. 읽는 중이거나 열지 못한 폴더(꺼진 NAS)는 등록하는 동안 네트워크를 기다리며 창이 멈출 수 있다
-            let want = (p < self.layout.count())
+        // 다 읽은 폴더만 감시한다. 읽는 중이거나 열지 못한 폴더(꺼진 NAS)는 등록이 네트워크를 오래 기다릴 수 있다.
+        // 등록·해제는 따로 도는 일꾼이 하므로 창은 기다리지 않는다
+        let want: [Option<String>; 4] = std::array::from_fn(|p| {
+            (p < self.layout.count())
                 .then(|| {
                     let tab = self.panes[p].tab();
                     tab.loc
@@ -204,20 +206,13 @@ impl App {
                         .filter(|d| matches!(tab.state, LoadState::Ready) || (matches!(tab.state, LoadState::Loading) && is_local_path(d)))
                         .map(String::from)
                 })
-                .flatten();
-            if want.as_deref() == self.watches[p].as_ref().map(|(_, d)| d.as_str()) {
-                continue;
-            }
-            if let Some((id, _)) = self.watches[p].take() {
-                if id != 0 {
-                    shell::unwatch(id);
-                }
-            }
-            if let Some(d) = want {
-                // 등록에 실패해도(id 0) 기억해 두어, 같은 폴더를 다른 칸·탭을 오갈 때마다 다시 시도하지 않는다 (F5면 다시)
-                let id = shell::watch(self.hwnd, &d, WM_APP_NOTIFY + p as u32);
-                self.watches[p] = Some((id, d));
-            }
+                .flatten()
+        });
+        let retry = std::mem::take(&mut self.watch_retry);
+        if want == self.watches && !retry.contains(&true) {
+            return;
         }
+        self.watches = want.clone();
+        shell::set_watches(self.hwnd, WM_APP_NOTIFY, want, retry);
     }
 }

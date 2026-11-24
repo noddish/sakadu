@@ -1,6 +1,7 @@
 //! 작업 공간: 왼쪽 레일의 공간 아이콘으로 바꾸고, 새로 만들고, 이름과 색을 바꾸고, 지운다.
 //! 바꿀 때 지금 작업 공간은 그 순간의 화면으로 저장해 두고(save_session도 늘 지금 작업 공간을 함께 저장한다),
 //! 고른 작업 공간의 칸 나누기·칸·탭, 사이드 패널, 미리 보기와 고정한 파일, 검색어를 되살린다. 강조 색도 그 공간의 색으로 바뀐다.
+//! 떠나는 공간의 칸·탭(읽어 둔 목록, 선택, 스크롤)은 메모리에 두었다가, 돌아오면 바로 보여 주고 뒤에서 새로 읽는다.
 //! 레일의 자리와 그리기는 sidebar.rs, 고정한 것의 동작은 fav_ui.rs, 저장 형식은 workspaces.rs
 
 use super::*;
@@ -14,7 +15,7 @@ impl App {
             return;
         }
         if let Some(state) = self.workspaces.current.and_then(|c| self.workspaces.list.get(c)).map(|w| w.state.clone()) {
-            self.apply_screen(&state);
+            self.apply_screen(&state, None);
         }
     }
 
@@ -188,12 +189,18 @@ impl App {
         if self.workspaces.current == Some(i) || i >= self.workspaces.list.len() {
             return;
         }
+        let _stage = crate::stall::stage("작업 공간 바꾸기");
         self.save_workspaces();
+        let leaving = self.workspaces.current;
         self.workspaces.current = Some(i);
         self.reset_side_scroll();
         self.apply_space_color();
         let state = self.workspaces.list[i].state.clone();
-        self.apply_screen(&state);
+        let kept = self.ws_panes.remove(&i);
+        let left = self.apply_screen(&state, kept);
+        if let Some(o) = leaving {
+            self.ws_panes.insert(o, left);
+        }
         self.save_workspaces();
         self.save_session();
     }
@@ -208,10 +215,12 @@ impl App {
             self.save_workspaces();
         }
         if self.workspaces.remove(i) {
+            // 공간 번호가 당겨지므로 메모리에 둔 칸·탭은 모두 버린다 (다음에 열 때 저장한 상태로 연다)
+            self.ws_panes.clear();
             self.reset_side_scroll();
             self.apply_space_color();
             if let Some(state) = self.workspaces.current().map(|w| w.state.clone()) {
-                self.apply_screen(&state);
+                self.apply_screen(&state, None);
             }
         }
         self.side_clamp_scroll();
@@ -232,8 +241,10 @@ impl App {
     }
 
     /// 저장해 둔 화면으로 바꾼다: 칸 나누기·칸·탭, 사이드 패널(너비 포함), 미리 보기와 고정한 파일, 검색어·범위.
-    /// 창 위치·숨김 항목·화면 설정·최근 위치는 작업 공간과 상관없어 그대로 둔다
-    fn apply_screen(&mut self, s: &session::Session) {
+    /// 창 위치·숨김 항목·화면 설정·최근 위치는 작업 공간과 상관없어 그대로 둔다.
+    /// kept는 이 공간을 떠날 때 메모리에 둔 칸·탭: 있으면 그 목록·선택·스크롤을 바로 보이고 뒤에서 새로 읽는다.
+    /// 바꾸기 전의 칸·탭을 돌려준다 (떠나는 공간에 두도록)
+    fn apply_screen(&mut self, s: &session::Session, kept: Option<Vec<Pane>>) -> Vec<Pane> {
         if self.edit_mode != EditMode::None {
             self.cancel_edit();
         }
@@ -245,8 +256,18 @@ impl App {
         self.close_peek();
         self.drag = Drag::None;
         self.start_keys = false;
+        let left: Vec<Pane> = self
+            .panes
+            .iter_mut()
+            .map(|p| Pane { tabs: std::mem::take(&mut p.tabs), active: p.active, sort: p.sort, cols: p.cols, view: p.view })
+            .collect();
+        let kept = kept.filter(|k| k.len() == self.panes.len() && k.iter().all(|p| !p.tabs.is_empty()));
+        let restored = kept.is_some();
+        if let Some(k) = kept {
+            self.panes = k;
+        }
         // 칸·탭 (App::new와 같은 규칙: 저장된 칸이 없으면 기본 위치)
-        for (i, default) in default_locations().into_iter().enumerate() {
+        for (i, default) in default_locations().into_iter().enumerate().filter(|_| !restored) {
             let ps = s.panes.get(i);
             let locs: Vec<Location> = ps.map(|p| p.tabs.iter().map(|t| Location::from_session(t)).collect()).unwrap_or_else(|| vec![default]);
             let mut tabs: Vec<Tab> = locs.into_iter().map(|loc| Tab::new(self.next_tab_id(), loc)).collect();
@@ -285,7 +306,7 @@ impl App {
         }
         self.preview_restore_pin(s.pin.as_deref(), s.pin_id);
         for p in 0..self.layout.count() {
-            self.load(p, false);
+            self.load(p, restored);
         }
         self.sync_watches();
         let filter = self.panes[self.active].tab().filter.clone();
@@ -298,6 +319,7 @@ impl App {
         self.refresh_hover();
         self.focus();
         self.invalidate();
+        left
     }
 }
 

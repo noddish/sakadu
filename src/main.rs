@@ -10,6 +10,7 @@ mod popup;
 mod acl;
 mod service;
 mod shell;
+mod stall;
 mod theme;
 mod thumbs;
 mod tray;
@@ -99,6 +100,7 @@ pub fn run_deferred(hwnd: HWND) {
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    stall::message(msg);
     unsafe {
         if let Some(r) = shell::forward_menu_msg(msg, wp, lp) {
             return r;
@@ -715,6 +717,7 @@ fn main() -> Result<()> {
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         let app = app::App::new(hwnd, sess)?;
         APP.with(|c| *c.borrow_mut() = Some(Box::new(app)));
+        stall::watch(hwnd);
         if background {
             FIRST_SHOW.set(Some(if maximized { SW_SHOWMAXIMIZED } else { SW_SHOWNORMAL }));
         } else {

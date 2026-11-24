@@ -353,6 +353,13 @@ impl Tab {
         self.anchor = vi;
     }
 
+    /// 커서 항목을 고르거나 푼다 (Ctrl+Space)
+    pub fn toggle_cursor(&mut self) {
+        if self.cursor < self.view.len() {
+            self.toggle(self.cursor);
+        }
+    }
+
     pub fn select_range(&mut self, to: usize, additive: bool) {
         if !additive {
             self.clear_selection();
@@ -569,6 +576,22 @@ mod tests {
 
     fn names(t: &Tab) -> Vec<String> {
         t.view.iter().map(|&i| t.entries[i as usize].name_string()).collect()
+    }
+
+    /// Ctrl+화살표는 커서만 옮기고, Ctrl+Space가 커서 항목을 고르거나 풀어 여러 개를 모은다 (그 뒤 지우기·복사가 이 목록을 쓴다)
+    #[test]
+    fn ctrl_arrows_and_ctrl_space_collect_a_selection() {
+        let mut t = tab_with(&[("a.txt", Kind::File), ("b.txt", Kind::File), ("c.txt", Kind::File), ("d.txt", Kind::File)]);
+        t.move_cursor(0, false, false);
+        t.move_cursor(2, false, true);
+        let names = |t: &Tab| t.marked_paths().iter().map(|p| util::file_name(p).to_string()).collect::<Vec<_>>();
+        assert_eq!(names(&t), ["a.txt"], "Ctrl+arrow moves the cursor only");
+        t.toggle_cursor();
+        t.move_cursor(3, false, true);
+        t.toggle_cursor();
+        assert_eq!(names(&t), ["a.txt", "c.txt", "d.txt"]);
+        t.toggle_cursor();
+        assert_eq!(names(&t), ["a.txt", "c.txt"], "Ctrl+Space again unselects");
     }
 
     #[test]

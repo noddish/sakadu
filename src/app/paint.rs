@@ -7,6 +7,7 @@ impl App {
     // ---------- 그리기 ----------
 
     pub(super) fn paint(&mut self) {
+        let _stage = crate::stall::stage("그리기");
         // 목록이 마우스 아래에서 밀리면(휠·키보드 스크롤, 새로 고침) 강조된 줄이 엉뚱한 곳에 남지 않게 지금 자리로 맞춘다
         if matches!(self.drag, Drag::None) && matches!(self.hover, Hit::Row(..)) {
             let mut pt = POINT::default();

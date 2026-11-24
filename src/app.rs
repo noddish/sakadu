@@ -370,7 +370,9 @@ pub struct App {
     rename: Option<RenameCtx>,
     edit_font: HFONT,
     pub pending: Vec<Deferred>,
-    watches: [Option<(u32, String)>; 4],
+    watches: [Option<String>; 4],
+    /// F5로 감시 등록을 다시 시도할 칸 (지난번에 실패했으면)
+    watch_retry: [bool; 4],
     drop_hover: Option<(usize, Option<usize>)>,
     next_id: u64,
     types: HashMap<String, (String, i32)>,
@@ -469,6 +471,11 @@ pub struct App {
     tray: Option<crate::tray::TrayIcon>,
     /// 창을 숨긴 동안 폴더가 바뀐 패널. 다시 보일 때 한 번만 읽는다
     stale: [bool; 4],
+    /// 떠난 작업 공간(번호)의 칸·탭. 돌아오면 읽어 둔 목록을 바로 보인다 (앱을 닫으면 사라진다)
+    ws_panes: HashMap<usize, Vec<Pane>>,
+    /// 폴더 변경 알림으로 다시 읽기를 걸어 둔 칸, 마지막으로 알림 때문에 다시 읽은 때 (첫 알림은 바로, 이어지는 알림은 묶는다)
+    notify_pending: [bool; 4],
+    notify_read: [Option<std::time::Instant>; 4],
     /// 네모 상자로 고르기 시작할 때의 선택 (보이는 순서)
     marquee_base: Vec<bool>,
     /// 새 탭을 열 위치 (세션 형식, session::NEW_TAB_SAME이면 지금 탭과 같은 폴더)
@@ -702,6 +709,15 @@ fn ext_of_name(name: &str) -> String {
     }
 }
 
+/// 폴더 변경 알림 뒤 다시 읽기까지 기다릴 ms. 한동안 조용했으면 거의 바로(같은 순간의 알림만 묶는다),
+/// 방금 읽었으면(복사 중처럼 알림이 이어지면) 조금 모아서
+fn notify_delay(since_last_read: Option<std::time::Duration>) -> u32 {
+    match since_last_read {
+        Some(d) if d.as_millis() < 300 => 250,
+        _ => 30,
+    }
+}
+
 /// 이름 상자에 넣지 않는 문자
 fn blocked_name_char(c: char) -> bool {
     matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
@@ -891,6 +907,7 @@ impl App {
             edit_font: HFONT::default(),
             pending: Vec::new(),
             watches: Default::default(),
+            watch_retry: [false; 4],
             drop_hover: None,
             next_id,
             types: HashMap::new(),
@@ -947,6 +964,9 @@ impl App {
             preview_host,
             tray: None,
             stale: [false; 4],
+            ws_panes: HashMap::new(),
+            notify_pending: [false; 4],
+            notify_read: [None; 4],
             marquee_base: Vec::new(),
             new_tab_home: sess.as_ref().map_or_else(|| session::NEW_TAB_START.to_string(), |s| s.new_tab.clone()),
             recent: sess.as_ref().map(|s| s.recent.clone()).unwrap_or_default(),

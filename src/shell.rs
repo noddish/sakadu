@@ -142,7 +142,7 @@ pub struct Picked {
 pub struct ShellMenu {
     cm: IContextMenu,
     menu: HMENU,
-    /// 사카두 모양으로 띄울 줄과 그 아이콘 (만들 때 탐색기 메뉴에서 읽는다)
+    /// 사카두 모양으로 띄울 줄과 그 아이콘. 띄울 메뉴만 읽는다 (read_lines): 복사·속성처럼 동사만 실행할 때는 읽지 않는다
     entries: Vec<crate::popup::Entry>,
     icons: Vec<crate::popup::Icon>,
 }
@@ -166,18 +166,26 @@ impl ShellMenu {
             if !custom.is_empty() {
                 let _ = InsertMenuW(menu, custom.len() as u32, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null());
             }
-            // 사카두 모양으로 띄울 줄을 지금 읽는다 (오른쪽 단추를 누를 때 미리 만들므로, 뗄 때 바로 뜬다).
-            // 맨 아래에는 Windows 메뉴를 그대로 띄우는 줄: 어떤 프로그램의 줄이 사카두 모양으로 다 나오지 않아도 쓸 수 있게
-            let mut icons = Vec::new();
-            let mut entries = read_menu(&cm, menu, 0, &mut icons);
-            entries.push(crate::popup::Entry::Sep);
-            entries.push(crate::popup::Entry::item(MENU_NATIVE, "Windows 메뉴로 보기"));
-            Ok(ShellMenu { cm, menu, entries, icons })
+            Ok(ShellMenu { cm, menu, entries: Vec::new(), icons: Vec::new() })
         }
     }
 
+    /// 사카두 모양으로 띄울 줄을 읽는다 (하위 메뉴를 채우느라 셸 확장을 부르므로, 띄울 메뉴만: 오른쪽 단추를 누를 때 미리).
+    /// 맨 아래에는 Windows 메뉴를 그대로 띄우는 줄: 어떤 프로그램의 줄이 사카두 모양으로 다 나오지 않아도 쓸 수 있게
+    pub fn read_lines(&mut self) {
+        if !self.entries.is_empty() {
+            return;
+        }
+        self.icons.clear();
+        let mut entries = read_menu(&self.cm, self.menu, 0, &mut self.icons);
+        entries.push(crate::popup::Entry::Sep);
+        entries.push(crate::popup::Entry::item(MENU_NATIVE, "Windows 메뉴로 보기"));
+        self.entries = entries;
+    }
+
     /// 사카두 모양으로 띄운다. 'Windows 메뉴로 보기'를 고르면 같은 자리에 Windows 메뉴를 띄운다
-    pub fn track(&self, hwnd: HWND, pt: POINT) -> Option<Picked> {
+    pub fn track(&mut self, hwnd: HWND, pt: POINT) -> Option<Picked> {
+        self.read_lines();
         let mut cmd = crate::popup::show_with_icons(hwnd, pt, &self.entries, false, &self.icons);
         if cmd == MENU_NATIVE {
             ACTIVE_MENU.with(|m| *m.borrow_mut() = Some(self.cm.clone()));
@@ -383,15 +391,18 @@ pub fn warm_up_menus() {
         }
         for _ in 0..2 {
             for p in &items {
-                if let Ok(cm) = ui_object::<IContextMenu>(HWND::default(), std::slice::from_ref(p)) {
-                    let _ = ShellMenu::new(cm, false, &[]);
+                if let Ok(cm) = ui_object::<IContextMenu>(HWND::default(), std::slice::from_ref(p))
+                    && let Ok(mut m) = ShellMenu::new(cm, false, &[])
+                {
+                    m.read_lines();
                 }
             }
         }
-        if let Some(parent) = items.first().and_then(|d| util::parent(d)) {
-            if let Ok(cm) = background_menu(HWND::default(), &parent) {
-                let _ = ShellMenu::new(cm, false, &[]);
-            }
+        if let Some(parent) = items.first().and_then(|d| util::parent(d))
+            && let Ok(cm) = background_menu(HWND::default(), &parent)
+            && let Ok(mut m) = ShellMenu::new(cm, false, &[])
+        {
+            m.read_lines();
         }
         crate::diag::log(|| format!("menu: warm-up done in {:?}", t.elapsed()));
     });
@@ -592,6 +603,8 @@ pub struct OpReport {
     pub undone: Option<Undone>,
     /// 잘라내기 붙여넣기 뒤처리
     pub cut: Option<CutLeft>,
+    /// 내용이 바뀌었을 폴더들 (원래 자리와 놓은 자리). 창은 이 폴더를 보이는 칸을 바로 다시 읽는다
+    pub dirs: Vec<String>,
     /// 창이 이 알림을 처리할 때까지 작업 중으로 센다. 그 전에 끝나면 되돌리기 기록·잘라내기 뒤처리를 잃는다
     _running: Option<RunningOp>,
 }
@@ -650,10 +663,34 @@ fn spawn_op(hwnd: HWND, op: FileOp, cut: Option<(u32, Vec<String>, u64)>) {
                 Vec::new()
             }),
         };
+        report.dirs = op_dirs(&op, &done);
         report.undo = Undo::from_done(&done, crate::undo::stamp);
         report.cut = cut.map(|(seq, clip, id)| CutLeft { seq, left: crate::undo::not_moved(&clip, &done), clip, id });
         post_box(owner.get(), crate::WM_APP_FILEOP, Box::new(report));
     });
+}
+
+/// 작업으로 내용이 바뀌었을 폴더들: 고른 항목의 폴더, 놓은 폴더, 셸이 알려 온 결과의 폴더 (겹치면 하나만)
+fn op_dirs(op: &FileOp, done: &[Done]) -> Vec<String> {
+    let mut paths: Vec<String> = match op {
+        FileOp::Delete { paths, .. } => paths.iter().filter_map(|p| util::parent(p)).collect(),
+        FileOp::Copy { paths, dest } | FileOp::Move { paths, dest } => paths.iter().filter_map(|p| util::parent(p)).chain([dest.clone()]).collect(),
+        FileOp::Rename { path, .. } => util::parent(path).into_iter().collect(),
+        FileOp::Undo(u) => u.dirs(),
+    };
+    for d in done {
+        paths.extend(util::parent(d.source()));
+        if let Done::Renamed { to, .. } | Done::Moved { to, .. } = d {
+            paths.extend(util::parent(to));
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for p in paths {
+        if !out.iter().any(|o| util::eq_path(o, &p)) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// 기록을 반대로 실행한다. 작업 직후와 달라진 항목은 건드리지 않고, 처리하지 못한 항목은 다시 시도할 수 있게 돌려준다
@@ -960,6 +997,27 @@ pub fn set_clipboard_files(hwnd: HWND, paths: &[String], cut: bool) -> Result<()
     set_clipboard(hwnd, vec![(CF_HDROP.0 as u32, hdrop_bytes(paths)), (effect, value.0.to_le_bytes().to_vec())])
 }
 
+/// 고른 파일을 탐색기와 같은 셸 데이터 객체로 클립보드에 올린다 (cut이면 잘라내기).
+/// 탐색기 메뉴를 만들지 않으므로 셸 확장을 부르지 않아 바로 끝난다. 앱을 닫아도 붙여넣을 수 있게 클립보드에 내용을 넘겨 둔다
+pub fn put_files_on_clipboard(hwnd: HWND, paths: &[String], cut: bool) -> Result<()> {
+    let obj: IDataObject = ui_object(hwnd, paths)?;
+    let effect = unsafe { RegisterClipboardFormatW(w!("Preferred DropEffect")) };
+    // 탐색기와 같은 값: 복사는 복사·바로 가기, 잘라내기는 옮기기
+    let value = if cut { DROPEFFECT_MOVE } else { DROPEFFECT_COPY | DROPEFFECT_LINK };
+    let fmt = FORMATETC { cfFormat: effect as u16, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 };
+    let h = global_bytes(&value.0.to_le_bytes())?;
+    let medium = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: h }, pUnkForRelease: std::mem::ManuallyDrop::new(None) };
+    unsafe {
+        // fRelease: 데이터 객체가 메모리를 맡는다 (실패하면 여기서 푼다)
+        if let Err(e) = obj.SetData(&fmt, &medium, true) {
+            let _ = GlobalFree(Some(h));
+            return Err(e);
+        }
+        OleSetClipboard(&obj)?;
+        OleFlushClipboard()
+    }
+}
+
 /// 클립보드 내용이 바뀔 때마다 늘어나는 번호
 pub fn clipboard_seq() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
@@ -1023,6 +1081,89 @@ pub fn unwatch(id: u32) {
     }
 }
 
+/// 칸 감시 일꾼에게 보내는 일
+enum WatchCmd {
+    /// 칸 p의 변경을 first_msg + p로 알린다. retry인 칸은 지난번 등록에 실패했으면 다시 시도한다 (F5)
+    Set { hwnd: SendHwnd, first_msg: u32, dirs: [Option<String>; 4], retry: [bool; 4] },
+    /// 모두 풀고 알린 뒤 끝낸다 (창을 닫을 때)
+    Stop(std::sync::mpsc::Sender<()>),
+}
+
+static WATCH_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<WatchCmd>>> = std::sync::Mutex::new(None);
+
+fn watch_send(cmd: WatchCmd) {
+    let Ok(mut tx) = WATCH_TX.lock() else { return };
+    let tx = tx.get_or_insert_with(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || watch_worker(rx));
+        tx
+    });
+    let _ = tx.send(cmd);
+}
+
+/// 칸마다 감시할 폴더(없으면 None)를 맞춘다. 등록·해제는 따로 도는 일꾼이 한다:
+/// 네트워크 폴더(꺼진 NAS, 잠든 스캐너 공유)에서는 오래 걸릴 수 있어 창이 기다리지 않게
+pub fn set_watches(hwnd: HWND, first_msg: u32, dirs: [Option<String>; 4], retry: [bool; 4]) {
+    watch_send(WatchCmd::Set { hwnd: SendHwnd(hwnd), first_msg, dirs, retry });
+}
+
+/// 감시를 모두 푼다 (창을 닫을 때). 일꾼이 등록하느라 늦으면 1초만 기다린다
+pub fn stop_watches() {
+    if WATCH_TX.lock().map(|t| t.is_none()).unwrap_or(true) {
+        return;
+    }
+    let (ack, done) = std::sync::mpsc::channel();
+    watch_send(WatchCmd::Stop(ack));
+    let _ = done.recv_timeout(std::time::Duration::from_secs(1));
+}
+
+/// 밀린 일은 마지막 것만 맞춘다 (칸을 빠르게 옮겨 다니면 지나간 폴더는 등록하지 않는다)
+fn watch_worker(rx: std::sync::mpsc::Receiver<WatchCmd>) {
+    let _com = ComInit::sta();
+    let mut regs: [Option<(u32, String)>; 4] = Default::default();
+    while let Ok(first) = rx.recv() {
+        let mut last = None;
+        let mut retry = [false; 4];
+        let mut stop = None;
+        for cmd in std::iter::once(first).chain(rx.try_iter()) {
+            match cmd {
+                WatchCmd::Set { hwnd, first_msg, dirs, retry: r } => {
+                    for (a, b) in retry.iter_mut().zip(r) {
+                        *a |= b;
+                    }
+                    last = Some((hwnd, first_msg, dirs));
+                }
+                WatchCmd::Stop(ack) => stop = Some(ack),
+            }
+        }
+        if let Some(ack) = stop {
+            for (id, _) in regs.iter_mut().filter_map(Option::take) {
+                unwatch(id);
+            }
+            let _ = ack.send(());
+            return;
+        }
+        let Some((hwnd, first_msg, dirs)) = last else { continue };
+        for p in 0..4 {
+            let same = dirs[p].as_deref() == regs[p].as_ref().map(|(_, d)| d.as_str());
+            let failed = regs[p].as_ref().is_some_and(|(id, _)| *id == 0);
+            if same && !(retry[p] && failed) {
+                continue;
+            }
+            if let Some((id, _)) = regs[p].take() {
+                unwatch(id);
+            }
+            if let Some(d) = &dirs[p] {
+                let t = std::time::Instant::now();
+                // 등록에 실패해도(id 0) 기억해 두어, 같은 폴더를 오갈 때마다 다시 시도하지 않는다 (F5면 다시)
+                let id = watch(hwnd.get(), d, first_msg + p as u32);
+                crate::diag::log(|| format!("watch: pane {p} id {id} in {:?}", t.elapsed()));
+                regs[p] = Some((id, d.clone()));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,7 +1183,9 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         let path = file.to_string_lossy().into_owned();
         let cm: IContextMenu = ui_object(HWND::default(), std::slice::from_ref(&path)).unwrap();
-        let menu = ShellMenu::new(cm, false, &[(MENU_CUSTOM + 1, "즐겨찾기에 추가")]).unwrap();
+        let mut menu = ShellMenu::new(cm, false, &[(MENU_CUSTOM + 1, "즐겨찾기에 추가")]).unwrap();
+        assert!(menu.entries.is_empty(), "lines are read only for menus that are shown");
+        menu.read_lines();
         let labels: Vec<&str> = menu
             .entries
             .iter()
@@ -1069,6 +1212,19 @@ mod tests {
         assert!(all.iter().all(|id| (MENU_FIRST..=MENU_LAST).contains(id) || *id >= MENU_CUSTOM), "{all:?}");
         drop(menu);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 작업이 끝나면 다시 읽을 폴더: 고른 항목의 폴더와 놓은 폴더, 셸이 알려 온 결과의 폴더. 대소문자만 다른 경로는 하나로
+    #[test]
+    fn file_ops_name_the_folders_they_changed() {
+        let s = |v: &[&str]| v.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let copy = FileOp::Copy { paths: s(&["C:\\a\\x.txt", "C:\\A\\y.txt"]), dest: "D:\\b".into() };
+        assert_eq!(op_dirs(&copy, &[]), ["C:\\a", "D:\\b"]);
+        let del = FileOp::Delete { paths: s(&["C:\\a\\x.txt"]), permanent: false };
+        assert_eq!(op_dirs(&del, &[Done::Recycled { from: "C:\\a\\x.txt".into(), item: "C:\\$Recycle.Bin\\S\\$R1.txt".into() }]), ["C:\\a"]);
+        let mv = FileOp::Move { paths: s(&["C:\\a\\x.txt"]), dest: "C:\\b".into() };
+        let done = [Done::Moved { from: "C:\\a\\x.txt".into(), to: "C:\\b\\x (2).txt".into() }];
+        assert_eq!(op_dirs(&mv, &done), ["C:\\a", "C:\\b"]);
     }
 
     /// 여러 폴더의 파일을 담은 CF_HDROP 내용을 셸이 그대로 읽는지 (클립보드는 건드리지 않는다)

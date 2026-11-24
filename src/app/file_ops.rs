@@ -113,6 +113,9 @@ impl App {
     }
 
     pub(super) fn on_file_op(&mut self, r: shell::OpReport) {
+        let _stage = crate::stall::stage("파일 작업 뒤처리");
+        // 바뀐 폴더를 보이는 칸은 셸 변경 알림을 기다리지 않고 바로 다시 읽는다 (선택·스크롤은 지킨다)
+        self.reload_dirs(&r.dirs);
         if let Some(u) = r.undo {
             // 옮기기·복사·휴지통: 무엇을 했는지와 되돌리기 단추를 알림으로 (Ctrl+Z와 같은 기록을 쓴다)
             let text = u.done_text();
@@ -134,6 +137,25 @@ impl App {
         self.refresh_places();
         // 고정한 미리 보기 파일의 이름이 바뀌었거나 옮겨졌거나 지워졌을 수 있다
         self.preview_pin_check();
+    }
+
+    /// dirs 가운데 하나를 보이는 칸을 다시 읽는다. 트레이에 숨어 있으면 다시 보일 때 읽는다
+    pub(super) fn reload_dirs(&mut self, dirs: &[String]) {
+        let visible = unsafe { IsWindowVisible(self.hwnd) }.as_bool();
+        for p in 0..self.layout.count() {
+            let shows = self.panes[p].tab().loc.dir().is_some_and(|d| dirs.iter().any(|x| util::eq_path(x, d)));
+            if !shows {
+                continue;
+            }
+            if visible {
+                self.load(p, true);
+            } else {
+                self.stale[p] = true;
+            }
+        }
+        if !dirs.is_empty() {
+            self.pal_requery();
+        }
     }
 
     /// 되돌리기가 일부만 됐으면 알리고, 실패한 항목은 기록으로 되돌려 놓아 다시 시도할 수 있게 한다
