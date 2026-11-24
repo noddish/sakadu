@@ -57,13 +57,15 @@ pub struct Theme {
     pub chip_text: Color,
     /// 키보드 포커스 테두리
     pub focus: Color,
+    /// 창 바탕 위의 단추판 (도구 막대 단추, 고르기 판, 레일의 +). 창 바탕과 같은 빛에서 한 단계 진하게(어두운 테마는 밝게)
+    pub control: Color,
 }
 
 impl Theme {
     pub const LIGHT: Theme = Theme {
         dark: false,
         high_contrast: false,
-        window: hex(0xF0F1F4),
+        window: hex(0xF8F9FA),
         pane: hex(0xFFFFFF),
         strip: hex(0xF4F5F7),
         field: hex(0xF0F2F5),
@@ -81,6 +83,7 @@ impl Theme {
         pane_border: hex(0xD5D8DD),
         chip_text: hex(0x2F6FEB),
         focus: hex(0x6A6F78),
+        control: hex(0xE0E1E4),
     };
 
     /// 라이트를 뒤집지 않고 어두운 바탕에서의 명암에 맞췄다: 활성 칸의 지금 탭은 밝은 회색, 선택은 어두운 파랑
@@ -105,6 +108,7 @@ impl Theme {
         pane_border: hex(0x34363C),
         chip_text: hex(0x5B9BFF),
         focus: hex(0xA3A8B2),
+        control: hex(0x262729),
     };
 
     /// 고대비 모드: 시스템 색으로만 만든다. 활성 칸의 지금 탭과 선택은 강조(Highlight), 포커스는 HotLight 색
@@ -132,6 +136,7 @@ impl Theme {
             pane_border: text,
             chip_text: text,
             focus: hot,
+            control: window,
         }
     }
 
@@ -167,8 +172,14 @@ impl Theme {
         }
         // 활성 칸의 지금 탭 칩 글자도 강조 색을 따르되, 옅은 강조 색 바탕 위에서 또렷하게
         t.chip_text = chip_text(t.accent, t.accent_soft, t.text);
-        // 창 바탕에 강조 색(작업 공간 색)이 아주 옅게 묻는다: 어느 공간인지 색으로도 알아본다
-        t.window = mix(t.window, t.accent, WINDOW_TINT);
+        // 창 바탕에 강조 색(작업 공간 색)이 아주 옅게 묻는다: 어느 공간인지 색으로도 알아본다.
+        // 회색들(올렸을 때, 입력 칸, 비활성 선택, 테두리, 스크롤 막대)에도 같은 양을 섞어 어느 공간에서든 한 벌의 회색으로 보이게 한다
+        let tint = if dark { WINDOW_TINT_DARK } else { WINDOW_TINT };
+        for c in [&mut t.window, &mut t.strip, &mut t.field, &mut t.hover, &mut t.sel_inactive, &mut t.border, &mut t.pane_border, &mut t.thumb] {
+            *c = mix(*c, t.accent, tint);
+        }
+        // 단추판: 창 바탕에서 글자 색 쪽으로 한 단계 (밝은 테마는 진하게, 어두운 테마는 밝게). 바탕과 같은 빛이라 떠 보이지 않는다
+        t.control = mix(t.window, t.text, if dark { CONTROL_DARK } else { CONTROL_LIGHT });
         t
     }
 }
@@ -185,8 +196,13 @@ pub fn apca(text: Color, bg: Color) -> f32 {
     if s.abs() < 0.1 { 0.0 } else { (s.abs() - 0.027) * 100.0 }
 }
 
-/// 창 바탕에 섞는 강조 색의 양
-const WINDOW_TINT: f32 = 0.06;
+/// 창 바탕과 회색들에 섞는 강조 색(작업 공간 색)의 양: 밝은 테마, 어두운 테마
+const WINDOW_TINT: f32 = 0.04;
+const WINDOW_TINT_DARK: f32 = 0.06;
+
+/// 단추판을 창 바탕에서 글자 색 쪽으로 옮기는 양: 밝은 테마(진하게), 어두운 테마(밝게)
+const CONTROL_LIGHT: f32 = 0.085;
+const CONTROL_DARK: f32 = 0.07;
 
 /// 탭 칩 글자(13px 굵게)에 필요한 체감 대비
 const CHIP_LC: f32 = 68.0;
@@ -252,5 +268,49 @@ mod tests {
         let white = hex(0xFFFFFF);
         assert!(apca(hex(0x000000), white) > 100.0);
         assert_eq!(apca(white, white), 0.0);
+    }
+
+    struct Sys(bool);
+    impl System for Sys {
+        fn prefers_dark(&self) -> bool {
+            self.0
+        }
+        fn high_contrast(&self) -> Option<[Color; 7]> {
+            None
+        }
+        fn accent(&self, _dark: bool) -> Option<Color> {
+            None
+        }
+    }
+
+    /// 밝기 L* (0~100)
+    fn lightness(c: Color) -> f32 {
+        let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+        let y = 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+        if y > 0.008856 { 116.0 * y.cbrt() - 16.0 } else { 903.3 * y }
+    }
+
+    /// 단추판은 어느 공간 색·밝기에서든 창 바탕과 밝기가 또렷이 다르다 (밝은 테마는 진하게, 어두운 테마는 밝게).
+    /// 창 바탕과 회색들은 같은 공간 색을 같은 양 품어, 공간 색 쪽으로 같은 방향으로 기운다
+    #[test]
+    fn controls_stand_out_from_the_window_in_every_space() {
+        for dark in [false, true] {
+            for a in &ACCENTS[1..] {
+                let t = Theme::resolve(if dark { "dark" } else { "light" }, a.0, &Sys(dark));
+                let (w, c) = (lightness(t.window), lightness(t.control));
+                let step = if dark { c - w } else { w - c };
+                assert!(step >= 4.0, "{} dark={dark}: window L* {w:.1}, control L* {c:.1}", a.0);
+                // 바탕은 참고 화면(#FAFAFA 바탕, #E1E1E1 고른 줄)처럼 밝게
+                if !dark {
+                    assert!(w > 94.0, "{}: window L* {w:.1}", a.0);
+                }
+                let base = if dark { Theme::DARK } else { Theme::LIGHT };
+                let accent = hex(if dark { a.3 } else { a.2 });
+                for (name, got, plain) in [("window", t.window, base.window), ("hover", t.hover, base.hover), ("sel_inactive", t.sel_inactive, base.sel_inactive)] {
+                    let toward = |g: f32, p: f32, acc: f32| (g - p) * (acc - p) >= -1e-6;
+                    assert!(toward(got.r, plain.r, accent.r) && toward(got.g, plain.g, accent.g) && toward(got.b, plain.b, accent.b), "{} dark={dark}: {name} is not tinted toward the space color", a.0);
+                }
+            }
+        }
     }
 }

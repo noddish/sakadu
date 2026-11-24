@@ -3,7 +3,7 @@
 
 use super::glyph::*;
 use super::*;
-use crate::palette::{alpha, apca, mix};
+use crate::palette::{apca, mix};
 
 /// 공간 아이콘 한 변과 아이콘 사이 간격을 더한 거리
 pub const RAIL_ITEM: f32 = 32.0;
@@ -105,7 +105,8 @@ pub fn paint_rail(g: &impl Canvas, t: &Theme, s: &RailScene) {
                 g.fill_round(r, RAIL_R, t.hover);
             }
         } else if filled || hovered {
-            g.fill_round(r, RAIL_R, alpha(t.text, if hovered { 0.10 } else { 0.05 }));
+            // 도구 막대 단추와 같은 단추판 (올리면 한 단계 더)
+            g.fill_round(r, RAIL_R, if hovered { mix(t.control, t.text, 0.06) } else { t.control });
         }
         g.glyph(glyph, r, false, if hovered { t.text } else { t.dim });
     };

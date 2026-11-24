@@ -3,7 +3,7 @@
 
 use crate::draw::{Color, Font, R};
 use crate::pane::{Location, SortKey, ViewMode};
-use crate::palette::Theme;
+use crate::palette::{Theme, alpha, mix};
 use crate::util;
 
 pub mod paint;
@@ -617,15 +617,10 @@ pub fn well(t: &Theme) -> Color {
     if t.high_contrast { t.window } else { t.sel_inactive }
 }
 
-/// 고르기 판(칸 나누기, 검색 범위, 설정의 고르기)의 들어간 바탕. 어두운 테마는 바탕보다 어둡게 겹친다
+/// 단추판과 고르기 판(도구 막대 단추, 칸 나누기, 검색 범위, 설정의 고르기)의 바탕: 창 바탕과 같은 빛에서 한 단계 진하게
+/// (어두운 테마는 밝게). 그래서 바탕에 묻히지도, 다른 빛으로 떠 보이지도 않는다
 pub fn seg_track(t: &Theme) -> Color {
-    if t.high_contrast {
-        t.window
-    } else if t.dark {
-        Color { r: 0.0, g: 0.0, b: 0.0, a: 0.28 }
-    } else {
-        t.sel_inactive
-    }
+    if t.high_contrast { t.window } else { t.control }
 }
 
 /// 고르기 판에서 고른 칸·켜진 단추: 밝은 테마는 흰 면 + 아주 작은 그림자, 어두운 테마는 한 단계 밝은 면 + 위쪽 빛 선 (떠 보이게)
@@ -634,7 +629,7 @@ pub fn seg_on(g: &impl Canvas, r: R, radius: f32, t: &Theme) {
         g.fill_round(r, radius, t.pane);
         g.stroke_round(r.inset(0.5, 0.5), radius, t.border, 1.0);
     } else if t.dark {
-        g.fill_round(r, radius, t.sel_inactive);
+        g.fill_round(r, radius, mix(t.control, t.text, 0.12));
         g.fill(R::new(r.l + radius, r.t + 0.5, r.r - radius, r.t + 1.5), Color { r: 1.0, g: 1.0, b: 1.0, a: 0.10 });
     } else {
         soft_shadow(g, r, radius, 3.0, 0.12, false);
@@ -664,7 +659,8 @@ pub fn hover_fill(t: &Theme) -> Color {
     } else if t.dark {
         Color { r: 1.0, g: 1.0, b: 1.0, a: 0.06 }
     } else {
-        Color { r: 0.06, g: 0.09, b: 0.16, a: 0.05 }
+        // 글자 색을 옅게 겹친다: 어느 공간 색 위에서도 빛을 바꾸지 않고 한 단계만 진해진다
+        alpha(t.text, 0.06)
     }
 }
 
