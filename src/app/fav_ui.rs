@@ -14,27 +14,9 @@ pub(super) enum TopSel {
     Computer,
 }
 
-/// 네이티브 팝업 메뉴. id 0은 구분선. 고른 id(없으면 0)
+/// 사카두 메뉴 (popup.rs). id 0은 구분선. 고른 id(없으면 0)
 pub(super) fn popup_menu(hwnd: HWND, pt: POINT, items: &[(u32, &str)]) -> u32 {
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return 0 };
-        append_items(menu, items);
-        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
-        let _ = DestroyMenu(menu);
-        cmd
-    }
-}
-
-pub(super) fn append_items(menu: HMENU, items: &[(u32, &str)]) {
-    for (id, label) in items {
-        unsafe {
-            let _ = if *id == 0 {
-                AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
-            } else {
-                AppendMenuW(menu, MF_STRING, *id as usize, &HSTRING::from(*label))
-            };
-        }
-    }
+    crate::popup::show(hwnd, pt, &crate::popup::from_pairs(items), false)
 }
 
 /// 즐겨찾기 줄(항목·그룹)의 오른쪽 버튼 메뉴
@@ -60,28 +42,17 @@ fn show_item_menu(hwnd: HWND, row: Row, current: Option<usize>, groups: &[(Strin
     const NO_GROUP: u32 = 7;
     const NEW_GROUP: u32 = 8;
     const GROUP: u32 = 100;
-    let cmd = unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        let Ok(sub) = CreatePopupMenu() else {
-            let _ = DestroyMenu(menu);
-            return;
-        };
-        let check = |on: bool| MF_STRING | if on { MF_CHECKED } else { MF_UNCHECKED };
-        for (g, (name, _)) in groups.iter().enumerate() {
-            let _ = AppendMenuW(sub, check(current == Some(g)), GROUP as usize + g, &HSTRING::from(name.as_str()));
-        }
-        if !groups.is_empty() {
-            let _ = AppendMenuW(sub, check(current.is_none()), NO_GROUP as usize, w!("그룹 없음"));
-            let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
-        }
-        let _ = AppendMenuW(sub, MF_STRING, NEW_GROUP as usize, w!("새 그룹을 만들어 넣기"));
-        append_items(menu, &[(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, ""), (3, "이름 바꾸기\tF2"), (4, "위로 이동\tCtrl+↑"), (5, "아래로 이동\tCtrl+↓")]);
-        let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("그룹으로 이동"));
-        append_items(menu, &[(9, "이 작업 공간에만 두기"), (0, ""), (6, "모든 공간에서 빼기\tDel")]);
-        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
-        let _ = DestroyMenu(menu);
-        cmd
-    };
+    use crate::popup::{Entry, from_pairs};
+    let mut sub: Vec<Entry> = groups.iter().enumerate().map(|(g, (name, _))| Entry::check(GROUP + g as u32, name, current == Some(g))).collect();
+    if !groups.is_empty() {
+        sub.push(Entry::check(NO_GROUP, "그룹 없음", current.is_none()));
+        sub.push(Entry::Sep);
+    }
+    sub.push(Entry::item(NEW_GROUP, "새 그룹을 만들어 넣기"));
+    let mut entries = from_pairs(&[(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, ""), (3, "이름 바꾸기"), (4, "위로 이동"), (5, "아래로 이동")]);
+    entries.push(Entry::sub("그룹으로 이동", sub));
+    entries.extend(from_pairs(&[(9, "이 작업 공간에만 두기"), (0, ""), (6, "모든 공간에서 빼기")]));
+    let cmd = crate::popup::show(hwnd, pt, &entries, false);
     with_app(|a| match cmd {
         1 | 2 => a.fav_open_row(row, cmd == 2),
         3 => a.begin_fav_rename(row),
@@ -101,13 +72,13 @@ fn show_group_menu(hwnd: HWND, g: usize, group: &(String, usize), collapsed: boo
         hwnd,
         pt,
         &[
-            (1, if collapsed { "펼치기\t→" } else { "접기\t←" }),
+            (1, if collapsed { "펼치기" } else { "접기" }),
             (0, ""),
-            (2, "이름 바꾸기\tF2"),
-            (3, "위로 이동\tCtrl+↑"),
-            (4, "아래로 이동\tCtrl+↓"),
+            (2, "이름 바꾸기"),
+            (3, "위로 이동"),
+            (4, "아래로 이동"),
             (0, ""),
-            (5, "그룹 풀기 (안의 즐겨찾기는 남김)\tDel"),
+            (5, "그룹 풀기 (안의 즐겨찾기는 남김)"),
             (6, "그룹과 안의 즐겨찾기 빼기…"),
         ],
     );
@@ -143,7 +114,7 @@ pub(super) fn show_fav_sort_menu(hwnd: HWND, pt: POINT) {
 /// 이 공간에 고정한 줄의 오른쪽 버튼 메뉴
 pub(super) fn show_pin_menu(hwnd: HWND, index: usize, pt: POINT) {
     let Some((is_dir, count)) = with_app(|a| a.pins().get(index).map(|f| (f.is_dir, a.pins().len()))).flatten() else { return };
-    let mut items: Vec<(u32, &str)> = vec![(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, ""), (7, "이름 바꾸기\tF2")];
+    let mut items: Vec<(u32, &str)> = vec![(1, "열기"), (2, if is_dir { "새 탭에서 열기" } else { "위치 열기 (새 탭)" }), (0, ""), (7, "이름 바꾸기")];
     if index > 0 {
         items.push((3, "위로 이동"));
     }

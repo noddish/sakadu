@@ -160,37 +160,26 @@ impl App {
         if self.view_menu.is_some() || !matches!(self.drag, Drag::None) {
             return None;
         }
-        // 명령 메뉴: 여는 방법
+        // 명령 메뉴에는 말풍선을 띄우지 않는다
         if self.cmd.is_some() {
-            return self.cmd_tip();
+            return None;
         }
         // 설정 창: 줄의 설명
         if self.settings.is_some() {
             return self.settings_tip();
         }
-        use crate::keys::Action;
-        // "이름 (단축키)". 단축키를 비워 두었으면 이름만
-        let named = |a: Action, name: &str| match self.keys.get(a) {
-            Some(c) => format!("{name} ({})", c.label()),
-            None => name.to_string(),
-        };
         Some(match self.hover {
             Hit::LayoutPick => (self.toolbar().layout, "칸 나누기".to_string()),
             Hit::View(_) => (self.toolbar().view, "보기 방식".to_string()),
-            Hit::NewFolder(_) => (self.toolbar().new_folder, named(Action::NewFolder, "새 폴더")),
-            Hit::Back(_) => (self.toolbar().back, "뒤로 (Alt+←)".to_string()),
-            Hit::Fwd(_) => (self.toolbar().fwd, "앞으로 (Alt+→)".to_string()),
-            Hit::Up(_) => (self.toolbar().up, "위로 (Alt+↑)".to_string()),
+            // 말풍선에는 이름만 (단축키는 보이지 않는다)
+            Hit::NewFolder(_) => (self.toolbar().new_folder, "새 폴더".to_string()),
+            Hit::Back(_) => (self.toolbar().back, "뒤로".to_string()),
+            Hit::Fwd(_) => (self.toolbar().fwd, "앞으로".to_string()),
+            Hit::Up(_) => (self.toolbar().up, "위로".to_string()),
             Hit::Side(s) => return self.side_tip(s),
-            Hit::SearchButton => (
-                self.search_button(),
-                match &self.hotkey {
-                    Some(hk) => format!("{} · 다른 앱에서는 {hk}", named(Action::Search, "검색")),
-                    None => named(Action::Search, "검색"),
-                },
-            ),
+            Hit::SearchButton => (self.search_button(), "검색".to_string()),
             Hit::PreviewButton => (self.toolbar().preview, (if self.auto_preview { "자동 미리 보기 끄기" } else { "자동 미리 보기 · 그림이나 글 파일을 고르면 보여요" }).to_string()),
-            Hit::SettingsButton => (self.settings_button(), named(Action::Settings, "설정")),
+            Hit::SettingsButton => (self.settings_button(), "설정".to_string()),
             // 레일의 공간 아이콘: 이름. 패널이 열려 있는 지금 공간에는 붙이지 않는다 (이름이 패널 머리에 보인다)
             Hit::Rail(i) if Some(i) == self.workspaces.current && self.side_panel() == Some(Panel::Main) => return None,
             Hit::Rail(i) => (self.rail().spaces.iter().find(|(k, _)| *k == i)?.1, self.workspaces.list.get(i)?.name.clone()),

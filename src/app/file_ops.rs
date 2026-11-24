@@ -142,7 +142,6 @@ impl App {
         if let Some(r) = o.retry {
             self.push_undo(r);
         }
-        let key = self.keys.get(crate::keys::Action::Undo).map_or_else(|| "되돌리기".to_string(), |c| c.label());
         let changed = match o.changed.as_slice() {
             [] => String::new(),
             [one] => format!("‘{}’ 항목은 그사이 바뀌었거나 없어져 그대로 두었어요", util::file_name(one)),
@@ -151,8 +150,8 @@ impl App {
         let msg = match (failed, changed.is_empty()) {
             (0, true) => return,
             (0, false) => changed,
-            (n, true) => format!("{n}개를 되돌리지 못했어요 · {key}로 다시 시도"),
-            (n, false) => format!("{n}개를 되돌리지 못했어요({key}로 다시 시도) · {changed}"),
+            (n, true) => format!("{n}개를 되돌리지 못했어요 · 다시 되돌리면 한 번 더 해 봐요"),
+            (n, false) => format!("{n}개를 되돌리지 못했어요(다시 되돌리면 한 번 더 해 봐요) · {changed}"),
         };
         self.flash(self.active, msg);
     }
