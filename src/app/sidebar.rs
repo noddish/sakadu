@@ -804,7 +804,7 @@ impl App {
             if !g.thumb(&key, ir, 1.0) {
                 g.fill_round(ir, 4.0, t.field);
                 if !thumb_failed.contains(&key) {
-                    missing.push(crate::thumbs::Request { key, path: f.path.clone(), px });
+                    missing.push(crate::thumbs::Request { key, path: f.path.clone(), px, only_thumb: false });
                 }
             }
         }

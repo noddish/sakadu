@@ -424,6 +424,11 @@ pub fn open_path(hwnd: HWND, path: &str, dir: Option<&str>) {
 
 /// 바로 가기(.lnk)가 폴더를 가리키면 그 경로
 pub fn shortcut_target_dir(path: &str) -> Option<String> {
+    shortcut_target(path).and_then(|(target, dir)| dir.then_some(target))
+}
+
+/// 바로 가기(.lnk)가 가리키는 경로와 폴더인지
+pub fn shortcut_target(path: &str) -> Option<(String, bool)> {
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
         let file: IPersistFile = link.cast().ok()?;
@@ -433,8 +438,11 @@ pub fn shortcut_target_dir(path: &str) -> Option<String> {
         link.GetPath(&mut buf, &mut fd, 0).ok()?;
         let target = util::from_wide(&buf);
         // 링크에 저장된 대상 속성을 쓴다 (NAS 대상에 다시 물으면 꺼져 있을 때 창이 멈춘다). 속성이 비어 있는 링크만 직접 확인
+        if target.is_empty() {
+            return None;
+        }
         let dir = if fd.dwFileAttributes != 0 { fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 } else { is_dir(&target) };
-        dir.then_some(target)
+        Some((target, dir))
     }
 }
 
