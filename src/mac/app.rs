@@ -3756,7 +3756,7 @@ impl App {
         self.paint_card(g, t);
         // 메뉴는 맨 위에
         if let (Some(m), Some(r)) = (self.menu.as_ref(), self.menu_rect()) {
-            paint_menu(g, t, &MenuScene { rect: r, lines: &m.lines, sel: m.sel, scroll: m.scroll });
+            paint_menu(g, t, &MenuScene { rect: r, lines: &m.lines, sel: m.sel, scroll: m.scroll, card: true });
         }
     }
 
@@ -3917,7 +3917,7 @@ impl App {
         let copying = self.batch.as_ref().filter(|b| self.pane_showing(b.tab, &b.dir).unwrap_or(self.active) == p).and(self.copy_progress());
         // 끌어다 놓은 것은 디스크에 따라 옮기거나 복사한다: 방금 끝낸 항목이 복사였으면 복사하는 중으로 적는다
         let doing = if self.batch.as_ref().is_some_and(|b| b.how != Paste::Copy && b.moved.last() != Some(&false)) { "옮기는 중" } else { "복사하는 중" };
-        let flash = flash.or_else(|| copying.map(|(at, total)| format!("{doing} · {total}개 중 {at}개 · Esc로 그만두기")));
+        let flash = flash.or_else(|| copying.map(|(at, total)| format!("{doing} · {total}개 중 {at}개")));
         let count_hot = flash.is_some();
         let count_text = flash.unwrap_or_else(|| count_text(tab));
         let cw = g.measure(&count_text, Font::Small).min(gm.head.w() * 0.6);

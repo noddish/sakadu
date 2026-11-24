@@ -6,6 +6,7 @@ mod defaultfm;
 mod droptarget;
 mod folders;
 mod gfx;
+mod popup;
 mod acl;
 mod service;
 mod shell;

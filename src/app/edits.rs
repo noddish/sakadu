@@ -255,7 +255,7 @@ impl App {
             // 필터에 걸리지 않는 이름이면 목록에서 숨는다. 필터는 그대로 두고(클릭 도중에 목록을 바꾸지 않게) 알린다
             let filter = tab.filter.clone();
             if !filter.is_empty() && !new_name.to_lowercase().contains(&filter.to_lowercase()) {
-                self.flash(p, format!("‘{new_name}’ · 필터 ‘{filter}’에 맞지 않아 목록에서 숨겨져요 · Esc로 필터 풀기"));
+                self.flash(p, format!("‘{new_name}’ · 필터 ‘{filter}’에 맞지 않아 목록에서 숨겨져요"));
             }
         }
         shell::spawn_file_op(self.hwnd, FileOp::Rename { path, name: new_name });

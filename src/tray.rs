@@ -134,22 +134,16 @@ pub fn on_message(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> Option<Command> {
 }
 
 fn show_menu(hwnd: HWND, pt: POINT) -> Option<Command> {
+    // 알림 영역 메뉴는 먼저 창을 앞으로 가져와야 바깥을 눌렀을 때(다른 앱이 앞으로 오면) 닫힌다
     unsafe {
-        let menu = CreatePopupMenu().ok()?;
-        let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, w!("Sakadu 열기"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("끝내기"));
-        let _ = SetMenuDefaultItem(menu, MENU_OPEN as u32, 0);
-        // 알림 영역 메뉴는 먼저 창을 앞으로 가져와야 바깥을 눌렀을 때 닫힌다
         let _ = SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN).0, pt.x, pt.y, hwnd, None).0 as usize;
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
-        match cmd {
-            MENU_OPEN => Some(Command::Open),
-            MENU_QUIT => Some(Command::Quit),
-            _ => None,
-        }
+    }
+    // 사카두 메뉴를 알림 영역 위로 띄운다
+    let entries = crate::popup::from_pairs(&[(MENU_OPEN as u32, "Sakadu 열기"), (0, ""), (MENU_QUIT as u32, "끝내기")]);
+    match crate::popup::show(hwnd, pt, &entries, true) as usize {
+        MENU_OPEN => Some(Command::Open),
+        MENU_QUIT => Some(Command::Quit),
+        _ => None,
     }
 }
 

@@ -324,31 +324,34 @@ pub(super) fn show_rail_menu(hwnd: HWND, index: usize, pt: POINT) {
     const DELETE: u32 = 3;
     const COLOR_NONE: u32 = 10;
     const COLOR: u32 = 11;
-    let Some((color, is_current, count)) = with_app(|a| a.workspaces.list.get(index).map(|w| (w.color.clone(), a.workspaces.current == Some(index), a.workspaces.list.len()))).flatten() else {
+    use crate::popup::Entry;
+    use sakadu::ui::menu::{MenuIcon, MenuLine};
+    let Some((color, is_current, count, dark)) =
+        with_app(|a| a.workspaces.list.get(index).map(|w| (w.color.clone(), a.workspaces.current == Some(index), a.workspaces.list.len(), a.theme.dark))).flatten()
+    else {
         return;
     };
-    let cmd = unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        let Ok(sub) = CreatePopupMenu() else {
-            let _ = DestroyMenu(menu);
-            return;
-        };
-        let check = |on: bool| MF_STRING | if on { MF_CHECKED } else { MF_UNCHECKED };
-        for (k, key) in workspaces::COLORS.iter().enumerate() {
+    // 색 줄마다 그 색 동그라미
+    let mut colors: Vec<Entry> = workspaces::COLORS
+        .iter()
+        .enumerate()
+        .map(|(k, key)| {
             let label = crate::theme::ACCENTS.iter().find(|a| a.0 == *key).map_or(*key, |a| a.1);
-            let _ = AppendMenuW(sub, check(color == *key), COLOR as usize + k, &HSTRING::from(label));
-        }
-        let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(sub, check(color.is_empty()), COLOR_NONE as usize, w!("설정의 강조 색 따르기"));
-        fav_ui::append_items(menu, &[if is_current { (RENAME, "이름 바꾸기") } else { (SWITCH, "이 공간으로 바꾸기") }]);
-        let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("색"));
-        if count > 1 {
-            fav_ui::append_items(menu, &[(0, ""), (DELETE, "이 작업 공간 지우기…")]);
-        }
-        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
-        let _ = DestroyMenu(menu);
-        cmd
-    };
+            let mut line = MenuLine::new(label).checked(color == *key);
+            if let Some(c) = crate::theme::accent_color(key, dark) {
+                line = line.icon(MenuIcon::Swatch(c));
+            }
+            Entry::Item(COLOR + k as u32, line)
+        })
+        .collect();
+    colors.push(Entry::Sep);
+    colors.push(Entry::check(COLOR_NONE, "설정의 강조 색 따르기", color.is_empty()));
+    let mut entries = vec![if is_current { Entry::item(RENAME, "이름 바꾸기") } else { Entry::item(SWITCH, "이 공간으로 바꾸기") }, Entry::sub("색", colors)];
+    if count > 1 {
+        entries.push(Entry::Sep);
+        entries.push(Entry::item(DELETE, "이 작업 공간 지우기…"));
+    }
+    let cmd = crate::popup::show(hwnd, pt, &entries, false);
     match cmd {
         SWITCH => {
             with_app(|a| a.switch_workspace(index));

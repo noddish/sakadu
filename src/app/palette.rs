@@ -218,32 +218,21 @@ pub(super) fn show_pal_menu(hwnd: HWND, pt: POINT) {
     if n == 0 {
         return;
     }
-    let open = if n > 1 { format!("{n}개 열기\tEnter") } else { "열기\tEnter".to_string() };
+    let open = if n > 1 { format!("{n}개 열기") } else { "열기".to_string() };
     let mut items: Vec<(u32, String)> = vec![
         (PAL_MENU_OPEN, open),
-        (PAL_MENU_LOCATE, "지금 칸에서 위치 열기\tCtrl+Enter".to_string()),
+        (PAL_MENU_LOCATE, "지금 칸에서 위치 열기".to_string()),
         (0, String::new()),
-        (PAL_MENU_COPY, "복사\tCtrl+C".to_string()),
+        (PAL_MENU_COPY, "복사".to_string()),
         (PAL_MENU_COPY_PATH, "경로 복사".to_string()),
         (0, String::new()),
         (PAL_MENU_PICK_ALL, "결과 모두 고르기".to_string()),
     ];
     if picks > 0 {
-        items.push((PAL_MENU_CLEAR, "고르기 풀기\tEsc".to_string()));
+        items.push((PAL_MENU_CLEAR, "고르기 풀기".to_string()));
     }
-    let cmd = unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        for (id, label) in &items {
-            let _ = if *id == 0 {
-                AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
-            } else {
-                AppendMenuW(menu, MF_STRING, *id as usize, &HSTRING::from(label.as_str()))
-            };
-        }
-        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
-        let _ = DestroyMenu(menu);
-        cmd
-    };
+    let entries: Vec<crate::popup::Entry> = items.iter().map(|(id, label)| if *id == 0 { crate::popup::Entry::Sep } else { crate::popup::Entry::item(*id, label) }).collect();
+    let cmd = crate::popup::show(hwnd, pt, &entries, false);
     if cmd != 0 {
         with_app(|a| a.pal_menu_command(cmd));
     }
@@ -776,7 +765,7 @@ impl App {
         let n = paths.len();
         let p = self.active;
         match shell::set_clipboard_files(self.hwnd, &paths, false) {
-            Ok(()) => self.flash(p, format!("검색 결과 {n}개를 복사했어요 · 붙여넣을 폴더에서 Ctrl+V")),
+            Ok(()) => self.flash(p, format!("검색 결과 {n}개를 복사했어요")),
             Err(e) => self.flash(p, format!("클립보드에 복사하지 못했어요: {}", e.message())),
         }
     }
@@ -1166,14 +1155,6 @@ impl App {
         let (type_name, icon) = self.types.entry(key).or_insert_with(|| shell::type_info(&ext, is_dir)).clone();
         Some((path, name, is_dir, size, modified, type_name, icon))
     }
-}
-
-pub(super) fn kbd(gfx: &Gfx, t: &Theme, x: f32, cy: f32, label: &str) -> f32 {
-    let w = gfx.measure(label, Font::Small) + 10.0;
-    let r = R::new(x, cy - 10.0, x + w, cy + 10.0);
-    gfx.fill_round(r, 4.0, super::sidebar::well(t));
-    gfx.text(label, R::new(r.l + 5.0, r.t, r.r, r.b), Font::Small, t.text);
-    r.r
 }
 
 #[cfg(test)]

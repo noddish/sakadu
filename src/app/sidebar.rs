@@ -929,7 +929,6 @@ impl App {
         let mut fav_icons = kinds.iter().map(|(d, e)| self.type_icon(e, *d)).collect::<Vec<_>>().into_iter();
         let pins = self.pins().to_vec();
         let pin_icons: Vec<i32> = pins.iter().map(|f| self.type_icon(&ext_of(&f.path), f.is_dir)).collect();
-        let add_key = self.keys.get(crate::keys::Action::AddFavorite).map(crate::keys::Combo::label);
         let pin = self.side_pin_rect();
         let title = self.side_title_rect();
         let name = self.workspaces.current_name().unwrap_or_default().to_string();
@@ -1006,7 +1005,7 @@ impl App {
                     }
                 }
                 Side::PinEmpty => {
-                    let how = add_key.as_deref().map(|k| format!("책갈피나 {k}로 고정해 보세요")).unwrap_or_else(|| "책갈피로 고정해 보세요".to_string());
+                    let how = "책갈피로 고정해 보세요".to_string();
                     g.text("이 공간에 고정한 곳이 없어요", R::new(r.l + 10.0, r.t + 4.0, r.r - 6.0, r.t + 22.0), Font::Small, t.faint);
                     g.text(&how, R::new(r.l + 10.0, r.t + 22.0, r.r - 6.0, r.t + 40.0), Font::Small, t.faint);
                 }

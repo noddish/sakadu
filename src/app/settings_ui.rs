@@ -1193,18 +1193,11 @@ fn open_url(hwnd: HWND, target: &str) {
     }
 }
 
-/// 항목들을 체크 표시와 함께 띄우고 고른 번호(1부터, 없으면 0)
+/// 항목들을 체크 표시와 함께 사카두 메뉴로 띄우고 고른 번호(1부터, 없으면 0). 빈 글은 구분선
 pub(super) fn pick_menu(hwnd: HWND, pt: POINT, items: &[(String, bool)]) -> usize {
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return 0 };
-        for (i, (label, checked)) in items.iter().enumerate() {
-            let flags = if label.is_empty() { MF_SEPARATOR } else { MF_STRING | if *checked { MF_CHECKED } else { MF_UNCHECKED } };
-            let _ = AppendMenuW(menu, flags, i + 1, &HSTRING::from(label.as_str()));
-        }
-        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as usize;
-        let _ = DestroyMenu(menu);
-        cmd
-    }
+    use crate::popup::Entry;
+    let entries: Vec<Entry> = items.iter().enumerate().map(|(i, (label, checked))| if label.is_empty() { Entry::Sep } else { Entry::check(i as u32 + 1, label, *checked) }).collect();
+    crate::popup::show(hwnd, pt, &entries, false) as usize
 }
 
 fn new_tab_menu(hwnd: HWND, pt: POINT) {
@@ -1243,24 +1236,13 @@ fn font_menu(hwnd: HWND, pt: POINT) {
     const COMMON: [&str; 9] = ["맑은 고딕", "Pretendard", "Pretendard Variable", "SUIT", "Noto Sans KR", "나눔고딕", "나눔스퀘어", "Spoqa Han Sans Neo", "IBM Plex Sans KR"];
     let Some((current, all)) = with_app(|a| (a.look.font.clone(), a.gfx.installed_fonts())) else { return };
     let common: Vec<&str> = COMMON.iter().copied().filter(|f| all.iter().any(|a| a == f)).collect();
-    let cmd = unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        let check = |on: bool| MF_STRING | if on { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, check(current.is_empty()), 1, w!("기본 (Segoe UI)"));
-        for (i, f) in common.iter().enumerate() {
-            let _ = AppendMenuW(menu, check(current == *f), 100 + i, &HSTRING::from(*f));
-        }
-        if let Ok(sub) = CreatePopupMenu() {
-            for (i, f) in all.iter().enumerate() {
-                let _ = AppendMenuW(sub, check(current == *f), 1000 + i, &HSTRING::from(f.as_str()));
-            }
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("설치된 글꼴 전체"));
-        }
-        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as usize;
-        let _ = DestroyMenu(menu);
-        cmd
-    };
+    use crate::popup::Entry;
+    let mut entries = vec![Entry::check(1, "기본 (Segoe UI)", current.is_empty())];
+    entries.extend(common.iter().enumerate().map(|(i, f)| Entry::check(100 + i as u32, f, current == *f)));
+    // 설치된 글꼴 전체는 하위 메뉴 (길면 화면 높이에 맞춰 스크롤한다)
+    entries.push(Entry::Sep);
+    entries.push(Entry::sub("설치된 글꼴 전체", all.iter().enumerate().map(|(i, f)| Entry::check(1000 + i as u32, f, current == *f)).collect()));
+    let cmd = crate::popup::show(hwnd, pt, &entries, false) as usize;
     let font = match cmd {
         1 => String::new(),
         100..=999 => match common.get(cmd - 100) {

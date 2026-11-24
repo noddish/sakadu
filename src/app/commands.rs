@@ -228,11 +228,6 @@ impl App {
         }
     }
 
-    /// 줄에 마우스를 올려 두면 보여 줄 여는 방법 (카드 아래에 뜬다). 전에는 카드 아래 줄에 늘 적혀 있었다
-    pub(super) fn cmd_tip(&self) -> Option<(R, String)> {
-        let r = self.cmd_rect()?;
-        matches!(self.hover, Hit::CmdRow(_)).then(|| (R::new(r.l, r.b - 8.0, r.r, r.b), "Enter 열기 · Alt+Enter 옆 칸 · Ctrl+Enter 새 탭".to_string()))
-    }
 
     pub(super) fn cmd_hover(&mut self, hit: Hit) {
         if let (Hit::CmdRow(i), Some(c)) = (hit, self.cmd.as_mut()) {
@@ -361,9 +356,6 @@ impl App {
                 _ => -1,
             })
             .collect();
-        let keys: Vec<Option<String>> = self.cmd.as_ref().map_or_else(Vec::new, |c| {
-            c.items.iter().map(|it| if let CmdItem::Command(a) = it { self.keys.get(*a).map(|k| k.label()) } else { None }).collect()
-        });
         let fade = anim_progress(self.cmd_at, CMD_FADE_MS);
         let App { gfx: g, cmd, .. } = self;
         let Some(c) = cmd.as_ref() else { return };
@@ -404,7 +396,7 @@ impl App {
                 (_, icon) if icon >= 0 => g.icon(icon, ir),
                 _ => {}
             }
-            // 이름, 그 뒤에 흐린 위치. 오른쪽의 종류(명령이면 단축키)는 고른 줄에만 보인다
+            // 이름, 그 뒤에 흐린 위치. 오른쪽의 종류는 고른 줄에만 보인다 (단축키는 보이지 않는다)
             let (name, detail, kind): (String, String, String) = match &c.items[i] {
                 CmdItem::Tab { pane, title, path, .. } => (title.clone(), path.clone().unwrap_or_default(), if multi { format!("{}번 칸 탭", pane + 1) } else { "열린 탭".to_string() }),
                 CmdItem::Fav { name, path, .. } => (name.clone(), util::parent(path).unwrap_or_default(), "모든 공간".to_string()),
@@ -418,19 +410,12 @@ impl App {
                 CmdItem::GoPath(p) => (p.clone(), String::new(), "경로로 이동".to_string()),
                 CmdItem::SearchDisk(q) => (format!("‘{q}’ 디스크에서 찾기"), String::new(), "검색".to_string()),
             };
-            let right = match keys.get(i).cloned().flatten() {
-                _ if i != c.sel => row.r - 12.0,
-                Some(k) => {
-                    let kw = g.measure(&k, Font::Small) + 10.0;
-                    palette::kbd(g, &t, row.r - 10.0 - kw, (row.t + row.b) / 2.0, &k);
-                    row.r - 10.0 - kw - 8.0
-                }
-                None if !kind.is_empty() => {
-                    let kw = g.measure(&kind, Font::Small);
-                    g.text(&kind, R::new(row.r - 12.0 - kw, row.t, row.r - 12.0, row.b), Font::Small, t.dim);
-                    row.r - 12.0 - kw - 12.0
-                }
-                None => row.r - 12.0,
+            let right = if i == c.sel && !kind.is_empty() {
+                let kw = g.measure(&kind, Font::Small);
+                g.text(&kind, R::new(row.r - 12.0 - kw, row.t, row.r - 12.0, row.b), Font::Small, t.dim);
+                row.r - 12.0 - kw - 12.0
+            } else {
+                row.r - 12.0
             };
             let nw = g.measure(&name, Font::Normal).min((right - row.l - 40.0) * 0.6).max(0.0);
             g.text(&name, R::new(row.l + 40.0, row.t, (row.l + 40.0 + nw + 2.0).min(right), row.b), Font::Normal, t.text);

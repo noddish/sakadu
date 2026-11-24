@@ -35,33 +35,23 @@ pub(super) struct ViewMenu {
     pub sel: usize,
 }
 
-fn view_action(v: ViewMode) -> Action {
-    match v {
-        ViewMode::Huge => Action::Huge,
-        ViewMode::Large => Action::Thumbs,
-        ViewMode::Medium => Action::Medium,
-        ViewMode::Small => Action::SmallIcons,
-        ViewMode::List => Action::List,
-        ViewMode::Details => Action::Details,
-    }
-}
 
 impl App {
-    /// 메뉴의 줄: 모양 그림, 이름, 지금 것 체크, 단축키. 보기 방식 메뉴의 맨 아래는 구분선 뒤의 숨김 항목 보기
+    /// 사카두 메뉴 창(popup.rs)의 모양: 지금 테마, 글꼴, 크기, 글자 표시
+    pub(crate) fn menu_style(&self) -> crate::popup::Style {
+        crate::popup::Style { theme: self.theme, font: self.look.font.clone(), zoom: self.zoom(), text: self.look.text.clone() }
+    }
+
+    /// 메뉴의 줄: 모양 그림, 이름, 지금 것 체크 (단축키는 보이지 않는다). 보기 방식 메뉴의 맨 아래는 구분선 뒤의 숨김 항목 보기
     fn view_menu_lines(&self, m: ViewMenu) -> Vec<MenuLine> {
-        let key = |a: Action| self.keys.get(a).map(|c| c.label()).unwrap_or_default();
         match m.kind {
             MenuKind::View => {
                 let current = self.panes[m.pane].view;
-                let mut v: Vec<_> = ViewMode::ALL.iter().map(|v| MenuLine::new(v.label()).icon(MenuIcon::View(*v)).checked(*v == current).hint(key(view_action(*v)))).collect();
-                v.push(MenuLine::new("숨김 항목 보기").icon(MenuIcon::Glyph(G_HIDDEN)).checked(self.show_hidden).hint(key(Action::Hidden)).sep(true));
+                let mut v: Vec<_> = ViewMode::ALL.iter().map(|v| MenuLine::new(v.label()).icon(MenuIcon::View(*v)).checked(*v == current)).collect();
+                v.push(MenuLine::new("숨김 항목 보기").icon(MenuIcon::Glyph(G_HIDDEN)).checked(self.show_hidden).sep(true));
                 v
             }
-            MenuKind::Layout => Layout::ALL
-                .iter()
-                .zip(LAYOUT_KEYS)
-                .map(|(l, a)| MenuLine::new(crate::keys::name(a)).icon(MenuIcon::Layout(*l)).checked(*l == self.layout).hint(key(a)))
-                .collect(),
+            MenuKind::Layout => Layout::ALL.iter().zip(LAYOUT_KEYS).map(|(l, a)| MenuLine::new(crate::keys::name(a)).icon(MenuIcon::Layout(*l)).checked(*l == self.layout)).collect(),
         }
     }
 
@@ -202,7 +192,7 @@ impl App {
         let gfx = &self.gfx;
         // 열릴 때 위에서 4px 내려오며 나타난다
         let pushed = anim_progress(self.view_menu_at, MENU_FADE_MS).is_some_and(|f| gfx.push_fade(f, 0.0, -(1.0 - f) * 4.0));
-        paint_menu(gfx, &self.theme, &MenuScene { rect: r, lines: &lines, sel: Some(m.sel), scroll: 0.0 });
+        paint_menu(gfx, &self.theme, &MenuScene { rect: r, lines: &lines, sel: Some(m.sel), scroll: 0.0, card: true });
         if pushed {
             gfx.pop_fade();
         }

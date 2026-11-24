@@ -189,22 +189,26 @@ pub fn menu_step(lines: &[MenuLine], from: Option<usize>, down: bool) -> Option<
     None
 }
 
-/// 그릴 메뉴: 자리, 줄, 가리킨 줄(마우스·키보드), 스크롤
+/// 그릴 메뉴: 자리, 줄, 가리킨 줄(마우스·키보드), 스크롤.
+/// card면 그림자와 흰 카드, 테두리까지 그린다 (창 안의 메뉴). Windows의 메뉴 창은 창이 곧 카드라 바탕만 칠하고 줄만 그린다
 pub struct MenuScene<'a> {
     pub rect: R,
     pub lines: &'a [MenuLine],
     pub sel: Option<usize>,
     pub scroll: f32,
+    pub card: bool,
 }
 
 pub fn paint_menu(g: &impl Canvas, t: &Theme, s: &MenuScene) {
     let r = s.rect;
     // 그림자 + 흰 카드 (떠 있는 다른 것과 같은 그림자). 테두리는 아주 옅게
-    if !t.high_contrast {
-        soft_shadow(g, r, R_PANE, 12.0, 0.16, t.dark);
+    if s.card {
+        if !t.high_contrast {
+            soft_shadow(g, r, R_PANE, 12.0, 0.16, t.dark);
+        }
+        g.fill_round(r, R_PANE, t.pane);
+        g.stroke_round(r.inset(0.5, 0.5), R_PANE, if t.high_contrast { t.border } else { t.pane_border }, 1.0);
     }
-    g.fill_round(r, R_PANE, t.pane);
-    g.stroke_round(r.inset(0.5, 0.5), R_PANE, if t.high_contrast { t.border } else { t.pane_border }, 1.0);
     let x0 = label_x(s.lines);
     g.clip(r.inset(1.0, MENU_PAD));
     for (i, (line, ir)) in s.lines.iter().zip(menu_rows(r, s.lines, s.scroll)).enumerate() {
