@@ -188,6 +188,8 @@ impl App {
                     } else if (TIMER_REFRESH..TIMER_REFRESH + 4).contains(&id) {
                         let _ = KillTimer(Some(hwnd), id);
                         let p = id - TIMER_REFRESH;
+                        self.notify_pending[p] = false;
+                        self.notify_read[p] = Some(std::time::Instant::now());
                         if p < self.layout.count() {
                             // 트레이에 숨어 있는 동안에는 읽지 않고, 다시 보일 때 읽는다
                             if IsWindowVisible(hwnd).as_bool() {
@@ -258,8 +260,12 @@ impl App {
                 crate::WM_APP_PREVIEW => self.on_preview_msg(*Box::from_raw(lp.0 as *mut PreviewMsg)),
                 m if (WM_APP_NOTIFY..WM_APP_NOTIFY + 4).contains(&m) => {
                     shell::ack_notify(wp, lp);
-                    // 연속된 변경(복사 중 등)을 한 번의 새로 고침으로 묶는다
-                    SetTimer(Some(hwnd), TIMER_REFRESH + (m - WM_APP_NOTIFY) as usize, 250, None);
+                    let p = (m - WM_APP_NOTIFY) as usize;
+                    // 이미 걸어 둔 다시 읽기가 있으면 그것이 이 변경까지 읽는다 (타이머를 늦추지 않아 긴 복사 중에도 목록이 따라온다)
+                    if !self.notify_pending[p] {
+                        self.notify_pending[p] = true;
+                        SetTimer(Some(hwnd), TIMER_REFRESH + p, notify_delay(self.notify_read[p].map(|t| t.elapsed())), None);
+                    }
                 }
                 _ => return None,
             }
@@ -1045,7 +1051,8 @@ impl App {
                 let t = self.panes[p].active;
                 self.close_tab(p, t);
             }
-            VK_DELETE if !ctrl && !alt => self.delete(p, shift),
+            // Ctrl을 누른 채여도 지운다: Ctrl+화살표·Ctrl+Space로 고른 뒤 손을 떼지 않고 누를 때 (탐색기와 같다)
+            VK_DELETE if !alt => self.delete(p, shift),
             VK_ESCAPE => self.escape(p),
             VK_APPS => self.context_menu_at_cursor(p),
             VK_F10 if shift => self.context_menu_at_cursor(p),
@@ -1056,6 +1063,8 @@ impl App {
                 }
                 // 바꿀 수 없는 기본 조작 (나머지 Ctrl 단축키는 keys.rs의 키 맵에서 처리)
                 match c {
+                    // Ctrl+Space: 커서 항목을 고르거나 푼다 (Ctrl+화살표로 커서만 옮기며 여러 개를 고를 때, 탐색기와 같다)
+                    b' ' => self.panes[p].tab_mut().toggle_cursor(),
                     b'A' => self.panes[p].tab_mut().select_all(),
                     b'C' if shift => self.copy_paths(p),
                     b'C' => self.copy(p, false),

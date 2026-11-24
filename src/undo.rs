@@ -244,6 +244,17 @@ impl Undo {
         }
     }
 
+    /// 되돌리면 내용이 바뀌는 폴더들 (지금 자리와 원래 자리의 폴더)
+    pub fn dirs(&self) -> Vec<String> {
+        let paths: Vec<&str> = match self {
+            Undo::Rename { now, .. } | Undo::Create(now, _) => vec![now],
+            Undo::Move(v) => v.iter().flat_map(|(now, was, _)| [now.as_str(), was.as_str()]).collect(),
+            Undo::Copy(v) => v.iter().map(|(p, _)| p.as_str()).collect(),
+            Undo::Recycle(v) => v.iter().map(|(_, was)| was.as_str()).collect(),
+        };
+        paths.into_iter().filter_map(util::parent).collect()
+    }
+
     pub fn len(&self) -> usize {
         match self {
             Undo::Rename { .. } | Undo::Create(..) => 1,

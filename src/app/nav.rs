@@ -75,10 +75,8 @@ impl App {
     }
 
     pub(super) fn refresh(&mut self, p: usize) {
-        // 감시 등록에 실패했던 폴더는 F5로 다시 시도한다
-        if self.watches[p].as_ref().is_some_and(|(id, _)| *id == 0) {
-            self.watches[p] = None;
-        }
+        // 감시 등록에 실패했던 폴더는 F5로 다시 시도한다 (다 읽은 뒤 감시를 맞출 때)
+        self.watch_retry[p] = true;
         self.load(p, true);
     }
 

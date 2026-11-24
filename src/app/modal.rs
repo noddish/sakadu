@@ -5,6 +5,7 @@ use super::*;
 // ---------- 모달 작업 실행 (App 빌림이 풀린 상태) ----------
 
 pub fn execute(hwnd: HWND, act: Deferred) {
+    let _stage = crate::stall::stage(deferred_stage(&act));
     match act {
         Deferred::Close => unsafe {
             let _ = DestroyWindow(hwnd);
@@ -37,7 +38,11 @@ pub fn execute(hwnd: HWND, act: Deferred) {
             let _ = shell::drag_out(hwnd, &paths);
         }
         Deferred::Verb { paths, verb } => {
-            let _ = shell::invoke_verb(hwnd, &paths, verb);
+            // 복사·잘라내기는 탐색기 메뉴 없이 바로 클립보드에 (안 되면 메뉴의 동사로)
+            let quick = matches!(verb, "copy" | "cut") && shell::put_files_on_clipboard(hwnd, &paths, verb == "cut").inspect_err(|e| crate::diag::log(|| format!("clipboard: data object failed: {e}"))).is_ok();
+            if !quick {
+                let _ = shell::invoke_verb(hwnd, &paths, verb);
+            }
         }
         Deferred::Paste { pane, dest } => match shell::clipboard_files() {
             Some((paths, false)) if !paths.is_empty() => shell::spawn_file_op(hwnd, FileOp::Copy { paths, dest }),
@@ -114,6 +119,22 @@ pub(super) struct MenuRequest {
     pt: POINT,
 }
 
+/// 멈춤 기록에 적을 이름 (stall.rs)
+fn deferred_stage(act: &Deferred) -> &'static str {
+    match act {
+        Deferred::Open { .. } | Deferred::ConfirmOpen { .. } => "파일 열기",
+        Deferred::Menu { .. } => "탐색기 메뉴 띄우기",
+        Deferred::PrepareMenu { .. } => "탐색기 메뉴 준비",
+        Deferred::Verb { .. } => "셸 동작(복사·잘라내기·속성)",
+        Deferred::Paste { .. } => "붙여넣기 준비(클립보드 읽기)",
+        Deferred::DragOut { .. } => "끌어 내보내기",
+        Deferred::PreviewSync => "미리 보기 처리기 맞추기",
+        Deferred::NetFix { .. } => "네트워크 연결",
+        Deferred::ConfirmRename { .. } => "이름 바꾸기 확인",
+        _ => "메뉴·설정",
+    }
+}
+
 pub(super) struct PreparedMenu {
     paths: Vec<String>,
     dir: Option<String>,
@@ -142,7 +163,8 @@ pub(super) fn build_menu(hwnd: HWND, paths: &[String], dir: Option<&str>, extend
     } else {
         Vec::new()
     };
-    let menu = shell::ShellMenu::new(cm, extended, &custom).ok()?;
+    let mut menu = shell::ShellMenu::new(cm, extended, &custom).ok()?;
+    menu.read_lines();
     Some((menu, single_dir))
 }
 
@@ -169,7 +191,7 @@ pub(super) fn show_menu(hwnd: HWND, req: MenuRequest) {
         .with(|m| m.borrow_mut().take())
         .filter(|p| p.paths == req.paths && p.dir == req.dir && p.extended == extended);
     let reused = prepared.is_some();
-    let (menu, single_dir) = match prepared {
+    let (mut menu, single_dir) = match prepared {
         Some(p) => (p.menu, p.single_dir),
         None => match build_menu(hwnd, &req.paths, req.dir.as_deref(), extended) {
             Some(b) => b,
