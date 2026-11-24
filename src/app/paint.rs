@@ -50,8 +50,10 @@ impl App {
         self.paint_sidebar();
         let t = self.theme;
         let (sx, sy) = self.splitters();
-        let hot_x = matches!(self.drag, Drag::SplitX) || self.hover == Hit::SplitX;
-        let hot_y = matches!(self.drag, Drag::SplitY) || self.hover == Hit::SplitY;
+        // 가운데(두 선이 만나는 곳)를 끌거나 올리면 두 선을 함께 밝힌다
+        let both = matches!(self.drag, Drag::SplitXY) || self.hover == Hit::SplitXY;
+        let hot_x = both || matches!(self.drag, Drag::SplitX) || self.hover == Hit::SplitX;
+        let hot_y = both || matches!(self.drag, Drag::SplitY) || self.hover == Hit::SplitY;
         if let (Some(r), true) = (sx, hot_x) {
             let cx = (r.l + r.r) / 2.0;
             self.gfx.fill_round(R::new(cx - 1.5, r.t + 8.0, cx + 1.5, r.b - 8.0), 1.5, t.focus);

@@ -167,6 +167,37 @@ pub fn splitters(a: R, split: (f32, f32), layout: Layout) -> (Option<R>, Option<
     (sx, sy)
 }
 
+/// 가로·세로 나눔선이 만나는 곳 (4칸은 가운데, 3칸은 T자). 여기를 끌면 두 선이 함께 움직인다.
+/// 잡기 쉽게 둘레를 4씩 넓힌다 (칸 카드의 둥근 모서리 바깥이라 칸의 것을 가리지 않는다)
+pub fn split_cross(a: R, split: (f32, f32), layout: Layout) -> Option<R> {
+    matches!(layout, Layout::Three | Layout::Four).then(|| {
+        let (xm, ym) = split_points(a, split);
+        R::new(xm - 4.0, ym - 4.0, xm + GAP + 4.0, ym + GAP + 4.0)
+    })
+}
+
+/// 열 너비의 범위
+pub const COL_MIN: f32 = 60.0;
+pub const COL_MAX: f32 = 400.0;
+
+/// 열 머리글의 경계를 d만큼 왼쪽으로 끌었다 (오른쪽이면 음수). 열은 오른쪽 끝에 붙어 있어(columns), 끄는 선만 따라가고
+/// 다른 선은 그대로 두려면 선 오른쪽 열(col)이 넓어지는 만큼 왼쪽 열(prev)이 좁아져야 한다 (탐색기처럼 그 선만 움직인다).
+/// 왼쪽에 다른 열이 없으면(이름과 사이의 선) 이름 칸이 받는다. 열은 COL_MIN~COL_MAX
+pub fn drag_column(start: [f32; 3], col: usize, prev: Option<usize>, d: f32) -> [f32; 3] {
+    let mut w = start;
+    match prev {
+        None => w[col] = (start[col] + d).clamp(COL_MIN, COL_MAX),
+        Some(p) => {
+            let lo = (COL_MIN - start[col]).max(start[p] - COL_MAX);
+            let hi = (COL_MAX - start[col]).min(start[p] - COL_MIN);
+            let d = d.clamp(lo, hi.max(lo));
+            w[col] = start[col] + d;
+            w[p] = start[p] - d;
+        }
+    }
+    w
+}
+
 pub struct PaneGeom {
     /// 칩 줄 (탭 칩, 새 탭, 오른쪽 항목 수·필터 칩)
     pub head: R,
@@ -710,6 +741,46 @@ mod tests {
             let r = name_edit_rect(list, view, cols, 0, 0.0).unwrap();
             assert!(r.l >= it.l && r.r <= it.r && r.t > it.t && r.b <= it.b && r.w() > 40.0, "{view:?}: {r:?} in {it:?}");
         }
+    }
+
+    /// 4칸의 가운데와 3칸의 T자에서 두 나눔선이 만난다. 1·2칸에는 없다
+    #[test]
+    fn split_cross_sits_where_both_splitters_meet() {
+        let a = R::new(0.0, 0.0, 1000.0, 800.0);
+        for layout in [Layout::Three, Layout::Four] {
+            let c = split_cross(a, (0.5, 0.5), layout).unwrap();
+            let (sx, sy) = splitters(a, (0.5, 0.5), layout);
+            let (sx, sy) = (sx.unwrap(), sy.unwrap());
+            let mid = |r: R| ((r.l + r.r) / 2.0, (r.t + r.b) / 2.0);
+            let (cx, cy) = mid(c);
+            assert!(sx.contains(cx, cy) && (sy.contains(cx, cy) || (layout == Layout::Three && sy.l - cx <= GAP)), "{layout:?}");
+            assert!(c.w() <= 20.0 && c.h() <= 20.0, "small target: {c:?}");
+        }
+        assert!(split_cross(a, (0.5, 0.5), Layout::TwoV).is_none() && split_cross(a, (0.5, 0.5), Layout::One).is_none());
+    }
+
+    /// 열 경계를 끌면 그 선만 움직인다: 선 왼쪽 열들의 왼쪽 끝은 그대로다. 열은 60 아래로 줄지 않는다
+    #[test]
+    fn dragging_a_column_edge_moves_only_that_line() {
+        let list = R::new(0.0, 0.0, 900.0, 400.0);
+        let start = [140.0, 130.0, 84.0];
+        let lefts = |w: [f32; 3]| {
+            let c = columns(list, w);
+            (c.modified.unwrap().0, c.kind.unwrap().0, c.size.unwrap().0)
+        };
+        let (m0, k0, s0) = lefts(start);
+        // 유형 열의 왼쪽 선(날짜와 사이)을 20 왼쪽으로: 그 선만 20 움직인다
+        let w = drag_column(start, 1, Some(0), 20.0);
+        assert_eq!(w, [120.0, 150.0, 84.0]);
+        assert_eq!(lefts(w), (m0, k0 - 20.0, s0));
+        // 크기 열의 왼쪽 선을 오른쪽으로 끝까지: 크기 열은 60에서 멈추고 유형 열이 그만큼 넓어진다
+        let w = drag_column(start, 2, Some(1), -500.0);
+        assert_eq!(w, [140.0, 154.0, 60.0]);
+        assert_eq!(lefts(w).0, m0);
+        // 날짜 열의 왼쪽 선(이름과 사이): 날짜 열이 넓어지고 이름 칸이 받는다
+        let w = drag_column(start, 0, None, 30.0);
+        assert_eq!(w, [170.0, 130.0, 84.0]);
+        assert_eq!((lefts(w).1, lefts(w).2), (k0, s0));
     }
 
     /// 모든 보기에서 칸 가운데를 누르면 그 항목이 잡히고, 보이는 범위에 들어 있다. 경로 줄은 경로와 책갈피가 겹치지 않는다

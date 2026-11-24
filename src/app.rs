@@ -105,6 +105,8 @@ enum Hit {
     HiddenButton,
     SplitX,
     SplitY,
+    /// 두 나눔선이 만나는 곳 (4칸 가운데, 3칸 T자): 두 선을 함께 끈다
+    SplitXY,
     Tab(usize, usize),
     TabClose(usize, usize),
     TabAdd(usize),
@@ -201,7 +203,9 @@ enum Drag {
     None,
     SplitX,
     SplitY,
-    Col { pane: usize, col: usize, start_x: f32, start_w: f32 },
+    SplitXY,
+    /// 열 경계를 끄는 중: col은 선 오른쪽 열, prev는 선 왼쪽 열(없으면 이름 칸). start는 누를 때의 세 열 너비
+    Col { pane: usize, col: usize, prev: Option<usize>, start_x: f32, start: [f32; 3] },
     Thumb { pane: usize, grab: f32 },
     Press { pane: usize, vi: usize, x: f32, y: f32, select_on_up: bool },
     /// 사이드바 즐겨찾기 줄을 눌렀다. 조금 움직이면 FavMove
@@ -411,6 +415,8 @@ pub struct App {
     places_again: bool,
     /// 앞 누름이 팝업을 열거나 닫았다: 이어지는 두 번 클릭 누름은 무시한다
     swallow_dbl: bool,
+    /// 검색 칸·검색 패널 밖을 눌렀다: 버튼을 떼면 검색을 닫는다 (X와 같다)
+    pal_close_on_up: bool,
     /// 필터 상자를 마지막으로 둔 자리 (픽셀 x, y, 너비, 높이)
     filter_placed: Cell<(i32, i32, i32, i32)>,
     /// 잠깐 강조할 즐겨찾기 줄 (이미 있는 것을 다시 넣으려 할 때. 키보드는 옮기지 않는다)
@@ -930,6 +936,7 @@ impl App {
             places_busy: false,
             places_again: false,
             swallow_dbl: false,
+            pal_close_on_up: false,
             filter_placed: Cell::new((0, 0, 0, 0)),
             fav_flash: None,
             search_edit,
