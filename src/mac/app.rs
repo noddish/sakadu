@@ -85,12 +85,12 @@ pub enum Hit {
     SideTitle,
     /// 사이드바 목록의 줄 (side_rows의 번호)
     SideRow(usize),
-    /// 도구 막대의 칸 나누기·보기 방식 단추 (누르면 메뉴가 열린다)
+    /// 도구 막대의 칸 나누기 단추, 칸의 경로 줄에 있는 보기 방식 단추 (누르면 메뉴가 열린다)
     LayoutPick,
-    ViewPick,
-    /// 도구 막대의 새 폴더 (지금 칸)
-    NewFolder,
-    /// 도구 막대의 눈 (자동 미리 보기를 끄고 켠다)
+    ViewPick(usize),
+    /// 도구 막대의 눈 (숨김 항목을 보이고 감춘다: ⌘⇧.와 같다)
+    HiddenToggle,
+    /// 도구 막대의 자동 미리 보기 단추
     PreviewToggle,
     /// 도구 막대의 돋보기 (검색이 닫혀 있을 때), 늘어난 입력 칸, 그 칸의 닫기
     FindOpen,
@@ -2712,7 +2712,14 @@ impl App {
     fn menu_anchor(&self, kind: MenuKind) -> Option<R> {
         let anchor = match kind {
             MenuKind::Layout => self.toolbar().layout,
-            MenuKind::View => self.toolbar().view,
+            // 보기 방식은 지금 칸의 경로 줄 단추 아래 (좁아서 단추가 없으면 경로 줄 오른쪽 끝 아래)
+            MenuKind::View => match self.view_button(self.active) {
+                b if b.w() > 0.0 => b,
+                _ => {
+                    let g = geom(self.pane_rects().into_iter().find(|(p, _)| *p == self.active)?.1);
+                    R::new(g.star.l, g.star.t, g.star.r.max(g.crumb.r), g.star.b)
+                }
+            },
             MenuKind::Space(i) => self.rail().spaces.iter().find(|(s, _)| *s == i)?.1,
             MenuKind::Spaces => self.rail().add,
             // 사이드바 줄의 메뉴는 그 줄에 붙인다
@@ -2735,7 +2742,7 @@ impl App {
         let brk = self.menu_break(kind);
         let icon = |i: usize| match kind {
             MenuKind::Layout => Layout::ALL.get(i).map_or(MenuIcon::None, |l| MenuIcon::Layout(*l)),
-            MenuKind::View => ViewMode::ALL.get(i).map_or(MenuIcon::Glyph(G_HIDDEN), |v| MenuIcon::View(*v)),
+            MenuKind::View => ViewMode::ALL.get(i).map_or(MenuIcon::None, |v| MenuIcon::View(*v)),
             MenuKind::Space(_) => workspaces::COLORS.get(i).map_or(MenuIcon::None, |key| MenuIcon::Swatch(self.key_color(key))),
             _ => MenuIcon::None,
         };
@@ -2788,7 +2795,7 @@ impl App {
         }
     }
 
-    /// 메뉴의 줄: (이름, 지금 것인지). 보기 방식 메뉴의 맨 아래 줄은 숨김 항목 보기.
+    /// 메뉴의 줄: (이름, 지금 것인지). 숨김 항목은 보기 메뉴가 아니라 도구 막대의 눈으로 켜고 끈다.
     /// 공간 메뉴는 색 여섯 가지 다음에 이름 바꾸기(지금 공간만), 지우기(공간이 둘 이상일 때만).
     /// 모든 작업 공간 메뉴는 공간 이름들.
     /// 고정한 줄의 메뉴는 위로·아래로 이동(갈 수 있는 쪽만), 모든 공간에 두기, 고정 풀기.
@@ -2802,9 +2809,7 @@ impl App {
             }
             MenuKind::View => {
                 let current = self.panes[self.active].view;
-                let mut v: Vec<_> = ViewMode::ALL.iter().map(|v| (v.label().to_string(), *v == current)).collect();
-                v.push(("숨김 항목 보기".to_string(), self.show_hidden));
-                v
+                ViewMode::ALL.iter().map(|v| (v.label().to_string(), *v == current)).collect()
             }
             MenuKind::Space(i) => {
                 let Some(w) = self.workspaces.list.get(i) else { return Vec::new() };
@@ -2860,10 +2865,9 @@ impl App {
     /// 고정한 줄을 옮기는 줄과 그 밖의 줄 사이)
     pub fn menu_break(&self, kind: MenuKind) -> Option<usize> {
         match kind {
-            MenuKind::Layout | MenuKind::Spaces | MenuKind::Fav(_) | MenuKind::Blank => None,
+            MenuKind::Layout | MenuKind::View | MenuKind::Spaces | MenuKind::Fav(_) | MenuKind::Blank => None,
             // 보는 줄(열기, Finder에서 보기)과 그 밖의 줄(이름 바꾸기, 복사, 복제, 휴지통으로 이동) 사이
             MenuKind::Rows => Some(2),
-            MenuKind::View => Some(ViewMode::ALL.len()),
             MenuKind::Space(_) => Some(workspaces::COLORS.len()),
             // 옮길 곳이 없는 줄(고정한 것이 하나뿐)은 구분선 없이 나머지 줄만
             MenuKind::Pin(p) => Some(self.pin_menu(p).iter().filter(|act| matches!(act, PinAct::Up | PinAct::Down)).count()).filter(|n| *n > 0),
@@ -2878,10 +2882,11 @@ impl App {
                     self.set_layout(*l);
                 }
             }
-            MenuKind::View => match ViewMode::ALL.get(i) {
-                Some(v) => self.set_view(self.active, *v),
-                None => self.toggle_hidden(),
-            },
+            MenuKind::View => {
+                if let Some(v) = ViewMode::ALL.get(i) {
+                    self.set_view(self.active, *v);
+                }
+            }
             MenuKind::Space(w) => {
                 if let Some(color) = workspaces::COLORS.get(i) {
                     return self.set_workspace_color(w, color);
@@ -3296,12 +3301,17 @@ impl App {
         self.side_scroll = self.side_scroll.clamp(0.0, if max < 0.5 { 0.0 } else { max });
     }
 
-    /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다. 오른쪽 끝은 새 폴더, 자동 미리 보기의 눈, 검색.
+    /// 도구 막대 단추 자리: 칸 카드의 왼쪽·오른쪽 가장자리에 맞춘다. 오른쪽 끝은 숨김 항목의 눈, 자동 미리 보기, 검색.
     /// 검색은 열면 그 자리에서 입력 칸으로 늘어난다. 위로는 ⌘↑와 경로 조각으로 한다 (Finder와 같다)
     fn toolbar(&self) -> ToolbarGeom {
         let a = self.area();
         let search_w = if self.find_shown() { find::FIELD_W } else { 0.0 };
-        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, new_folder: true, preview: true, search: true, search_w })
+        toolbar_geom(&ToolbarSpec { left: a.l, right: a.r, up: false, hidden: true, preview: true, search: true, search_w })
+    }
+
+    /// 칸 p의 경로 줄에 있는 보기 방식 단추 (좁아서 없으면 폭 0)
+    pub fn view_button(&self, p: usize) -> R {
+        self.pane_rects().into_iter().find(|(q, _)| *q == p).map_or(R::new(0.0, 0.0, 0.0, 0.0), |(_, r)| geom(r).view)
     }
 
     /// 탭 칩 자리와 새 탭(+) 자리 (app.rs chips와 같다: 오른쪽 항목 수 자리 앞까지, 넘치면 지금 탭을 지킨다)
@@ -3366,7 +3376,7 @@ impl App {
             // 도구 막대: 뒤로·앞으로는 지금 칸에 대해 움직인다
             let m = self.toolbar();
             let p = self.active;
-            let hits = [(m.back, Hit::Back(p)), (m.fwd, Hit::Fwd(p)), (m.layout, Hit::LayoutPick), (m.view, Hit::ViewPick), (m.new_folder, Hit::NewFolder), (m.preview, Hit::PreviewToggle)];
+            let hits = [(m.back, Hit::Back(p)), (m.fwd, Hit::Fwd(p)), (m.layout, Hit::LayoutPick), (m.hidden, Hit::HiddenToggle), (m.preview, Hit::PreviewToggle)];
             if let Some((_, h)) = hits.into_iter().find(|(r, _)| r.contains(x, y)) {
                 return h;
             }
@@ -3413,6 +3423,9 @@ impl App {
             }
             if gm.star.contains(x, y) {
                 return Hit::Star(p);
+            }
+            if gm.view.contains(x, y) && self.edit != Editing::Address(p) {
+                return Hit::ViewPick(p);
             }
             if gm.crumb.contains(x, y) {
                 if let Some(dir) = tab.loc.dir()
@@ -3471,9 +3484,18 @@ impl App {
             return;
         }
         match hit {
-            Hit::Tab(p, _) | Hit::TabClose(p, _) | Hit::TabAdd(p) | Hit::Back(p) | Hit::Fwd(p) | Hit::Crumb(p, _) | Hit::CrumbEmpty(p) | Hit::Star(p) | Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) => {
-                self.activate_pane(p)
-            }
+            Hit::Tab(p, _)
+            | Hit::TabClose(p, _)
+            | Hit::TabAdd(p)
+            | Hit::Back(p)
+            | Hit::Fwd(p)
+            | Hit::Crumb(p, _)
+            | Hit::CrumbEmpty(p)
+            | Hit::Star(p)
+            | Hit::ViewPick(p)
+            | Hit::Row(p, _)
+            | Hit::List(p)
+            | Hit::Pane(p) => self.activate_pane(p),
             _ => {}
         }
         // 두 번 누르기는 처음 누른 그 항목을 연다. 두 번 사이에 목록이 바뀌어(폴더 감시) 손 밑에 다른 줄이나 빈 곳이 와 있어도
@@ -3501,8 +3523,8 @@ impl App {
             }
             Hit::SideRow(i) => self.open_side_row(i),
             Hit::LayoutPick => self.open_menu(g, MenuKind::Layout),
-            Hit::ViewPick => self.open_menu(g, MenuKind::View),
-            Hit::NewFolder => self.new_folder(self.active),
+            Hit::ViewPick(_) => self.open_menu(g, MenuKind::View),
+            Hit::HiddenToggle => self.toggle_hidden(),
             Hit::PreviewToggle => self.toggle_auto_preview(),
             // 카드는 단추가 아닌 곳을 눌러도 커지고 작아진다
             Hit::CardExpand | Hit::Card => self.toggle_card_large(),
@@ -3863,18 +3885,16 @@ impl App {
         g.unclip();
     }
 
-    /// 칸 영역 위 도구 막대: 뒤로·앞으로, 지금 폴더 이름, 칸 나누기·보기 방식 단추, 자동 미리 보기의 눈 (공통 그리기)
+    /// 칸 영역 위 도구 막대: 뒤로·앞으로, 칸 나누기 단추, 숨김 항목의 눈, 자동 미리 보기 (공통 그리기)
     fn paint_workbar(&self, g: &Gfx, t: &Theme) {
         let m = self.toolbar();
         let p = self.active;
         let tab = self.panes[p].tab();
-        let title = tab.loc.title();
         let hover = match self.hover {
             Hit::Back(_) => ToolbarHover::Back,
             Hit::Fwd(_) => ToolbarHover::Fwd,
             Hit::LayoutPick => ToolbarHover::Layout,
-            Hit::ViewPick => ToolbarHover::View,
-            Hit::NewFolder => ToolbarHover::NewFolder,
+            Hit::HiddenToggle => ToolbarHover::Hidden,
             Hit::PreviewToggle => ToolbarHover::Preview,
             Hit::FindOpen => ToolbarHover::Search,
             Hit::FindClose => ToolbarHover::SearchClose,
@@ -3885,19 +3905,15 @@ impl App {
             t,
             &ToolbarScene {
                 geom: &m,
-                title: &title,
                 layout: self.layout,
-                view: self.panes[p].view,
                 can_back: !tab.back.is_empty(),
                 can_fwd: !tab.fwd.is_empty(),
                 can_up: can_go_up(&tab.loc),
-                new_folder_ok: tab.loc.dir().is_some(),
-                view_ok: true,
+                hidden_on: self.show_hidden,
                 preview_on: self.auto_preview,
                 search_on: self.find_shown(),
                 search_focus: self.find_wants_keys(),
                 layout_open: self.menu_shown().is_some_and(|(k, _)| k == MenuKind::Layout),
-                view_open: self.menu_shown().is_some_and(|(k, _)| k == MenuKind::View),
                 hover,
             },
         );
@@ -3944,6 +3960,8 @@ impl App {
             count_hot,
             filter: None,
             starred: dir.map(|d| self.is_marked(d)),
+            // 보기 메뉴는 지금 칸에 대해 열린다
+            view_button: Some(active && self.menu_shown().is_some_and(|(k, _)| k == MenuKind::View)),
             root: None,
             address: editing,
             // 창에서는 입력 상자가 글자를 그린다. 그림 시험에서만 직접 그린다
@@ -3988,6 +4006,7 @@ fn pane_hover(h: Hit, p: usize) -> PaneHover {
         Hit::TabClose(q, i) if q == p => PaneHover::TabClose(i),
         Hit::TabAdd(q) if q == p => PaneHover::TabAdd,
         Hit::Star(q) if q == p => PaneHover::Star,
+        Hit::ViewPick(q) if q == p => PaneHover::ViewPick,
         Hit::Crumb(q, i) if q == p => PaneHover::Crumb(i),
         Hit::CrumbEmpty(q) if q == p => PaneHover::CrumbEmpty,
         Hit::Row(q, vi) if q == p => PaneHover::Row(vi),
@@ -4491,17 +4510,24 @@ mod tests {
         assert_eq!(a.menu_items(MenuKind::Layout).iter().filter(|(_, on)| *on).count(), 1);
         a.pick_menu(MenuKind::Layout, 4);
         assert_eq!(a.layout(), Layout::Four);
-        // 보기 방식 메뉴: 여섯 가지와 맨 아래 숨김 항목 보기
-        let (x, y) = mid(a.toolbar().view);
+        // 보기 방식 단추는 칸마다 경로 줄에 있다: 누른 칸이 지금 칸이 되고, 그 칸의 단추 아래에 여섯 가지가 열린다
+        let p = 1 - a.active();
+        let b = a.view_button(p);
+        assert!(b.w() > 0.0);
+        let (x, y) = mid(b);
+        assert_eq!(a.hit(&g, x, y), Hit::ViewPick(p));
         a.mouse_down(&g, x, y, Mods::default(), 1);
-        assert_eq!(take_menu(&mut a).map(|(k, _)| k), Some(MenuKind::View));
-        assert_eq!(a.menu_items(MenuKind::View).len(), ViewMode::ALL.len() + 1);
-        let p = a.active();
+        assert_eq!(a.active(), p);
+        assert_eq!(take_menu(&mut a), Some((MenuKind::View, b)));
+        assert_eq!(a.menu_items(MenuKind::View).len(), ViewMode::ALL.len());
         a.pick_menu(MenuKind::View, 2);
         assert_eq!(a.pane(p).view, ViewMode::Medium);
-        let hidden = a.menu_items(MenuKind::View).last().unwrap().1;
-        a.pick_menu(MenuKind::View, ViewMode::ALL.len());
-        assert_ne!(a.menu_items(MenuKind::View).last().unwrap().1, hidden);
+        // 숨김 항목은 도구 막대의 눈으로 켜고 끈다
+        let (x, y) = mid(a.toolbar().hidden);
+        assert_eq!(a.hit(&g, x, y), Hit::HiddenToggle);
+        let hidden = a.prefs().hidden;
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        assert_ne!(a.prefs().hidden, hidden);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4516,14 +4542,15 @@ mod tests {
         a.mouse_up();
         let picked = a.seen().selected.clone();
         assert_eq!(picked.len(), 1);
-        let (x, y) = mid(a.toolbar().view);
+        let b = a.view_button(a.active());
+        let (x, y) = mid(b);
         let open = |a: &mut App| {
             a.mouse_down(&g, x, y, Mods::default(), 1);
             a.mouse_up();
         };
         open(&mut a);
         let r = a.menu_rect().expect("the view menu is open");
-        assert!(r.t >= a.toolbar().view.b && r.l >= MARGIN && r.r <= a.w - MARGIN, "below the button, inside the window: {r:?}");
+        assert!(r.t >= b.b && r.l >= MARGIN && r.r <= a.w - MARGIN, "below the button, inside the window: {r:?}");
         // 메뉴 밖(다른 줄)을 누르면 닫기만 한다
         let (ox, oy) = row_point(&a, 0, 2);
         assert_eq!(a.hit(&g, ox, oy), Hit::None, "nothing under the open menu is pointed at");
@@ -5246,14 +5273,12 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// 도구 막대의 새 폴더 단추. 파일을 만들거나 고치는 키는 누르고 있어도 되풀이하지 않는다
+    /// 새 폴더(⌘⇧N, 빈 곳 메뉴): 만들고 고른 채 이름을 고친다. 파일을 만들거나 고치는 키는 누르고 있어도 되풀이하지 않는다
     #[test]
-    fn toolbar_has_a_new_folder_button() {
+    fn new_folder_is_made_from_the_key() {
         let (root, home) = demo();
-        let (mut a, g) = app(&home);
-        let (x, y) = mid(a.toolbar().new_folder);
-        assert_eq!(a.hit(&g, x, y), Hit::NewFolder);
-        a.mouse_down(&g, x, y, Mods::default(), 1);
+        let (mut a, _g) = app(&home);
+        a.key(Key::Char('n'), Mods { cmd: true, shift: true, ..Mods::default() });
         a.settle();
         assert!(std::fs::metadata(util::join(&home, "새 폴더")).unwrap().is_dir());
         assert!(matches!(&a.edit, Editing::Item(e) if e.name == "새 폴더"));
@@ -5775,7 +5800,7 @@ mod tests {
         assert_eq!(a.drag_over(&g, x, y, &dragged), Some(downloads.clone()));
         assert!(matches!(a.drop, Some(DropAt::Side(_))), "{:?}", a.drop);
         // 도구 막대 위는 놓을 곳이 아니고, 창을 벗어나면 강조가 지워진다
-        let (x, y) = mid(a.toolbar().view);
+        let (x, y) = mid(a.toolbar().layout);
         assert_eq!(a.drag_over(&g, x, y, &dragged), None);
         assert_eq!(a.drop, None);
         // 탭 위도 놓을 곳이 아니다: 다른 탭 위에 놓았는데 지금 탭의 폴더로 가지 않게
@@ -5842,7 +5867,7 @@ mod tests {
         assert_eq!(std::fs::read(util::join(&util::join(&work, "2026 4분기"), "회의록.md")).unwrap(), b"x");
         assert!(!names(&a, 0).contains(&"회의록.md".to_string()));
         // 놓을 수 없는 곳에 놓으면 아무 일도 없다
-        let (x, y) = mid(a.toolbar().view);
+        let (x, y) = mid(a.toolbar().layout);
         assert!(!a.drop_paths(&g, x, y, vec![src.clone()], Paste::Drop));
         assert_eq!(a.copy_progress(), None);
         std::fs::remove_dir_all(root).unwrap();

@@ -1,4 +1,5 @@
-//! 도구 막대: 창 위쪽 한 줄. 뒤로·앞으로(·위로), 지금 폴더 이름, 칸 나누기·보기 방식 단추, 새 폴더, 미리 보기, 검색.
+//! 도구 막대: 창 위쪽 한 줄. 뒤로·앞으로(·위로), 칸 나누기 단추, 숨김 항목·자동 미리 보기, 검색.
+//! 보기 방식은 칸마다 경로 줄에 있다 (ui::geom의 view). 폴더 이름은 칸의 탭과 경로에 있어 여기에 두지 않는다.
 //! 자리 계산과 그리기를 Windows와 맥이 함께 쓴다. 누르면 무엇을 할지는 각 앱이 정한다
 
 use super::glyph::*;
@@ -10,7 +11,7 @@ pub const TOOL_H: f32 = 32.0;
 pub const TOOL_W: f32 = 36.0;
 /// 단추 묶음 사이 간격
 const TOOL_GAP: f32 = 8.0;
-/// 고르는 단추(칸 나누기·보기 방식): 지금 모양 그림과 아래 화살표
+/// 고르는 단추(칸 나누기): 지금 모양 그림과 아래 화살표
 const PICK_W: f32 = 52.0;
 /// 단추 묶음의 모서리
 const TOOL_R: f32 = 10.0;
@@ -25,8 +26,9 @@ pub struct ToolbarSpec {
     pub right: f32,
     /// 위로 단추 (Windows)
     pub up: bool,
-    pub new_folder: bool,
-    /// 자동 미리 보기 켜고 끄기 (눈)
+    /// 숨김 항목 보이기 켜고 끄기 (눈: 감으면 숨김, 뜨면 보임)
+    pub hidden: bool,
+    /// 자동 미리 보기 켜고 끄기
     pub preview: bool,
     /// 검색 (누르면 검색 패널이 열린다)
     pub search: bool,
@@ -42,21 +44,18 @@ pub struct ToolbarGeom {
     pub back: R,
     pub fwd: R,
     pub up: R,
-    /// 폴더 이름 자리 (오른쪽 단추 앞까지)
-    pub title: R,
     pub layout: R,
-    pub view: R,
-    /// 새 폴더·자동 미리 보기를 담는 판
+    /// 숨김 항목·자동 미리 보기를 담는 판
     pub tools: R,
-    pub new_folder: R,
+    pub hidden: R,
     pub preview: R,
     pub search: R,
 }
 
-/// 단추를 모두 놓는 데 필요한 폭 (폴더 이름 자리는 빼고)
+/// 단추를 모두 놓는 데 필요한 폭
 pub fn toolbar_need(s: &ToolbarSpec) -> f32 {
     let nav = TOOL_W * if s.up { 3.0 } else { 2.0 };
-    let tools = TOOL_W * (s.new_folder as u8 + s.preview as u8) as f32;
+    let tools = TOOL_W * (s.hidden as u8 + s.preview as u8) as f32;
     let search = if !s.search {
         0.0
     } else if s.search_w > 0.0 {
@@ -64,8 +63,8 @@ pub fn toolbar_need(s: &ToolbarSpec) -> f32 {
     } else {
         TOOL_W
     };
-    let gaps = TOOL_GAP * (2.0 + (tools > 0.0) as u8 as f32 + s.search as u8 as f32);
-    nav + PICK_W * 2.0 + tools + search + gaps
+    let gaps = TOOL_GAP * (1.0 + (tools > 0.0) as u8 as f32 + s.search as u8 as f32);
+    nav + PICK_W + tools + search + gaps
 }
 
 /// 검색 입력 칸의 부분: (돋보기, 글자 자리, 닫기 단추). 돋보기 단추만 있을 때는 None
@@ -74,8 +73,8 @@ pub fn search_field_parts(m: &ToolbarGeom) -> Option<(R, R, R)> {
     (r.w() > TOOL_W).then(|| (R::new(r.l + 4.0, r.t, r.l + 32.0, r.b), R::new(r.l + 32.0, r.t, r.r - 32.0, r.b), R::new(r.r - 30.0, r.t + 2.0, r.r - 2.0, r.b - 2.0)))
 }
 
-/// 좁아서 다 들어가지 않으면 미리 보기, 새 폴더, 검색, 위로 순으로 덜어 낸다 (모두 단축키나 메뉴로 된다).
-/// 뒤로·앞으로와 칸 나누기·보기 방식은 늘 남는다. 입력 칸으로 열려 있는 검색도 덜어 내지 않는다 (치던 글자가 사라지지 않게)
+/// 좁아서 다 들어가지 않으면 미리 보기, 숨김 항목, 검색, 위로 순으로 덜어 낸다 (모두 단축키나 메뉴로 된다).
+/// 뒤로·앞으로와 칸 나누기는 늘 남는다. 입력 칸으로 열려 있는 검색도 덜어 내지 않는다 (치던 글자가 사라지지 않게)
 pub fn toolbar_geom(spec: &ToolbarSpec) -> ToolbarGeom {
     let mut s = *spec;
     for drop in 0..4 {
@@ -84,7 +83,7 @@ pub fn toolbar_geom(spec: &ToolbarSpec) -> ToolbarGeom {
         }
         match drop {
             0 => s.preview = false,
-            1 => s.new_folder = false,
+            1 => s.hidden = false,
             2 => s.search = s.search_w > 0.0,
             _ => s.up = false,
         }
@@ -109,16 +108,13 @@ pub fn toolbar_geom(spec: &ToolbarSpec) -> ToolbarGeom {
         x = search.l - TOOL_GAP;
     }
     let preview = R::new(x - if s.preview { TOOL_W } else { 0.0 }, t, x, b);
-    let new_folder = R::new(preview.l - if s.new_folder { TOOL_W } else { 0.0 }, t, preview.l, b);
-    let tools = R::new(new_folder.l, t, preview.r, b);
+    let hidden = R::new(preview.l - if s.hidden { TOOL_W } else { 0.0 }, t, preview.l, b);
+    let tools = R::new(hidden.l, t, preview.r, b);
     if tools.w() > 0.0 {
         x = tools.l - TOOL_GAP;
     }
-    let view = R::new(x - PICK_W, t, x, b);
-    let layout = R::new(view.l - TOOL_GAP - PICK_W, t, view.l - TOOL_GAP, b);
-    let title_l = nav.r + 12.0;
-    let title = R::new(title_l, t, (layout.l - 12.0).max(title_l), b);
-    ToolbarGeom { nav, back, fwd, up, title, layout, view, tools, new_folder, preview, search }
+    let layout = R::new(x - PICK_W, t, x, b);
+    ToolbarGeom { nav, back, fwd, up, layout, tools, hidden, preview, search }
 }
 
 /// 도구 막대에서 마우스가 올라간 곳 (앱의 Hit을 그리기 직전에 바꿔 넘긴다)
@@ -129,8 +125,7 @@ pub enum ToolbarHover {
     Fwd,
     Up,
     Layout,
-    View,
-    NewFolder,
+    Hidden,
     Preview,
     Search,
     /// 검색 입력 칸의 닫기 단추
@@ -140,25 +135,20 @@ pub enum ToolbarHover {
 /// 도구 막대를 그리는 데 필요한 것 (앱이 자기 상태로 채운다)
 pub struct ToolbarScene<'a> {
     pub geom: &'a ToolbarGeom,
-    /// 지금 칸의 폴더 이름
-    pub title: &'a str,
     pub layout: Layout,
-    pub view: ViewMode,
     pub can_back: bool,
     pub can_fwd: bool,
     pub can_up: bool,
-    pub new_folder_ok: bool,
-    /// 보기 방식을 고를 수 있는지 (시작 화면에는 없다)
-    pub view_ok: bool,
+    /// 숨김 항목이 보인다 (뜬 눈)
+    pub hidden_on: bool,
     /// 자동 미리 보기가 켜져 있다
     pub preview_on: bool,
     /// 검색 패널이 열려 있다
     pub search_on: bool,
     /// 키보드가 검색 입력 칸에 있다 (테두리를 옅은 강조 색으로)
     pub search_focus: bool,
-    /// 칸 나누기·보기 방식 메뉴가 열려 있다
+    /// 칸 나누기 메뉴가 열려 있다
     pub layout_open: bool,
-    pub view_open: bool,
     pub hover: ToolbarHover,
 }
 
@@ -201,11 +191,6 @@ pub fn paint_toolbar(g: &impl Canvas, t: &Theme, s: &ToolbarScene) {
             }
         }
     }
-    // 좁은 창에서 한두 글자만 남으면 아예 그리지 않는다 (이름은 칸의 탭에도 있다)
-    if m.title.w() >= 40.0 {
-        g.text(s.title, m.title, Font::Title, t.text);
-    }
-
     // 고르는 단추: 지금 모양 그림과 아래 화살표. 메뉴가 열려 있으면 옅은 강조 색
     let pick = |r: R, open: bool, enabled: bool, hovered: bool| -> Color {
         g.fill_round(r, TOOL_R, if open { t.accent_soft } else { track });
@@ -215,27 +200,25 @@ pub fn paint_toolbar(g: &impl Canvas, t: &Theme, s: &ToolbarScene) {
     };
     let c = pick(m.layout, s.layout_open, true, s.hover == ToolbarHover::Layout);
     draw_layout_icon(g, R::new(m.layout.l + 8.0, m.layout.t, m.layout.l + 32.0, m.layout.b), s.layout, c);
-    let c = pick(m.view, s.view_open, s.view_ok, s.hover == ToolbarHover::View);
-    draw_view_icon(g, R::new(m.view.l + 8.0, m.view.t, m.view.l + 32.0, m.view.b), s.view, c);
 
-    // 새 폴더·자동 미리 보기(눈)
+    // 숨김 항목(눈: 감으면 숨김, 뜨면 보임)·자동 미리 보기. 켜져 있으면 옅은 강조 색 바탕
     if m.tools.w() > 0.0 {
         g.fill_round(m.tools, TOOL_R, track);
     }
-    if m.new_folder.w() > 0.0 {
-        let c = button(m.new_folder, s.new_folder_ok, s.hover == ToolbarHover::NewFolder);
-        g.glyph(G_NEW_FOLDER, m.new_folder, false, c);
-    }
-    if m.preview.w() > 0.0 {
-        // 켜져 있으면 옅은 강조 색 바탕
-        if s.preview_on {
-            g.fill_round(m.preview.inset(3.0, 3.0), TOOL_R - 3.0, t.accent_soft);
-            g.glyph(G_EYE, m.preview, false, t.chip_text);
-        } else {
-            let c = button(m.preview, true, s.hover == ToolbarHover::Preview);
-            g.glyph(G_EYE, m.preview, false, c);
+    let toggle = |r: R, on: bool, glyph: u16, h: ToolbarHover| {
+        if r.w() <= 0.0 {
+            return;
         }
-    }
+        if on {
+            g.fill_round(r.inset(3.0, 3.0), TOOL_R - 3.0, t.accent_soft);
+            g.glyph(glyph, r, false, t.chip_text);
+        } else {
+            let c = button(r, true, s.hover == h);
+            g.glyph(glyph, r, false, c);
+        }
+    };
+    toggle(m.hidden, s.hidden_on, if s.hidden_on { G_EYE } else { G_EYE_OFF }, ToolbarHover::Hidden);
+    toggle(m.preview, s.preview_on, G_AUTO_PREVIEW, ToolbarHover::Preview);
     if let Some((icon, _, close)) = search_field_parts(m) {
         // 입력 칸으로 늘어난 검색: 들어간 상자에 돋보기와 닫기. 글자는 앱이 그 자리에 입력 상자를 놓는다
         g.fill_round(m.search, TOOL_R, if t.high_contrast { t.window } else { t.field });
@@ -310,36 +293,37 @@ mod tests {
     use super::*;
 
     fn spec(left: f32, right: f32) -> ToolbarSpec {
-        ToolbarSpec { left, right, up: true, new_folder: true, preview: true, search: true, search_w: 0.0 }
+        ToolbarSpec { left, right, up: true, hidden: true, preview: true, search: true, search_w: 0.0 }
     }
 
-    /// 넓은 창: 모든 단추가 있고 왼쪽부터 순서대로 겹치지 않는다
+    /// 넓은 창: 모든 단추가 있고 왼쪽부터 순서대로 겹치지 않는다. 가운데는 비어 있다 (폴더 이름은 칸에 있다)
     #[test]
     fn wide_toolbar_keeps_every_button_in_order() {
         let m = toolbar_geom(&spec(300.0, 1200.0));
-        let order = [m.back, m.fwd, m.up, m.title, m.layout, m.view, m.new_folder, m.preview, m.search];
+        let order = [m.back, m.fwd, m.up, m.layout, m.hidden, m.preview, m.search];
         assert!(order.iter().all(|r| r.w() > 0.0));
         assert!(order.windows(2).all(|w| w[0].r <= w[1].l), "buttons overlap");
         assert_eq!((m.back.l, m.search.r), (300.0, 1200.0));
-        assert_eq!((m.tools.l, m.tools.r), (m.new_folder.l, m.preview.r));
+        assert_eq!((m.tools.l, m.tools.r), (m.hidden.l, m.preview.r));
+        assert!(m.layout.l - m.up.r > 400.0, "the middle is left empty");
     }
 
     /// 좁은 창: 덜 중요한 단추부터 빠지고, 남은 단추는 겹치지 않고 범위 안에 있다
     #[test]
     fn narrow_toolbar_drops_buttons_instead_of_overlapping() {
-        for w in [520.0, 400.0, 340.0, 300.0, 260.0, 220.0, 200.0] {
+        for w in [520.0, 400.0, 340.0, 300.0, 260.0, 220.0, 180.0, 150.0] {
             let m = toolbar_geom(&spec(100.0, 100.0 + w));
-            let kept: Vec<R> = [m.back, m.fwd, m.up, m.layout, m.view, m.new_folder, m.preview, m.search].into_iter().filter(|r| r.w() > 0.0).collect();
+            let kept: Vec<R> = [m.back, m.fwd, m.up, m.layout, m.hidden, m.preview, m.search].into_iter().filter(|r| r.w() > 0.0).collect();
             assert!(kept.windows(2).all(|p| p[0].r <= p[1].l), "w={w}");
             assert!(kept.iter().all(|r| r.l >= 100.0 && r.r <= 100.0 + w), "w={w}");
-            assert!(m.back.w() > 0.0 && m.layout.w() > 0.0 && m.view.w() > 0.0, "w={w}");
+            assert!(m.back.w() > 0.0 && m.layout.w() > 0.0, "w={w}");
         }
-        // 미리 보기가 가장 먼저 빠지고, 검색은 새 폴더·미리 보기보다 오래 남는다
-        assert_eq!(toolbar_need(&spec(0.0, 0.0)), 352.0);
-        let m = toolbar_geom(&spec(0.0, 340.0));
-        assert!(m.preview.w() == 0.0 && m.new_folder.w() > 0.0 && m.back.w() > 0.0);
-        let m = toolbar_geom(&spec(0.0, 280.0));
-        assert!(m.tools.w() == 0.0 && m.search.w() > 0.0, "search outlives new folder and preview");
+        // 미리 보기가 가장 먼저 빠지고, 검색은 숨김 항목·미리 보기보다 오래 남는다
+        assert_eq!(toolbar_need(&spec(0.0, 0.0)), 292.0);
+        let m = toolbar_geom(&spec(0.0, 260.0));
+        assert!(m.preview.w() == 0.0 && m.hidden.w() > 0.0 && m.back.w() > 0.0);
+        let m = toolbar_geom(&spec(0.0, 215.0));
+        assert!(m.tools.w() == 0.0 && m.search.w() > 0.0, "search outlives hidden items and preview");
     }
 
     /// 검색이 열리면 돋보기 자리에서 입력 칸이 왼쪽으로 늘어난다. 좁으면 줄어들 뿐 사라지지 않는다
@@ -353,12 +337,12 @@ mod tests {
         let (icon, text, close) = search_field_parts(&m).unwrap();
         assert!(icon.l >= m.search.l && icon.r <= text.l && text.r <= close.l && close.r <= m.search.r);
         // 다른 단추는 입력 칸 왼쪽으로 밀리고 겹치지 않는다
-        let order = [m.back, m.fwd, m.up, m.title, m.layout, m.view, m.new_folder, m.preview, m.search];
+        let order = [m.back, m.fwd, m.up, m.layout, m.hidden, m.preview, m.search];
         assert!(order.windows(2).all(|w| w[0].r <= w[1].l));
-        for w in [520.0, 440.0, 400.0, 360.0, 330.0] {
+        for w in [520.0, 440.0, 400.0, 360.0, 330.0, 280.0] {
             let m = open(100.0, 100.0 + w);
             assert!(m.search.w() >= SEARCH_MIN_W, "w={w}: {}", m.search.w());
-            let kept: Vec<R> = [m.back, m.fwd, m.up, m.layout, m.view, m.new_folder, m.preview, m.search].into_iter().filter(|r| r.w() > 0.0).collect();
+            let kept: Vec<R> = [m.back, m.fwd, m.up, m.layout, m.hidden, m.preview, m.search].into_iter().filter(|r| r.w() > 0.0).collect();
             assert!(kept.windows(2).all(|p| p[0].r <= p[1].l), "w={w}");
             assert!(kept.iter().all(|r| r.l >= 100.0 && r.r <= 100.0 + w), "w={w}");
         }

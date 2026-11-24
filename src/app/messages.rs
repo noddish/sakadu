@@ -469,7 +469,7 @@ impl App {
             && matches!(
                 hit,
                 Hit::Rail(_) | Hit::RailAdd | Hit::SidePin | Hit::SearchButton | Hit::PalClose | Hit::PalScope(_) | Hit::PalInstall | Hit::PalAddFolder
-                    | Hit::PreviewPin | Hit::PreviewOpen | Hit::PreviewButton | Hit::CardExpand | Hit::CardClose | Hit::Card
+                    | Hit::PreviewPin | Hit::PreviewOpen | Hit::PreviewButton | Hit::HiddenButton | Hit::CardExpand | Hit::CardClose | Hit::Card
             )
         {
             return;
@@ -518,7 +518,7 @@ impl App {
             Hit::PalRow(_) | Hit::PalInstall | Hit::PalAddFolder | Hit::PalScope(_) => self.pal_mouse_down(hit, dbl),
             Hit::PalClose => self.close_palette(),
             Hit::SearchField => self.pal_focus_input(),
-            Hit::NewFolder(p) => self.new_folder(p),
+            Hit::HiddenButton => self.toggle_hidden(),
             Hit::PreviewButton => self.toggle_auto_preview(),
             Hit::CardExpand | Hit::Card => self.toggle_card_large(),
             Hit::CardClose => self.close_card(),

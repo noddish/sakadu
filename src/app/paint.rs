@@ -112,21 +112,18 @@ impl App {
         }
     }
 
-    /// 칸 영역 위 도구 막대: 뒤로·앞으로·위로, 폴더 이름, 칸 나누기·보기 방식, 새 폴더, 자동 미리 보기(눈), 검색.
+    /// 칸 영역 위 도구 막대: 뒤로·앞으로·위로, 칸 나누기, 숨김 항목(눈)·자동 미리 보기, 검색.
     /// 창 단추는 paint_caption
     pub(super) fn paint_workbar(&self) {
         let m = self.toolbar();
         let p = self.active;
         let tab = self.panes[p].tab();
-        let start = tab.loc == Location::Start;
-        let title = self.toolbar_title();
         let hover = match self.hover {
             Hit::Back(_) => ToolbarHover::Back,
             Hit::Fwd(_) => ToolbarHover::Fwd,
             Hit::Up(_) => ToolbarHover::Up,
             Hit::LayoutPick => ToolbarHover::Layout,
-            Hit::View(_) => ToolbarHover::View,
-            Hit::NewFolder(_) => ToolbarHover::NewFolder,
+            Hit::HiddenButton => ToolbarHover::Hidden,
             Hit::PreviewButton => ToolbarHover::Preview,
             Hit::SearchButton => ToolbarHover::Search,
             Hit::PalClose => ToolbarHover::SearchClose,
@@ -138,19 +135,15 @@ impl App {
             &self.theme,
             &ToolbarScene {
                 geom: &m,
-                title: &title,
                 layout: self.layout,
-                view: self.panes[p].view,
                 can_back: !tab.back.is_empty(),
                 can_fwd: !tab.fwd.is_empty(),
                 can_up: can_go_up(&tab.loc),
-                new_folder_ok: !start && tab.loc.dir().is_some(),
-                view_ok: !start,
+                hidden_on: self.show_hidden,
                 preview_on: self.auto_preview,
                 search_on: self.pal_shown(),
                 search_focus: self.pal_focus,
                 layout_open: open == Some(view_menu::MenuKind::Layout),
-                view_open: open == Some(view_menu::MenuKind::View),
                 hover,
             },
         );
@@ -171,9 +164,9 @@ impl App {
         }
         Some(match self.hover {
             Hit::LayoutPick => (self.toolbar().layout, "칸 나누기".to_string()),
-            Hit::View(_) => (self.toolbar().view, "보기 방식".to_string()),
             // 말풍선에는 이름만 (단축키는 보이지 않는다)
-            Hit::NewFolder(_) => (self.toolbar().new_folder, "새 폴더".to_string()),
+            Hit::View(p) => (geom(self.pane_rect(p)?).view, "보기 방식".to_string()),
+            Hit::HiddenButton => (self.toolbar().hidden, (if self.show_hidden { "숨김 항목 감추기" } else { "숨김 항목 보기" }).to_string()),
             Hit::Back(_) => (self.toolbar().back, "뒤로".to_string()),
             Hit::Fwd(_) => (self.toolbar().fwd, "앞으로".to_string()),
             Hit::Up(_) => (self.toolbar().up, "위로".to_string()),
@@ -319,6 +312,8 @@ impl App {
         };
         let net_button = self.net_button(p);
         let hover = pane_hover(self.hover, p);
+        // 이 칸의 보기 방식 메뉴가 열려 있으면 경로 줄의 단추를 켜진 모양으로
+        let view_open = self.view_menu.filter(|m| m.kind == view_menu::MenuKind::View).map(|m| m.pane);
         // 목록의 수정한 날짜를 짧게(오늘·어제) 쓸지와 그 기준 시각
         let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
         let App { gfx, panes, types, thumb_failed, places, .. } = self;
@@ -341,6 +336,7 @@ impl App {
             count_hot: false,
             filter,
             starred,
+            view_button: (pane.tab().loc != Location::Start).then_some(view_open == Some(p)),
             root: Some("내 PC"),
             address: edit_mode == EditMode::Address(p),
             address_text: None,
@@ -397,6 +393,7 @@ fn pane_hover(h: Hit, p: usize) -> PaneHover {
         Hit::TabClose(q, i) if q == p => PaneHover::TabClose(i),
         Hit::TabAdd(q) if q == p => PaneHover::TabAdd,
         Hit::Star(q) if q == p => PaneHover::Star,
+        Hit::View(q) if q == p => PaneHover::ViewPick,
         Hit::Crumb(q, i) if q == p => PaneHover::Crumb(i),
         Hit::CrumbEmpty(q) if q == p => PaneHover::CrumbEmpty,
         Hit::Header(q, key) if q == p => PaneHover::Header(key),
