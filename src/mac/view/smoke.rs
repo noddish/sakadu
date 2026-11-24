@@ -3,13 +3,14 @@
 //! 경로 입력(⌘L), 새 폴더(⇧⌘N), 잘라내기·붙여넣기(옮기기)도 같은 길로 해 본다.
 //! 검색(⌘F)도: 시험 폴더만 훑게 하고 켠 뒤, 검색 입력 칸에 쳐서 찾고 그 칸의 키(↓, Return, Esc)로 고르고 연다.
 //! 설정 창도: 앱 메뉴의 '설정…'이 보내는 동작으로 열고, 스위치를 눌러 본 창의 값이 바뀌는지, 본 창에서 바꾼 값을 따라오는지 본다.
+//! 메뉴(앱이 그린다)도: 목록의 빈 곳을 오른쪽 단추로 눌러 열고, 실제 키(Esc, ↓, Return)로 닫고 고른다.
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
 //! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
 //! 걸음마다 `ok`나 `FAIL`을 찍고, 하나라도 실패하면 1로, 메인 줄이 답하지 않으면 2로 끝난다
 
 use super::*;
-use crate::app::Seen;
+use crate::app::{MenuKind, Seen};
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -442,7 +443,46 @@ fn script(dir: &str) -> usize {
         });
         run.wait("Esc closes the settings window", 5, || on_main(|| settings::shown().is_none()));
     }
+
+    // 메뉴: 앱이 그린다. 목록의 빈 곳을 오른쪽 단추로 누르면(실제 창이 받는 rightMouseDown:) 빈 곳 메뉴가 뜬다.
+    // Esc로 닫고, 다시 열어 ↓ 세 번으로 '새로 고침'을 가리키고 Return으로 고른다
+    let shown = || on_main(|| with_app(|a| a.menu_shown().map(|(k, _)| k))).flatten();
+    right_click_blank();
+    if run.wait("a right click on the empty list opens the Sakadu menu", 5, || shown() == Some(MenuKind::Blank)) {
+        key(ESC, false);
+        run.wait("Esc closes the menu", 5, || shown().is_none());
+        right_click_blank();
+        run.wait("it opens again", 5, || shown() == Some(MenuKind::Blank));
+        for _ in 0..3 {
+            key(DOWN, false);
+        }
+        key(RETURN, false);
+        run.wait("Return picks the line and closes the menu", 5, || shown().is_none() && seen().is_some_and(|s| s.ready));
+    }
     run.failed
+}
+
+/// 지금 칸 목록의 아래쪽 빈 곳을 오른쪽 단추로 누른다 (실제 창이 받는 rightMouseDown:. 창 좌표는 왼쪽 아래가 0)
+fn right_click_blank() {
+    on_main(|| {
+        let Some(view) = VIEW.with(|v| v.get().cloned()) else { return };
+        let Some(window) = view.window() else { return };
+        let at = NSPoint::new(view.bounds().size.width * 0.3, 60.0);
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            NSEventType::RightMouseDown,
+            at,
+            NSEventModifierFlags::empty(),
+            0.0,
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        );
+        if let Some(e) = event {
+            view.rightMouseDown(&e);
+        }
+    });
 }
 
 /// 앱 메뉴의 '설정…'이 보내는 동작을 메뉴처럼 보낸다 (받는 쪽을 정하지 않으면 응답 사슬을 따라 앱 위임까지 간다)

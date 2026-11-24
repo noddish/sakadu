@@ -23,6 +23,7 @@ use sakadu::palette::{self, R_ROW, System, Theme, alpha};
 use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab, ViewMode, child_toward};
 use sakadu::session::{self, Look, PaneState, Session};
 use sakadu::ui::glyph::*;
+use sakadu::ui::menu::{MenuIcon, MenuLine, MenuScene, menu_height, menu_hit, menu_max_scroll, menu_place, menu_reveal, menu_step, menu_width, paint_menu};
 use sakadu::ui::paint::{EntryArt, PaneHover, PaneScene, paint_pane_border, paint_pane_head, paint_pane_list};
 use sakadu::ui::preview_card::{CardArt, CardBody, CardGeom, CardHover, CardScene, card_geom, paint_preview_card};
 use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, rail_geom};
@@ -116,6 +117,8 @@ pub enum Hit {
     Pane(usize),
     SplitX,
     SplitY,
+    /// 열린 메뉴 안 (고를 수 있는 줄이면 그 번호). 메뉴가 열려 있으면 메뉴 밖은 Hit::None이다
+    Menu(Option<usize>),
 }
 
 /// 누른 수정 키
@@ -127,7 +130,7 @@ pub struct Mods {
     pub ctrl: bool,
 }
 
-/// 창 쪽이 맥 기본 메뉴로 여는 메뉴
+/// 앱이 직접 그리는 메뉴의 종류 (단추 메뉴와 오른쪽 단추 메뉴)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuKind {
     /// 칸 나누기 다섯 가지
@@ -148,47 +151,15 @@ pub enum MenuKind {
     Blank,
 }
 
-/// 메뉴 한 개에 담을 수 있는 줄 수 (tag에서 줄 번호가 차지하는 범위)
-const TAG_ITEMS: usize = 1_000_000;
-/// tag에서 메뉴 종류가 차지하는 범위 (종류는 여덟 가지)
-const TAG_KINDS: usize = 8;
-
-impl MenuKind {
-    /// 메뉴 줄에 붙이는 번호 (맥 메뉴 항목의 tag): 메뉴 종류, 그 메뉴를 연 것의 번호(공간, 고정한 줄, 즐겨찾기 줄), 줄 번호를 한 수에 담는다.
-    /// 종류(0~7) + TAG_KINDS × (줄 번호 + TAG_ITEMS × 연 것의 번호). 줄 번호와 연 것의 번호는 자르지 않는다:
-    /// 모든 작업 공간 메뉴는 줄 번호가 곧 공간 번호라, 잘리면 뒤쪽 공간들이 같은 번호가 된다
-    pub fn tag(self, item: usize) -> isize {
-        let (kind, index) = match self {
-            MenuKind::Layout => (0, 0),
-            MenuKind::View => (1, 0),
-            MenuKind::Space(i) => (2, i),
-            MenuKind::Spaces => (3, 0),
-            MenuKind::Pin(i) => (4, i),
-            MenuKind::Fav(i) => (5, i),
-            MenuKind::Rows => (6, 0),
-            MenuKind::Blank => (7, 0),
-        };
-        (kind + TAG_KINDS * (item.min(TAG_ITEMS - 1) + TAG_ITEMS * index)) as isize
-    }
-
-    /// tag에서 메뉴와 줄 번호를 되찾는다 (모르는 종류면 None)
-    pub fn from_tag(tag: isize) -> Option<(MenuKind, usize)> {
-        let tag = usize::try_from(tag).ok()?;
-        let (kind, rest) = (tag % TAG_KINDS, tag / TAG_KINDS);
-        let (index, item) = (rest / TAG_ITEMS, rest % TAG_ITEMS);
-        let kind = match kind {
-            0 => MenuKind::Layout,
-            1 => MenuKind::View,
-            2 => MenuKind::Space(index),
-            3 => MenuKind::Spaces,
-            4 => MenuKind::Pin(index),
-            5 => MenuKind::Fav(index),
-            6 => MenuKind::Rows,
-            7 => MenuKind::Blank,
-            _ => return None,
-        };
-        Some((kind, item))
-    }
+/// 열린 메뉴: 종류, 붙인 자리, 줄(열 때 정한다), 가리킨 줄(마우스·키보드), 스크롤
+struct OpenMenu {
+    kind: MenuKind,
+    anchor: R,
+    lines: Vec<MenuLine>,
+    /// 폭 (열 때 가장 긴 줄로 정한다)
+    w: f32,
+    sel: Option<usize>,
+    scroll: f32,
 }
 
 /// 고정한 줄 메뉴의 줄
@@ -886,8 +857,8 @@ pub struct App {
     pub open_files: Vec<String>,
     /// 즐겨찾기를 파일에 저장할지 (시험·그림에서는 저장하지 않는다)
     pub persist: bool,
-    /// 열어 달라는 메뉴 (창 쪽이 맥 기본 메뉴로 연다)
-    menu: Option<MenuKind>,
+    /// 열린 메뉴 (앱이 맨 위에 그린다)
+    menu: Option<OpenMenu>,
     /// Finder '종류' 이름: 확장자별로 한 번만 묻는다 (폴더는 앞에 '/')
     kinds: RefCell<HashMap<String, String>>,
     /// 작업 공간. 늘 하나 이상이고 그중 하나가 지금 것이다.
@@ -2699,9 +2670,46 @@ impl App {
         self.ensure_visible(p);
     }
 
-    /// 열어 달라는 메뉴와 그 메뉴를 붙일 자리 (창 쪽이 가져가서 맥 기본 메뉴로 연다)
-    pub fn take_menu(&mut self) -> Option<(MenuKind, R)> {
-        let kind = self.menu.take()?;
+    /// 메뉴를 연다: 붙일 자리와 줄을 정한다. 줄이 없거나 붙일 자리가 없으면 열지 않는다
+    fn open_menu(&mut self, g: &Gfx, kind: MenuKind) {
+        let Some(anchor) = self.menu_anchor(kind) else { return };
+        let lines = self.menu_lines(kind);
+        if lines.is_empty() {
+            return;
+        }
+        let w = menu_width(g, &lines, (self.w - 2.0 * MARGIN).clamp(1.0, 420.0));
+        self.menu = Some(OpenMenu { kind, anchor, lines, w, sel: None, scroll: 0.0 });
+    }
+
+    /// 그림용: 메뉴를 열고 sel번째 줄을 가리킨 모습. 목록 메뉴는 왼쪽 칸 셋째 줄을, 공간 메뉴는 그 공간 아이콘을 오른쪽 단추로 누른 자리에 연다
+    pub fn open_menu_for_render(&mut self, g: &Gfx, kind: MenuKind, sel: usize) {
+        let at = match kind {
+            MenuKind::Rows => self.list_rect(0).map(|l| (l.l + 80.0, l.t + 2.0 * ROW_H + ROW_H / 2.0)),
+            MenuKind::Space(i) => self.rail().spaces.iter().find(|(s, _)| *s == i).map(|(_, r)| ((r.l + r.r) / 2.0, (r.t + r.b) / 2.0)),
+            _ => None,
+        };
+        match at {
+            Some((x, y)) => {
+                self.right_down(g, x, y);
+            }
+            None => self.open_menu(g, kind),
+        }
+        if let Some(m) = self.menu.as_mut() {
+            m.sel = Some(sel);
+        }
+    }
+
+    /// 열린 메뉴의 종류와 붙인 자리
+    pub fn menu_shown(&self) -> Option<(MenuKind, R)> {
+        self.menu.as_ref().map(|m| (m.kind, m.anchor))
+    }
+
+    pub fn close_menu(&mut self) {
+        self.menu = None;
+    }
+
+    /// 메뉴를 붙일 자리: 단추나 줄, 목록 메뉴는 누른 자리
+    fn menu_anchor(&self, kind: MenuKind) -> Option<R> {
         let anchor = match kind {
             MenuKind::Layout => self.toolbar().layout,
             MenuKind::View => self.toolbar().view,
@@ -2713,13 +2721,71 @@ impl App {
                 let i = (0..rows.len()).find(|i| side_menu(&rows, *i) == Some(kind))?;
                 self.side_rect(&rows[i])
             }
-            // 목록 메뉴는 누른 자리에 연다 (창 쪽이 자리의 아래 끝에서 4 내려 연다)
+            // 목록 메뉴는 누른 자리에 연다 (메뉴는 붙인 자리의 아래 끝에서 4 내려 놓는다)
             MenuKind::Rows | MenuKind::Blank => {
                 let (x, y) = self.list_target.as_ref()?.at;
                 R::new(x, y - 4.0, x, y - 4.0)
             }
         };
-        Some((kind, anchor))
+        Some(anchor)
+    }
+
+    /// 메뉴의 줄 (이름, 지금 것 체크, 구분선, 그림): 칸 나누기와 보기 방식은 그 모양, 공간의 색은 색 동그라미
+    fn menu_lines(&self, kind: MenuKind) -> Vec<MenuLine> {
+        let brk = self.menu_break(kind);
+        let icon = |i: usize| match kind {
+            MenuKind::Layout => Layout::ALL.get(i).map_or(MenuIcon::None, |l| MenuIcon::Layout(*l)),
+            MenuKind::View => ViewMode::ALL.get(i).map_or(MenuIcon::Glyph(G_HIDDEN), |v| MenuIcon::View(*v)),
+            MenuKind::Space(_) => workspaces::COLORS.get(i).map_or(MenuIcon::None, |key| MenuIcon::Swatch(self.key_color(key))),
+            _ => MenuIcon::None,
+        };
+        self.menu_items(kind).into_iter().enumerate().map(|(i, (label, on))| MenuLine::new(label).checked(on).icon(icon(i)).sep(brk == Some(i))).collect()
+    }
+
+    /// 공간 색 이름(workspaces::COLORS)의 색
+    fn key_color(&self, key: &str) -> Color {
+        let dark = self.theme.dark;
+        let sys = Sys { dark, accent: self.system_accent };
+        palette::accent_color(key, dark, &sys).unwrap_or(self.theme.accent)
+    }
+
+    /// 열린 메뉴의 자리 (창 안쪽에 들어가게)
+    fn menu_rect(&self) -> Option<R> {
+        let m = self.menu.as_ref()?;
+        let bounds = R::new(MARGIN, MARGIN, (self.w - MARGIN).max(MARGIN + 1.0), (self.h - MARGIN).max(MARGIN + 1.0));
+        Some(menu_place(m.anchor, m.w, menu_height(&m.lines), bounds))
+    }
+
+    /// 열린 메뉴에서 줄 i를 골랐다: 메뉴를 닫고 그 줄의 일을 한다
+    fn pick_open_menu(&mut self, i: usize) {
+        if let Some(m) = self.menu.take() {
+            self.pick_menu(m.kind, i);
+        }
+    }
+
+    /// 메뉴가 열려 있는 동안의 키: ↑↓ 줄 옮기기, Home·End, Return·스페이스 고르기, Esc·←→·Tab 닫기. 그 밖의 키는 삼킨다
+    pub fn menu_key(&mut self, key: Key) {
+        let rect = self.menu_rect();
+        let Some(m) = self.menu.as_mut() else { return };
+        match key {
+            Key::Up | Key::Down => m.sel = menu_step(&m.lines, m.sel, key == Key::Down),
+            Key::Home => m.sel = menu_step(&m.lines, None, true),
+            Key::End => m.sel = menu_step(&m.lines, None, false),
+            Key::Return | Key::Char(' ') => {
+                if let Some(i) = m.sel {
+                    self.pick_open_menu(i);
+                }
+                return;
+            }
+            Key::Esc | Key::Left | Key::Right | Key::Tab => {
+                self.close_menu();
+                return;
+            }
+            _ => return,
+        }
+        if let (Some(r), Some(i)) = (rect, m.sel) {
+            m.scroll = menu_reveal(r, &m.lines, m.scroll, i);
+        }
     }
 
     /// 메뉴의 줄: (이름, 지금 것인지). 보기 방식 메뉴의 맨 아래 줄은 숨김 항목 보기.
@@ -2903,11 +2969,13 @@ impl App {
     /// 오른쪽 단추로 누른 곳의 메뉴를 열어 달라고 한다: 레일의 공간 아이콘이면 그 공간의 메뉴, + 면 모든 작업 공간 목록,
     /// 사이드바의 고정한 줄이나 즐겨찾기 항목이면 그 줄의 메뉴, 목록의 줄이나 빈 곳이면 목록 메뉴. 그랬으면 true
     pub fn right_down(&mut self, g: &Gfx, x: f32, y: f32) -> bool {
+        // 메뉴가 떠 있으면 닫고, 누른 곳의 메뉴를 새로 연다 (맥 메뉴와 같다). 닫기만 했어도 다시 그린다
+        let closed = self.menu.take().is_some();
         let hit = self.hit(g, x, y);
-        self.ask_menu(hit, x, y)
+        self.ask_menu(g, hit, x, y) || closed
     }
 
-    fn ask_menu(&mut self, hit: Hit, x: f32, y: f32) -> bool {
+    fn ask_menu(&mut self, g: &Gfx, hit: Hit, x: f32, y: f32) -> bool {
         let kind = match hit {
             Hit::Space(i) => Some(MenuKind::Space(i)),
             // 창이 낮으면 레일에 공간이 다 보이지 않는다: 안 보이는 공간은 이 목록에서 고른다
@@ -2917,8 +2985,8 @@ impl App {
             Hit::List(p) => self.list_menu(p, None, x, y),
             _ => None,
         };
-        if kind.is_some() {
-            self.menu = kind;
+        if let Some(kind) = kind {
+            self.open_menu(g, kind);
         }
         kind.is_some()
     }
@@ -3268,6 +3336,10 @@ impl App {
 
     /// card가 false면 미리 보기 카드는 없는 것으로 보고 그 아래 것을 찾는다 (두 번 누르기의 둘째 누름: mouse_down)
     fn hit_with(&self, g: &Gfx, x: f32, y: f32, card: bool) -> Hit {
+        // 메뉴가 열려 있으면 메뉴만 받는다: 메뉴 밖은 아무것도 아니다 (올림 표시도, 누르기도 메뉴를 닫는 것뿐)
+        if let (Some(m), Some(r)) = (self.menu.as_ref(), self.menu_rect()) {
+            return if r.contains(x, y) { Hit::Menu(menu_hit(r, &m.lines, m.scroll, x, y)) } else { Hit::None };
+        }
         if x < BAR_W {
             let rail = self.rail();
             if let Some((i, _)) = rail.spaces.iter().find(|(_, r)| r.contains(x, y)) {
@@ -3363,6 +3435,15 @@ impl App {
 
     /// 누름. clicks는 연속으로 누른 횟수 (2면 두 번 누르기)
     pub fn mouse_down(&mut self, g: &Gfx, x: f32, y: f32, mods: Mods, clicks: usize) {
+        // 메뉴가 열려 있으면: 줄을 누르면 고르고, 메뉴 밖을 누르면 닫기만 한다 (그 누름은 뒤로 넘기지 않는다)
+        if self.menu.is_some() {
+            match self.hit(g, x, y) {
+                Hit::Menu(Some(i)) => self.pick_open_menu(i),
+                Hit::Menu(None) => {}
+                _ => self.close_menu(),
+            }
+            return;
+        }
         let mut hit = self.hit(g, x, y);
         // 두 번 누르기는 첫 누름이 닿은 쪽의 것이다 (미리 보기 카드는 누름 한 번에 뜨고, 작아지고, 닫혀서 둘째 누름 때는 그 자리에 다른 것이 있다).
         // - 첫 누름이 카드였으면 둘째 누름은 버린다: 카드가 작아지거나 닫혀 드러난 줄을 열지 않는다
@@ -3386,7 +3467,7 @@ impl App {
         // 두 번 누르기의 첫 번째에 누른 항목 (한 번 누르기면 아래에서 새로 적는다)
         let first = self.clicked.take();
         // ⌃-누르기는 오른쪽 단추와 같다
-        if mods.ctrl && self.ask_menu(hit, x, y) {
+        if mods.ctrl && self.ask_menu(g, hit, x, y) {
             return;
         }
         match hit {
@@ -3419,8 +3500,8 @@ impl App {
                 }
             }
             Hit::SideRow(i) => self.open_side_row(i),
-            Hit::LayoutPick => self.menu = Some(MenuKind::Layout),
-            Hit::ViewPick => self.menu = Some(MenuKind::View),
+            Hit::LayoutPick => self.open_menu(g, MenuKind::Layout),
+            Hit::ViewPick => self.open_menu(g, MenuKind::View),
             Hit::NewFolder => self.new_folder(self.active),
             Hit::PreviewToggle => self.toggle_auto_preview(),
             // 카드는 단추가 아닌 곳을 눌러도 커지고 작아진다
@@ -3477,7 +3558,7 @@ impl App {
             Hit::SplitX | Hit::SplitY => self.drag = Some(hit),
             // 검색은 위에서 받았다
             Hit::FindOpen | Hit::FindField | Hit::FindClose | Hit::Find(_) => {}
-            Hit::None | Hit::Pane(_) => {}
+            Hit::None | Hit::Pane(_) | Hit::Menu(_) => {}
         }
     }
 
@@ -3521,13 +3602,30 @@ impl App {
     /// 마우스 올림이 바뀌었으면 true (다시 그린다)
     pub fn mouse_moved(&mut self, g: &Gfx, x: f32, y: f32) -> bool {
         let h = self.hit(g, x, y);
-        let changed = h != self.hover;
+        let mut changed = h != self.hover;
         self.hover = h;
+        // 메뉴: 마우스 아래 줄을 가리킨다 (키보드로 가리킨 줄과 같은 표시)
+        if let Some(m) = self.menu.as_mut()
+            && let Hit::Menu(Some(i)) = h
+            && m.sel != Some(i)
+        {
+            m.sel = Some(i);
+            changed = true;
+        }
         changed
     }
 
     /// 스크롤 (dy > 0이면 아래 항목이 보이게). 마우스 아래 칸을 움직인다
     pub fn scroll(&mut self, g: &Gfx, x: f32, y: f32, dy: f32) {
+        // 메뉴가 열려 있으면 메뉴 위에서만 메뉴를 스크롤한다 (뒤의 칸은 움직이지 않는다)
+        if self.menu.is_some() {
+            if let Some(r) = self.menu_rect().filter(|r| r.contains(x, y))
+                && let Some(m) = self.menu.as_mut()
+            {
+                m.scroll = (m.scroll + dy).clamp(0.0, menu_max_scroll(r, &m.lines));
+            }
+            return;
+        }
         if self.find_scroll(x, dy) {
             return;
         }
@@ -3558,6 +3656,11 @@ impl App {
 
     /// Finder 관례 키. 처리했으면 true
     pub fn key(&mut self, key: Key, m: Mods) -> bool {
+        // 메뉴가 열려 있으면 키는 메뉴가 받는다
+        if self.menu.is_some() {
+            self.menu_key(key);
+            return true;
+        }
         let p = self.active;
         self.flash = None;
         match (key, m.cmd, m.ctrl, m.alt) {
@@ -3651,6 +3754,10 @@ impl App {
             }
         }
         self.paint_card(g, t);
+        // 메뉴는 맨 위에
+        if let (Some(m), Some(r)) = (self.menu.as_ref(), self.menu_rect()) {
+            paint_menu(g, t, &MenuScene { rect: r, lines: &m.lines, sel: m.sel, scroll: m.scroll });
+        }
     }
 
     /// 미리 보기 카드: 칸들 위에 그린다. 자리와 그리기는 공통 코드, 그림과 글은 이 앱이 읽어 둔 것
@@ -3789,8 +3896,8 @@ impl App {
                 preview_on: self.auto_preview,
                 search_on: self.find_shown(),
                 search_focus: self.find_wants_keys(),
-                layout_open: self.menu == Some(MenuKind::Layout),
-                view_open: self.menu == Some(MenuKind::View),
+                layout_open: self.menu_shown().is_some_and(|(k, _)| k == MenuKind::Layout),
+                view_open: self.menu_shown().is_some_and(|(k, _)| k == MenuKind::View),
                 hover,
             },
         );
@@ -4039,6 +4146,13 @@ mod tests {
     /// 지금 공간에 고정한 것의 이름
     fn pin_names(a: &App) -> Vec<String> {
         a.workspaces().current().unwrap().pins.iter().map(|f| f.name.clone()).collect()
+    }
+
+    /// 열린 메뉴(종류와 붙인 자리)를 보고 닫는다
+    fn take_menu(a: &mut App) -> Option<(MenuKind, R)> {
+        let m = a.menu_shown();
+        a.close_menu();
+        m
     }
 
     fn mid(r: R) -> (f32, f32) {
@@ -4372,15 +4486,15 @@ mod tests {
         let (x, y) = mid(m.layout);
         assert_eq!(a.hit(&g, x, y), Hit::LayoutPick);
         a.mouse_down(&g, x, y, Mods::default(), 1);
-        assert_eq!(a.take_menu().map(|(k, r)| (k, r.l)), Some((MenuKind::Layout, m.layout.l)));
-        assert!(a.take_menu().is_none(), "the request is handed over once");
+        assert_eq!(take_menu(&mut a).map(|(k, r)| (k, r.l)), Some((MenuKind::Layout, m.layout.l)));
+        assert!(take_menu(&mut a).is_none(), "the request is handed over once");
         assert_eq!(a.menu_items(MenuKind::Layout).iter().filter(|(_, on)| *on).count(), 1);
         a.pick_menu(MenuKind::Layout, 4);
         assert_eq!(a.layout(), Layout::Four);
         // 보기 방식 메뉴: 여섯 가지와 맨 아래 숨김 항목 보기
         let (x, y) = mid(a.toolbar().view);
         a.mouse_down(&g, x, y, Mods::default(), 1);
-        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::View));
+        assert_eq!(take_menu(&mut a).map(|(k, _)| k), Some(MenuKind::View));
         assert_eq!(a.menu_items(MenuKind::View).len(), ViewMode::ALL.len() + 1);
         let p = a.active();
         a.pick_menu(MenuKind::View, 2);
@@ -4388,6 +4502,89 @@ mod tests {
         let hidden = a.menu_items(MenuKind::View).last().unwrap().1;
         a.pick_menu(MenuKind::View, ViewMode::ALL.len());
         assert_ne!(a.menu_items(MenuKind::View).last().unwrap().1, hidden);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 메뉴는 앱이 그린다: 단추 아래 창 안에 뜨고, 줄을 누르거나 ↓·Return으로 고른다. Esc와 메뉴 밖 누르기는 닫기만 한다
+    /// (그 누름은 뒤로 가지 않고, 메뉴가 떠 있는 동안 메뉴 밖의 것은 가리키지 않는다). 같은 단추를 다시 누르면 닫힌다
+    #[test]
+    fn menus_are_drawn_by_the_app_and_take_the_mouse_and_keys() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let (rx, ry) = row_point(&a, 0, 1);
+        a.mouse_down(&g, rx, ry, Mods::default(), 1);
+        a.mouse_up();
+        let picked = a.seen().selected.clone();
+        assert_eq!(picked.len(), 1);
+        let (x, y) = mid(a.toolbar().view);
+        let open = |a: &mut App| {
+            a.mouse_down(&g, x, y, Mods::default(), 1);
+            a.mouse_up();
+        };
+        open(&mut a);
+        let r = a.menu_rect().expect("the view menu is open");
+        assert!(r.t >= a.toolbar().view.b && r.l >= MARGIN && r.r <= a.w - MARGIN, "below the button, inside the window: {r:?}");
+        // 메뉴 밖(다른 줄)을 누르면 닫기만 한다
+        let (ox, oy) = row_point(&a, 0, 2);
+        assert_eq!(a.hit(&g, ox, oy), Hit::None, "nothing under the open menu is pointed at");
+        a.mouse_down(&g, ox, oy, Mods::default(), 1);
+        a.mouse_up();
+        assert!(a.menu_shown().is_none());
+        assert_eq!(a.seen().selected, picked, "the press only closed the menu");
+        // 마우스로: 올린 줄을 가리키고, 누르면 고르고 닫힌다
+        open(&mut a);
+        let r = a.menu_rect().unwrap();
+        let rows = sakadu::ui::menu::menu_rows(r, &a.menu.as_ref().unwrap().lines, 0.0);
+        let (mx, my) = mid(rows[3]);
+        assert_eq!(a.hit(&g, mx, my), Hit::Menu(Some(3)));
+        assert!(a.mouse_moved(&g, mx, my));
+        a.mouse_down(&g, mx, my, Mods::default(), 1);
+        assert!(a.menu_shown().is_none());
+        assert_eq!(a.pane(a.active()).view, ViewMode::ALL[3]);
+        // 키로: ↓ 두 번, Return
+        open(&mut a);
+        assert!(a.key(Key::Down, Mods::default()) && a.key(Key::Down, Mods::default()));
+        assert!(a.key(Key::Return, Mods::default()));
+        assert!(a.menu_shown().is_none());
+        assert_eq!(a.pane(a.active()).view, ViewMode::ALL[1]);
+        // Esc는 닫기만, 같은 단추를 다시 누르면 닫힌다
+        open(&mut a);
+        assert!(a.key(Key::Esc, Mods::default()) && a.menu_shown().is_none());
+        open(&mut a);
+        open(&mut a);
+        assert!(a.menu_shown().is_none());
+        assert_eq!(a.pane(a.active()).view, ViewMode::ALL[1]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 긴 메뉴(작업 공간이 많을 때)는 창 안에 들어가게 높이를 줄이고 스크롤한다. 키로 끝 줄을 가리키면 그 줄이 보인다
+    #[test]
+    fn long_menus_stay_inside_the_window_and_scroll() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        for _ in 0..24 {
+            a.new_workspace();
+            a.cancel_address();
+        }
+        a.resize(900.0, 400.0);
+        a.switch_workspace(0);
+        a.settle();
+        let (x, y) = mid(a.rail().add);
+        assert!(a.right_down(&g, x, y));
+        let r = a.menu_rect().unwrap();
+        assert!(r.t >= MARGIN && r.b <= a.h - MARGIN + 0.01, "{r:?}");
+        let lines = a.menu.as_ref().unwrap().lines.clone();
+        assert_eq!(lines.len(), 25);
+        let max = sakadu::ui::menu::menu_max_scroll(r, &lines);
+        assert!(max > 50.0);
+        let (cx, cy) = mid(r);
+        a.scroll(&g, cx, cy, 50.0);
+        assert_eq!(a.menu.as_ref().unwrap().scroll, 50.0);
+        assert!(a.key(Key::End, Mods::default()));
+        assert_eq!(a.menu.as_ref().unwrap().scroll, max);
+        assert!(a.key(Key::Return, Mods::default()));
+        a.settle();
+        assert_eq!(a.workspaces().current, Some(24));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4489,12 +4686,12 @@ mod tests {
         let tile = a.rail().spaces[0].1;
         let (x, y) = mid(tile);
         assert!(a.right_down(&g, x, y));
-        assert_eq!(a.take_menu().map(|(k, r)| (k, r.t)), Some((MenuKind::Space(0), tile.t)));
+        assert_eq!(take_menu(&mut a).map(|(k, r)| (k, r.t)), Some((MenuKind::Space(0), tile.t)));
         a.mouse_down(&g, x, y, Mods { ctrl: true, ..Default::default() }, 1);
-        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Space(0)));
+        assert_eq!(take_menu(&mut a).map(|(k, _)| k), Some(MenuKind::Space(0)));
         // 목록의 빈 곳에도 메뉴가 있다 (새 폴더, 새로 고침)
         assert!(a.right_down(&g, a.list_rect(0).unwrap().l + 60.0, 300.0));
-        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Blank));
+        assert_eq!(take_menu(&mut a).map(|(k, _)| k), Some(MenuKind::Blank));
         // 색: 고르면 그 공간의 색이 되고, 지금 공간이면 강조 색도 바뀐다
         let before = a.theme.accent;
         a.pick_menu(MenuKind::Space(0), 2);
@@ -4526,20 +4723,6 @@ mod tests {
         a.set_layout(Layout::Four);
         a.pick_menu(MenuKind::Space(0), workspaces::COLORS.len());
         assert_eq!((a.workspaces().list.len(), a.workspaces().current, a.layout()), (1, Some(0), Layout::Four));
-        // 메뉴 줄 번호(tag)에서 메뉴와 줄을 되찾는다
-        // 공간이 아주 많아도(100개, 1000개를 넘어도) 줄 번호와 공간 번호가 잘리지 않는다
-        for (kind, item) in [(MenuKind::Layout, 4), (MenuKind::View, 6), (MenuKind::Space(0), 0), (MenuKind::Space(12), 7), (MenuKind::Space(1500), 7), (MenuKind::Spaces, 0), (MenuKind::Spaces, 99), (MenuKind::Spaces, 100), (MenuKind::Spaces, 2500)] {
-            assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
-        }
-        // 사이드바 줄의 메뉴: 고정한 줄 번호, 즐겨찾기 줄 번호도 그대로 돌아온다
-        for (kind, item) in [(MenuKind::Pin(0), 0), (MenuKind::Pin(0), 3), (MenuKind::Pin(41), 2), (MenuKind::Fav(0), 0), (MenuKind::Fav(0), 1), (MenuKind::Fav(2500), 1)] {
-            assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
-        }
-        assert_eq!(MenuKind::from_tag(-1), None);
-        // 목록 메뉴 (고른 항목들, 빈 곳)
-        for (kind, item) in [(MenuKind::Rows, 0), (MenuKind::Rows, 3), (MenuKind::Blank, 1)] {
-            assert_eq!(MenuKind::from_tag(kind.tag(item)), Some((kind, item)));
-        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4562,11 +4745,10 @@ mod tests {
         // + 를 오른쪽 단추로: 메뉴를 + 자리에 열어 달라고 한다. 모든 공간의 이름이 있고 지금 것에 체크
         let (x, y) = mid(rail.add);
         assert!(a.right_down(&g, x, y));
-        assert_eq!(a.take_menu().map(|(k, r)| (k, r.t)), Some((MenuKind::Spaces, rail.add.t)));
+        assert_eq!(take_menu(&mut a).map(|(k, r)| (k, r.t)), Some((MenuKind::Spaces, rail.add.t)));
         let items = a.menu_items(MenuKind::Spaces);
         assert_eq!((items.len(), items.iter().position(|(_, on)| *on)), (8, Some(0)));
         assert_eq!(a.menu_break(MenuKind::Spaces), None);
-        assert_eq!(MenuKind::from_tag(MenuKind::Spaces.tag(5)), Some((MenuKind::Spaces, 5)));
         // 안 보이던 공간을 고르면 그 공간으로 바뀌고, 레일도 그 공간이 보이는 범위로 옮겨진다
         a.pick_menu(MenuKind::Spaces, hidden);
         a.settle();
@@ -4647,10 +4829,10 @@ mod tests {
         let (x, y) = mid(row);
         assert_eq!(a.hit(&g, x, y), Hit::SideRow(1));
         assert!(a.right_down(&g, x, y));
-        assert_eq!(a.take_menu(), Some((MenuKind::Pin(1), row)));
-        assert!(a.take_menu().is_none(), "the request is handed over once");
+        assert_eq!(take_menu(&mut a), Some((MenuKind::Pin(1), row)));
+        assert!(take_menu(&mut a).is_none(), "the request is handed over once");
         a.mouse_down(&g, x, y, Mods { ctrl: true, ..Default::default() }, 1);
-        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Pin(1)));
+        assert_eq!(take_menu(&mut a).map(|(k, _)| k), Some(MenuKind::Pin(1)));
         a.settle();
         assert_eq!(a.pane(0).tab().loc, Location::Dir(home.clone()), "the control-click did not open the row");
         // 위로, 아래로 (첫 줄의 메뉴는 '아래로 이동'이 첫 줄이다)
@@ -4694,7 +4876,7 @@ mod tests {
         let row = side_row(&a, "업무");
         let (x, y) = mid(row);
         assert!(a.right_down(&g, x, y));
-        assert_eq!(a.take_menu(), Some((MenuKind::Fav(0), row)));
+        assert_eq!(take_menu(&mut a), Some((MenuKind::Fav(0), row)));
         assert_eq!(menu_labels(&a, MenuKind::Fav(0)), ["이 작업 공간에만 두기", "모든 공간에서 빼기"]);
         assert_eq!(a.menu_break(MenuKind::Fav(0)), None);
         // 이 작업 공간에만 두기: 즐겨찾기에서 빠지고 이 공간에 고정한 것의 끝으로 돌아온다
@@ -4715,13 +4897,13 @@ mod tests {
             let (x, y) = mid(side_row(&a, label));
             assert!(matches!(a.hit(&g, x, y), Hit::SideRow(_)), "{label}");
             assert!(!a.right_down(&g, x, y), "{label}");
-            assert!(a.take_menu().is_none(), "{label}");
+            assert!(take_menu(&mut a).is_none(), "{label}");
         }
         assert!(a.menu_items(MenuKind::Fav(0)).is_empty(), "the group header has no menu");
         let item = side_row(&a, "예산");
         let (x, y) = mid(item);
         assert!(a.right_down(&g, x, y));
-        assert_eq!(a.take_menu(), Some((MenuKind::Fav(1), item)));
+        assert_eq!(take_menu(&mut a), Some((MenuKind::Fav(1), item)));
         // 모든 공간에서 빼기: 즐겨찾기에서만 없어진다
         a.pick_menu(MenuKind::Fav(1), 1);
         assert!(a.favorites().groups[0].items.is_empty());
@@ -5280,7 +5462,7 @@ mod tests {
             let vi = names(a, 0).iter().position(|n| n == name).unwrap();
             let (x, y) = row_point(a, 0, vi);
             assert!(a.right_down(&g, x, y));
-            let (kind, at) = a.take_menu().unwrap();
+            let (kind, at) = take_menu(a).unwrap();
             assert_eq!((kind, at.l, at.b + 4.0), (MenuKind::Rows, x, y), "the menu opens where the row was pressed");
         };
         // 고르지 않은 줄을 오른쪽 단추로: 그 줄만 골라진다
@@ -5333,7 +5515,7 @@ mod tests {
         click_name(&mut a, &g, 0, "업무", Mods::default());
         let l = a.list_rect(0).unwrap();
         a.mouse_down(&g, l.l + 60.0, l.b - 10.0, Mods { ctrl: true, ..Default::default() }, 1);
-        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Blank));
+        assert_eq!(take_menu(&mut a).map(|(k, _)| k), Some(MenuKind::Blank));
         assert!(picked(&a, 0).0.is_empty());
         assert_eq!(menu_labels(&a, MenuKind::Blank), ["새 폴더", "붙여넣기", "새로 고침"]);
         a.pick_menu(MenuKind::Blank, 0);
@@ -5748,7 +5930,7 @@ mod tests {
             let vi = names(a, 0).iter().position(|n| n == name).unwrap();
             let (x, y) = row_point(a, 0, vi);
             assert!(a.right_down(&g, x, y));
-            assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Rows));
+            assert_eq!(take_menu(a).map(|(k, _)| k), Some(MenuKind::Rows));
         };
         menu(&mut a, "예산.csv");
         a.pick_menu(MenuKind::Rows, 4);
@@ -5763,7 +5945,7 @@ mod tests {
         // 빈 곳의 붙여넣기: 그 칸을 지금 칸으로 하고 붙여넣어 달라고 한다
         let l = a.list_rect(1).unwrap();
         assert!(a.right_down(&g, l.l + 60.0, l.b - 10.0));
-        assert_eq!(a.take_menu().map(|(k, _)| k), Some(MenuKind::Blank));
+        assert_eq!(take_menu(&mut a).map(|(k, _)| k), Some(MenuKind::Blank));
         a.pick_menu(MenuKind::Blank, 1);
         assert!(a.clip_in == Some(false) && a.active() == 1);
         std::fs::remove_dir_all(root).unwrap();

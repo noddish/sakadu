@@ -6,6 +6,7 @@ use crate::pane::{Location, SortKey, ViewMode};
 use crate::palette::{Theme, alpha, mix};
 use crate::util;
 
+pub mod menu;
 pub mod paint;
 pub mod preview_card;
 pub mod rail;
@@ -40,6 +41,7 @@ pub mod glyph {
     pub const G_ADD: u16 = 0xE710;
     pub const G_CLOSE: u16 = 0xE8BB;
     pub const G_CHEVRON: u16 = 0xE76C;
+    pub const G_CHECK: u16 = 0xE73E;
     pub const G_STAR_FILL: u16 = 0xE735;
     pub const G_SORT_UP: u16 = 0xE70E;
     pub const G_SORT_DOWN: u16 = 0xE70D;
