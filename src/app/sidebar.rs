@@ -7,6 +7,7 @@
 //! 패널 가운데 목록의 줄 배치는 `side_slots` 한 곳에서 정해 그리기·누르기·끌어 놓기가 같이 쓴다.
 //! 즐겨찾기와 고정한 것의 동작(열기·추가·이름·그룹·키보드·끌어서 옮기기)은 fav_ui.rs, 작업 공간을 바꾸고 만드는 것은 workspace_ui.rs
 
+use super::side_flow::{DropPlan, DropTo};
 use super::*;
 use crate::favorites::Row;
 use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, rail_geom};
@@ -87,7 +88,7 @@ pub enum Side {
 
 /// 가운데 목록의 한 자리 (스크롤 전, 목록 맨 위·왼쪽이 0인 좌표)
 #[derive(Clone, Copy)]
-enum Slot {
+pub(super) enum Slot {
     Item(Side),
 }
 
@@ -242,7 +243,7 @@ impl App {
     }
 
     /// 보이는 패널의 가운데 목록 자리들과 전체 높이. 좌표는 스크롤 전, 목록 맨 위·왼쪽이 0
-    fn side_slots(&self) -> (Vec<(R, Slot)>, f32) {
+    pub(super) fn side_slots(&self) -> (Vec<(R, Slot)>, f32) {
         let mut out: Vec<(R, Slot)> = Vec::new();
         // 검색 패널의 결과 목록은 palette.rs가 따로 둔다
         if self.side_panel() != Some(Panel::Main) {
@@ -343,13 +344,6 @@ impl App {
         Some(R::new(r.l + 32.0, r.t + 3.0, r.r - 6.0, r.b - 3.0))
     }
 
-    /// 고정한 줄을 끌어 놓을 자리: 그 앞에 끼워 넣을 줄 번호 (0 ~ 줄 수). 줄의 위쪽 절반이면 그 줄 앞, 아래쪽 절반이면 그 줄 뒤
-    pub(super) fn pin_drop_slot(&self, y: f32) -> Option<usize> {
-        let (slots, _) = self.side_slots();
-        let rows: Vec<R> = slots.into_iter().filter(|(_, s)| matches!(s, Slot::Item(Side::Pin(_)))).map(|(r, _)| self.side_at(r)).collect();
-        (!rows.is_empty()).then(|| rows.iter().position(|r| y < (r.t + r.b) / 2.0).unwrap_or(rows.len()))
-    }
-
     /// 끄는 위치 y가 이 공간에 고정한 쪽(true, '모든 공간' 이름 줄보다 위)인지 '모든 공간' 쪽(false)인지. 목록 밖이면 None
     pub(super) fn side_drop_to_pins(&self, y: f32) -> Option<bool> {
         let list = self.side_list();
@@ -359,35 +353,6 @@ impl App {
         let (slots, _) = self.side_slots();
         let head = slots.iter().find(|(_, s)| matches!(s, Slot::Item(Side::CommonHead))).map(|(r, _)| self.side_at(*r))?;
         Some(y < head.t)
-    }
-
-    /// 끌고 있는 줄이 다른 쪽에 놓이는지: 즐겨찾기 항목이 고정한 쪽 위면 Some(true), 고정한 줄이 '모든 공간' 위면 Some(false)
-    fn side_cross_drop(&self) -> Option<bool> {
-        match self.drag {
-            Drag::FavMove { from: Row::Item { .. }, y } => self.side_drop_to_pins(y).filter(|to_pins| *to_pins),
-            Drag::PinMove { y, .. } => self.side_drop_to_pins(y).filter(|to_pins| !*to_pins),
-            _ => None,
-        }
-    }
-
-    /// 끄는 위치 y 아래 즐겨찾기 줄과 그 줄의 아래쪽 절반인지. 첫 줄 위면 첫 줄 위쪽, 마지막 줄 아래면 마지막 줄 아래쪽
-    pub(super) fn fav_drop_row(&self, y: f32) -> Option<(Row, bool)> {
-        let (slots, _) = self.side_slots();
-        let rows: Vec<(R, Row)> = slots
-            .into_iter()
-            .filter_map(|(r, s)| match s {
-                Slot::Item(Side::Fav(row)) => Some((self.side_at(r), row)),
-                _ => None,
-            })
-            .collect();
-        let (first, last) = (rows.first()?, rows.last()?);
-        if y < first.0.t {
-            return Some((first.1, false));
-        }
-        if y >= last.0.b {
-            return Some((last.1, true));
-        }
-        rows.iter().find(|(r, _)| y >= r.t && y < r.b).map(|(r, row)| (*row, y >= (r.t + r.b) / 2.0))
     }
 
     // ---------- 열고 닫기 ----------
@@ -926,28 +891,28 @@ impl App {
             _ => None,
         };
         let renaming_space = self.edit_mode == EditMode::WorkspaceRename;
-        // 다른 쪽(고정한 것 ↔ '모든 공간')으로 옮기는 중이면 놓일 쪽 전체를 강조하고, 놓일 자리에 선을 긋는다
-        let cross = self.side_cross_drop();
-        let cross_at = match (cross, &self.drag) {
-            (Some(true), Drag::FavMove { y, .. }) => Some((None, self.pin_drop_slot(*y).unwrap_or(0))),
-            (Some(false), Drag::PinMove { y, .. }) => self.fav_drop_row(*y).map(|(at, below)| (Some((at, below)), 0)),
-            _ => None,
+        // 끄는 중: 놓일 빈자리와 줄마다 보일 자리 (side_flow.rs). 줄은 지금 자리에서 그 자리로 미끄러져 간다
+        let plan = self.side_drop_plan(&slots);
+        let targets: Vec<Option<f32>> = match &plan {
+            Some(p) => p.targets.clone(),
+            None => slots.iter().map(|(r, _)| Some(r.t)).collect(),
         };
-        // 끌어서 옮기는 중: (끄는 줄, 놓을 줄, 아래쪽 절반)
-        let moving = match self.drag {
-            Drag::FavMove { from, y } if cross.is_none() => self.fav_drop_row(y).map(|(at, below)| (from, at, below)),
-            _ => None,
+        let keys: Vec<String> = slots.iter().map(|(_, Slot::Item(s))| self.side_flow_key(*s)).collect();
+        let shown_y = self.side_flow_step(&keys, &targets);
+        // 고정한 곳이 비어 있는데 그쪽으로 끌어 오면 그 자리를 강조한다 (빈자리를 보일 줄이 없다)
+        let side_drop = match &plan {
+            Some(DropPlan { to: DropTo::Pin(_), .. }) if self.pins().is_empty() => Some(Side::PinEmpty),
+            _ => self.side_drop,
         };
-        // 고정한 줄을 끌어서 옮기는 중: (끄는 줄, 끼워 넣을 자리). 제자리(그 줄의 바로 앞뒤)면 선을 그리지 않는다
-        let pin_moving = match self.drag {
-            Drag::PinMove { from, y } if cross.is_none() => self.pin_drop_slot(y).map(|slot| (from, slot)),
-            _ => None,
+        // 그룹 판: 끌어 온 줄이 들어갈 그룹(진하게), 끄는 중이 아니면 마우스가 올라간 그룹 머리 줄의 그룹(옅게)
+        let group_box = match &plan {
+            Some(p) => p.gap_group.map(|g| (g, true)),
+            None => match hover {
+                Hit::Side(Side::Fav(Row::Group(g))) => Some((g, false)),
+                _ => None,
+            },
         };
-        let side_drop = match cross {
-            Some(true) => Some(Side::PinEmpty),
-            Some(false) => Some(Side::FavEmpty),
-            None => self.side_drop,
-        };
+        let dragging = plan.as_ref().map(|p| (p.dragged, p.card_t, p.card_h, p.gap_t));
         // 아이콘은 형식 캐시에서 (가변 빌림이 필요해 먼저 모아 둔다)
         let ext_of = |path: &str| util::file_name(path).rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
         let kinds: Vec<(bool, String)> = fav_rows
@@ -957,9 +922,20 @@ impl App {
                 Row::Group(_) => None,
             })
             .collect();
-        let mut fav_icons = kinds.iter().map(|(d, e)| self.type_icon(e, *d)).collect::<Vec<_>>().into_iter();
+        let fav_icon_vec: Vec<i32> = kinds.iter().map(|(d, e)| self.type_icon(e, *d)).collect();
+        let mut fav_icons = fav_icon_vec.clone().into_iter();
         let pins = self.pins().to_vec();
         let pin_icons: Vec<i32> = pins.iter().map(|f| self.type_icon(&ext_of(&f.path), f.is_dir)).collect();
+        // 끄는 줄의 카드: 아이콘과 이름 (그룹이면 안의 항목 수도)
+        let (card_icon, card_name) = match dragging.map(|d| d.0) {
+            Some(Side::Pin(i)) => (pin_icons.get(i).copied(), pins.get(i).map(|f| f.name.clone()).unwrap_or_default()),
+            Some(Side::Fav(row @ Row::Item { .. })) => (
+                fav_rows.iter().filter(|r| matches!(r, Row::Item { .. })).position(|r| *r == row).and_then(|p| fav_icon_vec.get(p).copied()),
+                self.favs.row_name(row).unwrap_or_default().to_string(),
+            ),
+            Some(Side::Fav(Row::Group(gi))) => (None, self.favs.groups.get(gi).map(|g| format!("{} · {}", g.name, g.items.len())).unwrap_or_default()),
+            _ => (None, String::new()),
+        };
         let pin = self.side_pin_rect();
         let title = self.side_title_rect();
         let name = self.workspaces.current_name().unwrap_or_default().to_string();
@@ -1008,8 +984,34 @@ impl App {
         g.clip(list);
         // 줄 안의 16px 아이콘 자리
         let icon_at = |r: R, l: f32| R::new(l, r.t + (SIDE_ROW_H - 16.0) / 2.0, l + 16.0, r.t + (SIDE_ROW_H + 16.0) / 2.0);
-        for (r, slot) in &slots {
-            let r = R::new(r.l + dx, r.t + dy, r.r + dx, r.b + dy);
+        // 그룹 판: 머리 줄부터 안의 마지막 줄(끌어 온 빈자리 포함)까지 둥근 판으로 묶는다
+        if let Some((gi, strong)) = group_box {
+            let (mut top, mut bot) = (f32::MAX, f32::MIN);
+            for (k, (r, Slot::Item(s))) in slots.iter().enumerate() {
+                let in_group = matches!(s, Side::Fav(Row::Group(h)) | Side::Fav(Row::Item { group: Some(h), .. }) if *h == gi);
+                if let (true, Some(y)) = (in_group, shown_y[k]) {
+                    top = top.min(y);
+                    bot = bot.max(y + r.h());
+                }
+            }
+            if let Some((_, _, h, gap_t)) = dragging.filter(|_| strong) {
+                top = top.min(gap_t);
+                bot = bot.max(gap_t + h);
+            }
+            if top < bot {
+                let box_r = R::new(dx + ROW_L - 3.0, top + dy - 3.0, dx + rr + 3.0, bot + dy + 3.0);
+                g.fill_round(box_r, R_ROW + 3.0, if t.high_contrast { t.hover } else { alpha(t.text, if strong { 0.075 } else { 0.045 }) });
+            }
+        }
+        for (k, (r, slot)) in slots.iter().enumerate() {
+            // 끄는 줄은 카드로 따로 그린다 (아이콘 차례는 그대로 넘긴다)
+            let Some(vy) = shown_y[k] else {
+                if let Slot::Item(Side::Fav(Row::Item { .. })) = slot {
+                    fav_icons.next();
+                }
+                continue;
+            };
+            let r = R::new(r.l + dx, vy + dy, r.r + dx, vy + r.h() + dy);
             if r.b < list.t || r.t > list.b {
                 if let Slot::Item(Side::Fav(Row::Item { .. })) = slot {
                     fav_icons.next();
@@ -1028,8 +1030,7 @@ impl App {
                         g.fill_round(er, R_ROW, t.pane);
                         g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                     } else {
-                        let dragged = pin_moving.is_some_and(|(from, _)| from == i);
-                        g.text(&f.name, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, if dragged { t.faint } else { t.text });
+                        g.text(&f.name, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
                         if sel_top == Some(fav_ui::TopSel::Pin(i)) {
                             g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
                         }
@@ -1057,8 +1058,7 @@ impl App {
                 // 작은 단추는 '모든 공간' 줄에서 그렸다. FavEmpty는 끌어 놓을 때만 쓴다
                 Side::FavAdd | Side::FavSort | Side::FavNewGroup | Side::FavEmpty => {}
                 Side::Fav(row) => {
-                    let dragged = moving.is_some_and(|(from, ..)| from == row);
-                    let fg = if dragged { t.faint } else { t.text };
+                    let fg = t.text;
                     let lx = r.l + label_x(row);
                     match row {
                         Row::Group(gi) => {
@@ -1068,12 +1068,6 @@ impl App {
                             g.glyph(if group.collapsed { G_TWIST_CLOSED } else { G_TWIST_OPEN }, tw, true, t.faint);
                             if editing != Some(row) {
                                 g.text(&group.name, R::new(lx, r.t, r.r - 8.0, r.b), Font::Normal, fg);
-                            }
-                            // 항목을 그룹 머리 줄에 끌어 놓으면 그 그룹으로
-                            if let Some((Row::Item { .. }, Row::Group(at), _)) = moving {
-                                if at == gi {
-                                    g.stroke_round(r.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
-                                }
                             }
                         }
                         Row::Item { group, index } => {
@@ -1116,47 +1110,6 @@ impl App {
                 }
             }
         }
-        // 즐겨찾기를 끌어서 옮길 자리: 그룹 머리 줄에 항목을 놓는 게 아니면 줄 사이 선
-        if let Some((from, at, below)) = moving {
-            let line_y = match (from, at) {
-                (Row::Item { .. }, Row::Group(_)) => None,
-                (Row::Item { .. }, _) => fav_rect_in(&slots, at).map(|r| if below { r.b } else { r.t }),
-                (Row::Group(_), _) => {
-                    let slot = favs.group_drop_slot(at, below);
-                    if slot < favs.groups.len() {
-                        fav_rect_in(&slots, Row::Group(slot)).map(|r| r.t)
-                    } else {
-                        slots.iter().filter(|(_, s)| matches!(s, Slot::Item(Side::Fav(_)))).map(|(r, _)| r.b).last()
-                    }
-                }
-            };
-            if let Some(ly) = line_y {
-                let ly = ly + dy;
-                g.fill_round(R::new(dx + ROW_L + 8.0, ly - 1.5, dx + rr - 8.0, ly + 1.5), 1.5, t.accent);
-            }
-        }
-        // 고정한 줄을 끌어서 옮길 자리: 줄 사이 선
-        if let Some((from, slot)) = pin_moving.filter(|(from, slot)| *slot != *from && *slot != *from + 1) {
-            let rows: Vec<R> = slots.iter().filter(|(_, s)| matches!(s, Slot::Item(Side::Pin(_)))).map(|(r, _)| *r).collect();
-            let ly = rows.get(slot).map(|r| r.t).or_else(|| rows.last().map(|r| r.b));
-            if let Some(ly) = ly.filter(|_| from < rows.len()) {
-                let ly = ly + dy;
-                g.fill_round(R::new(dx + ROW_L + 8.0, ly - 1.5, dx + rr - 8.0, ly + 1.5), 1.5, t.accent);
-            }
-        }
-        // 다른 쪽으로 옮길 자리: 고정한 줄 사이, 또는 즐겨찾기 줄 위·아래 (그룹 머리 줄 위면 그 그룹으로: 선 없이 쪽 강조만)
-        let cross_line = match cross_at {
-            Some((None, slot)) => {
-                let rows: Vec<R> = slots.iter().filter(|(_, s)| matches!(s, Slot::Item(Side::Pin(_)))).map(|(r, _)| *r).collect();
-                rows.get(slot).map(|r| r.t).or_else(|| rows.last().map(|r| r.b))
-            }
-            Some((Some((at @ Row::Item { .. }, below)), _)) => fav_rect_in(&slots, at).map(|r| if below { r.b } else { r.t }),
-            _ => None,
-        };
-        if let Some(ly) = cross_line {
-            let ly = ly + dy;
-            g.fill_round(R::new(dx + ROW_L + 8.0, ly - 1.5, dx + rr - 8.0, ly + 1.5), 1.5, t.accent);
-        }
         // 파일을 끌어 놓으려 할 때: 놓일 쪽(이 공간에 고정하는 위쪽, 또는 '모든 공간')의 줄 전체를 강조
         let area_of = |want: fn(Side) -> bool| {
             let mut rows = slots.iter().filter(|(_, Slot::Item(s))| want(*s)).map(|(r, _)| *r);
@@ -1172,6 +1125,21 @@ impl App {
         if let Some(area) = drop_area {
             g.fill_round(area, 8.0, alpha(t.accent, 0.08));
             g.stroke_round(area.inset(0.75, 0.75), 8.0, t.accent, 1.5);
+        }
+        // 끄는 줄: 흰 카드로 떠서 마우스를 따라온다
+        if let Some((s, card_t, card_h, _)) = dragging {
+            let cr = R::new(dx + ROW_L, card_t + dy, dx + rr, card_t + card_h + dy);
+            if !t.high_contrast {
+                super::soft_shadow(g, cr, R_ROW, 10.0, 0.14, t.dark);
+            }
+            g.fill_round(cr, R_ROW, t.pane);
+            g.stroke_round(cr.inset(0.5, 0.5), R_ROW, if t.high_contrast { t.focus } else { t.border }, 1.0);
+            if let Side::Fav(Row::Group(_)) = s {
+                g.glyph(G_TWIST_CLOSED, R::new(cr.l + 8.0, cr.t, cr.l + 24.0, cr.b), true, t.faint);
+            } else if let Some(ic) = card_icon {
+                g.icon(ic, icon_at(cr, cr.l + 10.0));
+            }
+            g.text(&card_name, R::new(cr.l + 36.0, cr.t, cr.r - 8.0, cr.b), Font::Normal, t.text);
         }
         g.unclip();
     }
@@ -1202,6 +1170,3 @@ fn label_x(row: Row) -> f32 {
     }
 }
 
-fn fav_rect_in(slots: &[(R, Slot)], row: Row) -> Option<R> {
-    slots.iter().find(|(_, s)| matches!(s, Slot::Item(Side::Fav(r)) if *r == row)).map(|(r, _)| *r)
-}

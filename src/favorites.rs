@@ -153,6 +153,40 @@ impl Favorites {
         Some((to_group, at))
     }
 
+    /// 항목을 빼낸 뒤 기준 자리(post_index)에 넣는다: 사이드바에서 끄는 줄을 빼고 보이는 빈자리 그대로. 새 위치를 돌려준다
+    pub fn move_item_to(&mut self, from: (Option<usize>, usize), to_group: Option<usize>, post_index: usize) -> Option<(Option<usize>, usize)> {
+        if to_group.is_some_and(|g| g >= self.groups.len()) {
+            return None;
+        }
+        let fav = self.remove_item(from.0, from.1)?;
+        if let Some(g) = to_group {
+            self.groups[g].collapsed = false;
+        }
+        let section = self.section_mut(to_group)?;
+        let at = post_index.min(section.len());
+        section.insert(at, fav);
+        Some((to_group, at))
+    }
+
+    /// 끄는 항목을 빼낸 줄들(remaining, 보이는 차례) 사이 gap번째 틈에 놓으면 들어갈 곳 (그룹, 빼낸 뒤 기준 자리).
+    /// 틈 바로 위 줄이 그룹 머리면 그 그룹 맨 앞(접혀 있으면 맨 끝), 그룹 안 항목이면 그 다음, 그룹 없는 항목이면 그 다음,
+    /// 맨 위면 그룹 없는 맨 앞. 그룹 사이 틈은 위 그룹의 끝이다 (그룹 없는 항목은 늘 그룹들보다 위에 있다)
+    pub fn item_gap_target(&self, remaining: &[Row], gap: usize) -> (Option<usize>, usize) {
+        let before = &remaining[..gap.min(remaining.len())];
+        let count = |group: Option<usize>| before.iter().filter(|r| matches!(r, Row::Item { group: g, .. } if *g == group)).count();
+        match before.last() {
+            None => (None, 0),
+            Some(Row::Group(g)) if self.groups.get(*g).is_some_and(|gr| gr.collapsed) => (Some(*g), usize::MAX),
+            Some(Row::Group(g)) => (Some(*g), 0),
+            Some(Row::Item { group, .. }) => (*group, count(*group)),
+        }
+    }
+
+    /// 끄는 그룹을 빼낸 줄들 사이 boundary번째 틈(그룹 머리 줄 앞이나 맨 끝)에 놓으면 될 그룹 순서 (빼낸 뒤 기준)
+    pub fn group_gap_target(remaining: &[Row], boundary: usize) -> usize {
+        remaining[..boundary.min(remaining.len())].iter().filter(|r| matches!(r, Row::Group(_))).count()
+    }
+
     pub fn move_group(&mut self, from: usize, to: usize) -> Option<usize> {
         if from >= self.groups.len() {
             return None;
@@ -353,6 +387,48 @@ mod tests {
 
     fn file(n: &str, p: &str) -> Favorite {
         Favorite { name: n.into(), path: p.into(), is_dir: false }
+    }
+
+    /// 보이는 빈자리로 놓을 곳 정하기: 틈 위 줄이 무엇이냐에 따라 그룹과 자리가 정해지고, 그대로 옮기면 그 자리에 들어간다
+    #[test]
+    fn gaps_map_to_sections_and_positions() {
+        let f = Favorites {
+            items: vec![fav("a", "C:\\a"), fav("b", "C:\\b")],
+            groups: vec![
+                Group { name: "G0".into(), collapsed: false, items: vec![fav("x", "C:\\x"), fav("y", "C:\\y")] },
+                Group { name: "G1".into(), collapsed: true, items: vec![fav("z", "C:\\z")] },
+            ],
+        };
+        // 'a'를 끈다: 남은 줄 = b, G0, x, y, G1
+        let dragged = Row::Item { group: None, index: 0 };
+        let rem: Vec<Row> = f.rows().into_iter().filter(|r| *r != dragged).collect();
+        assert_eq!(rem.len(), 5);
+        assert_eq!(f.item_gap_target(&rem, 0), (None, 0));
+        assert_eq!(f.item_gap_target(&rem, 1), (None, 1), "after b");
+        assert_eq!(f.item_gap_target(&rem, 2), (Some(0), 0), "right under the G0 header");
+        assert_eq!(f.item_gap_target(&rem, 3), (Some(0), 1), "between x and y");
+        assert_eq!(f.item_gap_target(&rem, 4), (Some(0), 2), "end of G0 (above G1)");
+        assert_eq!(f.item_gap_target(&rem, 5), (Some(1), usize::MAX), "under a collapsed header: its end");
+        let mut g = f.clone();
+        let (to, at) = g.item_gap_target(&rem, 3);
+        assert_eq!(g.move_item_to((None, 0), to, at), Some((Some(0), 1)));
+        assert_eq!(g.groups[0].items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["x", "a", "y"]);
+        let mut g = f.clone();
+        let (to, at) = g.item_gap_target(&rem, 5);
+        assert_eq!(g.move_item_to((None, 0), to, at), Some((Some(1), 1)));
+        assert!(!g.groups[1].collapsed, "dropping into a collapsed group opens it");
+        // 같은 섹션 안: 'x'를 끌어 y 뒤에 놓는다 (빼낸 뒤 기준 1)
+        let dragged = Row::Item { group: Some(0), index: 0 };
+        let rem: Vec<Row> = f.rows().into_iter().filter(|r| *r != dragged).collect();
+        let (to, at) = f.item_gap_target(&rem, 4);
+        assert_eq!((to, at), (Some(0), 1));
+        let mut g = f.clone();
+        g.move_item_to((Some(0), 0), to, at);
+        assert_eq!(g.groups[0].items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["y", "x"]);
+        // 그룹 끌기: G0(과 그 안 줄)을 빼면 a, b, G1. 맨 끝 틈은 그룹 순서 1
+        let rem: Vec<Row> = f.rows().into_iter().filter(|r| !matches!(r, Row::Group(0) | Row::Item { group: Some(0), .. })).collect();
+        assert_eq!(Favorites::group_gap_target(&rem, rem.len()), 1);
+        assert_eq!(Favorites::group_gap_target(&rem, 2), 0, "before G1");
     }
 
     fn sample() -> Favorites {

@@ -39,6 +39,7 @@ mod settings_ui;
 mod view_menu;
 mod caption;
 mod sidebar;
+mod side_flow;
 mod start;
 mod workspace_ui;
 mod commands;
@@ -210,11 +211,12 @@ enum Drag {
     Press { pane: usize, vi: usize, x: f32, y: f32, select_on_up: bool },
     /// 사이드바 즐겨찾기 줄을 눌렀다. 조금 움직이면 FavMove
     FavPress { row: crate::favorites::Row, y: f32 },
-    FavMove { from: crate::favorites::Row, y: f32 },
+    /// 즐겨찾기 줄을 끄는 중. grab은 카드(줄)에서 잡은 자리 (위에서부터)
+    FavMove { from: crate::favorites::Row, y: f32, grab: f32 },
     /// 사이드바의 고정한 줄을 눌렀다 (pins 번호). 조금 움직이면 PinMove, 그대로 떼면 연다
     PinPress { index: usize, y: f32 },
     /// 고정한 줄을 끌어 순서를 바꾸는 중
-    PinMove { from: usize, y: f32 },
+    PinMove { from: usize, y: f32, grab: f32 },
     /// 고정한 패널의 오른쪽 가장자리를 끌어 너비를 바꾸는 중
     SideW { start_x: f32, start_w: f32 },
     /// 탭을 눌렀다. 조금 움직이면 TabMove
@@ -477,6 +479,8 @@ pub struct App {
     tray: Option<crate::tray::TrayIcon>,
     /// 창을 숨긴 동안 폴더가 바뀐 패널. 다시 보일 때 한 번만 읽는다
     stale: [bool; 4],
+    /// 사이드바 줄이 미끄러지는 움직임 (side_flow.rs)
+    side_flow: side_flow::SideFlow,
     /// 떠난 작업 공간(번호)의 칸·탭. 돌아오면 읽어 둔 목록을 바로 보인다 (앱을 닫으면 사라진다)
     ws_panes: HashMap<usize, Vec<Pane>>,
     /// 폴더 변경 알림으로 다시 읽기를 걸어 둔 칸, 마지막으로 알림 때문에 다시 읽은 때 (첫 알림은 바로, 이어지는 알림은 묶는다)
@@ -971,6 +975,7 @@ impl App {
             preview_host,
             tray: None,
             stale: [false; 4],
+            side_flow: Default::default(),
             ws_panes: HashMap::new(),
             notify_pending: [false; 4],
             notify_read: [None; 4],
