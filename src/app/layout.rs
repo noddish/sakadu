@@ -25,16 +25,11 @@ impl App {
     pub(super) fn toolbar_spec_at(&self, left: f32) -> ToolbarSpec {
         // 검색이 열려 있으면 돋보기 자리가 입력 칸으로 늘어난다
         let search_w = if self.pal_shown() { SEARCH_FIELD_W } else { 0.0 };
-        ToolbarSpec { left, right: self.caption_left() - 8.0, up: true, new_folder: true, preview: true, search: true, search_w }
+        ToolbarSpec { left, right: self.caption_left() - 8.0, up: true, hidden: true, preview: true, search: true, search_w }
     }
 
     pub(super) fn toolbar(&self) -> ToolbarGeom {
         toolbar_geom(&self.toolbar_spec())
-    }
-
-    /// 도구 막대에 보일 이름: 지금 칸의 폴더
-    pub(super) fn toolbar_title(&self) -> String {
-        self.panes[self.active].tab().loc.title()
     }
 
     pub(super) fn pane_rects(&self) -> Vec<(usize, R)> {
@@ -177,7 +172,7 @@ impl App {
             }
         }
         if y < WORKBAR_H {
-            // 도구 막대: 뒤로·앞으로·위로·새 폴더·보기 방식은 지금 칸에 대해 움직인다
+            // 도구 막대: 뒤로·앞으로·위로는 지금 칸에 대해 움직인다 (보기 방식은 칸마다 경로 줄에 있다)
             let m = self.toolbar();
             let p = self.active;
             // 입력 칸으로 늘어난 검색: 닫기 단추, 나머지 둘레는 입력 칸 (빈 곳으로 두면 창을 끄는 자리가 된다)
@@ -189,15 +184,12 @@ impl App {
                     return Hit::SearchField;
                 }
             }
-            // 시작 화면에는 보기 방식과 새 폴더가 없다
-            let start = self.panes[p].tab().loc == Location::Start;
             let hits = [
                 (m.back, Hit::Back(p)),
                 (m.fwd, Hit::Fwd(p)),
                 (m.up, Hit::Up(p)),
                 (m.layout, Hit::LayoutPick),
-                (m.view, if start { Hit::None } else { Hit::View(p) }),
-                (m.new_folder, if start { Hit::None } else { Hit::NewFolder(p) }),
+                (m.hidden, Hit::HiddenButton),
                 (m.preview, Hit::PreviewButton),
                 (m.search, Hit::SearchButton),
             ];
@@ -255,6 +247,10 @@ impl App {
             let start = tab.loc == Location::Start;
             if tab.loc.dir().is_some() && self.edit_mode != EditMode::Address(p) && g.star.contains(x, y) {
                 return Hit::Star(p);
+            }
+            // 경로 줄의 보기 방식 단추 (시작 화면에는 없다)
+            if !start && self.edit_mode != EditMode::Address(p) && g.view.contains(x, y) {
+                return Hit::View(p);
             }
             if g.crumb.contains(x, y) {
                 let cs = crumbs(&self.gfx, g.crumbs, &tab.loc, Some("내 PC"));

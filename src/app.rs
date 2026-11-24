@@ -101,8 +101,8 @@ enum Hit {
     None,
     /// 도구 막대의 칸 나누기 단추 (누르면 칸 나누기 메뉴)
     LayoutPick,
-    /// 도구 막대의 새 폴더 단추 (지금 칸에)
-    NewFolder(usize),
+    /// 도구 막대의 숨김 항목 단추 (눈)
+    HiddenButton,
     SplitX,
     SplitY,
     Tab(usize, usize),
@@ -190,7 +190,7 @@ impl Hit {
         use Hit::*;
         match self {
             Tab(p, _) | TabClose(p, _) | TabAdd(p) | TabStrip(p) | Back(p) | Fwd(p) | Up(p) | Crumb(p, _) | CrumbEmpty(p) | Star(p) | View(p)
-            | Header(p, _) | HeaderResize(p, _) | Row(p, _) | ListEmpty(p) | Thumb(p) | Track(p) | FilterClear(p) | NewFolder(p) | Pane(p)
+            | Header(p, _) | HeaderResize(p, _) | Row(p, _) | ListEmpty(p) | Thumb(p) | Track(p) | FilterClear(p) | Pane(p)
             | Start(p, _) => Some(p),
             _ => Option::None,
         }

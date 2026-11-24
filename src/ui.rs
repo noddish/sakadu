@@ -66,6 +66,10 @@ pub mod glyph {
     pub const G_BOOKMARK_FILL: u16 = 0xFFF1;
     /// 눈 (자동 미리 보기)
     pub const G_EYE: u16 = 0xE890;
+    /// 감은 눈 (숨김 항목을 숨겨 둔 상태)
+    pub const G_EYE_OFF: u16 = 0xED1A;
+    /// 자동 미리 보기 단추 (Segoe의 '미리 보기')
+    pub const G_AUTO_PREVIEW: u16 = 0xE8A1;
     /// 크게 보기·작게 보기 (미리 보기 카드)
     pub const G_EXPAND: u16 = 0xE740;
     pub const G_SHRINK: u16 = 0xE73F;
@@ -172,11 +176,13 @@ pub struct PaneGeom {
     pub crumbs: R,
     /// 경로 오른쪽 끝: 즐겨찾기 책갈피
     pub star: R,
+    /// 책갈피 앞: 보기 방식 단추 (모양 그림과 작은 아래 화살표). 폭 0이면 없다
+    pub view: R,
     pub header: R,
     pub list: R,
 }
 
-/// 칸 안 자리. 경로 줄에는 경로 조각과 책갈피만 있다 (뒤로·앞으로·새 폴더·보기 방식은 도구 막대: ui::toolbar)
+/// 칸 안 자리. 경로 줄에는 경로 조각, 보기 방식 단추, 책갈피가 있다 (뒤로·앞으로·칸 나누기는 도구 막대: ui::toolbar)
 pub fn geom(r: R) -> PaneGeom {
     let head = R::new(r.l, r.t, r.r, r.t + HEAD_H);
     let path = R::new(r.l, head.b, r.r, head.b + PATH_H);
@@ -185,17 +191,26 @@ pub fn geom(r: R) -> PaneGeom {
     let l = path.l + 16.0 - CRUMB_PAD;
     // 책갈피: 24×24 단추. 그림의 오른쪽 끝이 목록의 오른쪽 여백(16)과 맞는다
     let mut star = R::new(path.r - 12.0 - 24.0, t, path.r - 12.0, b);
-    // 좁은 칸: 경로가 PATH_MIN_W보다 좁아지면 책갈피를 뺀다 (폭 0이면 그리지도 누르지도 않는다. 단축키로는 된다)
+    let mut view = R::new(star.l - 4.0 - VIEW_W, t, star.l - 4.0, b);
+    // 좁은 칸: 경로가 PATH_MIN_W보다 좁아지면 보기 방식 단추, 그다음 책갈피를 뺀다 (폭 0이면 그리지도 누르지도 않는다. 단축키로는 된다)
+    if view.l - 4.0 - l < PATH_MIN_W {
+        view = R::new(star.l, t, star.l, b);
+    }
     if star.l - 4.0 - l < PATH_MIN_W {
         star = R::new(path.r - 12.0, t, path.r - 12.0, b);
+        view = R::new(star.l, t, star.l, b);
     }
-    let crumb = R::new(l, t, (star.l - 4.0).max(l), b);
+    let right = if view.w() > 0.0 { view.l } else { star.l };
+    let crumb = R::new(l, t, (right - 4.0).max(l), b);
     let crumbs = crumb;
     let header = R::new(r.l, path.b, r.r, path.b + HEADER_H);
     // 아래쪽은 둥근 모서리에 항목이 닿지 않게 조금 띄운다
     let list = R::new(r.l, header.b, r.r, (r.b - 6.0).max(header.b));
-    PaneGeom { head, crumb, crumbs, star, header, list }
+    PaneGeom { head, crumb, crumbs, star, view, header, list }
 }
+
+/// 경로 줄의 보기 방식 단추 폭
+pub const VIEW_W: f32 = 44.0;
 
 /// 경로 입력 상자 자리: 경로 자리가 너무 좁으면 책갈피 자리까지 덮는다
 pub fn addr_rect(g: &PaneGeom) -> R {
@@ -702,16 +717,23 @@ mod tests {
     fn every_view_maps_items_and_clicks_consistently() {
         let g = geom(R::new(0.0, 0.0, 700.0, 520.0));
         assert!(g.star.w() > 0.0 && g.crumb.r <= g.star.l && g.star.r <= g.head.r);
+        // 보기 방식 단추는 경로와 책갈피 사이, 경로 줄 높이 안
+        assert!(g.view.w() == VIEW_W && g.crumb.r <= g.view.l && g.view.r <= g.star.l, "{:?} {:?} {:?}", g.crumb, g.view, g.star);
+        assert!(g.view.t >= g.head.b && g.view.b <= g.header.t);
         // 경로 글자와 목록 아이콘이 같은 선에서 시작한다
         assert_eq!(g.crumb.l + CRUMB_PAD, columns(g.list, [140.0, 130.0, 84.0]).name.0 + 4.0);
-        // 좁은 칸: 책갈피가 빠지고, 경로는 칸 밖으로 나가지 않는다
-        for w in [100.0, 150.0, 200.0, 240.0, 330.0] {
+        // 좁은 칸: 보기 방식 단추가 먼저, 그다음 책갈피가 빠지고, 경로는 칸 밖으로 나가지 않는다
+        for w in [100.0, 150.0, 200.0, 240.0, 280.0, 330.0] {
             let g = geom(R::new(0.0, 0.0, w, 400.0));
             assert!(g.star.w() == 0.0 || g.crumb.r <= g.star.l, "w={w}");
+            assert!(g.view.w() == 0.0 || (g.crumb.r <= g.view.l && g.view.r <= g.star.l), "w={w}");
+            assert!(g.view.w() == 0.0 || g.star.w() > 0.0, "w={w}: the view button goes before the bookmark");
             assert!(g.crumb.l >= 0.0 && g.crumb.r <= w, "w={w}");
             assert!(addr_rect(&g).r <= w, "w={w}");
         }
         assert!(geom(R::new(0.0, 0.0, 120.0, 400.0)).star.w() == 0.0);
+        let g = geom(R::new(0.0, 0.0, 190.0, 400.0));
+        assert!(g.view.w() == 0.0 && g.star.w() > 0.0, "a narrow pane keeps the bookmark and drops the view button");
         let cols = |w: f32| columns(R::new(0.0, 0.0, w, 400.0), [140.0, 130.0, 84.0]);
         assert!(cols(420.0).modified.is_some() && cols(420.0).size.is_none(), "date outlives size");
         assert!(cols(600.0).kind.is_some() && cols(600.0).size.is_some());

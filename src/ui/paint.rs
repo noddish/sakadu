@@ -3,6 +3,7 @@
 //! 아이콘·썸네일·유형 이름처럼 OS마다 다른 것만 `EntryArt`로 받는다
 
 use super::glyph::*;
+use super::toolbar::draw_view_icon;
 use super::*;
 use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time, format_time_short};
 use crate::palette::{FOCUS_W, R_CTRL, R_ROW, alpha};
@@ -16,6 +17,8 @@ pub enum PaneHover {
     TabClose(usize),
     TabAdd,
     Star,
+    /// 경로 줄의 보기 방식 단추
+    ViewPick,
     Crumb(usize),
     CrumbEmpty,
     Header(SortKey),
@@ -63,6 +66,8 @@ pub struct PaneScene<'a> {
     pub filter: Option<FilterChip>,
     /// 경로 오른쪽 즐겨찾기 별 (폴더일 때만): 켜짐 여부
     pub starred: Option<bool>,
+    /// 경로 줄의 보기 방식 단추 (시작 화면에는 없다): 이 칸의 보기 메뉴가 열려 있는지
+    pub view_button: Option<bool>,
     /// 경로 맨 앞 이름 (Windows "내 PC")
     pub root: Option<&'a str>,
     /// 경로 입력 중. 입력 상자가 없으면(그림 시험) 그 글자를 직접 그린다
@@ -240,6 +245,18 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
             };
             gfx.glyph(if on { G_BOOKMARK_FILL } else { G_BOOKMARK }, g.star, false, c);
         }
+        // 보기 방식: 지금 모양 그림과 작은 아래 화살표. 메뉴가 열려 있으면 옅은 강조 색
+        if let Some(open) = s.view_button.filter(|_| g.view.w() > 0.0) {
+            let hot = p_hover == PaneHover::ViewPick;
+            if open {
+                gfx.fill_round(g.view, R_CTRL, t.accent_soft);
+            } else if hot {
+                gfx.fill_round(g.view, R_CTRL, t.hover);
+            }
+            let c = if open { t.chip_text } else if hot { t.text } else { t.dim };
+            draw_view_icon(gfx, R::new(g.view.l + 4.0, g.view.t, g.view.l + 26.0, g.view.b), s.view, c);
+            gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - 18.0, g.view.t + 1.0, g.view.r - 4.0, g.view.b + 1.0), true, if open { c } else { t.faint });
+        }
         gfx.clip(g.crumbs);
         for (i, c) in cs.iter().enumerate() {
             let last = i + 1 == n;
@@ -274,6 +291,9 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
     let tab = s.tab();
     let g = geom(s.r);
     let (short_dates, now) = (s.short_dates, s.now);
+
+    // 경로 줄과 열 머리글 사이 가는 선 (열 머리글 아래 선과 같은 폭)
+    gfx.fill(R::new(g.list.l + 8.0, g.header.t, g.list.r - SCROLL_W - 6.0, g.header.t + 1.0), t.border);
 
     // 열 머리글
     let cols = columns(g.list, s.cols);
@@ -560,6 +580,7 @@ mod tests {
             count_hot: false,
             filter: None,
             starred: Some(false),
+            view_button: Some(false),
             root: None,
             address: false,
             address_text: None,

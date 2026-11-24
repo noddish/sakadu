@@ -1,4 +1,4 @@
-//! 도구 막대의 펼치는 메뉴: 보기 방식 단추나 칸 나누기 단추를 누르면 그 아래에 뜬다.
+//! 펼치는 메뉴: 칸의 경로 줄에 있는 보기 방식 단추나 도구 막대의 칸 나누기 단추를 누르면 그 아래에 뜬다.
 //! Windows 기본 메뉴 대신 사카두 메뉴(공통 sakadu::ui::menu, 맥과 같은 모양)로 직접 그린다
 
 use super::*;
@@ -10,7 +10,7 @@ const LAYOUT_KEYS: [Action; 5] = [Action::Layout1, Action::Layout2, Action::Layo
 /// 어느 메뉴인지
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum MenuKind {
-    /// 보기 방식 여섯 가지(ViewMode::ALL 순서)와 맨 아래 '숨김 항목 보기'
+    /// 보기 방식 여섯 가지 (ViewMode::ALL 순서). 숨김 항목은 도구 막대의 눈 단추로 켜고 끈다
     View,
     /// 칸 나누기 다섯 가지 (Layout::ALL 순서)
     Layout,
@@ -19,7 +19,7 @@ pub(super) enum MenuKind {
 impl MenuKind {
     fn len(self) -> usize {
         match self {
-            MenuKind::View => ViewMode::ALL.len() + 1,
+            MenuKind::View => ViewMode::ALL.len(),
             MenuKind::Layout => Layout::ALL.len(),
         }
     }
@@ -42,27 +42,28 @@ impl App {
         crate::popup::Style { theme: self.theme, font: self.look.font.clone(), zoom: self.zoom(), text: self.look.text.clone() }
     }
 
-    /// 메뉴의 줄: 모양 그림, 이름, 지금 것 체크 (단축키는 보이지 않는다). 보기 방식 메뉴의 맨 아래는 구분선 뒤의 숨김 항목 보기
+    /// 메뉴의 줄: 모양 그림, 이름, 지금 것 체크 (단축키는 보이지 않는다)
     fn view_menu_lines(&self, m: ViewMenu) -> Vec<MenuLine> {
         match m.kind {
             MenuKind::View => {
                 let current = self.panes[m.pane].view;
-                let mut v: Vec<_> = ViewMode::ALL.iter().map(|v| MenuLine::new(v.label()).icon(MenuIcon::View(*v)).checked(*v == current)).collect();
-                v.push(MenuLine::new("숨김 항목 보기").icon(MenuIcon::Glyph(G_HIDDEN)).checked(self.show_hidden).sep(true));
-                v
+                ViewMode::ALL.iter().map(|v| MenuLine::new(v.label()).icon(MenuIcon::View(*v)).checked(*v == current)).collect()
             }
             MenuKind::Layout => Layout::ALL.iter().zip(LAYOUT_KEYS).map(|(l, a)| MenuLine::new(crate::keys::name(a)).icon(MenuIcon::Layout(*l)).checked(*l == self.layout)).collect(),
         }
     }
 
-    /// 메뉴 자리: 누른 단추 바로 아래, 오른쪽 끝을 단추에 맞춘다. 창 밖으로 나가지 않게
+    /// 메뉴 자리: 누른 단추 바로 아래, 오른쪽 끝을 단추에 맞춘다. 창 밖으로 나가지 않게.
+    /// 보기 방식 메뉴는 그 칸의 경로 줄 단추 아래 (좁아서 단추가 없으면 경로 줄 오른쪽 끝 아래)
     pub(super) fn view_menu_rect(&self) -> Option<R> {
         let m = self.view_menu?;
-        if m.kind == MenuKind::View && m.pane >= self.layout.count() {
-            return None;
-        }
-        let bar = self.toolbar();
-        let b = if m.kind == MenuKind::View { bar.view } else { bar.layout };
+        let b = match m.kind {
+            MenuKind::View => {
+                let g = geom(self.pane_rect(m.pane)?);
+                if g.view.w() > 0.0 { g.view } else { R::new(g.star.l, g.star.t, g.star.r.max(g.crumb.r), g.star.b) }
+            }
+            MenuKind::Layout => self.toolbar().layout,
+        };
         let lines = self.view_menu_lines(m);
         let bounds = R::new(MARGIN, MARGIN, (self.w - MARGIN).max(MARGIN + 1.0), (self.h - MARGIN).max(MARGIN + 1.0));
         let w = menu_width(&self.gfx, &lines, bounds.w().min(320.0));
@@ -121,14 +122,12 @@ impl App {
         let Some(m) = self.view_menu else { return };
         self.close_view_menu();
         match m.kind {
-            MenuKind::View => match ViewMode::ALL.get(i) {
-                Some(v) => {
+            MenuKind::View => {
+                if let Some(v) = ViewMode::ALL.get(i) {
                     self.set_view(m.pane, *v);
                     self.save_session();
                 }
-                // 맨 아래 줄: 숨김 항목 보기
-                None => self.toggle_hidden(),
-            },
+            }
             MenuKind::Layout => {
                 if let Some(l) = Layout::ALL.get(i) {
                     self.set_layout(*l);

@@ -118,6 +118,9 @@ fn symbol_name(code: u16) -> &'static str {
         0xFFF1 => "bookmark.fill",
         // 자동 미리 보기의 눈, 미리 보기 카드의 크게 보기·작게 보기 (ui::glyph::G_EYE, G_EXPAND, G_SHRINK)
         0xE890 => "eye",
+        // 숨김 항목을 감춘 눈, 자동 미리 보기 단추 (ui::glyph::G_EYE_OFF, G_AUTO_PREVIEW)
+        0xED1A => "eye.slash",
+        0xE8A1 => "doc.text.magnifyingglass",
         0xE740 => "arrow.up.left.and.arrow.down.right",
         0xE73F => "arrow.down.right.and.arrow.up.left",
         _ => "questionmark.square.dashed",
