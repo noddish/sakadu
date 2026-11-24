@@ -1,7 +1,8 @@
 //! 오른쪽 미리 보기 창 (Alt+P). 활성 패널에서 선택한 항목을 보여 준다.
 //! 그림·글 파일을 고르면 저절로 뜨는 작은 카드는 preview_card.rs (이 창이 열려 있으면 카드는 뜨지 않는다).
-//! 사진은 셸 썸네일, 텍스트는 앞부분, 그 밖은 Windows 미리 보기 처리기(PDF·Office 등),
-//! 처리기가 없으면 큰 아이콘과 정보.
+//! 사진은 셸 썸네일, 텍스트는 앞부분, 그 밖은 Windows 미리 보기 처리기(PDF·Office 등. 엑셀 처리기는 매크로 통합 문서(xlsm)를 받지 않는다),
+//! 처리기가 없으면 셸 썸네일(동영상 장면, 음악 앨범 그림 등), 그것도 없으면 큰 아이콘과 정보.
+//! 한글 문서는 안에 든 미리 보기 그림(없으면 미리 보기 글), SVG는 직접 그린다 (thumbs.rs). 바로 가기는 가리키는 파일을 본다.
 //! 머리의 핀으로 파일을 고정하면 선택을 바꿔도 그 파일을 계속 보여 준다. 고정한 파일은 파일 번호로 기억해,
 //! 이름이 바뀌거나 옮겨지면 새 경로를 따라가고 지워지면 고정을 푼다 (확인은 뒤에서).
 //! 미리 보기 처리기는 다른 프로세스(prevhost)에서 돈다. 열기·크기 맞추기·닫기는 따로 도는 일꾼 스레드가 해서,
@@ -39,8 +40,13 @@ pub(super) const TEXT_EXTS: &[&str] = &[
     "txt", "log", "md", "markdown", "csv", "tsv", "json", "jsonc", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "config", "env",
     "gitignore", "editorconfig", "properties", "rs", "c", "h", "cpp", "hpp", "cc", "cs", "java", "kt", "kts", "go", "py", "rb", "php",
     "js", "mjs", "cjs", "ts", "tsx", "jsx", "css", "scss", "less", "html", "htm", "vue", "svelte", "sql", "sh", "bash", "zsh", "ps1",
-    "psm1", "bat", "cmd", "lua", "r", "swift", "dart", "gradle", "cmake", "srt", "vtt", "nfo", "reg", "lock",
+    "psm1", "bat", "cmd", "lua", "r", "swift", "dart", "gradle", "cmake", "srt", "vtt", "nfo", "reg", "lock", "jsonl", "ndjson", "cts", "mts",
+    "eslintrc", "prettierrc", "babelrc", "nycrc", "npmrc", "nvmrc", "gitattributes", "gitkeep", "npmignore", "eslintignore", "dockerignore", "patch",
+    "diff", "rst", "tex", "bib", "pyi", "pyx", "proto", "graphql", "gql", "vb", "vbs", "xaml", "plist", "sample", "template", "example",
 ];
+
+/// 셸이 그리지 못해 사카두가 직접 그리는 그림 형식 (thumbs.rs): SVG, 한글 문서의 미리 보기 그림
+pub(super) const DRAWN_EXTS: &[&str] = &["svg", "hwp"];
 
 #[derive(Clone)]
 struct Target {
@@ -57,6 +63,8 @@ enum Content {
     /// 고른 직후 잠깐 기다리는 중 (키를 누르고 있을 때 하나하나 열지 않도록)
     Waiting,
     Image,
+    /// 셸 썸네일만 (동영상 장면, 음악 앨범 그림 등): 없으면 큰 아이콘 대신 '미리 볼 수 없어요'
+    Thumb,
     Text(String),
     Handler(GUID),
     Info,
@@ -94,6 +102,8 @@ pub(super) struct Preview {
     host_shown: bool,
     /// 지금 대상을 읽기 시작한 때 ('불러오는 중…'은 0.3초가 지나야 보인다)
     since: std::time::Instant,
+    /// 내용을 읽을 경로: 바로 가기면 가리키는 파일, 아니면 None(대상 그대로)
+    source: Option<String>,
 }
 
 impl Preview {
@@ -110,6 +120,7 @@ impl Preview {
             handler_ready: false,
             host_shown: false,
             since: std::time::Instant::now(),
+            source: None,
         }
     }
 }
@@ -124,6 +135,8 @@ pub enum PreviewMsg {
     Zone { seq: u64, clsid: GUID, internet: bool },
     /// 고정한 파일의 지금 자리. 찾지 못했으면(지워짐·휴지통) None
     Pin { round: u64, found: Option<Found> },
+    /// 한글 문서에 미리 보기 그림이 있다 (없으면 Text로 미리 보기 글을 보낸다)
+    HwpImage { seq: u64 },
     /// 미리 보기 처리기가 열려 그렸다 / 열지 못했다 (일꾼 스레드에서)
     HandlerReady { seq: u64 },
     HandlerFailed { seq: u64 },
@@ -217,26 +230,31 @@ pub(super) fn ext_of(name: &str) -> String {
     }
 }
 
-/// 확장자에 등록된 미리 보기 처리기
-fn handler_for(ext: &str) -> Option<GUID> {
+/// 확장자에 등록된 셸 확장(iid 종류)의 CLSID
+fn shell_extension(ext: &str, iid: PCWSTR) -> Option<GUID> {
     if ext.is_empty() {
         return None;
     }
     let mut buf = [0u16; 64];
     let mut len = buf.len() as u32;
     unsafe {
-        AssocQueryStringW(
-            ASSOCF_INIT_DEFAULTTOSTAR,
-            ASSOCSTR_SHELLEXTENSION,
-            &HSTRING::from(format!(".{ext}")),
-            w!("{8895b1c6-b41f-4c1c-a562-0d564250836f}"),
-            Some(PWSTR(buf.as_mut_ptr())),
-            &mut len,
-        )
-        .ok()
-        .ok()?;
+        AssocQueryStringW(ASSOCF_INIT_DEFAULTTOSTAR, ASSOCSTR_SHELLEXTENSION, &HSTRING::from(format!(".{ext}")), iid, Some(PWSTR(buf.as_mut_ptr())), &mut len)
+            .ok()
+            .ok()?;
         CLSIDFromString(&HSTRING::from(util::from_wide(&buf))).ok()
     }
+}
+
+/// 확장자에 등록된 미리 보기 처리기.
+/// (엑셀 처리기는 매크로 통합 문서를 경로·내용·확장자를 바꾼 복사본 어느 쪽으로 넘겨도 받지 않아, 같은 형식의 처리기로 대신 보지 않는다)
+fn handler_for(ext: &str) -> Option<GUID> {
+    shell_extension(ext, w!("{8895b1c6-b41f-4c1c-a562-0d564250836f}"))
+}
+
+/// 셸 썸네일을 만들 수 있는 형식인지 (문서 첫 장, 동영상 장면, 음악 앨범 그림 등). 바로 가기·실행 파일은 뺀다 (아이콘이 나온다)
+pub(super) fn thumb_provider(ext: &str) -> bool {
+    !matches!(ext, "" | "lnk" | "url" | "exe" | "dll" | "msi" | "appref-ms" | "ico" | "cur")
+        && shell_extension(ext, w!("{e357fccd-a995-4576-b01f-234630154e96}")).is_some()
 }
 
 /// 텍스트 파일 앞부분을 글자로. 이진 파일이면 None
@@ -261,12 +279,31 @@ pub fn decode_text(b: &[u8]) -> Option<String> {
             Err(_) => ansi(b),
         }
     };
+    Some(tidy_text(&s))
+}
+
+/// 미리 보기에 보일 글: 앞쪽 줄만, 탭은 칸 넷으로
+fn tidy_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len().min(48 * 1024));
     for line in s.lines().take(TEXT_LINES) {
         out.push_str(&line.replace('\t', "    "));
         out.push('\n');
     }
-    Some(out)
+    out
+}
+
+/// 한글 문서: 미리 보기 그림이 있으면 그림으로, 없으면 미리 보기 글로
+fn spawn_hwp(hwnd: HWND, seq: u64, path: String) {
+    let owner = shell::SendHwnd(hwnd);
+    std::thread::spawn(move || {
+        let _com = shell::ComInit::sta();
+        let msg = if crate::thumbs::hwp_has_image(&path) {
+            PreviewMsg::HwpImage { seq }
+        } else {
+            PreviewMsg::Text { seq, text: crate::thumbs::hwp_text(&path).map(|s| tidy_text(&s)) }
+        };
+        post(owner.get(), WM_APP_PREVIEW, Box::new(msg));
+    });
 }
 
 /// UTF-8이 아닌 옛 한글 파일(CP949 등)은 시스템 코드 페이지로
@@ -446,26 +483,44 @@ impl App {
         let hwnd = self.hwnd;
         let Some(pv) = self.preview.as_mut() else { return };
         let Some(t) = pv.target.clone() else { return };
-        let ext = ext_of(&t.name);
-        pv.content = if t.kind != Kind::File {
+        // 바로 가기는 가리키는 파일을 본다 (링크에 적힌 대상만 읽고, 대상에 다시 묻지 않는다)
+        pv.source = None;
+        let mut ext = ext_of(&t.name);
+        if t.kind == Kind::File && ext == "lnk"
+            && let Some((target, false)) = shell::shortcut_target(&t.path)
+        {
+            ext = ext_of(util::file_name(&target));
+            pv.source = Some(target);
+        }
+        let path = pv.source.clone().unwrap_or_else(|| t.path.clone());
+        let e = ext.as_str();
+        pv.content = if t.kind != Kind::File || e == "lnk" {
             Content::Info
-        } else if IMAGE_EXTS.contains(&ext.as_str()) {
-            spawn_dims(hwnd, pv.seq, t.path.clone());
+        } else if IMAGE_EXTS.contains(&e) {
+            spawn_dims(hwnd, pv.seq, path);
             Content::Image
-        } else if TEXT_EXTS.contains(&ext.as_str()) {
-            spawn_text(hwnd, pv.seq, t.path.clone());
+        } else if e == "hwp" {
+            spawn_hwp(hwnd, pv.seq, path);
             Content::Waiting
-        } else if let Some(clsid) = handler_for(&ext) {
-            spawn_zone(hwnd, pv.seq, t.path.clone(), clsid);
+        } else if DRAWN_EXTS.contains(&e) {
+            Content::Image
+        } else if TEXT_EXTS.contains(&e) {
+            spawn_text(hwnd, pv.seq, path);
             Content::Waiting
+        } else if let Some(clsid) = handler_for(e) {
+            spawn_zone(hwnd, pv.seq, path, clsid);
+            Content::Waiting
+        } else if thumb_provider(e) {
+            Content::Thumb
         } else if t.size <= SNIFF_MAX {
-            spawn_text(hwnd, pv.seq, t.path.clone());
+            spawn_text(hwnd, pv.seq, path);
             Content::Waiting
         } else {
             Content::Info
         };
         crate::diag::log(|| format!("preview: {} -> {}", t.name, match pv.content {
             Content::Image => "image",
+            Content::Thumb => "thumbnail",
             Content::Handler(_) => "handler",
             Content::Info => "info",
             Content::Blocked => "blocked",
@@ -491,6 +546,7 @@ impl App {
                 pv.layout = None;
             }
             PreviewMsg::Dims { seq, dims } if seq == pv.seq => pv.dims = Some(dims),
+            PreviewMsg::HwpImage { seq } if seq == pv.seq => pv.content = Content::Image,
             PreviewMsg::Zone { seq, clsid, internet } if seq == pv.seq => {
                 crate::diag::log(|| format!("preview: mark of the web = {internet}"));
                 pv.content = if internet { Content::Blocked } else { Content::Handler(clsid) };
@@ -709,7 +765,7 @@ impl App {
         let (Content::Handler(clsid), Some(t), Some(r)) = (&pv.content, &pv.target, pv.host_rect) else { return None };
         Some(Wanted {
             seq: pv.seq,
-            path: t.path.clone(),
+            path: pv.source.clone().unwrap_or_else(|| t.path.clone()),
             clsid: *clsid,
             host: shell::SendHwnd(self.preview_host),
             owner: shell::SendHwnd(self.hwnd),
@@ -789,15 +845,16 @@ impl App {
         };
         gfx.text(&sub, sub_r, Font::Small, t.dim);
 
-        // 그림이 있으면 그리고, 없으면 요청 목록에 넣는다
-        let mut image = |gfx: &mut Gfx, r: R, px: u32| -> bool {
-            let key = thumb_key(&target.path, target.modified, px);
+        // 그림이 있으면 그리고, 없으면 요청 목록에 넣는다 (only_thumb이면 썸네일만: 큰 아이콘을 받지 않는다)
+        let source = pv.source.clone().unwrap_or_else(|| target.path.clone());
+        let mut image = |gfx: &mut Gfx, r: R, px: u32, only_thumb: bool| -> bool {
+            let key = thumb_key(&source, target.modified, px);
             if gfx.thumb(&key, r, 1.0) {
                 return true;
             }
             if !thumb_failed.contains(&key) {
                 // 미리 보기 그림은 목록보다 먼저 만든다
-                missing.insert(0, Request { key, path: target.path.clone(), px });
+                missing.insert(0, Request { key, path: source.clone(), px, only_thumb });
             }
             false
         };
@@ -813,10 +870,10 @@ impl App {
                     unsafe { SetTimer(Some(hwnd), TIMER_REDRAW, (300 - waited) as u32, None) };
                 }
             }
-            Content::Image => {
+            Content::Image | Content::Thumb => {
                 let px = image_px(body.w().max(body.h()), scale);
-                if !image(gfx, body, px) {
-                    let failed = thumb_failed.contains(&thumb_key(&target.path, target.modified, px));
+                if !image(gfx, body, px, matches!(pv.content, Content::Thumb)) {
+                    let failed = thumb_failed.contains(&thumb_key(&source, target.modified, px));
                     let waited = pv.since.elapsed().as_millis();
                     if failed {
                         gfx.text("미리 볼 수 없어요", body, Font::Hint, t.faint);
@@ -852,7 +909,7 @@ impl App {
             Content::Info => {
                 let (cx, cy) = ((body.l + body.r) / 2.0, (body.t + body.b) / 2.0);
                 let ir = R::new(cx - INFO_IMG / 2.0, cy - INFO_IMG / 2.0, cx + INFO_IMG / 2.0, cy + INFO_IMG / 2.0);
-                if !image(gfx, ir, (INFO_IMG * scale).round() as u32) {
+                if !image(gfx, ir, (INFO_IMG * scale).round() as u32, false) {
                     gfx.icon(target.icon, R::new(cx - 16.0, cy - 16.0, cx + 16.0, cy + 16.0));
                 }
             }

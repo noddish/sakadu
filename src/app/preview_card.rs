@@ -1,9 +1,10 @@
-//! 자동 미리 보기 카드: 지금 칸에서 그림·글 파일 하나를 고르면 다른 칸의 오른쪽 아래에 저절로 뜬다.
+//! 자동 미리 보기 카드: 지금 칸에서 파일 하나를 고르면 다른 칸의 오른쪽 아래에 저절로 뜬다.
 //! 자리와 그리기는 공통 코드(ui::preview_card). 그림은 셸 썸네일(목록·미리 보기 창과 같은 캐시), 글은 앞부분을 뒤에서 읽는다.
-//! 도구 막대의 눈 단추로 끄고 켠다. 오른쪽 미리 보기 창(Alt+P, preview.rs)이 열려 있으면 그 창이 보여 주므로 카드는 뜨지 않는다.
-//! PDF·Office 문서처럼 미리 보기 처리기가 필요한 파일은 카드에 띄우지 않는다 (미리 보기 창에서 본다)
+//! PDF·Office 문서·동영상·음악처럼 셸이 썸네일을 만들 수 있는 파일과 한글 문서(안에 든 미리 보기 그림)는 그 썸네일을 크게 보인다.
+//! 썸네일이 없으면 카드를 띄우지 않는다. 도구 막대의 자동 미리 보기 단추로 끄고 켠다.
+//! 오른쪽 미리 보기 창(Alt+P, preview.rs)이 열려 있으면 그 창이 보여 주므로 카드는 뜨지 않는다
 
-use super::preview::{IMAGE_EXTS, TEXT_EXTS, ext_of, image_px, next_seq, spawn_text};
+use super::preview::{DRAWN_EXTS, IMAGE_EXTS, TEXT_EXTS, ext_of, image_px, next_seq, spawn_text, thumb_provider};
 use super::*;
 use crate::thumbs::Request;
 use sakadu::ui::preview_card::{CardArt, CardBody, CardGeom, CardHover, CardScene, card_geom, paint_preview_card};
@@ -15,6 +16,17 @@ const SETTLE_MS: u32 = 120;
 const TEXT_LINES: usize = 80;
 const TEXT_COLS: usize = 200;
 
+/// 카드에 무엇을 보이는지
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CardKind {
+    /// 그림 (셸 썸네일, SVG는 직접 그린다)
+    Image,
+    /// 글 파일의 앞부분
+    Text,
+    /// 문서·동영상·음악의 썸네일, 한글 문서의 미리 보기 그림. 없으면 카드를 띄우지 않는다
+    Doc,
+}
+
 #[derive(Clone, PartialEq)]
 struct Target {
     path: String,
@@ -22,8 +34,20 @@ struct Target {
     size: u64,
     modified: u64,
     type_name: String,
-    /// 글 파일이면 true, 그림이면 false
-    text: bool,
+    kind: CardKind,
+}
+
+/// 확장자로 카드에 보일 것을 정한다. 보일 것이 없으면 None
+fn card_kind(ext: &str) -> Option<CardKind> {
+    if TEXT_EXTS.contains(&ext) {
+        Some(CardKind::Text)
+    } else if IMAGE_EXTS.contains(&ext) || ext == "svg" {
+        Some(CardKind::Image)
+    } else if DRAWN_EXTS.contains(&ext) || thumb_provider(ext) {
+        Some(CardKind::Doc)
+    } else {
+        None
+    }
 }
 
 pub(super) struct Card {
@@ -61,6 +85,8 @@ struct WinCardArt<'a> {
     px: u32,
     /// 셸이 그림을 주지 못했다 (다시 요청하지 않는다)
     failed: bool,
+    /// 썸네일만 (문서: 큰 아이콘을 받지 않는다)
+    only_thumb: bool,
     missing: &'a mut Vec<Request>,
     drawn: bool,
 }
@@ -70,14 +96,14 @@ impl CardArt<Gfx> for WinCardArt<'_> {
         self.drawn = g.thumb(&self.key, r, 1.0);
         if !self.drawn && !self.failed {
             // 카드의 그림은 목록보다 먼저 만든다
-            self.missing.insert(0, Request { key: self.key.clone(), path: self.path.to_string(), px: self.px });
+            self.missing.insert(0, Request { key: self.key.clone(), path: self.path.to_string(), px: self.px, only_thumb: self.only_thumb });
         }
         self.drawn
     }
 }
 
 impl App {
-    /// 지금 카드로 보여 줄 파일: 지금 칸에서 하나만 고른 그림·글 파일.
+    /// 지금 카드로 보여 줄 파일: 지금 칸에서 하나만 고른 파일 가운데 그림·글·문서(썸네일) 파일.
     /// 자동 미리 보기를 껐거나, 미리 보기 창·설정 창이 열려 있으면 없다
     fn card_wanted(&mut self) -> Option<Target> {
         if !self.auto_preview || self.preview.is_some() || self.settings.is_some() {
@@ -90,13 +116,9 @@ impl App {
             return None;
         }
         let name = e.name_string();
-        let ext = ext_of(&name);
-        let text = TEXT_EXTS.contains(&ext.as_str());
-        if !text && !IMAGE_EXTS.contains(&ext.as_str()) {
-            return None;
-        }
+        let kind = card_kind(&ext_of(&name))?;
         let (type_name, _) = type_info(types, e);
-        Some(Target { path: tab.path_of(e)?, name, size: e.size, modified: e.modified, type_name, text })
+        Some(Target { path: tab.path_of(e)?, name, size: e.size, modified: e.modified, type_name, kind })
     }
 
     /// 그리기 전에: 고른 것이 바뀌었으면 카드를 새 파일에 맞춘다 (조금 기다렸다 띄운다)
@@ -137,7 +159,7 @@ impl App {
         let Some(t) = &c.target else { return };
         c.started = true;
         c.since = std::time::Instant::now();
-        if t.text {
+        if t.kind == CardKind::Text {
             spawn_text(hwnd, c.seq, t.path.clone());
         }
         self.invalidate();
@@ -157,15 +179,20 @@ impl App {
         true
     }
 
-    /// 카드가 보이면 그 자리. 글 파일은 다 읽은 뒤에 보인다
+    /// 카드가 보이면 그 자리. 글 파일은 다 읽은 뒤에 보인다. 문서는 썸네일을 만들지 못했으면 띄우지 않는다
     pub(super) fn card_rects(&self) -> Option<CardGeom> {
         let c = &self.card;
         let t = c.target.as_ref()?;
-        let ready = c.started && !c.unreadable && (!t.text || c.text.is_some());
+        let ready = c.started && !c.unreadable && (t.kind != CardKind::Text || c.text.is_some());
         if !ready || c.dismissed.as_deref() == Some(t.path.as_str()) || !self.auto_preview || self.preview.is_some() || self.settings.is_some() {
             return None;
         }
-        card_geom(&self.pane_rects(), self.active, c.large)
+        let m = card_geom(&self.pane_rects(), self.active, c.large)?;
+        let px = image_px(m.body.w().max(m.body.h()), self.scale());
+        if t.kind == CardKind::Doc && self.thumb_failed.contains(&thumb_key(&t.path, t.modified, px)) {
+            return None;
+        }
+        Some(m)
     }
 
     /// 카드에서 누를 수 있는 것. 카드의 그 밖의 곳도 Hit::Card로 잡아, 아래 칸을 누르지 않게 한다
@@ -199,7 +226,7 @@ impl App {
     pub(super) fn toggle_auto_preview(&mut self) {
         self.auto_preview = !self.auto_preview;
         let p = self.active;
-        self.flash(p, if self.auto_preview { "자동 미리 보기를 켰어요 · 그림이나 글 파일을 고르면 보여요" } else { "자동 미리 보기를 껐어요" });
+        self.flash(p, if self.auto_preview { "자동 미리 보기를 켰어요 · 그림·글·문서 파일을 고르면 보여요" } else { "자동 미리 보기를 껐어요" });
         self.save_session();
         self.invalidate();
     }
@@ -231,19 +258,21 @@ impl App {
         let failed = thumb_failed.contains(&key);
         let waited = card.since.elapsed().as_millis();
         // 그림이 곧 오면 글자를 보이지 않는다. 늦으면 0.3초 뒤에 '불러오는 중…'
+        let text = target.kind == CardKind::Text;
         let note = match () {
-            _ if target.text => None,
+            _ if text => None,
             _ if failed => Some("미리 볼 수 없어요"),
             _ if waited >= 300 => Some("불러오는 중…"),
             _ => None,
         };
         let body = match &card.text {
-            Some(s) if target.text => CardBody::Text(s),
+            Some(s) if text => CardBody::Text(s),
             _ => CardBody::Image,
         };
-        let mut art = WinCardArt { key, path: &target.path, px, failed, missing, drawn: false };
+        let only_thumb = target.kind == CardKind::Doc;
+        let mut art = WinCardArt { key, path: &target.path, px, failed, only_thumb, missing, drawn: false };
         paint_preview_card(gfx, &mut art, &t, &CardScene { geom: &m, name: &target.name, detail: &detail, body, note, large: card.large, hover });
-        if !target.text && !art.drawn && !failed && waited < 300 {
+        if !text && !art.drawn && !failed && waited < 300 {
             unsafe { SetTimer(Some(hwnd), TIMER_REDRAW, (300 - waited) as u32, None) };
         }
     }
@@ -252,6 +281,20 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 카드에 보일 것: 글·그림은 그대로, SVG는 그림, 한글 문서와 썸네일이 있는 문서·동영상은 썸네일. 실행 파일·바로 가기는 없다
+    #[test]
+    fn card_kinds_follow_the_extension() {
+        assert_eq!(card_kind("txt"), Some(CardKind::Text));
+        assert_eq!(card_kind("jsonl"), Some(CardKind::Text));
+        assert_eq!(card_kind("png"), Some(CardKind::Image));
+        assert_eq!(card_kind("svg"), Some(CardKind::Image));
+        assert_eq!(card_kind("hwp"), Some(CardKind::Doc));
+        assert_eq!(card_kind("exe"), None);
+        assert_eq!(card_kind("lnk"), None);
+        // 이 PC에 등록된 썸네일 처리기를 따른다: Windows에 늘 있는 동영상 썸네일
+        assert_eq!(card_kind("mp4"), Some(CardKind::Doc));
+    }
 
     #[test]
     fn snippet_keeps_the_first_lines_and_cuts_long_ones() {

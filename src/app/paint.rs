@@ -174,7 +174,7 @@ impl App {
             Hit::Up(_) => (self.toolbar().up, "위로".to_string()),
             Hit::Side(s) => return self.side_tip(s),
             Hit::SearchButton => (self.search_button(), "검색".to_string()),
-            Hit::PreviewButton => (self.toolbar().preview, (if self.auto_preview { "자동 미리 보기 끄기" } else { "자동 미리 보기 · 그림이나 글 파일을 고르면 보여요" }).to_string()),
+            Hit::PreviewButton => (self.toolbar().preview, (if self.auto_preview { "자동 미리 보기 끄기" } else { "자동 미리 보기 · 그림·글·문서 파일을 고르면 보여요" }).to_string()),
             Hit::SettingsButton => (self.settings_button(), "설정".to_string()),
             // 레일의 공간 아이콘: 이름. 패널이 열려 있는 지금 공간에는 붙이지 않는다 (이름이 패널 머리에 보인다)
             Hit::Rail(i) if Some(i) == self.workspaces.current && self.side_panel() == Some(Panel::Main) => return None,
@@ -426,7 +426,7 @@ impl EntryArt<Gfx> for WinArt<'_> {
         let key = thumb_key(&path, e.modified, px);
         let ok = g.thumb(&key, bx, opacity);
         if !ok && !self.thumb_failed.contains(&key) {
-            self.missing.push(crate::thumbs::Request { key, path, px });
+            self.missing.push(crate::thumbs::Request { key, path, px, only_thumb: false });
         }
         ok
     }
