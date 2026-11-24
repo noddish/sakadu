@@ -495,6 +495,7 @@ impl App {
             || anim_progress(self.toast_at, TOAST_FADE_MS).is_some()
             || anim_progress(self.view_menu_at, MENU_FADE_MS).is_some()
             || anim_progress(self.cmd_at, commands::CMD_FADE_MS).is_some()
+            || self.side_flow.moving
     }
 
     /// 휠 한 걸음: 목표 자리 쪽으로 남은 거리의 35%씩 (0.2초쯤에 닿는다)

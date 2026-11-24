@@ -340,7 +340,7 @@ impl App {
     // ---------- 열기·추가·편집 ----------
 
     /// 줄을 고르고 보이게 한 뒤 저장한다 (항목을 옮기거나 그룹을 바꾼 다음)
-    fn fav_changed(&mut self, select: Option<Row>) {
+    pub(super) fn fav_changed(&mut self, select: Option<Row>) {
         self.fav_flash = None;
         self.fav_sel = self.fav_sel.min(self.favs.rows().len().saturating_sub(1));
         if let Some(row) = select {
@@ -546,32 +546,6 @@ impl App {
             }
         }
         self.unpin(i);
-    }
-
-    /// 즐겨찾기 줄을 끌어 이 공간에 고정한 곳(y)에 놓았다: '이 작업 공간에만 두기'처럼 옮기고, 놓은 자리에 끼운다
-    pub(super) fn fav_drop_to_pins(&mut self, row: Row, y: f32) {
-        let slot = self.pin_drop_slot(y).unwrap_or(0);
-        let before = self.pins().len();
-        self.fav_move_to_pins(row);
-        if self.pins().len() > before {
-            self.pin_move(before, slot);
-        }
-    }
-
-    /// 고정한 줄 i를 끌어 '모든 공간'(y)에 놓았다: '모든 공간에 두기'처럼 옮기고, 놓은 자리(그룹 머리 줄이면 그 그룹)에 끼운다
-    pub(super) fn pin_drop_to_favs(&mut self, i: usize, y: f32) {
-        let target = self.fav_drop_row(y);
-        let Some(path) = self.pins().get(i).map(|f| f.path.clone()) else { return };
-        let already = self.favs.find(&path).is_some();
-        self.pin_to_common(i);
-        if already {
-            return;
-        }
-        let (Some((at, below)), Some(from)) = (target, self.favs.find(&path)) else { return };
-        let (to_group, to_index) = self.favs.item_drop_target(at, below);
-        if let Some((group, index)) = self.favs.move_item(from, to_group, to_index) {
-            self.fav_changed(Some(Row::Item { group, index }));
-        }
     }
 
     /// 즐겨찾기 항목을 '모든 공간'에서 빼서 지금 작업 공간에만 고정한다.
@@ -932,11 +906,12 @@ impl App {
     }
 
     pub(super) fn fav_drag_move(&mut self, y: f32) {
+        // 조금 움직이면 끌기 시작: 줄에서 잡은 자리를 기억해 카드가 그 자리를 잡은 채 따라오게 한다
         self.drag = match self.drag {
-            Drag::FavPress { row, y: y0 } if (y - y0).abs() > 4.0 => Drag::FavMove { from: row, y },
-            Drag::FavMove { from, .. } => Drag::FavMove { from, y },
-            Drag::PinPress { index, y: y0 } if (y - y0).abs() > 4.0 => Drag::PinMove { from: index, y },
-            Drag::PinMove { from, .. } => Drag::PinMove { from, y },
+            Drag::FavPress { row, y: y0 } if (y - y0).abs() > 4.0 => Drag::FavMove { from: row, y, grab: self.side_grab(Side::Fav(row), y0) },
+            Drag::FavMove { from, grab, .. } => Drag::FavMove { from, y, grab },
+            Drag::PinPress { index, y: y0 } if (y - y0).abs() > 4.0 => Drag::PinMove { from: index, y, grab: self.side_grab(Side::Pin(index), y0) },
+            Drag::PinMove { from, grab, .. } => Drag::PinMove { from, y, grab },
             _ => return,
         };
         // 목록 끝에 가까이 끌면 자동 스크롤
@@ -964,42 +939,14 @@ impl App {
                 self.release_capture();
                 self.pin_open(index, ctrl);
             }
-            Drag::PinMove { from, y } => {
+            // 끌어서 놓았다: 보이던 빈자리 그대로 옮긴다 (side_flow.rs). 카드는 놓은 자리로 미끄러져 들어간다
+            Drag::PinMove { .. } | Drag::FavMove { .. } => {
+                let (slots, _) = self.side_slots();
+                let plan = self.side_drop_plan(&slots);
                 self.drag = Drag::None;
                 self.release_capture();
-                // '모든 공간'에 놓으면 모든 공간으로, 아니면 고정한 것 안에서 자리만
-                if self.side_drop_to_pins(y) == Some(false) {
-                    self.pin_drop_to_favs(from, y);
-                } else if let Some(slot) = self.pin_drop_slot(y) {
-                    self.pin_move(from, slot);
-                }
-                self.invalidate();
-            }
-            Drag::FavMove { from: from @ Row::Item { .. }, y } if self.side_drop_to_pins(y) == Some(true) => {
-                // 즐겨찾기 항목을 이 공간에 고정한 쪽에 놓았다: 이 작업 공간으로 옮긴다
-                self.drag = Drag::None;
-                self.release_capture();
-                self.fav_drop_to_pins(from, y);
-            }
-            Drag::FavMove { from, y } => {
-                self.drag = Drag::None;
-                self.release_capture();
-                let Some((at, below)) = self.fav_drop_row(y) else { return true };
-                match from {
-                    // 항목은 그룹 머리 줄 위에 놓으면 그 그룹으로, 항목 줄이면 그 위·아래 자리로
-                    Row::Item { group, index } => {
-                        let (to_group, to_index) = self.favs.item_drop_target(at, below);
-                        if let Some((group, index)) = self.favs.move_item((group, index), to_group, to_index) {
-                            self.fav_changed(Some(Row::Item { group, index }));
-                        }
-                    }
-                    // 그룹은 그룹끼리 순서를 바꾼다
-                    Row::Group(g) => {
-                        let to = self.favs.group_drop_target(at, below, g);
-                        if let Some(to) = self.favs.move_group(g, to) {
-                            self.fav_changed(Some(Row::Group(to)));
-                        }
-                    }
+                if let Some(p) = plan {
+                    self.side_drop(p);
                 }
             }
             _ => return false,
