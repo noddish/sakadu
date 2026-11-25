@@ -116,7 +116,7 @@ impl App {
             .enumerate()
             .map(|(_, tab)| {
                 // 지금 탭만 굵게 그리지만 폭은 모두 굵은 글자로 잰다: 탭을 누를 때마다 옆 탭이 밀리지 않게
-                (self.gfx.measure(&tab.loc.title(), Font::Normal) + 22.0 + if n > 1 { 20.0 } else { 0.0 }).clamp(52.0, 180.0)
+                tab_natural_w(self.gfx.measure(&tab.loc.title(), Font::Normal), n)
             })
             .collect();
         let strip = chip_strip(g, self.head_right_w(p, g));

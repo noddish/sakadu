@@ -419,6 +419,11 @@ pub fn drop_index(trs: &[R], x: f32) -> usize {
     }
 }
 
+/// 탭 칩의 이름에 맞춘 폭: 글자 + 양쪽 안쪽 여백 12 (+ 탭이 여럿이면 닫기 단추 자리 20). 그리기(paint_pane_head)의 글자 자리와 같다
+pub fn tab_natural_w(text_w: f32, tabs: usize) -> f32 {
+    (text_w + SP_M * 2.0 + if tabs > 1 { 20.0 } else { 0.0 }).clamp(52.0, 180.0)
+}
+
 /// 탭 칩 안 오른쪽 끝의 닫기 단추
 pub fn close_rect(tr: R) -> R {
     R::new(tr.r - SP_XL, tr.t + SP_XS, tr.r - SP_XS, tr.b - SP_XS)

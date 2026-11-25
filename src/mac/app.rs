@@ -3321,7 +3321,7 @@ impl App {
         let pane = &self.panes[p];
         let n = pane.tabs.len();
         let strip = chip_strip(gm, g.measure(&count_text(pane.tab()), Font::Small));
-        let natural: Vec<f32> = pane.tabs.iter().map(|t| (g.measure(&t.loc.title(), Font::Normal) + 22.0 + if n > 1 { 20.0 } else { 0.0 }).clamp(52.0, 180.0)).collect();
+        let natural: Vec<f32> = pane.tabs.iter().map(|t| tab_natural_w(g.measure(&t.loc.title(), Font::Normal), n)).collect();
         let trs = tab_rects(strip, &natural, pane.active);
         let add = add_rect(strip, &trs);
         (trs, add)
