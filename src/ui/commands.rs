@@ -105,10 +105,10 @@ pub fn looks_like_path(s: &str) -> bool {
     looks_like_path_on(s, cfg!(not(windows)))
 }
 
-/// 경로처럼 보이는 입력. Windows: C:\…, \\서버\…, %환경 변수%. 맥: /…, ~, ~/… (홈)
+/// 경로처럼 보이는 입력. Windows: C:\…, \\서버\…, %환경 변수%. 맥: /…, ~, ~/… (홈), 네트워크 공유 주소(smb:// 따위: 연결해서 연다)
 pub fn looks_like_path_on(s: &str, unix: bool) -> bool {
     if unix {
-        return s.starts_with('/') || s == "~" || s.starts_with("~/");
+        return s.starts_with('/') || s == "~" || s.starts_with("~/") || crate::util::share_url(s).is_some();
     }
     let b = s.as_bytes();
     s.starts_with("\\\\") || s.starts_with('%') || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
@@ -407,6 +407,9 @@ mod tests {
         let mac = |s: &str| looks_like_path_on(s, true);
         assert!(mac("/Users/a/문서") && mac("~") && mac("~/Downloads"));
         assert!(!mac("견적서") && !mac("~a") && !mac("C:\\Users"));
+        // 맥에서는 네트워크 공유 주소도 (연결해서 연다). Windows의 주소 칸은 받지 않는다
+        assert!(mac("smb://nas.local/사진") && mac("afp://nas/share") && !mac("smb://") && !mac("https://example.com"));
+        assert!(!win("smb://nas.local/사진"));
     }
 
     /// 줄의 순서: 경로 → 탭 → 고정한 것·즐겨찾기 → 최근 위치 → 작업 공간 → 명령 → 디스크에서 찾기. 묶음 안에서는 앞부분이 맞는 것부터

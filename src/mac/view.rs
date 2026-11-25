@@ -10,11 +10,12 @@
 //! 훑어보기(스페이스, ⌘Y)는 맥의 훑어보기 창(QLPreviewPanel)에 고른 파일을 띄운다. 그 창의 내용은 이 뷰가 댄다.
 //! 오른쪽 미리 보기 창(⌥⌘P)에서 문서(PDF·Office 따위)는 그 본문 자리에 Quick Look 보기(QLPreviewView)를 하위 뷰로 둔다.
 //! 고정한 파일이 그대로 있는지도 뒷줄에서 확인한다.
+//! 디스크가 붙고 떨어지는 것은 NSWorkspace의 알림으로 듣고 사이드바를 고친다. 디스크 꺼내기와 네트워크 공유 연결(volumes.rs)은 뒷줄에서 한다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다.
 //! 설정 창(앱 메뉴의 '설정…', ⌘,)은 본 창과 따로 뜬다 (settings.rs).
 //! 창 시험(smoke)은 이 창을 그대로 열고 실제 입력의 길로 파일 작업을 돌려 본다 (CI의 맥 러너에서)
 
-use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, Mods, Paste};
+use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, Mods, Paste, VolumeEvent};
 use sakadu::ui::ROW_H;
 use crate::gfx::Gfx;
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -29,7 +30,8 @@ use objc2_app_kit::{
     NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo, NSDraggingItem, NSDraggingSession, NSDraggingSource, NSPasteboard, NSPasteboardTypeFileURL,
     NSPasteboardWriting,
     NSTextField, NSTextFieldDelegate, NSTextView, NSTitlebarSeparatorStyle, NSToolbar, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle, NSWorkspace,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle, NSWorkspace, NSWorkspaceDidMountNotification, NSWorkspaceDidRenameVolumeNotification,
+    NSWorkspaceDidUnmountNotification, NSWorkspaceVolumeOldURLKey, NSWorkspaceVolumeURLKey,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL};
 use sakadu::draw::Color;
@@ -1216,6 +1218,30 @@ fn pump() {
             });
         });
     }
+    // 디스크 꺼내기와 네트워크 공유 연결: 오래 걸릴 수 있어 뒷줄에서 (연결은 맥의 로그인 창을 기다릴 수도 있다)
+    for path in with_app(App::take_ejects).unwrap_or_default() {
+        std::thread::spawn(move || {
+            let result = crate::volumes::eject(&path);
+            DispatchQueue::main().exec_async(move || {
+                with_app(|a| a.on_ejected(&path, result));
+                redraw();
+            });
+        });
+    }
+    for probe in with_app(App::take_mount_asks).unwrap_or_default() {
+        std::thread::spawn(move || {
+            let result = crate::volumes::mount(&probe.text);
+            DispatchQueue::main().exec_async(move || {
+                // 붙은 디스크를 사이드바에 먼저 넣는다 (맥의 알림보다 먼저 올 수 있다). 그리고 그 자리로 간다
+                with_app(|a| {
+                    a.on_volumes(places(), None);
+                    a.on_mounted(&probe, result);
+                });
+                pump();
+                redraw();
+            });
+        });
+    }
     // 설정·도움말 단축키: 설정 창을 연다 (단축키와 도움말이 거기 있다)
     if with_app(|a| std::mem::take(&mut a.open_settings)) == Some(true)
         && let Some(mtm) = MainThreadMarker::new()
@@ -1539,7 +1565,8 @@ const KEY_CHARS: [(u16, char); 47] = [
 /// F1~F20의 키 번호 (kVK_F1 …)
 const F_KEYS: [u16; 20] = [0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A, 0x40, 0x4F, 0x50, 0x5A];
 
-/// 사이드바 '모든 공간'에 늘 있는 줄: 홈 아래 폴더들과 연결된 디스크
+/// 사이드바 '모든 공간'에 늘 있는 줄: 홈 아래 폴더들과 연결된 디스크 (/Volumes 안. 숨긴 것(타임머신의 .timemachine 따위)은 빼고).
+/// 디스크가 붙고 떨어질 때마다 다시 읽는다 (/Volumes만 읽고 디스크 안은 보지 않아 꺼진 서버를 기다리지 않는다)
 fn places() -> Vec<(String, String)> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let mut out = vec![("홈".to_string(), home.clone())];
@@ -1548,11 +1575,48 @@ fn places() -> Vec<(String, String)> {
     }
     out.push(("응용 프로그램".to_string(), "/Applications".to_string()));
     if let Ok(vols) = std::fs::read_dir("/Volumes") {
-        let mut v: Vec<(String, String)> = vols.flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().to_string_lossy().into_owned())).collect();
+        let mut v: Vec<(String, String)> = vols
+            .flatten()
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().to_string_lossy().into_owned()))
+            .filter(|(name, _)| !name.starts_with('.'))
+            .collect();
         v.sort();
         out.extend(v);
     }
     out
+}
+
+/// 디스크 알림을 듣는다: 붙었다, 떨어졌다, 이름이 바뀌었다 (맥은 NSWorkspace의 알림 센터로 알린다. 받는 쪽은 앱 위임의 volumesChanged:)
+fn watch_volumes(delegate: &Delegate) {
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    // SAFETY: 맥이 정한 알림 이름들이다
+    let names = unsafe { [NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification, NSWorkspaceDidRenameVolumeNotification] };
+    for name in names {
+        // SAFETY: 앱 위임은 앱이 끝날 때까지 산다 (run이 쥐고 있다). volumesChanged:는 define_class에 있고 알림 하나를 받는다
+        unsafe { center.addObserver_selector_name_object(delegate, sel!(volumesChanged:), Some(name), None) };
+    }
+}
+
+/// 디스크 알림에서 무엇이 일어났는지 읽는다 (자리는 알림에 든 디스크 주소에서). 읽지 못하면 None (사이드바만 다시 읽는다)
+fn volume_event(n: &NSNotification) -> Option<VolumeEvent> {
+    let info = n.userInfo()?;
+    let path_of = |key: &NSString| {
+        let url = info.objectForKey(key)?.downcast::<NSURL>().ok()?;
+        url.path().map(|p| sakadu::util::normalize(&p.to_string()))
+    };
+    let name = n.name();
+    // SAFETY: 맥이 정한 알림 이름과 키들이다
+    unsafe {
+        if &*name == NSWorkspaceDidMountNotification {
+            path_of(NSWorkspaceVolumeURLKey).map(VolumeEvent::Mounted)
+        } else if &*name == NSWorkspaceDidUnmountNotification {
+            path_of(NSWorkspaceVolumeURLKey).map(VolumeEvent::Unmounted)
+        } else if &*name == NSWorkspaceDidRenameVolumeNotification {
+            Some(VolumeEvent::Renamed { from: path_of(NSWorkspaceVolumeOldURLKey)?, to: path_of(NSWorkspaceVolumeURLKey)? })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1576,6 +1640,8 @@ define_class!(
             let app = NSApplication::sharedApplication(mtm);
             let smoke = SMOKE.with(|s| s.borrow().clone());
             let window = open_window(mtm, smoke.clone());
+            // 디스크가 붙고 떨어지는 것을 듣는다 (사이드바의 디스크 줄)
+            watch_volumes(self);
             // 메뉴 막대의 키는 단축키 표에서 온다: 창(App)을 만든 뒤에 짓는다
             main_menu(mtm, &app);
             apply_theme(mtm);
@@ -1633,6 +1699,16 @@ define_class!(
         #[unsafe(method(sakaduSettings:))]
         fn sakadu_settings(&self, _sender: Option<&AnyObject>) {
             settings::open(self.mtm());
+        }
+
+        /// 디스크가 붙거나 떨어지거나 이름이 바뀌었다 (NSWorkspace의 알림. watch_volumes가 건다): 사이드바의 디스크 줄을 다시 읽고,
+        /// 떨어진 디스크를 보던 탭은 홈으로, 이름이 바뀐 디스크를 보던 탭은 새 자리로
+        #[unsafe(method(volumesChanged:))]
+        fn volumes_changed(&self, n: &NSNotification) {
+            let event = volume_event(n);
+            with_app(|a| a.on_volumes(places(), event));
+            pump();
+            redraw();
         }
 
         /// 메뉴 막대의 동작 줄 (파일·보기·이동·도움말): 줄의 tag가 단축키 표(ACTIONS)의 번호다.

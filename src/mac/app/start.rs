@@ -24,38 +24,29 @@ impl StartArt<Gfx> for MacStartArt<'_> {
     }
 }
 
-/// 디스크 자리의 (남은 바이트, 전체 바이트). 붙어 있는 디스크의 정보를 한 번에 읽고 꺼진 네트워크 디스크를 기다리지 않는다 (MNT_NOWAIT).
+/// 디스크 자리 하나: 남은·전체 바이트와, 그 자리가 디스크가 붙은 곳 그 자체인지 (바로가기가 아니다: 꺼낼 수 있다)
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Space {
+    pub free: u64,
+    pub total: u64,
+    pub mount: bool,
+}
+
+/// 디스크 자리들의 용량. 붙어 있는 디스크의 정보를 한 번에 읽고 꺼진 네트워크 디스크를 기다리지 않는다 (MNT_NOWAIT).
 /// /Volumes 아래의 바로가기(시동 디스크 'Macintosh HD' → /)는 그 대상으로 찾는다. 디스크의 자리가 아닌 경로는 빠진다
-pub fn volume_space(paths: &[String]) -> HashMap<String, (u64, u64)> {
-    // SAFETY: 받을 곳 없이 개수만 묻는다
-    let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
-    if n <= 0 {
+pub fn volume_space(paths: &[String]) -> HashMap<String, Space> {
+    if paths.is_empty() {
         return HashMap::new();
     }
-    // 그사이 붙은 디스크를 위해 넉넉히
-    let mut list: Vec<libc::statfs> = Vec::with_capacity(n as usize + 16);
-    let bytes = (list.capacity() * std::mem::size_of::<libc::statfs>()) as libc::c_int;
-    // SAFETY: list의 칸만큼만 채운다
-    let got = unsafe { libc::getfsstat(list.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
-    if got <= 0 {
-        return HashMap::new();
-    }
-    // SAFETY: getfsstat이 앞의 got칸을 채웠다
-    unsafe { list.set_len(got as usize) };
-    let mounts: HashMap<String, (u64, u64)> = list
-        .iter()
-        .map(|fs| {
-            // SAFETY: f_mntonname은 NUL로 끝나는 C 문자열이다
-            let at = unsafe { std::ffi::CStr::from_ptr(fs.f_mntonname.as_ptr()) }.to_string_lossy().into_owned();
-            let block = u64::from(fs.f_bsize);
-            (at, (fs.f_bavail.saturating_mul(block), fs.f_blocks.saturating_mul(block)))
-        })
-        .collect();
+    let mounts: HashMap<String, (u64, u64)> = crate::volumes::mounts().into_iter().map(|m| (m.on, (m.free, m.total))).collect();
     paths
         .iter()
         .filter_map(|path| {
-            let target = std::fs::read_link(path).map(|t| t.to_string_lossy().into_owned()).unwrap_or_else(|_| path.clone());
-            mounts.get(&target).map(|space| (path.clone(), *space))
+            if let Some(&(free, total)) = mounts.get(path) {
+                return Some((path.clone(), Space { free, total, mount: true }));
+            }
+            let target = std::fs::read_link(path).ok()?.to_string_lossy().into_owned();
+            mounts.get(&target).map(|&(free, total)| (path.clone(), Space { free, total, mount: false }))
         })
         .collect()
 }
@@ -66,8 +57,8 @@ impl App {
         self.places
             .iter()
             .map(|(name, path)| {
-                let (free, total) = self.volumes.get(path).copied().unwrap_or((0, 0));
-                StartDrive { name, free, total }
+                let space = self.volumes.get(path).copied().unwrap_or_default();
+                StartDrive { name, free: space.free, total: space.total }
             })
             .collect()
     }
@@ -227,7 +218,8 @@ impl App {
 
     // ---------- 디스크 용량 ----------
 
-    /// 위치 칸의 용량을 읽어 달라는 경로들 (시작 화면을 열 때마다 한 번). 창 쪽이 뒷줄에서 volume_space로 읽어 set_volumes로 넘긴다
+    /// 위치 칸과 사이드바 디스크 줄의 용량을 읽어 달라는 경로들 (창을 열 때, 창이 앞으로 올 때, 디스크가 붙거나 떨어질 때,
+    /// 시작 화면을 열 때). 창 쪽이 뒷줄에서 volume_space로 읽어 set_volumes로 넘긴다
     pub fn take_volume_ask(&mut self) -> Option<Vec<String>> {
         if !std::mem::take(&mut self.volumes_wanted) {
             return None;
@@ -235,7 +227,7 @@ impl App {
         Some(self.places.iter().map(|(_, path)| path.clone()).filter(|path| path.starts_with("/Volumes/")).collect())
     }
 
-    pub fn set_volumes(&mut self, space: HashMap<String, (u64, u64)>) {
+    pub fn set_volumes(&mut self, space: HashMap<String, Space>) {
         self.volumes = space;
     }
 
