@@ -174,6 +174,8 @@ pub enum MenuKind {
     Fav(usize),
     /// 즐겨찾기 그룹 머리를 오른쪽 단추로 눌렀을 때 (그룹 번호): 이름 바꾸기, 그룹 풀기, 그룹과 안의 즐겨찾기 빼기
     Group(usize),
+    /// 그룹과 안의 즐겨찾기를 뺄지 한 번 더 묻는다 (Windows의 확인 창과 같은 물음): 빼기, 그만두기
+    GroupDelete(usize),
     /// 목록의 줄을 오른쪽 단추로 눌렀을 때: 고른 항목들의 메뉴 (열기, Finder에서 보기, 이름 바꾸기, 휴지통으로 이동)
     Rows,
     /// 목록의 빈 곳을 오른쪽 단추로 눌렀을 때: 그 폴더의 메뉴 (새 폴더, 새로 고침)
@@ -3073,6 +3075,8 @@ impl App {
                 let i = (0..rows.len()).find(|i| side_menu(&rows, *i) == Some(kind))?;
                 self.side_rect(&rows[i])
             }
+            // 그룹을 지울지 묻는 메뉴는 그 그룹 머리에 붙인다
+            MenuKind::GroupDelete(g) => return self.menu_anchor(MenuKind::Group(g)),
             // 목록 메뉴는 누른 자리에 연다 (메뉴는 붙인 자리의 아래 끝에서 4 내려 놓는다)
             MenuKind::Rows | MenuKind::Blank => {
                 let (x, y) = self.list_target.as_ref()?.at;
@@ -3146,7 +3150,7 @@ impl App {
     /// 고정한 줄의 메뉴는 위로·아래로 이동(갈 수 있는 쪽만), 모든 공간에 두기, 고정 풀기.
     /// 즐겨찾기 항목의 메뉴는 이 작업 공간에만 두기, 모든 공간에서 빼기, 그리고 그룹으로 옮기는 줄들 (그룹마다, 지금 그룹에 체크.
     /// 그룹 안 항목이면 그룹에서 빼기. 맨 끝은 새 그룹을 만들어 넣기). 앱이 그리는 메뉴에는 하위 메뉴가 없어 Windows의 '그룹으로 이동'을 펼쳐 둔다.
-    /// 그룹 머리의 메뉴는 이름 바꾸기, 그룹 풀기, 그룹과 안의 즐겨찾기 빼기 (묻지 않고 지운다)
+    /// 그룹 머리의 메뉴는 이름 바꾸기, 그룹 풀기, 그룹과 안의 즐겨찾기 빼기 (즐겨찾기가 들어 있으면 한 번 더 묻는다)
     pub fn menu_items(&self, kind: MenuKind) -> Vec<(String, bool)> {
         use sakadu::keys::{Action, name};
         match kind {
@@ -3188,7 +3192,15 @@ impl App {
                 self.fav_menu(row).into_iter().map(line).collect()
             }
             MenuKind::Group(g) => match self.favs.groups.get(g) {
-                Some(_) => ["이름 바꾸기", "그룹 풀기 (안의 즐겨찾기는 남김)", "그룹과 안의 즐겨찾기 빼기"].map(|s| (s.to_string(), false)).to_vec(),
+                Some(grp) => {
+                    // 즐겨찾기가 든 그룹은 한 번 더 묻는다 (…)
+                    let delete = if grp.items.is_empty() { "그룹과 안의 즐겨찾기 빼기" } else { "그룹과 안의 즐겨찾기 빼기…" };
+                    ["이름 바꾸기", "그룹 풀기 (안의 즐겨찾기는 남김)", delete].map(|s| (s.to_string(), false)).to_vec()
+                }
+                None => Vec::new(),
+            },
+            MenuKind::GroupDelete(g) => match self.favs.groups.get(g) {
+                Some(grp) => vec![(format!("‘{}’ 그룹과 즐겨찾기 {}개 빼기", grp.name, grp.items.len()), false), ("그만두기".to_string(), false)],
                 None => Vec::new(),
             },
             MenuKind::Rows => self.row_menu().into_iter().map(|act| (act.label().to_string(), false)).collect(),
@@ -3243,6 +3255,8 @@ impl App {
             MenuKind::Layout | MenuKind::View | MenuKind::Spaces | MenuKind::Blank => None,
             MenuKind::Fav(_) => Some(2),
             MenuKind::Group(_) => Some(1),
+            // 빼기와 그만두기 사이
+            MenuKind::GroupDelete(_) => Some(1),
             // 보는 줄(열기, Finder에서 보기)과 그 밖의 줄(이름 바꾸기, 복사, 복제, 휴지통으로 이동) 사이
             MenuKind::Rows => Some(2),
             MenuKind::Space(_) => Some(workspaces::COLORS.len()),
@@ -3300,9 +3314,15 @@ impl App {
             MenuKind::Group(g) => match i {
                 0 => self.begin_group_rename(g),
                 1 => self.fav_ungroup(g),
+                2 if self.favs.groups.get(g).is_some_and(|grp| !grp.items.is_empty()) => self.ask_group_delete(g),
                 2 => self.fav_delete_group(g),
                 _ => {}
             },
+            MenuKind::GroupDelete(g) => {
+                if i == 0 {
+                    self.fav_delete_group(g);
+                }
+            }
             MenuKind::Rows | MenuKind::Blank => self.pick_list_menu(kind, i),
         }
     }
@@ -3606,7 +3626,18 @@ impl App {
         self.save_favorites();
     }
 
-    /// 그룹과 안의 즐겨찾기를 함께 지운다 (Windows의 '그룹과 안의 즐겨찾기 빼기'. 앱이 그리는 메뉴라 묻지 않는다)
+    /// 즐겨찾기가 든 그룹을 지우기 전에 묻는다: 그 그룹 머리에 '빼기·그만두기' 메뉴를 연다 (Windows의 확인 창).
+    /// 메뉴를 고른 자리에는 글자 폭을 잴 그림판이 없어 폭은 글자 수로 어림한다 (한글 한 자 14, 둘레 48)
+    fn ask_group_delete(&mut self, g: usize) {
+        let kind = MenuKind::GroupDelete(g);
+        let Some(anchor) = self.menu_anchor(kind) else { return };
+        let lines = self.menu_lines(kind);
+        let longest = lines.iter().map(|l| l.label.chars().count()).max().unwrap_or(0) as f32;
+        let w = (longest * 14.0 + 48.0).clamp(160.0, (self.w - 2.0 * MARGIN).clamp(1.0, 420.0));
+        self.menu = Some(OpenMenu { kind, anchor, lines, w, sel: None, scroll: 0.0 });
+    }
+
+    /// 그룹과 안의 즐겨찾기를 함께 지운다 (Windows의 '그룹과 안의 즐겨찾기 빼기'. 즐겨찾기가 들어 있으면 ask_group_delete로 물은 뒤)
     fn fav_delete_group(&mut self, g: usize) {
         self.end_group_rename();
         self.favs.delete_group(g);
@@ -6450,7 +6481,7 @@ mod tests {
             Group { name: "묶음".into(), collapsed: false, items: vec![f("예산", "예산.csv")] },
             Group { name: "둘째".into(), collapsed: false, items: vec![f("회의록", "회의록.md")] },
         ];
-        assert_eq!(menu_labels(&a, MenuKind::Group(0)), ["이름 바꾸기", "그룹 풀기 (안의 즐겨찾기는 남김)", "그룹과 안의 즐겨찾기 빼기"]);
+        assert_eq!(menu_labels(&a, MenuKind::Group(0)), ["이름 바꾸기", "그룹 풀기 (안의 즐겨찾기는 남김)", "그룹과 안의 즐겨찾기 빼기…"]);
         assert_eq!(a.menu_break(MenuKind::Group(0)), Some(1));
         assert!(a.menu_items(MenuKind::Group(5)).is_empty());
         // 이름 바꾸기: 그 머리 줄의 이름 자리에 입력 상자가 뜨고, 확정하면 바뀐다
@@ -6479,9 +6510,17 @@ mod tests {
         a.pick_menu(MenuKind::Group(0), 1);
         assert_eq!(names_of(&a.favorites().items), ["예산"]);
         assert_eq!(a.favorites().groups.iter().map(|grp| grp.name.as_str()).collect::<Vec<_>>(), ["둘째", "셋째"]);
-        // 그룹 지우기: 안의 즐겨찾기도 함께 없어진다 (묻지 않는다)
+        // 그룹 지우기: 즐겨찾기가 든 그룹은 그 머리에 한 번 더 묻고(Windows의 확인 창), '빼기'를 골라야 안의 즐겨찾기와 함께 없어진다
         a.pick_menu(MenuKind::Group(0), 2);
+        assert_eq!(a.menu_shown().map(|(k, _)| k), Some(MenuKind::GroupDelete(0)));
+        assert_eq!(menu_labels(&a, MenuKind::GroupDelete(0)), ["‘둘째’ 그룹과 즐겨찾기 1개 빼기", "그만두기"]);
+        a.close_menu();
+        a.pick_menu(MenuKind::GroupDelete(0), 1);
+        assert_eq!(a.favorites().groups.len(), 2, "그만두기 keeps the group");
+        a.pick_menu(MenuKind::GroupDelete(0), 0);
         assert_eq!(a.favorites().groups.iter().map(|grp| grp.name.as_str()).collect::<Vec<_>>(), ["셋째"]);
+        // 빈 그룹은 묻지 않고 지운다
+        assert_eq!(menu_labels(&a, MenuKind::Group(0))[2], "그룹과 안의 즐겨찾기 빼기");
         assert!(a.favorites().find(&util::join(&work, "회의록.md")).is_none());
         assert_eq!(saved_favs(&a), a.favorites().clone());
         // 항목 메뉴의 그룹 줄들: 그룹마다 하나(지금 그룹에 체크), 그룹 안이면 그룹에서 빼기, 맨 끝은 새 그룹
