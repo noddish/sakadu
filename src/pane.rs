@@ -136,6 +136,8 @@ pub struct Tab {
     pub net_fix: Option<crate::listing::NetFix>,
     /// 연결이 끊겨 이번 실행에서 마지막으로 본 목록을 보여 주는 중 (흐리게, 다시 연결되면 저절로 새로 고침)
     pub offline: bool,
+    /// 압축 파일 안을 셸로 읽은 목록 (목록이 올 때 정한다). 썸네일과 자동 미리 보기 카드를 만들지 않는다
+    pub in_archive: bool,
 }
 
 fn key_of(e: &Entry) -> String {
@@ -205,6 +207,7 @@ impl Tab {
             loading_since: None,
             net_fix: None,
             offline: false,
+            in_archive: false,
         }
     }
 

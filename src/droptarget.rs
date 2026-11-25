@@ -74,7 +74,10 @@ fn own_effect(files: &[String], dest: &str, keys: MODIFIERKEYS_FLAGS, allowed: D
         return DROPEFFECT_NONE;
     }
     let (shift, ctrl) = (keys.0 & MK_SHIFT.0 != 0, keys.0 & MK_CONTROL.0 != 0);
+    // 압축 파일 안에서 꺼내는 것은 늘 복사 (옮기면 압축 파일에서 지워야 한다)
+    let from_archive = files.iter().any(|f| crate::archive::archive_of(f).is_some());
     let want = match (shift, ctrl) {
+        _ if from_archive => DROPEFFECT_COPY,
         (true, false) => DROPEFFECT_MOVE,
         (false, true) => DROPEFFECT_COPY,
         _ if files.iter().all(|f| same_volume(f, dest)) => DROPEFFECT_MOVE,
@@ -183,7 +186,7 @@ fn point(pt: &POINTL) -> POINT {
 impl IDropTarget_Impl for DropTarget_Impl {
     fn DragEnter(&self, pdataobj: Ref<IDataObject>, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let data = pdataobj.ok()?.clone();
-        let files = shell::hdrop_paths(&data).filter(|f| !f.is_empty());
+        let files = shell::dropped_paths(&data).filter(|f| !f.is_empty());
         crate::diag::log(|| format!("drop: DragEnter at {},{} files={:?}", pt.x, pt.y, files.as_ref().map(|f| f.len())));
         {
             let mut st = self.state.borrow_mut();

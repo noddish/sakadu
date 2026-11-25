@@ -16,8 +16,10 @@ pub fn execute(hwnd: HWND, act: Deferred) {
             let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
         },
         Deferred::Open { pane, paths, dir } => {
+            // 압축 파일 하나만 열 때는 폴더처럼 들어간다 (여럿이면 기본 프로그램으로)
+            let one = paths.len() == 1;
             for path in paths {
-                open_one(hwnd, pane, &path, dir.as_deref());
+                open_one(hwnd, pane, &path, dir.as_deref(), one);
             }
         }
         Deferred::ConfirmRename { tab, path, old, new } => {
@@ -30,7 +32,7 @@ pub fn execute(hwnd: HWND, act: Deferred) {
             if unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), w!("Sakadu"), MB_YESNO | MB_ICONQUESTION) } == IDYES {
                 for path in paths {
                     let dir = util::parent(&path);
-                    open_one(hwnd, pane, &path, dir.as_deref());
+                    open_one(hwnd, pane, &path, dir.as_deref(), false);
                 }
             }
         }
@@ -82,18 +84,30 @@ pub fn execute(hwnd: HWND, act: Deferred) {
     }
 }
 
-/// 팝업 메뉴를 띄우는 동안 표시해 둔다: 메뉴 위로 간 마우스 때문에 떠 있는 패널이 닫히지 않게
-/// 파일 하나 열기. 폴더를 가리키는 바로 가기(.lnk)는 Sakadu 안에서 그 폴더로 간다
-pub(super) fn open_one(hwnd: HWND, pane: usize, path: &str, dir: Option<&str>) {
+/// 파일 하나 열기. 폴더를 가리키는 바로 가기(.lnk)는 Sakadu 안에서 그 폴더로 간다.
+/// enter_archive면 셸이 폴더로 읽는 압축 파일(zip·7z 등)은 같은 탭에서 들어간다 (못 읽는 형식은 기본 프로그램으로)
+pub(super) fn open_one(hwnd: HWND, pane: usize, path: &str, dir: Option<&str>, enter_archive: bool) {
     if path.to_lowercase().ends_with(".lnk") {
         if let Some(target) = shell::shortcut_target_dir(path) {
             with_app(|a| a.navigate(pane, Location::Dir(target), None));
             return;
         }
     }
+    if enter_archive && crate::archive::is_archive_name(util::file_name(path)) && crate::archive::opens_as_folder(path) {
+        with_app(|a| a.navigate(pane, Location::Dir(path.to_string()), None));
+        return;
+    }
+    // 압축 파일 안의 파일은 셸의 '열기'로 (임시 폴더에 풀어 연다)
+    if crate::archive::archive_of(path).is_some_and(|a| !util::eq_path(&a, path)) {
+        if let Err(e) = shell::open_default(hwnd, path) {
+            crate::diag::log(|| format!("open: archive item failed: {e}"));
+        }
+        return;
+    }
     shell::open_path(hwnd, path, dir);
 }
 
+/// 팝업 메뉴를 띄우는 동안 표시해 둔다: 메뉴 위로 간 마우스 때문에 떠 있는 패널이 닫히지 않게
 pub(super) fn with_menu(f: impl FnOnce()) {
     with_app(|a| a.menu_open = true);
     f();
@@ -153,7 +167,13 @@ thread_local! {
 
 pub(super) fn build_menu(hwnd: HWND, paths: &[String], dir: Option<&str>, extended: bool) -> Option<(shell::ShellMenu, bool)> {
     let cm = if paths.is_empty() { shell::background_menu(hwnd, dir?) } else { shell::ui_object(hwnd, paths) }.ok()?;
-    let single_dir = paths.len() == 1 && shell::is_dir(&paths[0]);
+    // 압축 파일 안을 보는 중인지 (칸의 폴더로, 칸이 없으면 항목 경로로). 압축 파일 자체의 메뉴는 그대로 둔다
+    let in_archive = match (dir, paths.first()) {
+        (Some(d), _) => crate::archive::archive_of(d).is_some(),
+        (None, Some(p)) => crate::archive::archive_of(p).is_some_and(|a| !util::eq_path(&a, p)),
+        (None, None) => false,
+    };
+    let single_dir = paths.len() == 1 && if in_archive { crate::archive::is_folder(&paths[0]) == Some(true) } else { shell::is_dir(&paths[0]) };
     let custom: Vec<(u32, &str)> = if single_dir {
         vec![(ID_OPEN_TAB, "새 탭에서 열기"), (ID_ADD_FAV, "즐겨찾기에 추가")]
     } else if paths.len() == 1 {
@@ -164,6 +184,10 @@ pub(super) fn build_menu(hwnd: HWND, paths: &[String], dir: Option<&str>, extend
         Vec::new()
     };
     let mut menu = shell::ShellMenu::new(cm, extended, &custom).ok()?;
+    // 압축 파일 안은 읽기만 한다: 압축 파일을 고치는 줄을 뺀다 (꺼내기는 복사·압축 풀기로)
+    if in_archive {
+        menu.hide_verbs(&["cut", "delete", "rename", "paste", "pastelink", "link"]);
+    }
     menu.read_lines();
     Some((menu, single_dir))
 }
@@ -218,6 +242,10 @@ pub(super) fn show_menu(hwnd: HWND, req: MenuRequest) {
         }
         "open" | "explore" if single_dir => {
             with_app(|a| a.navigate(pane, Location::Dir(util::normalize(&paths[0])), None));
+        }
+        // 압축 파일 안의 폴더: '열기'에 동사 이름이 없다 (기본 줄로 알아본다)
+        "" if single_dir && menu.default_id() == Some(picked.id) => {
+            with_app(|a| a.navigate(pane, Location::Dir(paths[0].clone()), None));
         }
         "opennewwindow" if single_dir => {
             with_app(|a| a.new_tab(pane, Some(Location::Dir(util::normalize(&paths[0]))), true));

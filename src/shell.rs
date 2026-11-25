@@ -199,6 +199,35 @@ impl ShellMenu {
         Some(Picked { id: cmd, verb })
     }
 
+    /// 이 동사의 줄을 뺀다 (압축 파일 안처럼 읽기만 하는 곳에서 잘라내기·삭제·이름 바꾸기). 남은 구분선은 정리한다
+    pub fn hide_verbs(&mut self, verbs: &[&str]) {
+        unsafe {
+            for i in (0..GetMenuItemCount(Some(self.menu)).max(0)).rev() {
+                let id = GetMenuItemID(self.menu, i);
+                if (MENU_FIRST..=MENU_LAST).contains(&id) && verbs.contains(&self.verb(id - MENU_FIRST).as_str()) {
+                    let _ = DeleteMenu(self.menu, i as u32, MF_BYPOSITION);
+                }
+            }
+            // 맨 앞·맨 뒤·겹친 구분선
+            let sep = |i: i32| GetMenuState(self.menu, i as u32, MF_BYPOSITION) & MF_SEPARATOR.0 != 0;
+            let mut i = GetMenuItemCount(Some(self.menu)) - 1;
+            while i >= 0 {
+                let n = GetMenuItemCount(Some(self.menu));
+                if sep(i) && (i == 0 || i == n - 1 || sep(i - 1)) {
+                    let _ = DeleteMenu(self.menu, i as u32, MF_BYPOSITION);
+                }
+                i -= 1;
+            }
+        }
+        self.entries.clear();
+    }
+
+    /// 기본 줄(굵게 보이는 '열기')의 명령 번호. 압축 파일 안의 폴더처럼 동사 이름이 없는 '열기'를 알아볼 때 쓴다
+    pub fn default_id(&self) -> Option<u32> {
+        let id = unsafe { GetMenuDefaultItem(self.menu, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0)) };
+        (id != u32::MAX).then_some(id)
+    }
+
     fn verb(&self, offset: u32) -> String {
         let mut buf = [0u16; 128];
         let ok = unsafe { self.cm.GetCommandString(offset as usize, GCS_VERBW, None, PSTR(buf.as_mut_ptr() as *mut u8), buf.len() as u32) };
@@ -420,6 +449,14 @@ pub fn open_path(hwnd: HWND, path: &str, dir: Option<&str>) {
     let p = HSTRING::from(path);
     let d = HSTRING::from(dir.unwrap_or(""));
     unsafe { ShellExecuteW(Some(hwnd), PCWSTR::null(), &p, PCWSTR::null(), &d, SW_SHOWNORMAL) };
+}
+
+/// 셸 항목을 기본 동작('열기')으로 연다. 압축 파일 안의 파일은 셸이 임시 폴더에 풀어 연다 (탐색기와 같다)
+pub fn open_default(hwnd: HWND, path: &str) -> Result<()> {
+    let cm: IContextMenu = ui_object(hwnd, &[path.to_string()])?;
+    let menu = ShellMenu::new(cm, false, &[])?;
+    let id = menu.default_id().ok_or_else(|| Error::from(E_FAIL))?;
+    menu.invoke(hwnd, id, None, None)
 }
 
 /// 바로 가기(.lnk)가 폴더를 가리키면 그 경로
@@ -885,7 +922,10 @@ fn hdrop_format() -> FORMATETC {
 
 /// 클립보드에 파일 목록이 있는지 (열지 않고 형식만 본다)
 pub fn clipboard_has_files() -> bool {
-    unsafe { windows::Win32::System::DataExchange::IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_ok()
+    use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+    // 압축 파일 안에서 복사한 항목은 CF_HDROP 없이 셸 항목 목록만 있다
+    let idlist = unsafe { RegisterClipboardFormatW(w!("Shell IDList Array")) };
+    unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_ok() || IsClipboardFormatAvailable(idlist).is_ok() }
 }
 
 /// 데이터 객체에 들어 있는 파일 경로 목록(CF_HDROP)
@@ -906,6 +946,27 @@ pub fn hdrop_paths(obj: &IDataObject) -> Option<Vec<String>> {
     }
 }
 
+/// 데이터 객체의 파일 경로: CF_HDROP, 없으면 압축 파일 안의 항목 (압축 폴더는 CF_HDROP 대신 셸 항목 목록만 준다)
+pub fn dropped_paths(obj: &IDataObject) -> Option<Vec<String>> {
+    hdrop_paths(obj).or_else(|| archive_paths(obj))
+}
+
+/// 데이터 객체가 압축 파일 안의 항목만 담고 있으면 그 경로들 ("C:\자료\묶음.zip.txt"처럼 셸이 알아듣는 경로)
+fn archive_paths(obj: &IDataObject) -> Option<Vec<String>> {
+    unsafe {
+        let items: IShellItemArray = SHCreateShellItemArrayFromDataObject(obj).ok()?;
+        let n = items.GetCount().ok()?;
+        let mut paths = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let raw = items.GetItemAt(i).ok()?.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING).ok()?;
+            let path = raw.to_string().ok();
+            CoTaskMemFree(Some(raw.0 as *const c_void));
+            paths.push(path?);
+        }
+        (!paths.is_empty() && paths.iter().all(|p| crate::archive::archive_of(p).is_some_and(|a| !util::eq_path(&a, p)))).then_some(paths)
+    }
+}
+
 /// 진단 로그용: 셸 이동·복사는 비동기일 수 있어 잠시 뒤 경로가 있는지 기록한다
 pub fn log_exists_later(what: &'static str, paths: Vec<String>) {
     if !crate::diag::enabled() || paths.is_empty() {
@@ -922,7 +983,7 @@ pub fn log_exists_later(what: &'static str, paths: Vec<String>) {
 pub fn clipboard_files() -> Option<(Vec<String>, bool)> {
     unsafe {
         let obj = OleGetClipboard().ok()?;
-        let paths = hdrop_paths(&obj)?;
+        let paths = dropped_paths(&obj)?;
         let mut fmt = hdrop_format();
         fmt.cfFormat = RegisterClipboardFormatW(w!("Preferred DropEffect")) as u16;
         let is_move = match obj.GetData(&fmt) {
@@ -1055,9 +1116,11 @@ pub fn clipboard_text(hwnd: HWND) -> Option<String> {
 
 pub fn drag_out(hwnd: HWND, paths: &[String]) -> Result<()> {
     let obj: IDataObject = ui_object(hwnd, paths).inspect_err(|e| crate::diag::log(|| format!("drag: data object failed: {e}")))?;
-    // 탐색기 등 다른 앱에 놓을 때는 그쪽 규칙대로 (같은 드라이브면 이동, 다른 곳이면 복사)
+    // 탐색기 등 다른 앱에 놓을 때는 그쪽 규칙대로 (같은 드라이브면 이동, 다른 곳이면 복사).
+    // 압축 파일 안의 항목은 꺼내 복사만 한다 (옮기면 압축 파일에서 지워진다)
+    let allowed = if paths.first().is_some_and(|p| crate::archive::archive_of(p).is_some()) { DROPEFFECT_COPY } else { DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK };
     crate::diag::log(|| format!("drag: SHDoDragDrop begin, lbutton down={}", key_down(windows::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON)));
-    let r = unsafe { SHDoDragDrop(Some(hwnd), &obj, None, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK) };
+    let r = unsafe { SHDoDragDrop(Some(hwnd), &obj, None, allowed) };
     crate::diag::log(|| format!("drag: SHDoDragDrop -> {r:?}"));
     log_exists_later("drag: sources still at original place", paths.to_vec());
     r.map(|_| ())
@@ -1177,6 +1240,63 @@ mod tests {
     use super::*;
     use std::time::Instant;
     use windows::Win32::System::SystemServices::{MK_CONTROL, MK_LBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS};
+
+    /// 압축 파일 안을 읽고, 그 안의 항목을 꺼내 복사한다 (셸 압축 폴더). 시험 압축 파일은 Windows에 든 tar로 만든다.
+    /// 셸 복사 창이 잠깐 뜰 수 있어 손으로 돌린다: cargo test archive_round_trip -- --ignored
+    #[test]
+    #[ignore]
+    fn archive_round_trip() {
+        let _com = ComInit::sta();
+        let dir = std::env::temp_dir().join(format!("sakadu-archive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("원본");
+        std::fs::create_dir_all(src.join("폴더")).unwrap();
+        std::fs::write(src.join("메모.txt"), "제주").unwrap();
+        std::fs::write(src.join("폴더").join("안.txt"), "안쪽").unwrap();
+        let zip = dir.join("묶음.zip");
+        let made = std::process::Command::new("tar").args(["-a", "-cf"]).arg(&zip).args(["메모.txt", "폴더"]).current_dir(&src).status().unwrap();
+        assert!(made.success());
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+
+        let z = s(&zip);
+        assert_eq!(crate::archive::archive_of(&format!("{z}\\폴더")), Some(z.clone()));
+        let mut names: Vec<(String, bool)> = crate::archive::list(&z, &z).unwrap().iter().map(|e| (e.name_string(), e.is_dir())).collect();
+        names.sort();
+        assert_eq!(names, vec![("메모.txt".to_string(), false), ("폴더".to_string(), true)]);
+        assert_eq!(crate::archive::list(&format!("{z}\\폴더"), &z).unwrap().len(), 1);
+        assert_eq!(crate::archive::is_folder(&format!("{z}\\폴더")), Some(true));
+        assert_eq!(crate::archive::is_folder(&format!("{z}\\메모.txt")), Some(false));
+
+        // 끌기·클립보드의 데이터 객체는 CF_HDROP 없이 셸 항목만 준다: 압축 파일 안의 경로로 읽는다
+        let inner = vec![format!("{z}\\메모.txt"), format!("{z}\\폴더")];
+        let obj: IDataObject = ui_object(HWND::default(), &inner).unwrap();
+        assert!(hdrop_paths(&obj).is_none());
+        let got = dropped_paths(&obj).unwrap();
+        assert!(got.len() == 2 && got.iter().zip(&inner).all(|(a, b)| util::eq_path(a, b)), "{got:?}");
+
+        // 읽기만 하는 메뉴: 잘라내기·삭제 줄을 빼고 복사는 남긴다
+        let cm: IContextMenu = ui_object(HWND::default(), &inner[..1]).unwrap();
+        let mut menu = ShellMenu::new(cm, false, &[]).unwrap();
+        let verbs = |m: &ShellMenu| -> Vec<String> {
+            (0..unsafe { GetMenuItemCount(Some(m.menu)) }.max(0)).map(|i| unsafe { GetMenuItemID(m.menu, i) }).filter(|id| (MENU_FIRST..=MENU_LAST).contains(id)).map(|id| m.verb(id - MENU_FIRST)).collect()
+        };
+        assert!(verbs(&menu).iter().any(|v| v == "delete"), "{:?}", verbs(&menu));
+        // 파일을 열 때 쓰는 기본 줄('열기')이 있다 (open_default)
+        assert!(menu.default_id().is_some_and(|id| (MENU_FIRST..=MENU_LAST).contains(&id)));
+        menu.hide_verbs(&["cut", "delete", "rename"]);
+        let left = verbs(&menu);
+        assert!(left.iter().any(|v| v == "copy") && !left.iter().any(|v| v == "delete" || v == "cut"), "{left:?}");
+
+        let out = dir.join("꺼냄");
+        std::fs::create_dir_all(&out).unwrap();
+        let done = run_file_op(HWND::default(), &FileOp::Copy { paths: inner, dest: s(&out) }).unwrap();
+        assert_eq!(std::fs::read_to_string(out.join("메모.txt")).unwrap(), "제주");
+        assert_eq!(std::fs::read_to_string(out.join("폴더").join("안.txt")).unwrap(), "안쪽");
+        assert!(!done.is_empty(), "copies out of an archive are recorded for undo");
+        // 꺼내기는 복사라 압축 파일은 그대로
+        assert_eq!(crate::archive::list(&z, &z).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 임시 파일의 탐색기 메뉴를 창 없이 만들어 사카두 메뉴 줄로 읽는다: 이름이 있는 줄들, 사카두가 넣은 줄이 맨 위,
     /// 맨 아래는 'Windows 메뉴로 보기'. 고를 수 있는 줄의 번호는 탐색기 메뉴의 번호 범위 안이다

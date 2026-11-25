@@ -341,6 +341,8 @@ pub struct Listed {
     gone: bool,
     /// 네트워크 폴더를 열지 못한 까닭에 맞는 고칠 방법
     net: Option<crate::listing::NetFix>,
+    /// 압축 파일 안을 셸로 읽었다 (검색 인덱스와 맞춰 보지 않는다)
+    archive: bool,
 }
 
 pub struct IconsReady {
@@ -602,6 +604,18 @@ fn resolve_input(text: &str) -> Result<(Location, Option<String>), String> {
             return Ok((Location::Dir(util::normalize(&p)), None));
         }
     }
+    // 압축 파일 안의 경로: 폴더면 열고, 파일이면 그 폴더에서 고른다
+    if crate::archive::archive_of(&path).is_some() {
+        match crate::archive::is_folder(&path) {
+            Some(true) => return Ok((Location::Dir(path), None)),
+            Some(false) => {
+                if let Some(parent) = util::parent(&path) {
+                    return Ok((Location::Dir(parent), Some(util::file_name(&path).to_string())));
+                }
+            }
+            None => {}
+        }
+    }
     Err(format!("경로를 찾을 수 없어요: {t}"))
 }
 
@@ -757,14 +771,17 @@ fn spawn_listing(hwnd: HWND, tab: u64, generation: u64, loc: Location) {
     let owner = shell::SendHwnd(hwnd);
     std::thread::spawn(move || {
         let _com = shell::ComInit::sta();
-        let result = match &loc {
-            Location::Computer => Ok(list_computer()),
+        // 압축 파일 안은 셸(압축 폴더)로 읽는다
+        let archive = loc.dir().and_then(crate::archive::archive_of);
+        let result = match (&loc, &archive) {
+            (Location::Computer, _) => Ok(list_computer()),
             // 시작 화면은 읽을 것이 없다 (즐겨찾기·최근 위치·드라이브는 앱이 이미 들고 있다)
-            Location::Start => Ok(Vec::new()),
-            Location::Dir(d) => list_dir(d),
+            (Location::Start, _) => Ok(Vec::new()),
+            (Location::Dir(d), Some(a)) => crate::archive::list(d, a),
+            (Location::Dir(d), None) => list_dir(d),
         };
         let special: Vec<(u32, String)> = match (&result, &loc) {
-            (Ok(entries), Location::Dir(d)) => entries
+            (Ok(entries), Location::Dir(d)) if archive.is_none() => entries
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| needs_own_icon(e))
@@ -777,10 +794,11 @@ fn spawn_listing(hwnd: HWND, tab: u64, generation: u64, loc: Location) {
             _ => None,
         };
         let gone = match (&result, &loc) {
-            (Err(_), Location::Dir(d)) => !shell::exists(d) && util::parent(d).is_some_and(|p| shell::is_dir(&p)),
+            (Err(_), Location::Dir(d)) if archive.is_none() => !shell::exists(d) && util::parent(d).is_some_and(|p| shell::is_dir(&p)),
             _ => false,
         };
-        post(owner.get(), WM_APP_LISTED, Box::new(Listed { tab, generation, result, gone, net }));
+        let archive = archive.is_some();
+        post(owner.get(), WM_APP_LISTED, Box::new(Listed { tab, generation, result, gone, net, archive }));
         if !special.is_empty() {
             let icons = special.into_iter().map(|(i, p)| (i, shell::icon_for_path(&p))).collect();
             post(owner.get(), WM_APP_ICONS, Box::new(IconsReady { tab, generation, icons }));

@@ -421,6 +421,10 @@ impl EntryArt<Gfx> for WinArt<'_> {
     }
 
     fn thumbnail(&mut self, g: &mut Gfx, tab: &Tab, e: &Entry, bx: R, size: f32, opacity: f32) -> bool {
+        // 압축 파일 안은 썸네일을 만들지 않는다 (아이콘만)
+        if tab.in_archive {
+            return false;
+        }
         let px = (size * g.dpi / 96.0).round() as u32;
         let Some(path) = tab.path_of(e) else { return false };
         let key = thumb_key(&path, e.modified, px);

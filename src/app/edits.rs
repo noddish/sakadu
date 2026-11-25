@@ -180,9 +180,11 @@ impl App {
         }
         let Some(e) = tab.cursor_entry() else { return };
         // 고른 것 없이 커서만 남아 있으면 탐색기처럼 아무것도 하지 않는다
-        if !e.selected {
+        if !e.selected || self.archive_read_only(p) {
             return;
         }
+        let tab = self.panes[p].tab();
+        let Some(e) = tab.cursor_entry() else { return };
         let Some(path) = tab.path_of(e) else { return };
         let name = e.name_string();
         let dir = e.is_dir();

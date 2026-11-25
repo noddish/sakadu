@@ -64,6 +64,8 @@ impl App {
                 None => (None, None),
             },
         };
+        // 압축 파일 안에는 놓지 않는다 (읽기만 한다)
+        let dir = dir.filter(|d| crate::archive::archive_of(d).is_none());
         let hover = if dir.is_some() { hover } else { None };
         // 놓을 경로 조각은 마우스를 올린 것처럼 강조한다 (끄는 동안에는 마우스 이동 메시지가 오지 않는다)
         let crumb = match self.hit(x, y) {
