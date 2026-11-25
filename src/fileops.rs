@@ -133,6 +133,9 @@ pub struct Crossed {
     /// 받는 폴더 안의 복사본 (이름, 파일 번호)
     pub name: String,
     pub file_id: u64,
+    /// 옮길 때 잰 복사본의 모양 지문 (속까지의 이름·종류·크기·수정 시각을 엮은 숫자 하나). 되돌리기 전에 다시 재어 다르면
+    /// 옮긴 뒤 고친 것이 있어 되돌리지 않는다. 재지 못했으면 None (그때도 되돌리지 않는다)
+    pub print: Option<u64>,
 }
 
 /// 되돌릴 수 있는 파일 작업 하나 (맥 앱의 것. Windows 앱은 undo.rs를 쓴다).
@@ -420,7 +423,7 @@ mod tests {
         let trashed = |name: &str| Trashed { name: name.into(), file_id: 1, trash_path: String::new() };
         assert!(Undo::Rename { dir: "/t".into(), from: "a.txt".into(), to: "b.txt".into(), file_id: 1 }.label().contains("a.txt"));
         assert!(Undo::Trash { dir: "/t".into(), items: vec![trashed("a"), trashed("b")] }.label().starts_with("2개"));
-        let crossed = Crossed { orig: "/s/a".into(), trashed: trashed("a"), name: "a".into(), file_id: 2 };
+        let crossed = Crossed { orig: "/s/a".into(), trashed: trashed("a"), name: "a".into(), file_id: 2, print: None };
         assert_eq!(Undo::Across { to: "/t".into(), items: vec![crossed] }.label(), "1개를 원래 자리로 되돌려 놓았어요");
     }
 

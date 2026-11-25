@@ -159,11 +159,8 @@ impl App {
             CmdItem::Command(a) => {
                 self.run_action(a);
             }
-            // 검색을 열고 그 글로 찾는다 (검색이 꺼져 있으면 '검색 켜기' 카드가 보인다)
-            CmdItem::SearchDisk(q) => {
-                self.open_find();
-                self.find_typed(&q);
-            }
+            // 검색을 열고 그 글로 디스크 전체에서 찾는다 ('지금 폴더'로 좁혀 두었어도. 검색이 꺼져 있으면 '검색 켜기' 카드가 보인다)
+            CmdItem::SearchDisk(q) => self.find_on_disk(&q),
         }
     }
 
