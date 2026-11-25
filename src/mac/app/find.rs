@@ -304,7 +304,12 @@ impl App {
             self.navigate(p, Location::Dir(path), None);
             self.find.focus = false;
         } else {
-            self.open_files.push(path);
+            // 압축 파일이면 칸에서 그 안으로 들어간다: 그러면 키보드도 칸으로
+            let before = self.panes[p].tab().loc.clone();
+            self.open_paths(p, vec![path], false);
+            if self.panes[p].tab().loc != before {
+                self.find.focus = false;
+            }
         }
     }
 

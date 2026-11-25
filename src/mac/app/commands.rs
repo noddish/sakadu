@@ -167,11 +167,12 @@ impl App {
         }
     }
 
-    /// 고정한 것·즐겨찾기·최근 위치를 연다: 폴더는 이 탭(new_tab이면 새 탭)에서, 파일은 macOS '열기'로.
+    /// 고정한 것·즐겨찾기·최근 위치를 연다: 폴더는 이 탭(new_tab이면 새 탭)에서, 파일은 open_paths로
+    /// (압축 파일이면 그 안으로 들어가고, 압축 파일 안의 파일은 꺼내서 연다. 나머지는 macOS '열기').
     /// 폴더 읽기는 뒷줄에서 하므로 꺼진 네트워크 폴더여도 멈추지 않는다 (열지 못하면 그 칸에 알리고 최근 위치에서 뺀다)
     fn open_place(&mut self, p: usize, path: String, is_dir: bool, new_tab: bool) {
         if !is_dir {
-            self.open_files.push(path);
+            self.open_paths(p, vec![path], new_tab);
         } else if new_tab {
             self.open_tab(p, Location::Dir(path), None);
         } else {

@@ -19,6 +19,9 @@ const SCALE: f32 = 2.0;
 const DEMO_PICTURE: &str = "협재 노을.bmp";
 const DEMO_NOTE: &str = "여행 일정.txt";
 const DEMO_PDF: &str = "숙소 안내.pdf";
+/// 압축 파일 장면의 zip (업무/문서 안에 만든다. 그 폴더의 안은 다른 장면에 보이지 않는다)과 그 안의 폴더
+const DEMO_ZIP: &str = "여행 자료.zip";
+const DEMO_ZIP_DIR: &str = "여행 자료";
 const DEMO_NOTE_TEXT: &str = "제주살이 여행 일정\n\n1일차  제주공항 → 협재 해변 → 숙소\n2일차  성산 일출봉 (일출 06:42) → 우도\n3일차  한라산 영실 코스, 오후에는 쉬기\n4일차  동문시장에서 장 보기 → 공항\n\n챙길 것\n- 등산화, 바람막이\n- 보조 배터리\n- 숙소 안내 메일 (다운로드 폴더)\n";
 
 /// 24비트 BMP 파일 내용 (압축 없음). pixel은 왼쪽 위를 (0, 0), 오른쪽 아래를 (1, 1)로 본 자리의 색 [빨강, 초록, 파랑]
@@ -113,14 +116,44 @@ fn write_demo_previews(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 스물네 가지 × 밝은·어두운 테마를 out에 그린다.
+/// 압축 파일 장면의 zip을 dir에 만든다: 여행 자료/(일정 글, 노을 그림, 숙소 안내 PDF, 영수증/렌터카.txt)를 맥의 ditto로 묶는다
+/// (Finder의 압축하기와 같은 도구). 이미 있으면 그대로 쓴다. 만들지 못하면(ditto가 없거나 실패) None: 그 장면은 건너뛴다
+fn write_demo_zip(dir: &Path) -> Option<String> {
+    let zip = dir.join(DEMO_ZIP);
+    if !zip.is_file() {
+        // 묶을 것은 임시 폴더에 만들었다가 묶은 뒤 치운다
+        let stage = std::env::temp_dir().join(format!("sakadu-render-zip-{}", std::process::id()));
+        let made = ditto_demo(&stage.join(DEMO_ZIP_DIR), &zip);
+        let _ = std::fs::remove_dir_all(&stage);
+        if !matches!(made, Ok(true)) {
+            eprintln!("압축 파일 장면을 건너뜀: zip을 만들지 못함 ({made:?})");
+            return None;
+        }
+    }
+    Some(util::normalize(&zip.to_string_lossy()))
+}
+
+/// 폴더 src에 압축 파일 장면의 내용을 만들고 zip으로 묶는다. ditto가 잘 끝났으면 true
+fn ditto_demo(src: &Path, zip: &Path) -> std::io::Result<bool> {
+    if let Some(dir) = zip.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    write_demo_previews(src)?;
+    std::fs::create_dir_all(src.join("영수증"))?;
+    std::fs::write(src.join("영수증").join("렌터카.txt"), "렌터카 3일 · 186,000원\n")?;
+    let status = std::process::Command::new("/usr/bin/ditto").args(["-c", "-k", "--norsrc", "--keepParent"]).arg(src).arg(zip).status()?;
+    Ok(status.success())
+}
+
+/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 스물다섯 가지 × 밝은·어두운 테마를 out에 그린다.
 /// 작업 공간은 셋: 업무(파랑, 두 칸), 사진 정리(보라, 네 칸), 개인(주황, 세 칸). 공간마다 고정한 것이 다르고,
 /// 아래 '모든 공간'(바로가기와 즐겨찾기)은 어느 공간에서나 같다.
-/// 미리 보기 카드와 창 장면에 쓸 그림·글·PDF 파일은 demo의 사진/제주살이에 직접 만든다
+/// 미리 보기 카드와 창 장면에 쓸 그림·글·PDF 파일은 demo의 사진/제주살이에, 압축 파일 장면의 zip은 업무/문서에 직접 만든다
 pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let root = util::normalize(&demo.to_string_lossy());
     let d = |rel: &str| rel.split('/').fold(root.clone(), |p, s| util::join(&p, s));
     write_demo_previews(Path::new(&d("사진/제주살이"))).map_err(|e| format!("데모 그림을 만들지 못함: {e}"))?;
+    let demo_zip = write_demo_zip(Path::new(&d("업무/문서")));
     let item = |name: &str, rel: &str, is_dir: bool| Favorite { name: name.into(), path: d(rel), is_dir };
     // 즐겨찾기('모든 공간'의 바로가기 아래): 펼친 그룹 하나와 접은 그룹 하나
     let favs = Favorites {
@@ -267,6 +300,20 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         a.navigate(0, Location::Dir(d("업무/2026 4분기")), None);
         a.settle();
         shots.push(("pane", a));
+
+        // 압축 파일 안: 왼쪽 칸은 zip 안의 폴더 (새 폴더를 만들려 하면 읽기만 한다는 알림), 오른쪽 칸은 그 zip을 고른 폴더와
+        // 오른쪽 미리 보기 창에 보이는 zip 안의 목록
+        if let Some(zip) = &demo_zip {
+            let mut a = base(favs.clone(), true);
+            a.navigate(0, Location::Dir(util::join(zip, DEMO_ZIP_DIR)), None);
+            a.navigate(1, Location::Dir(d("업무/문서")), Some(DEMO_ZIP.to_string()));
+            a.settle();
+            a.activate_pane(1);
+            a.run_action(sakadu::keys::Action::Preview);
+            a.settle();
+            a.new_folder(0);
+            shots.push(("archive", a));
+        }
 
         // 검색을 처음 연 모습: 꺼져 있어 사이드바 자리에 '검색 켜기' 카드가 보인다
         let mut a = base(favs.clone(), true);

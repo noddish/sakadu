@@ -327,29 +327,9 @@ fn spawn_archive_list(hwnd: HWND, seq: u64, path: String) {
     let owner = shell::SendHwnd(hwnd);
     std::thread::spawn(move || {
         let _com = shell::ComInit::sta();
-        let text = crate::archive::opens_as_folder(&path).then(|| crate::archive::list(&path, &path).ok()).flatten().map(|v| archive_text(&v));
+        let text = crate::archive::opens_as_folder(&path).then(|| crate::archive::list(&path, &path).ok()).flatten().map(|v| sakadu::archive_path::archive_text(&v));
         post(owner.get(), WM_APP_PREVIEW, Box::new(PreviewMsg::Text { seq, text }));
     });
-}
-
-/// 압축 파일 미리 보기 글: 항목 수, 폴더(이름\), 파일(이름 · 크기). 너무 많으면 앞부분만
-fn archive_text(entries: &[Entry]) -> String {
-    const SHOW: usize = 300;
-    let mut v: Vec<&Entry> = entries.iter().collect();
-    v.sort_by(|a, b| b.is_dir().cmp(&a.is_dir()).then_with(|| sakadu::natural::cmp_z(a.name_z(), b.name_z())));
-    let dirs = v.iter().filter(|e| e.is_dir()).count();
-    let mut out = format!("압축 파일 안 · 폴더 {dirs}개, 파일 {}개\n\n", v.len() - dirs);
-    for e in v.iter().take(SHOW) {
-        if e.is_dir() {
-            out.push_str(&format!("{}\\\n", e.name_string()));
-        } else {
-            out.push_str(&format!("{} · {}\n", e.name_string(), format_size(e.size)));
-        }
-    }
-    if v.len() > SHOW {
-        out.push_str(&format!("… 외 {}개\n", v.len() - SHOW));
-    }
-    out
 }
 
 /// Zone.Identifier 내용이 인터넷(3)·제한된 사이트(4) 영역인지

@@ -8,6 +8,8 @@
 //! 오른쪽 미리 보기 창(⌥⌘P)은 preview_pane.rs: 열려 있는 동안은 카드 대신 그 창이 보여 준다.
 //! 아이콘 보기에서는 그림 파일이 썸네일로 보인다 (뒷줄에서 읽어 둔 것을 그린다).
 //! 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 복사, 옮기기, 되돌리기)은 할 일을 큐에 넣어 두면 창 쪽이 뒷줄에서 실행하고 결과를 돌려준다 (fileops.rs).
+//! 압축 파일(zip·7z·tar.gz …)은 폴더처럼 들어가 읽기만 한다 (archive.rs, Windows와 같은 규칙): 안의 파일은 임시 폴더에 꺼내서
+//! 열고, 복사하고, 끌어 낸다 (꺼내기도 파일 작업 줄에서 한다). 안에서는 썸네일·카드·훑어보기가 없고 폴더 감시도 하지 않는다.
 //! 클립보드도 창 쪽이 다룬다: 앱은 담아 달라는 경로(clip_out)와 붙여넣어 달라는 표시(clip_in)만 남긴다.
 //! 끌어서 놓기도 그렇다: 앱은 끌어 낼 항목(take_drag)을 내주고, 끌려 온 것이 어디에 놓일지(drag_over)와 놓기(drop_paths)를 맡는다.
 //! 검색(⌘F)은 find.rs: 도구 막대에서 입력 칸이 늘어나고, 결과는 사이드바 자리에 보인다.
@@ -26,8 +28,9 @@ pub use commands::CMD_PLACEHOLDER;
 pub use preview_pane::{PinCheck, check_pin};
 pub use start::volume_space;
 
-use crate::fileops::{self, Done, Fail, Job, Op};
+use crate::fileops::{self, Done, Fail, Job, Op, Then};
 use crate::gfx::{Gfx, MONO_LINE_H, Picture};
+use sakadu::archive_path;
 use sakadu::draw::{Color, Font, R};
 use sakadu::favorites::{self, Favorite, Favorites, Row};
 use sakadu::fileops::{Undo, UndoStack};
@@ -70,6 +73,13 @@ const PX_LARGE: u32 = 2048;
 const PICS_MAX: usize = 6;
 /// 그림이 이보다 늦게 오면 카드에 '불러오는 중…'을 보인다 (곧 오면 글자가 깜빡이지 않게)
 pub const LOADING_NOTE_MS: u64 = 300;
+
+/// 압축 파일 안에서 바꾸는 일(이름 바꾸기, 새 폴더, 휴지통, 잘라내기, 붙여넣기·놓기)을 막을 때의 알림 (Windows와 같은 글)
+pub const READ_ONLY: &str = "압축 파일 안은 읽기만 해요 · 꺼내려면 복사해서 다른 폴더에 붙여넣으세요";
+/// 압축 파일 안의 항목을 열거나 복사·끌어 내려고 임시 폴더에 꺼내는 동안
+pub const EXTRACTING: &str = "압축 파일에서 꺼내는 중…";
+/// 압축 파일 안에서 훑어보기를 누르면 (디스크에 없는 파일이라 훑어보기 창이 보일 수 없다)
+const NO_LOOK: &str = "압축 파일 안은 훑어볼 수 없어요 · ⌘↓로 열면 꺼내서 열어요";
 
 /// 아이콘 보기의 썸네일을 읽는 픽셀 수의 단계: 그림 자리(pt)에 화면 배율을 곱한 값을 이 가운데 하나로 올려 읽는다
 /// (아이콘 크기나 화면 배율이 조금 다를 때마다 다시 읽지 않게). 가장 큰 단계는 레티나 화면의 아주 큰 아이콘(256pt)
@@ -268,6 +278,8 @@ struct ListTarget {
     dir: String,
     items: Vec<(String, u64, bool)>,
     at: (f32, f32),
+    /// 압축 파일 안이다: 파일을 바꾸는 줄은 빼거나 흐리게 한다 (읽기만 한다)
+    in_archive: bool,
 }
 
 /// 붙여넣기의 종류
@@ -533,11 +545,21 @@ struct ColDrag {
     start: [f32; 3],
 }
 
-/// 폴더 읽기 요청: 창 쪽이 뒷줄에서 읽고 on_listed로 돌려준다
+/// 폴더 읽기 요청: 창 쪽이 뒷줄에서 읽고(list_request) on_listed로 돌려준다
 pub struct Request {
     pub tab: u64,
     pub generation: u64,
     pub dir: String,
+    /// 압축 파일 안이면 그 압축 파일: 그 안은 libarchive로 읽고, 폴더 감시를 기다리지 않는다
+    pub archive: Option<String>,
+}
+
+/// 읽기 요청 하나를 읽는다 (창에서는 뒷줄에서, 시험·그림은 settle이 부른다): 압축 파일 안은 libarchive로, 그 밖은 디스크에서
+pub fn list_request(r: &Request) -> Result<Vec<Entry>, String> {
+    match &r.archive {
+        Some(a) => crate::archive::list(&r.dir, a),
+        None => listing::list_dir(&r.dir),
+    }
 }
 
 /// 경로 입력 확인 요청: 창 쪽이 뒷줄에서 resolve_input을 돌려 on_probed로 돌려준다 (꺼진 NAS를 확인하는 동안 멈추지 않게)
@@ -564,10 +586,16 @@ pub fn resolve_input(text: &str, home: &str) -> Result<(String, Option<String>),
         return Err(missing());
     }
     let path = util::normalize(&expanded);
+    let select_in_parent = |path: &str| util::parent(path).map(|p| (p, Some(util::file_name(path).to_string()))).ok_or_else(missing);
     match std::fs::metadata(&path) {
         Ok(m) if m.is_dir() => Ok((path, None)),
-        Ok(_) => util::parent(&path).map(|p| (p, Some(util::file_name(&path).to_string()))).ok_or_else(missing),
-        Err(_) => Err(missing()),
+        Ok(_) => select_in_parent(&path),
+        // 압축 파일 안의 경로: 폴더면 열고, 파일이면 그 폴더에서 고른다 (Windows와 같다. 압축 파일을 읽어 본다)
+        Err(_) => match crate::archive::is_folder(&path) {
+            Some(true) => Ok((path, None)),
+            Some(false) => select_in_parent(&path),
+            None => Err(missing()),
+        },
     }
 }
 
@@ -584,7 +612,7 @@ pub struct PreviewRequest {
     /// 요청 번호 (나중에 낸 요청일수록 크다). 창 쪽이 밀린 그림 읽기를 건너뛸 때 쓴다
     pub seq: u64,
     key: CardKey,
-    /// 그림·썸네일이면 긴 쪽을 이 픽셀 수까지 줄여 읽는다. 글 파일이면 0
+    /// 그림·썸네일이면 긴 쪽을 이 픽셀 수까지 줄여 읽는다. 글 파일·압축 파일이면 0
     pub px: u32,
     /// 무엇으로 읽나: 그림(ImageIO), 글, 문서(Quick Look 썸네일, 한글 문서는 안에 든 미리 보기)
     kind: CardKind,
@@ -614,6 +642,8 @@ pub fn load_preview(req: &PreviewRequest) -> Option<Preview> {
             std::fs::File::open(path).ok()?.take(TEXT_READ).read_to_end(&mut buf).ok()?;
             if req.pane { decode_lines(&buf, lines) } else { decode_text(&buf) }.map(Preview::Text)
         }
+        // 압축 파일: 맨 위 항목들을 글로 (Windows와 같다). 읽지 못하면 정보만
+        CardKind::Archive => crate::archive::list(path, path).ok().map(|v| Preview::Text(archive_path::archive_text(&v))),
     }
 }
 
@@ -700,6 +730,8 @@ enum CardKind {
     Text,
     /// 문서·동영상·음악 따위의 Quick Look 썸네일, 한글 문서의 미리 보기 그림(없으면 미리 보기 글). 없으면 카드를 띄우지 않는다
     Doc,
+    /// 압축 파일 맨 위의 항목 목록 (오른쪽 미리 보기 창만. 카드는 띄우지 않는다: card_kind가 고르지 않는다)
+    Archive,
 }
 
 /// Quick Look이 썸네일을 만들지 않는 형식: 압축 파일, 디스크 이미지, 설치 꾸러미·실행 파일·라이브러리, 바로가기, 받는 중인 파일,
@@ -818,9 +850,10 @@ fn thumb_px(size: f32, scale: f32) -> u32 {
 }
 
 /// 그 항목의 썸네일을 가리는 값. 썸네일은 파일에만 있다 (폴더는 None): 그림 파일은 직접 읽고, 그 밖의 파일은 Quick Look이 만든다.
-/// 썸네일이 없는 파일(Quick Look이 만들지 못하는 형식)은 읽지 못한 것으로 적어 두고 아이콘을 그린다
+/// 썸네일이 없는 파일(Quick Look이 만들지 못하는 형식)은 읽지 못한 것으로 적어 두고 아이콘을 그린다.
+/// 압축 파일 안은 썸네일이 없다 (디스크에 없는 파일이다. Windows와 같다)
 fn thumb_key(tab: &Tab, e: &Entry, size: f32, scale: f32) -> Option<ThumbKey> {
-    if e.kind != Kind::File {
+    if e.kind != Kind::File || tab.in_archive {
         return None;
     }
     Some(ThumbKey { file: CardKey { path: tab.path_of(e)?, modified: e.modified, size: e.size }, px: thumb_px(size, scale) })
@@ -1057,6 +1090,10 @@ pub struct App {
     press: Option<Press>,
     /// 끌어 내 달라는 항목들의 경로 (창 쪽이 take_drag로 가져가 맥의 끌기를 시작한다)
     drag_out: Option<Vec<String>>,
+    /// 끌어 낼 것(drag_out)이 압축 파일에서 꺼낸 임시 복사본이다: 받는 쪽에 복사만 허락한다 (옮기면 임시 폴더에서 빠질 뿐이다)
+    pub drag_copy: bool,
+    /// 압축 파일 안에서 끌기 시작해 꺼내기를 기다리는 작업 번호 (그 사이 손을 떼면 지운다: 꺼낸 뒤 끌지 않는다)
+    drag_wait: Option<u64>,
     /// 끌려 온 것이 지금 놓일 곳 (그 칸이나 줄을 강조한다)
     drop: Option<DropAt>,
     /// 클립보드에 담아 달라는 항목들의 경로 (창 쪽이 파일 주소로 담는다: Finder에도 붙여넣을 수 있다).
@@ -1200,6 +1237,8 @@ impl App {
             batch: None,
             press: None,
             drag_out: None,
+            drag_copy: false,
+            drag_wait: None,
             drop: None,
             clip_out: None,
             clip_cut: false,
@@ -1354,8 +1393,11 @@ impl App {
         if tab.state != LoadState::Ready {
             tab.state = LoadState::Loading;
         }
-        if let Some(dir) = tab.loc.dir() {
-            self.requests.push(Request { tab: tab.id, generation: tab.generation, dir: dir.to_string() });
+        if let Some(dir) = tab.loc.dir().map(str::to_string) {
+            // 압축 파일 안인지는 읽기를 맡길 때 정한다 (그 탭의 위치가 바뀌면 다시 읽으므로 늘 맞다)
+            let archive = archive_path::archive_of(&dir);
+            tab.in_archive = archive.is_some();
+            self.requests.push(Request { tab: tab.id, generation: tab.generation, dir, archive });
             // 이제 읽는 것이 지금까지의 변화를 모두 담는다. 읽는 사이 또 바뀌면 다 읽은 뒤 한 번 더 읽는다 (reload_stale)
             self.stale.remove(&tab.id);
             self.reading.insert(tab.id);
@@ -1424,7 +1466,8 @@ impl App {
                 let gone = std::mem::replace(&mut tab.loc, Location::Dir(home.clone()));
                 tab.generation += 1;
                 tab.state = LoadState::Loading;
-                self.requests.push(Request { tab: tab.id, generation: tab.generation, dir: home });
+                tab.in_archive = false;
+                self.requests.push(Request { tab: tab.id, generation: tab.generation, dir: home, archive: None });
                 self.reading.insert(tab_id);
                 // 열지 못한 폴더는 최근 위치에서 뺀다 (시작 화면·명령 메뉴에 남지 않게)
                 if let Some(d) = gone.dir() {
@@ -1489,7 +1532,7 @@ impl App {
                 self.on_op_done(&op, result);
             }
             for r in reqs {
-                let result = listing::list_dir(&r.dir);
+                let result = list_request(&r);
                 self.on_listed(r.tab, r.generation, result);
             }
             for p in probes {
@@ -1524,6 +1567,10 @@ impl App {
             return None;
         }
         let tab = self.panes[self.active].tab();
+        // 압축 파일 안은 디스크에 없는 파일이라 카드를 띄우지 않는다 (Windows와 같다)
+        if tab.in_archive {
+            return None;
+        }
         let e = tab.cursor_entry().filter(|e| e.selected && e.kind == Kind::File)?;
         let kind = card_kind(&e.name_string())?;
         if tab.selection_stats().0 != 1 {
@@ -1840,8 +1887,34 @@ impl App {
         std::mem::take(&mut self.ops)
     }
 
+    /// 아직 내주지 않은 파일 작업이 있다 (끄는 중에 압축 파일에서 꺼내 달라고 맡긴 것: 창 쪽이 바로 보낸다)
+    pub fn ops_waiting(&self) -> bool {
+        !self.ops.is_empty()
+    }
+
+    /// 칸 p가 압축 파일 안을 보고 있으면 읽기만 한다고 알리고 true (Windows archive_read_only와 같다:
+    /// 이름 바꾸기·새 폴더·휴지통·잘라내기·붙여넣기·복제를 막는다)
+    fn archive_read_only(&mut self, p: usize) -> bool {
+        let inside = self.panes[p].tab().in_archive;
+        if inside {
+            self.flash = Some((p, READ_ONLY.to_string()));
+        }
+        inside
+    }
+
+    /// 압축 파일 archive 안의 항목들을 꺼내 달라고 맡기고 (파일 작업 줄에서 임시 폴더로), 꺼낸 뒤 then을 한다.
+    /// 꺼내는 동안 칸 p에 알린다 (큰 파일은 오래 걸린다). 맡긴 작업 번호
+    fn extract_then(&mut self, p: usize, archive: String, items: Vec<String>, then: Then) -> u64 {
+        let tab = self.panes[p].tab().id;
+        self.flash = Some((p, EXTRACTING.to_string()));
+        self.push_op(tab, Job::Extract { archive, items, then })
+    }
+
     /// 칸 p의 폴더에 새 폴더를 만든다 (⇧⌘N, 도구 막대). 만든 뒤 그 줄에서 이름을 바로 고칠 수 있다
     pub fn new_folder(&mut self, p: usize) {
+        if self.archive_read_only(p) {
+            return;
+        }
         let tab = self.panes[p].tab();
         let (Some(dir), LoadState::Ready) = (tab.loc.dir(), &tab.state) else { return };
         let (tab, dir) = (tab.id, dir.to_string());
@@ -1851,6 +1924,9 @@ impl App {
     /// 칸 p에서 고른 항목들을 휴지통으로 보낸다 (⌘⌫). 실제로 고른 것만: 커서만 놓인 줄은 대상이 아니다.
     /// 묻지 않고 보낸다 (잘못 보냈으면 ⌘Z로 되돌린다)
     pub fn trash_selected(&mut self, p: usize) {
+        if self.archive_read_only(p) {
+            return;
+        }
         let tab = self.panes[p].tab();
         let Some(dir) = tab.loc.dir().map(str::to_string) else { return };
         let items: Vec<(String, u64)> = (0..tab.view.len()).filter_map(|vi| tab.entry_at(vi)).filter(|e| e.selected).map(|e| (e.name_string(), e.file_id)).collect();
@@ -1884,8 +1960,19 @@ impl App {
         self.copy_out(paths, cut);
     }
 
+    /// 항목들을 클립보드에 담아 달라고 한다 (cut이면 잘라 둔다). 압축 파일 안의 것은 잘라 둘 수 없고,
+    /// 복사는 임시 폴더에 꺼낸 것을 담는다 (꺼낸 뒤 after_extract가 담는다. 붙여넣으면 복사만 된다)
     fn copy_out(&mut self, paths: Vec<String>, cut: bool) {
         if paths.is_empty() {
+            return;
+        }
+        let p = self.active;
+        if let Some(archive) = archive_path::archive_of(&paths[0]).filter(|a| !util::eq_path(a, &paths[0])) {
+            if cut {
+                self.flash = Some((p, READ_ONLY.to_string()));
+            } else {
+                self.extract_then(p, archive, paths, Then::Copy);
+            }
             return;
         }
         let note = if cut { format!("{}개를 잘라 뒀어요 · ⌘V로 옮겨요", paths.len()) } else { format!("{}개를 복사해 뒀어요 · ⌘V로 붙여넣어요", paths.len()) };
@@ -1897,7 +1984,7 @@ impl App {
     /// 클립보드의 파일들을 지금 칸에 붙여넣어 달라고 한다 (⌘V). 창 쪽이 클립보드를 읽어 paste_paths로 넘긴다.
     /// force_move면 잘라낸 것이 아니어도 옮긴다 (⌥⌘V: Finder의 '여기로 항목 이동')
     pub fn ask_paste(&mut self, force_move: bool) {
-        if self.edit == Editing::None {
+        if self.edit == Editing::None && !self.archive_read_only(self.active) {
             self.flash = None;
             self.clip_in = Some(force_move);
         }
@@ -1905,6 +1992,9 @@ impl App {
 
     /// 클립보드에서 읽은 파일들(전체 경로)을 지금 칸의 폴더로 복사하거나 옮긴다. 시작했으면 true
     pub fn paste_paths(&mut self, paths: Vec<String>, how: Paste) -> bool {
+        if self.archive_read_only(self.active) {
+            return false;
+        }
         let tab = self.panes[self.active].tab();
         let Some(dir) = tab.loc.dir().map(str::to_string) else { return false };
         if paths.is_empty() {
@@ -1917,6 +2007,9 @@ impl App {
 
     /// 칸 p에서 고른 항목들을 같은 폴더에 복제한다 (⌘D). 이름에 번호가 붙는다
     pub fn duplicate_selected(&mut self, p: usize) {
+        if self.archive_read_only(p) {
+            return;
+        }
         let tab = self.panes[p].tab();
         let Some(dir) = tab.loc.dir().map(str::to_string) else { return };
         let items: VecDeque<(String, u64)> = (0..tab.view.len()).filter_map(|vi| tab.entry_at(vi)).filter(|e| e.selected).map(|e| (util::join(&dir, &e.name_string()), e.file_id)).collect();
@@ -2039,13 +2132,19 @@ impl App {
     /// 놓을 수 없는 곳(도구 막대, 시작 화면 탭, 파일을 가리키는 사이드바 줄)이나 놓아도 달라질 것이 없는 곳(이미 그 폴더에 있다,
     /// 끌고 있는 폴더 자신이나 그 안)이면 None
     fn drop_target(&self, g: &Gfx, x: f32, y: f32, paths: &[String]) -> Option<(DropAt, String, u64)> {
+        // 압축 파일 안으로는 놓지 않는다 (읽기만 한다)
+        if self.drop_into_archive(g, x, y).is_some() {
+            return None;
+        }
         // 미리 보기 카드는 없는 것으로 보고 그 아래 칸을 찾는다
         let hit = self.hit_with(g, x, y, false);
         let (at, dir, tab) = match hit {
             Hit::SideRow(i) => {
                 let rows = self.side_rows();
                 let row = rows.get(i).filter(|row| row.is_dir)?;
-                (DropAt::Side(i), row.path.clone()?, self.panes[self.active].tab().id)
+                // 압축 파일 안의 폴더를 고정해 둔 줄에도 놓지 않는다
+                let dir = row.path.clone().filter(|d| archive_path::archive_of(d).is_none())?;
+                (DropAt::Side(i), dir, self.panes[self.active].tab().id)
             }
             // 탭 칩: 그 탭의 폴더 (닫기 단추 위도 그 탭이다). 묶음도 그 탭이 맡는다
             Hit::Tab(p, i) | Hit::TabClose(p, i) => {
@@ -2079,8 +2178,21 @@ impl App {
         Some((at, dir, tab))
     }
 
-    /// 끌려 온 것이 (x, y) 위에 있다: 놓일 곳을 강조하고 받는 폴더를 돌려준다. 놓을 수 없으면 None (강조도 없다)
+    /// (x, y)가 압축 파일 안을 보는 칸(목록, 경로 줄, 탭 칩)이면 그 칸. 끌려 온 것을 거기에 놓지 않는다
+    fn drop_into_archive(&self, g: &Gfx, x: f32, y: f32) -> Option<usize> {
+        match self.hit_with(g, x, y, false) {
+            Hit::Tab(p, i) | Hit::TabClose(p, i) => self.panes[p].tabs.get(i).filter(|t| t.in_archive).map(|_| p),
+            Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) | Hit::Crumb(p, _) | Hit::CrumbEmpty(p) | Hit::Star(p) => self.panes[p].tab().in_archive.then_some(p),
+            _ => None,
+        }
+    }
+
+    /// 끌려 온 것이 (x, y) 위에 있다: 놓일 곳을 강조하고 받는 폴더를 돌려준다. 놓을 수 없으면 None (강조도 없다).
+    /// 압축 파일 안 위면 읽기만 한다고 그 칸에 알린다
     pub fn drag_over(&mut self, g: &Gfx, x: f32, y: f32, paths: &[String]) -> Option<String> {
+        if let Some(p) = self.drop_into_archive(g, x, y) {
+            self.flash = Some((p, READ_ONLY.to_string()));
+        }
         let target = self.drop_target(g, x, y, paths);
         self.drop = target.as_ref().map(|(at, ..)| *at);
         // 놓일 곳이 다른 칸으로 옮겨 갔으면, 앞의 칸에서 미뤄 둔 것을 한다
@@ -2099,7 +2211,7 @@ impl App {
     /// 칸에 놓았으면 그 칸이 지금 칸이 된다. 시작했으면 true
     pub fn drop_paths(&mut self, g: &Gfx, x: f32, y: f32, paths: Vec<String>, how: Paste) -> bool {
         self.drop = None;
-        self.flash = None;
+        self.flash = self.drop_into_archive(g, x, y).map(|p| (p, READ_ONLY.to_string()));
         // 놓을 곳은 끄는 동안 보던 그 목록에서 찾는다 (미뤄 둔 읽기 결과와 다시 읽기는 그다음에 한다)
         let started = match self.drop_target(g, x, y, &paths) {
             Some((at, dir, tab)) => {
@@ -2115,7 +2227,8 @@ impl App {
         started
     }
 
-    /// 끌어 내 달라는 항목들의 경로를 내준다 (고른 줄을 누른 채 움직였을 때 한 번). 창 쪽이 맥의 끌기를 시작한다
+    /// 끌어 내 달라는 항목들의 경로를 내준다 (고른 줄을 누른 채 움직였을 때 한 번). 창 쪽이 맥의 끌기를 시작한다.
+    /// 압축 파일 안의 것은 꺼낸 뒤에 내준다 (그 사이 계속 누르고 있으면 다음 움직임에서. drag_copy가 켜진다)
     pub fn take_drag(&mut self) -> Option<Vec<String>> {
         self.drag_out.take()
     }
@@ -2159,6 +2272,10 @@ impl App {
 
     /// 칸 p에서 고른 항목의 이름을 고치기 시작한다 (Return). 하나만 골랐을 때만: 여럿이면 알리고, 없으면 아무것도 하지 않는다
     pub fn begin_item_rename(&mut self, p: usize) {
+        // 압축 파일 안은 이름을 바꾸지 않는다 (고른 것이 있을 때만 알린다. Windows와 같다)
+        if self.panes[p].tab().selection_stats().0 > 0 && self.archive_read_only(p) {
+            return;
+        }
         let tab = self.panes[p].tab();
         let Some(dir) = tab.loc.dir().map(str::to_string) else { return };
         let chosen: Vec<usize> = (0..tab.view.len()).filter(|vi| tab.is_selected(*vi)).take(2).collect();
@@ -2266,6 +2383,10 @@ impl App {
     /// 뒷줄에서 끝낸 파일 작업의 결과
     pub fn on_op_done(&mut self, op: &Op, result: Result<Done, Fail>) {
         self.ops_running = self.ops_running.saturating_sub(1);
+        // 압축 파일에서 꺼내기: 파일은 바뀌지 않았다 (다시 읽지 않는다)
+        if let Job::Extract { then, .. } = &op.job {
+            return self.after_extract(op, *then, result);
+        }
         // 파일 작업으로 고정한 파일이 옮겨지거나 지워졌을 수 있다
         self.pin_check();
         // 복사·옮기기 묶음의 한 항목: 결과를 묶음에 적고 다음 항목을 맡긴다 (알림과 다시 읽기는 묶음이 끝날 때 한 번)
@@ -2374,6 +2495,7 @@ impl App {
                     Job::Copy { .. } => "복사하지 못했어요",
                     Job::Move { .. } => "옮기지 못했어요",
                     Job::Undo(_) => "되돌리지 못했어요",
+                    Job::Extract { .. } => "꺼내지 못했어요",
                 };
                 let why = match (job, fail) {
                     (Job::Undo(Undo::Rename { .. }), Fail::Exists) => "원래 이름을 다른 항목이 쓰고 있어요".to_string(),
@@ -2389,6 +2511,43 @@ impl App {
         }
         // 잘 끝났든 아니든 다시 읽는다 (하지 못한 까닭이 낡은 목록일 수 있다)
         self.refresh_changed();
+    }
+
+    /// 압축 파일에서 꺼내기가 끝났다: 꺼낸 것을 열거나, 클립보드에 담거나, 끌기를 준비한다 (아직 누르고 있을 때만).
+    /// '꺼내는 중' 알림은 지우고, 꺼내지 못했으면 그 까닭을 알린다
+    fn after_extract(&mut self, op: &Op, then: Then, result: Result<Done, Fail>) {
+        let p = (0..self.layout.count()).find(|p| self.panes[*p].tab().id == op.tab).unwrap_or(self.active);
+        if self.flash.as_ref().is_some_and(|(_, note)| note == EXTRACTING) {
+            self.flash = None;
+        }
+        let dragging = self.drag_wait.take_if(|seq| *seq == op.seq).is_some();
+        let paths = match result {
+            Ok(Done::Extracted { paths }) => paths,
+            Ok(_) => return,
+            Err(fail) => {
+                let why = match fail {
+                    Fail::Other(msg) => msg,
+                    Fail::Exists => "같은 이름이 이미 있어요".to_string(),
+                    Fail::Changed => "그 사이 압축 파일이 바뀌었어요".to_string(),
+                };
+                self.flash = Some((p, format!("꺼내지 못했어요: {why}")));
+                return;
+            }
+        };
+        match then {
+            Then::Open => self.open_files.extend(paths),
+            Then::Copy => {
+                self.flash = Some((p, format!("{}개를 복사해 뒀어요 · ⌘V로 붙여넣어요", paths.len())));
+                self.clip_out = Some(paths);
+                self.clip_cut = false;
+            }
+            Then::Drag if dragging => {
+                self.drag_out = Some(paths);
+                self.drag_copy = true;
+            }
+            // 꺼내는 사이 손을 뗐다 (mouse_up이 기다림을 지웠다)
+            Then::Drag => {}
+        }
     }
 
     /// 되돌리기가 끝난 뒤의 뒷정리: 되돌려진 것을 고르거나 고른 것에서 빼고, 그 안을 보던 탭을 맞는 곳으로 옮긴다.
@@ -2537,13 +2696,14 @@ impl App {
     // ---------- 폴더 감시 ----------
 
     /// 감시할 폴더가 달라졌으면 새 목록을 내준다 (창 쪽이 감시를 그 목록으로 맞춘다): 보이는 칸의 폴더, 겹치면 한 번.
-    /// 읽는 중인 폴더도 넣는다 (감시를 먼저 걸어야 읽는 사이의 변화를 놓치지 않는다). 열지 못한 폴더는 뺀다.
+    /// 읽는 중인 폴더도 넣는다 (감시를 먼저 걸어야 읽는 사이의 변화를 놓치지 않는다). 열지 못한 폴더와 압축 파일 안은 뺀다
+    /// (압축 파일 안은 디스크의 폴더가 아니다. Windows도 감시하지 않는다).
     /// 감시를 그만두는 폴더를 보이던 탭은 다음에 보일 때 다시 읽게 적어 둔다 (보이지 않는 동안 바뀐 것은 알 길이 없다)
     pub fn take_watch_dirs(&mut self) -> Option<Vec<String>> {
         let mut want: Vec<String> = Vec::new();
         for p in 0..self.layout.count() {
             let tab = self.panes[p].tab();
-            if let Some(dir) = tab.loc.dir().filter(|_| !matches!(tab.state, LoadState::Error(_)))
+            if let Some(dir) = tab.loc.dir().filter(|_| !matches!(tab.state, LoadState::Error(_)) && !tab.in_archive)
                 && !want.iter().any(|w| w == dir)
             {
                 want.push(dir.to_string());
@@ -2932,7 +3092,7 @@ impl App {
         self.load(p);
     }
 
-    /// 줄 vi 열기: 폴더면 그리로, 파일이면 macOS '열기'
+    /// 줄 vi 열기: 폴더면 그리로, 파일이면 open_paths (압축 파일은 들어가고, 압축 파일 안의 파일은 꺼내서 연다)
     pub fn open_row(&mut self, p: usize, vi: usize) {
         let tab = self.panes[p].tab();
         let Some(e) = tab.entry_at(vi) else { return };
@@ -2940,7 +3100,7 @@ impl App {
         if e.is_dir() {
             self.navigate(p, Location::Dir(path), None);
         } else {
-            self.open_files.push(path);
+            self.open_paths(p, vec![path], false);
         }
     }
 
@@ -2952,7 +3112,38 @@ impl App {
             return self.open_row(p, cursor);
         }
         let files: Vec<String> = tab.selected_paths();
-        self.open_files.extend(files);
+        self.open_paths(p, files, false);
+    }
+
+    /// 파일들을 연다 (Windows modal::open_one과 같은 규칙): 하나만 열 때 들어갈 수 있는 압축 파일이면 칸 p에서
+    /// (new_tab이면 새 탭에서) 폴더처럼 들어간다. 압축 파일 안의 항목은 임시 폴더에 꺼낸 뒤 macOS '열기'로
+    /// (압축 파일 안의 압축 파일도 그렇게 연다). 나머지와 읽지 못하는 압축 파일은 바로 macOS '열기'로
+    pub(super) fn open_paths(&mut self, p: usize, paths: Vec<String>, new_tab: bool) {
+        if let [one] = paths.as_slice()
+            && crate::archive::enterable(one)
+        {
+            let loc = Location::Dir(one.clone());
+            if new_tab {
+                self.open_tab(p, loc, None);
+            } else {
+                self.navigate(p, loc, None);
+            }
+            return;
+        }
+        // 압축 파일 안의 것은 압축 파일마다 한 번에 꺼낸다
+        let mut packed: Vec<(String, Vec<String>)> = Vec::new();
+        for path in paths {
+            match archive_path::archive_of(&path).filter(|a| !util::eq_path(a, &path)) {
+                Some(a) => match packed.iter_mut().find(|(b, _)| *b == a) {
+                    Some((_, items)) => items.push(path),
+                    None => packed.push((a, vec![path])),
+                },
+                None => self.open_files.push(path),
+            }
+        }
+        for (archive, items) in packed {
+            self.extract_then(p, archive, items, Then::Open);
+        }
     }
 
     /// 칸 p의 지금 탭을 다시 읽는다 (같은 폴더). 고른 것·커서·스크롤은 다 읽었을 때의 것을 그대로 둔다 (on_listed)
@@ -3212,7 +3403,17 @@ impl App {
             MenuKind::Space(_) => workspaces::COLORS.get(i).map_or(MenuIcon::None, |key| MenuIcon::Swatch(self.key_color(key))),
             _ => MenuIcon::None,
         };
-        self.menu_items(kind).into_iter().enumerate().map(|(i, (label, on))| MenuLine::new(label).checked(on).icon(icon(i)).sep(brk == Some(i))).collect()
+        // 압축 파일 안의 빈 곳 메뉴: 새 폴더와 붙여넣기는 흐리게 (읽기만 한다. 새로 고침만 고를 수 있다)
+        let read_only = kind == MenuKind::Blank && self.list_target.as_ref().is_some_and(|t| t.in_archive);
+        self.menu_items(kind)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (label, on))| {
+                let mut line = MenuLine::new(label).checked(on).icon(icon(i)).sep(brk == Some(i));
+                line.disabled = read_only && i < 2;
+                line
+            })
+            .collect()
     }
 
     /// 공간 색 이름(workspaces::COLORS)의 색
@@ -3325,10 +3526,13 @@ impl App {
         }
     }
 
-    /// 목록 메뉴(고른 항목들)의 줄: 열기, Finder에서 보기, 이름 바꾸기(하나를 골랐을 때만), 잘라내기, 복사, 복제, 휴지통으로 이동
+    /// 목록 메뉴(고른 항목들)의 줄: 열기, Finder에서 보기, 이름 바꾸기(하나를 골랐을 때만), 잘라내기, 복사, 복제, 휴지통으로 이동.
+    /// 압축 파일 안은 열기와 복사만 (둘 다 꺼내서 한다. Finder에는 보일 파일이 없고, 나머지는 압축 파일을 바꾼다)
     fn row_menu(&self) -> Vec<RowAct> {
-        match self.list_target.as_ref().map_or(0, |t| t.items.len()) {
+        let Some(t) = self.list_target.as_ref() else { return Vec::new() };
+        match t.items.len() {
             0 => Vec::new(),
+            _ if t.in_archive => vec![RowAct::Open, RowAct::Copy],
             1 => vec![RowAct::Open, RowAct::Reveal, RowAct::Rename, RowAct::Cut, RowAct::Copy, RowAct::Duplicate, RowAct::Trash],
             _ => vec![RowAct::Open, RowAct::Reveal, RowAct::Cut, RowAct::Copy, RowAct::Duplicate, RowAct::Trash],
         }
@@ -3375,7 +3579,7 @@ impl App {
             // 빼기와 그만두기 사이
             MenuKind::GroupDelete(_) => Some(1),
             // 보는 줄(열기, Finder에서 보기)과 그 밖의 줄(이름 바꾸기, 복사, 복제, 휴지통으로 이동) 사이
-            MenuKind::Rows => Some(2),
+            MenuKind::Rows => self.row_menu().iter().position(|act| !matches!(act, RowAct::Open | RowAct::Reveal)).filter(|i| *i > 0),
             MenuKind::Space(_) => Some(workspaces::COLORS.len()),
             // 옮길 곳이 없는 줄(고정한 것이 하나뿐)은 구분선 없이 나머지 줄만
             MenuKind::Pin(p) => Some(self.pin_menu(p).iter().filter(|act| matches!(act, PinAct::Up | PinAct::Down)).count()).filter(|n| *n > 0),
@@ -3473,7 +3677,7 @@ impl App {
             // 폴더 하나면 그리로 들어가고, 아니면 고른 파일들을 macOS '열기'로 연다
             Some(RowAct::Open) => match t.items.as_slice() {
                 [(name, _, true)] => self.navigate(t.pane, Location::Dir(path(name)), None),
-                items => self.open_files.extend(items.iter().filter(|(_, _, is_dir)| !is_dir).map(|(name, ..)| path(name))),
+                items => self.open_paths(t.pane, items.iter().filter(|(_, _, is_dir)| !is_dir).map(|(name, ..)| path(name)).collect(), false),
             },
             Some(RowAct::Reveal) => self.reveal_files.extend(t.items.iter().map(|(name, ..)| path(name))),
             Some(RowAct::Rename) => {
@@ -3533,7 +3737,7 @@ impl App {
             None => tab.clear_selection(),
         }
         let items = (0..tab.view.len()).filter_map(|vi| tab.entry_at(vi)).filter(|e| e.selected).map(|e| (e.name_string(), e.file_id, e.is_dir())).collect();
-        self.list_target = Some(ListTarget { pane: p, tab: tab.id, dir, items, at: (x, y) });
+        self.list_target = Some(ListTarget { pane: p, tab: tab.id, dir, items, at: (x, y), in_archive: tab.in_archive });
         Some(if row.is_some() { MenuKind::Rows } else { MenuKind::Blank })
     }
 
@@ -3964,7 +4168,7 @@ impl App {
         if row.is_dir {
             self.navigate(self.active, Location::Dir(path), None);
         } else {
-            self.open_files.push(path);
+            self.open_paths(self.active, vec![path], false);
         }
     }
 
@@ -4495,10 +4699,19 @@ impl App {
         }
         // 고른 줄을 누른 채 조금 넘게 움직였다: 고른 항목들을 끌어 내 달라고 한다 (맥의 끌기는 창 쪽이 시작한다)
         if let Some(press) = self.press.as_ref().filter(|press| (x - press.x).hypot(y - press.y) > DRAG_START) {
-            let paths = self.panes[press.pane].tab().marked_paths();
+            let p = press.pane;
+            let tab = self.panes[p].tab();
+            let paths = tab.marked_paths();
+            // 압축 파일 안: 임시 폴더에 꺼낸 뒤에 끈다 (꺼내는 동안 계속 누르고 있으면 다음 움직임에서 끌기가 시작된다)
+            let archive = tab.loc.dir().filter(|_| tab.in_archive).and_then(archive_path::archive_of);
             self.press = None;
-            if !paths.is_empty() {
-                self.drag_out = Some(paths);
+            match archive {
+                Some(a) if !paths.is_empty() => self.drag_wait = Some(self.extract_then(p, a, paths, Then::Drag)),
+                _ if !paths.is_empty() => {
+                    self.drag_out = Some(paths);
+                    self.drag_copy = false;
+                }
+                _ => {}
             }
             // 이제 누르고 있는 것이 아니다: 누르는 동안 미뤄 둔 것을 한다. 끌려 나가는 것은 위에서 정했으므로 목록이 바뀌어도 된다.
             // 맥의 끌기가 어떻게 끝나든(창 밖에서 취소되면 떼기도 놓기도 오지 않는다) 미뤄 둔 결과가 남지 않게 여기서 한다
@@ -4543,6 +4756,9 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        // 끌기를 시작하기 전에 손을 뗐다: 꺼내기를 기다리던 끌기도, 꺼냈지만 아직 시작하지 않은 끌기도 하지 않는다
+        self.drag_wait = None;
+        self.drag_out = None;
         // 사이드바 줄: 그대로 떼면 열고(그룹 머리는 접고 펼치고), 끌었으면 보이던 빈자리 그대로 옮긴다
         if self.side_press.is_some() {
             let rows = self.side_rows();
@@ -4808,10 +5024,13 @@ impl App {
         (items, at)
     }
 
-    /// 훑어보기 창을 열어 달라고(떠 있으면 닫아 달라고) 한다. 보여 줄 것이 없으면 아무것도 하지 않고 false
+    /// 훑어보기 창을 열어 달라고(떠 있으면 닫아 달라고) 한다. 보여 줄 것이 없으면 아무것도 하지 않고 false.
+    /// 압축 파일 안은 디스크에 없는 파일이라 훑어볼 수 없다고 알린다
     fn toggle_look(&mut self) -> bool {
         if self.look_open {
             self.look_request = Some(false);
+        } else if self.panes[self.active].tab().in_archive {
+            self.flash = Some((self.active, NO_LOOK.to_string()));
         } else if self.look_items().0.is_empty() {
             return false;
         } else {
@@ -5208,8 +5427,11 @@ struct MacArt<'a> {
 }
 
 impl EntryArt<Gfx> for MacArt<'_> {
+    /// 압축 파일 안은 디스크에 없는 경로라, 종류(폴더, 확장자)의 아이콘을 그린다
     fn icon(&mut self, g: &mut Gfx, tab: &Tab, e: &Entry, r: R) {
-        if let Some(path) = tab.path_of(e) {
+        if tab.in_archive {
+            g.icon_for_kind(&e.name_string(), e.is_dir(), r);
+        } else if let Some(path) = tab.path_of(e) {
             g.icon_for_path(&path, r);
         }
     }
@@ -5222,13 +5444,15 @@ impl EntryArt<Gfx> for MacArt<'_> {
         true
     }
 
+    /// 압축 파일 안은 디스크에 물을 경로가 없다: 같은 확장자로 알아 둔 이름만 보인다
     fn type_name(&mut self, tab: &Tab, e: &Entry) -> String {
-        finder_kind(self.kinds, &e.name_string(), e.kind == Kind::Dir, || tab.path_of(e))
+        finder_kind(self.kinds, &e.name_string(), e.kind == Kind::Dir, || tab.path_of(e).filter(|_| !tab.in_archive))
     }
 }
 
 /// Finder '종류' 이름 ("PDF 문서", "폴더"). 확장자가 같으면 같은 종류로 보고 kinds에 한 번만 묻는다
-/// (확장자 없는 파일은 파일마다 다를 수 있어 매번 묻는다). path는 물어야 할 때만 부른다
+/// (확장자 없는 파일은 파일마다 다를 수 있어 매번 묻는다). path는 물어야 할 때만 부른다. 물을 경로가 없으면(압축 파일 안) 빈 글이고,
+/// 그것은 적어 두지 않는다 (같은 확장자의 디스크 파일이 빈 종류로 보이지 않게)
 fn finder_kind(kinds: &RefCell<HashMap<String, String>>, name: &str, dir: bool, path: impl FnOnce() -> Option<String>) -> String {
     let ext = name.rsplit_once('.').map(|(_, x)| x.to_lowercase()).filter(|x| !x.is_empty());
     let key = ext.as_ref().map(|x| if dir { format!("/{x}") } else { x.clone() });
@@ -5238,7 +5462,8 @@ fn finder_kind(kinds: &RefCell<HashMap<String, String>>, name: &str, dir: bool, 
     {
         return v.clone();
     }
-    let v = path().and_then(|p| Gfx::type_description(&p)).unwrap_or_default();
+    let Some(path) = path() else { return String::new() };
+    let v = Gfx::type_description(&path).unwrap_or_default();
     if let Some(k) = key {
         kinds.borrow_mut().insert(k, v.clone());
     }
@@ -5313,6 +5538,7 @@ fn traffic_lights(g: &Gfx, cy: f32) {
 mod tests {
     use super::*;
     use sakadu::favorites::Group;
+    use std::path::Path;
 
     /// 시험용 폴더: 하위 폴더 둘, 파일 셋, 숨김 파일 하나
     fn demo() -> (std::path::PathBuf, String) {
@@ -8971,7 +9197,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// 지금 칸에서 고른 것을 따라 보인다: 그림, 글, 폴더·압축 파일·글이 아닌 것은 정보, 문서는 창 쪽의 Quick Look 보기
+    /// 지금 칸에서 고른 것을 따라 보인다: 그림, 글, 폴더·읽지 못하는 압축 파일·글이 아닌 것은 정보, 문서는 창 쪽의 Quick Look 보기
     /// (앱이 그린 메뉴가 떠 있으면 감춘다. 그 보기를 만들 수 없으면 큰 썸네일). 열려 있는 동안 자동 미리 보기 카드는 뜨지 않는다
     #[test]
     fn preview_pane_opens_with_alt_cmd_p_and_follows_the_selection() {
@@ -9210,5 +9436,254 @@ mod tests {
         assert_eq!(first_lines("a\nb\nc\n", 2), "a\nb\n");
         assert_eq!(first_lines("a\nb\n", 5), "a\nb\n");
         assert_eq!(first_lines("", 3), "");
+    }
+
+    /// 압축 파일 시험 폴더: demo()의 다운로드에 ditto로 만든 '자료.zip'을 둔다 (원본은 숨김 폴더 .원본에).
+    /// 안: 자료/메모.txt, 자료/사진/바다.bmp, 자료/빈 폴더/, 자료/안.zip (압축 파일 안의 압축 파일). (root, home, zip)
+    fn zip_demo() -> (std::path::PathBuf, String, String) {
+        let (root, home) = demo();
+        let src = root.join(".원본").join("자료");
+        std::fs::create_dir_all(src.join("사진")).unwrap();
+        std::fs::create_dir_all(src.join("빈 폴더")).unwrap();
+        std::fs::write(src.join("메모.txt"), "압축 안의 메모\n").unwrap();
+        std::fs::write(src.join("사진").join("바다.bmp"), crate::render::demo_picture()).unwrap();
+        let nested = root.join(".원본").join("안");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("속.txt"), "속\n").unwrap();
+        crate::archive::tests::ditto(&nested, &src.join("안.zip").to_string_lossy());
+        let zip = util::join(&util::join(&home, "다운로드"), "자료.zip");
+        crate::archive::tests::ditto(&src, &zip);
+        (root, home, zip)
+    }
+
+    /// 칸 p에서 그 이름의 줄을 두 번 누른다
+    fn open_name(a: &mut App, g: &Gfx, p: usize, name: &str) {
+        let vi = names(a, p).iter().position(|n| n == name).unwrap_or_else(|| panic!("no row named {name}"));
+        let (x, y) = row_point(a, p, vi);
+        a.mouse_down(g, x, y, Mods::default(), 2);
+    }
+
+    fn flash_of(a: &App) -> Option<&str> {
+        a.flash.as_ref().map(|(_, note)| note.as_str())
+    }
+
+    /// 압축 파일은 두 번 누르면 폴더처럼 들어가고(감시는 하지 않는다), 안은 읽기만 한다: 새 폴더·휴지통·잘라내기·붙여넣기·복제·
+    /// 이름 바꾸기·놓기는 Windows와 같은 글로 막고, 목록 메뉴는 열기와 복사만, 빈 곳 메뉴의 새 폴더·붙여넣기는 흐리다.
+    /// 훑어보기와 미리 보기 카드도 없다. 위로 가면 그 압축 파일이 골라진 폴더로 나온다
+    #[test]
+    fn zip_files_open_like_folders_and_stay_read_only() {
+        let (root, home, zip) = zip_demo();
+        let (mut a, g) = app(&home);
+        let downloads = util::join(&home, "다운로드");
+        a.navigate(0, Location::Dir(downloads.clone()), None);
+        a.settle();
+        open_name(&mut a, &g, 0, "자료.zip");
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(zip.clone()));
+        assert!(a.pane(0).tab().in_archive && a.open_files.is_empty());
+        assert_eq!(names(&a, 0), ["자료"]);
+        assert!(a.take_watch_dirs().is_none_or(|dirs| !dirs.iter().any(|d| d.starts_with(&zip))), "an archive is not watched");
+        open_name(&mut a, &g, 0, "자료");
+        a.settle();
+        let inside = util::join(&zip, "자료");
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(inside.clone()));
+        let mut listed = names(&a, 0);
+        listed.sort();
+        assert_eq!(listed, ["메모.txt", "빈 폴더", "사진", "안.zip"]);
+        let memo = a.pane(0).tab().entries.iter().find(|e| e.name_string() == "메모.txt").unwrap();
+        assert_eq!(memo.size, "압축 안의 메모\n".len() as u64);
+
+        // 바꾸는 일은 모두 막는다 (맡긴 작업이 없다)
+        let vi = names(&a, 0).iter().position(|n| n == "메모.txt").unwrap();
+        a.tab_mut(0).select_only(vi);
+        a.activate_pane(0);
+        type Try = (&'static str, fn(&mut App));
+        let tries: [Try; 6] = [
+            ("new folder", |a| a.new_folder(0)),
+            ("trash", |a| a.trash_selected(0)),
+            ("cut", |a| a.cut_selected()),
+            ("paste", |a| a.ask_paste(false)),
+            ("duplicate", |a| a.duplicate_selected(0)),
+            ("name edit", |a| a.begin_item_rename(0)),
+        ];
+        for (what, act) in tries {
+            a.flash = None;
+            act(&mut a);
+            assert_eq!(flash_of(&a), Some(READ_ONLY), "{what}");
+        }
+        assert!(a.clip_out.is_none() && a.clip_in.is_none() && a.edit == Editing::None);
+        assert!(!a.paste_paths(vec![util::join(&home, "업무/예산.csv")], Paste::Copy));
+        let l = a.list_rect(0).unwrap();
+        let (bx, by) = (l.l + 60.0, l.b - 10.0);
+        let outside = vec![util::join(&home, "업무/예산.csv")];
+        a.flash = None;
+        assert_eq!(a.drag_over(&g, bx, by, &outside), None, "nothing is dropped into an archive");
+        assert!(!a.drop_paths(&g, bx, by, outside, Paste::Copy));
+        assert_eq!(flash_of(&a), Some(READ_ONLY));
+        assert!(a.take_ops().is_empty());
+
+        // 훑어보기와 카드는 없다 (디스크에 없는 파일이다)
+        assert!(a.key(Key::Char('y'), Mods { cmd: true, ..Default::default() }));
+        assert_eq!((flash_of(&a), a.look_request), (Some(NO_LOOK), None));
+        assert!(a.card().is_none());
+        assert!(a.take_thumbs().is_empty());
+
+        // 목록 메뉴: 열기와 복사만. 빈 곳 메뉴: 새 폴더와 붙여넣기는 흐리게
+        let (x, y) = row_point(&a, 0, vi);
+        assert!(a.right_down(&g, x, y));
+        assert_eq!(menu_labels(&a, MenuKind::Rows), ["열기", "복사"]);
+        assert_eq!(a.menu_break(MenuKind::Rows), Some(1));
+        a.close_menu();
+        assert!(a.right_down(&g, bx, by));
+        let dimmed: Vec<bool> = a.menu.as_ref().unwrap().lines.iter().map(|l| l.disabled).collect();
+        assert_eq!(dimmed, [true, true, false]);
+        a.close_menu();
+
+        // 위로: 압축 파일의 맨 위, 그다음 압축 파일이 골라진 다운로드
+        a.go_up(0);
+        a.settle();
+        a.go_up(0);
+        a.settle();
+        let t = a.pane(0).tab();
+        assert_eq!((t.loc.clone(), t.in_archive), (Location::Dir(downloads), false));
+        assert_eq!(t.cursor_entry().unwrap().name_string(), "자료.zip");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 압축 파일 안의 파일: 두 번 누르면 임시 폴더에 꺼내서 연다. 복사(⌘C)는 꺼낸 것을 클립보드에 담고,
+    /// 끌어 내기는 꺼낸 뒤 복사만 허락하는 끌기로 (꺼내는 사이 손을 떼면 끌지 않는다)
+    #[test]
+    fn files_in_a_zip_are_extracted_to_open_copy_and_drag() {
+        let (root, home, zip) = zip_demo();
+        let (mut a, g) = app(&home);
+        let cache = crate::archive::cache_dir();
+        a.navigate(0, Location::Dir(util::join(&zip, "자료")), None);
+        a.settle();
+        a.activate_pane(0);
+        open_name(&mut a, &g, 0, "메모.txt");
+        assert!(a.open_files.is_empty() && a.ops_waiting());
+        assert_eq!(flash_of(&a), Some(EXTRACTING));
+        a.settle();
+        assert_eq!(a.open_files.len(), 1);
+        let opened = a.open_files[0].clone();
+        assert!(Path::new(&opened).starts_with(&cache) && opened.ends_with("/메모.txt"), "{opened}");
+        assert_eq!(std::fs::read_to_string(&opened).unwrap(), "압축 안의 메모\n");
+        assert_eq!(flash_of(&a), None, "the note goes away");
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(util::join(&zip, "자료")), "the pane stays");
+
+        // 복사: 폴더도 속까지 꺼내서 담는다 (잘라 둔 것이 아니다)
+        let vi = names(&a, 0).iter().position(|n| n == "사진").unwrap();
+        a.tab_mut(0).select_only(vi);
+        a.copy_selected();
+        assert!(a.clip_out.is_none());
+        a.settle();
+        let clip = a.clip_out.take().expect("the extracted folder is on the clipboard");
+        assert!(clip.len() == 1 && clip[0].ends_with("/사진") && Path::new(&clip[0]).starts_with(&cache), "{clip:?}");
+        assert_eq!(std::fs::read(Path::new(&clip[0]).join("바다.bmp")).unwrap(), crate::render::demo_picture());
+        assert!(!a.clip_cut);
+        assert_eq!(flash_of(&a), Some("1개를 복사해 뒀어요 · ⌘V로 붙여넣어요"));
+
+        // 끌어 내기: 꺼낸 뒤에 끈다 (복사만)
+        let vi = names(&a, 0).iter().position(|n| n == "메모.txt").unwrap();
+        let (x, y) = row_point(&a, 0, vi);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x + 20.0, y + 6.0);
+        assert_eq!(a.take_drag(), None, "waits for the extraction");
+        assert!(a.ops_waiting());
+        a.settle();
+        let dragged = a.take_drag().expect("the extracted copy is dragged");
+        assert!(a.drag_copy && dragged.len() == 1 && Path::new(&dragged[0]).starts_with(&cache), "{dragged:?}");
+        a.mouse_up();
+        // 꺼내는 사이 손을 뗐으면 끌지 않는다
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x + 20.0, y + 6.0);
+        a.mouse_up();
+        a.settle();
+        assert_eq!(a.take_drag(), None);
+        // 디스크의 폴더에서 끄는 것은 그대로 (옮기기도 된다)
+        a.navigate(0, Location::Dir(util::join(&home, "업무")), None);
+        a.settle();
+        let (x, y) = row_point(&a, 0, 1);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x + 20.0, y + 6.0);
+        assert!(a.take_drag().is_some() && !a.drag_copy);
+        a.mouse_up();
+        for p in [&opened, &clip[0], &dragged[0]] {
+            let _ = std::fs::remove_dir_all(Path::new(p).parent().unwrap());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 읽지 못하는 형식은 기본 앱으로 연다 (Windows에서 셸이 못 읽는 형식처럼). 0으로 채운 zip은 들어가지만 '읽지 못했어요'.
+    /// 압축 파일 안의 압축 파일은 들어가지 않고 꺼내서 연다
+    #[test]
+    fn broken_and_nested_zips_open_as_files() {
+        let (root, home, zip) = zip_demo();
+        std::fs::write(root.join("다운로드").join("가짜.zip"), (0..4096u32).map(|i| (i * 7919 % 251) as u8 + 1).collect::<Vec<_>>()).unwrap();
+        std::fs::write(root.join("다운로드").join("영.zip"), vec![0u8; 8192]).unwrap();
+        let (mut a, g) = app(&home);
+        let downloads = util::join(&home, "다운로드");
+        a.navigate(0, Location::Dir(downloads.clone()), None);
+        a.settle();
+        open_name(&mut a, &g, 0, "가짜.zip");
+        a.settle();
+        assert_eq!(a.open_files, [util::join(&downloads, "가짜.zip")]);
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(downloads.clone()));
+        open_name(&mut a, &g, 0, "영.zip");
+        a.settle();
+        let t = a.pane(0).tab();
+        assert_eq!(t.loc, Location::Dir(util::join(&downloads, "영.zip")));
+        assert!(matches!(&t.state, LoadState::Error(msg) if msg.contains("읽지 못했어요")), "{:?}", t.state);
+        // 압축 파일 안의 압축 파일
+        a.navigate(0, Location::Dir(util::join(&zip, "자료")), None);
+        a.settle();
+        open_name(&mut a, &g, 0, "안.zip");
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(util::join(&zip, "자료")), "a nested archive is not entered");
+        a.settle();
+        let nested = a.open_files.last().unwrap().clone();
+        assert!(nested.ends_with("/안.zip") && Path::new(&nested).starts_with(crate::archive::cache_dir()), "{nested}");
+        assert!(crate::archive::enterable(&nested), "the extracted copy is a whole zip");
+        let _ = std::fs::remove_dir_all(Path::new(&nested).parent().unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 오른쪽 미리 보기 창: 압축 파일은 안의 맨 위 항목을 글로, 압축 파일 안의 항목은 정보만 (고정하지 않는다).
+    /// 경로 입력은 압축 파일 안의 경로도 받는다: 폴더는 열고, 파일은 그 폴더에서 고른다
+    #[test]
+    fn zip_preview_and_typed_paths() {
+        let (root, home, zip) = zip_demo();
+        let (mut a, g) = app(&home);
+        a.navigate(0, Location::Dir(util::join(&home, "다운로드")), None);
+        a.settle();
+        a.activate_pane(0);
+        click_name(&mut a, &g, 0, "자료.zip", Mods::default());
+        a.toggle_preview();
+        a.settle();
+        let (name, text) = a.preview_seen().unwrap();
+        assert_eq!(name.as_deref(), Some("자료.zip"));
+        let text = text.expect("the archive's items as text");
+        assert!(text.starts_with("압축 파일 안 · 폴더 1개") && text.contains("\n자료/\n"), "{text}");
+        a.navigate(0, Location::Dir(util::join(&zip, "자료")), None);
+        a.settle();
+        click_name(&mut a, &g, 0, "메모.txt", Mods::default());
+        a.settle();
+        assert_eq!(a.preview_body_seen().map(|s| s.0), Some("info"));
+        a.toggle_preview_pin();
+        assert!(a.preview_pin().is_none(), "items inside an archive are not pinned");
+        let mut canvas = Gfx::bitmap(1280.0, 800.0, 1.0).unwrap();
+        a.paint(&mut canvas);
+        // 경로 입력
+        let photos = util::join(&util::join(&zip, "자료"), "사진");
+        assert_eq!(resolve_input(&photos, &home), Ok((photos.clone(), None)));
+        assert_eq!(resolve_input(&util::join(&util::join(&zip, "자료"), "메모.txt"), &home), Ok((util::join(&zip, "자료"), Some("메모.txt".to_string()))));
+        assert!(resolve_input(&util::join(&zip, "없음"), &home).is_err());
+        a.begin_address(1);
+        a.commit_address(&photos);
+        a.settle();
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(photos));
+        assert_eq!(names(&a, 1), ["바다.bmp"]);
+        assert!(a.pane(1).tab().in_archive);
+        a.paint(&mut canvas);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -7,6 +7,7 @@
 //! 새 탭 시작 화면(⌘T)과 명령 메뉴(⌘K)도: 시작 화면을 키로 열어 보고, 명령 메뉴의 입력 칸에 쳐서 걸러 보고 Esc로 닫는다.
 //! 사이드바 끌기도: 둘을 고정하고 실제 마우스 입력(mouseDown:·mouseDragged:·mouseUp:)으로 첫 줄을 아래로 끌어 순서를 바꾸고, 눌렀다 떼서 연다.
 //! 오른쪽 미리 보기 창(⌥⌘P)도: 열어 글 파일의 글을 보고, PDF를 고르면 본문 자리에 Quick Look 보기가 뜨는지 보고, 닫는다.
+//! 압축 파일도: 시험 폴더에 zip을 만들어(맥의 ditto) 고르고 ⌘↓로 폴더처럼 들어가고, 안에서는 읽기만 하는지 보고 ⌘↑로 나온다.
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
 //! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
@@ -583,6 +584,27 @@ fn script(dir: &str) -> usize {
         run.wait("a click without moving opens the pinned folder", 5, || seen().is_some_and(|s| s.ready && s.dir == sub));
         key(UP, true);
         run.wait("cmd-up goes back", 5, || seen().is_some_and(|s| s.ready && s.dir == dir));
+    }
+
+    // 압축 파일: 다른 임시 폴더의 '묶음' 폴더를 ditto로 시험 폴더의 묶음.zip에 묶는다. 그 줄을 고르고 ⌘↓로 들어가면
+    // 안의 '묶음' 폴더가 보인다 (libarchive로 읽는다). 안에서 ⌘⌫는 읽기만 한다는 알림뿐이다. ⌘↑로 나오면 그 zip이 골라져 있다
+    let stage = std::env::temp_dir().join(format!("sakadu-smoke-zip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage);
+    let zip = sakadu::util::join(dir, "묶음.zip");
+    let made = std::fs::create_dir_all(stage.join("묶음")).and_then(|_| std::fs::write(stage.join("묶음").join("안.txt"), b"x")).is_ok()
+        && std::process::Command::new("/usr/bin/ditto").args(["-c", "-k", "--norsrc", "--keepParent"]).arg(stage.join("묶음")).arg(&zip).status().is_ok_and(|s| s.success());
+    let _ = std::fs::remove_dir_all(&stage);
+    run.check("ditto makes a zip in the test folder", made, String::new);
+    if made && run.select("묶음.zip") {
+        key(DOWN, true);
+        let at_zip = zip.clone();
+        if run.wait("cmd-down enters the zip like a folder", 5, move || seen().is_some_and(|s| s.ready && s.dir == at_zip && s.names == ["묶음"])) {
+            key(DELETE, true);
+            run.wait("cmd-delete inside the zip only says it is read-only", 5, || seen().is_some_and(|s| s.flash.as_deref() == Some(crate::app::READ_ONLY)));
+            run.check("the zip is still there", exists(dir, "묶음.zip"), String::new);
+            key(UP, true);
+            run.wait("cmd-up leaves the zip with it selected", 5, || seen().is_some_and(|s| s.ready && s.dir == dir && s.cursor == "묶음.zip"));
+        }
     }
     run.failed
 }
