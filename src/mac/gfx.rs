@@ -6,7 +6,7 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::{NSCompositingOperation, NSFont, NSFontWeightRegular, NSFontWeightSemibold, NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSWorkspace};
-use objc2_core_foundation::{CFAttributedString, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
+use objc2_core_foundation::{CFAttributedString, CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
 use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGInterpolationQuality, CGPath, kCGColorSpaceSRGB};
 use objc2_core_text::{CTFont, CTLine, CTLineTruncationType, kCTFontAttributeName, kCTForegroundColorFromContextAttributeName};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL, NSURLLocalizedTypeDescriptionKey};
@@ -123,6 +123,8 @@ fn symbol_name(code: u16) -> &'static str {
         0xE8A1 => "doc.text.magnifyingglass",
         0xE740 => "arrow.up.left.and.arrow.down.right",
         0xE73F => "arrow.down.right.and.arrow.up.left",
+        // 미리 보기 창 머리의 '기본 앱으로 열기' (Windows preview.rs의 G_OPEN)
+        0xE8A7 => "arrow.up.right.square",
         _ => "questionmark.square.dashed",
     }
 }
@@ -370,6 +372,18 @@ impl Gfx {
     pub fn load_picture(path: &str, max_px: u32) -> Option<Picture> {
         let url = CFURL::from_file_path(path)?;
         let source = unsafe { CGImageSource::with_url(&url, None) }?;
+        Self::thumbnail(&source, max_px)
+    }
+
+    /// 메모리에 든 그림(PNG·GIF·BMP 따위. 한글 문서 안의 미리 보기 그림)을 load_picture와 같게 읽는다
+    pub fn load_picture_data(bytes: &[u8], max_px: u32) -> Option<Picture> {
+        let data = CFData::from_bytes(bytes);
+        let source = unsafe { CGImageSource::with_data(&data, None) }?;
+        Self::thumbnail(&source, max_px)
+    }
+
+    /// 그림 원본에서 긴 쪽이 max_px 안에 드는 그림을 만든다 (사진에 적힌 회전도 반영한다)
+    fn thumbnail(source: &CGImageSource, max_px: u32) -> Option<Picture> {
         let max = CFNumber::new_i32(max_px.min(i32::MAX as u32) as i32);
         let yes: &CFType = unsafe { kCFBooleanTrue }?;
         // 원본이 작아도 늘 새로 만들고(파일에 든 작은 썸네일을 쓰지 않는다), 여기서 바로 풀어 둔다 (그릴 때 메인 줄에서 풀지 않게)
@@ -384,8 +398,9 @@ impl Gfx {
 
     /// Quick Look이 만든 썸네일을 받는다: PDF의 첫 쪽, 동영상의 한 장면, 문서·글의 첫머리처럼 그림 파일이 아닌 것.
     /// 긴 쪽이 max_px 안에 들어오게 만든다. 만들지 못하면(썸네일을 만드는 확장이 없는 형식, 너무 오래 걸림) None.
+    /// icon이면 Finder 아이콘처럼 꾸민 것(아이콘 보기), 아니면 내용 그대로(미리 보기 카드·창의 큰 그림).
     /// 다 될 때까지 이 줄을 붙잡으므로 뒷줄에서만 부른다
-    pub fn load_quick_look(path: &str, max_px: u32) -> Option<Picture> {
+    pub fn load_quick_look(path: &str, max_px: u32, icon: bool) -> Option<Picture> {
         let (generator_class, request_class) = quick_look_classes()?;
         // SAFETY: +[QLThumbnailGenerator sharedGenerator] (클래스 속성)
         let generator: Option<Retained<AnyObject>> = unsafe { msg_send![generator_class, sharedGenerator] };
@@ -398,10 +413,12 @@ impl Gfx {
             msg_send![fresh, initWithFileAtURL: &*url, size: CGSize::new(side, side), scale: 1.0 as CGFloat, representationTypes: QL_THUMBNAIL]
         };
         let request = request?;
-        // Finder처럼 파일 아이콘 모양으로 꾸며 받는다 (테두리, 접힌 모서리, 그림자). 꾸미지 않은 썸네일은 글·문서가
-        // 테두리 없는 흰 종이라 밝은 카드에서는 묻히고 어두운 카드에서는 흰 네모로 튄다
-        // SAFETY: QLThumbnailGenerationRequest의 BOOL 속성 iconMode의 설정 메서드
-        let _: () = unsafe { msg_send![&*request, setIconMode: true] };
+        // 아이콘 보기: Finder처럼 파일 아이콘 모양으로 꾸며 받는다 (테두리, 접힌 모서리, 그림자). 꾸미지 않은 썸네일은 글·문서가
+        // 테두리 없는 흰 종이라 밝은 칸에서는 묻히고 어두운 칸에서는 흰 네모로 튄다 (큰 그림에는 앱이 가는 테두리를 두른다)
+        if icon {
+            // SAFETY: QLThumbnailGenerationRequest의 BOOL 속성 iconMode의 설정 메서드
+            let _: () = unsafe { msg_send![&*request, setIconMode: true] };
+        }
         let (tx, rx) = mpsc::channel();
         // 생성기가 자기 줄에서 한 번 부른다 (실패하면 썸네일 없이). 받은 그림은 넘기기 전에 붙잡는다: 표현과 함께 사라지지 않게
         let done = RcBlock::new(move |thumb: *mut AnyObject, _error: *mut AnyObject| {
@@ -428,16 +445,26 @@ impl Gfx {
         self.picture_alpha(pic, r, 1.0);
     }
 
-    /// picture와 같되 opacity(0~1)만큼 비치게 그린다 (숨김 파일의 썸네일은 흐리게)
-    pub fn picture_alpha(&self, pic: &Picture, r: R, opacity: f32) {
+    /// 그림이 r 안에 놓이는 자리 (picture가 그리는 곳: 비율을 지켜 가운데, 늘리지 않는다)
+    pub fn fit(pic: &Picture, r: R) -> R {
         let (w, h) = pic.size();
         let (w, h) = (w as f32, h as f32);
         if w <= 0.0 || h <= 0.0 || r.w() <= 0.0 || r.h() <= 0.0 {
-            return;
+            return R::new(r.l, r.t, r.l, r.t);
         }
         let k = (r.w() / w).min(r.h() / h).min(1.0);
         let (dw, dh) = (w * k, h * k);
         let (x, y) = (r.l + (r.w() - dw) / 2.0, r.t + (r.h() - dh) / 2.0);
+        R::new(x, y, x + dw, y + dh)
+    }
+
+    /// picture와 같되 opacity(0~1)만큼 비치게 그린다 (숨김 파일의 썸네일은 흐리게)
+    pub fn picture_alpha(&self, pic: &Picture, r: R, opacity: f32) {
+        let at = Self::fit(pic, r);
+        let (x, y, dw, dh) = (at.l, at.t, at.w(), at.h());
+        if dw <= 0.0 || dh <= 0.0 {
+            return;
+        }
         // 위아래를 뒤집은 좌표라 그대로 그리면 그림이 거꾸로 선다: 그림을 그리는 동안만 그림의 아래 끝을 0으로 다시 뒤집는다
         CGContext::save_g_state(self.c());
         CGContext::translate_ctm(self.c(), x as CGFloat, (y + dh) as CGFloat);

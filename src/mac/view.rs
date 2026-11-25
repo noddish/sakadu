@@ -8,6 +8,8 @@
 //! 끌어서 놓기도 파일 주소로 한다: 고른 줄을 끌어 내면 맥의 끌기를 시작하고(Finder나 다른 칸에 놓을 수 있다),
 //! 끌려 온 파일은 App에 어디에 놓일지 묻고 놓는다.
 //! 훑어보기(스페이스, ⌘Y)는 맥의 훑어보기 창(QLPreviewPanel)에 고른 파일을 띄운다. 그 창의 내용은 이 뷰가 댄다.
+//! 오른쪽 미리 보기 창(⌥⌘P)에서 문서(PDF·Office 따위)는 그 본문 자리에 Quick Look 보기(QLPreviewView)를 하위 뷰로 둔다.
+//! 고정한 파일이 그대로 있는지도 뒷줄에서 확인한다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다.
 //! 설정 창(앱 메뉴의 '설정…', ⌘,)은 본 창과 따로 뜬다 (settings.rs).
 //! 창 시험(smoke)은 이 창을 그대로 열고 실제 입력의 길로 파일 작업을 돌려 본다 (CI의 맥 러너에서)
@@ -16,7 +18,7 @@ use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, Mods, Paste};
 use sakadu::ui::ROW_H;
 use crate::gfx::Gfx;
 use dispatch2::{DispatchQueue, DispatchTime};
-use objc2::rc::Retained;
+use objc2::rc::{Allocated, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2::ffi::NSInteger;
 use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, Sel};
@@ -65,7 +67,7 @@ thread_local! {
     static FLOW_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// 가장 나중에 낸 미리 보기 카드 요청의 번호. 뒷줄이 그림을 읽기 직전에 보고, 그 사이 다른 요청이 나왔으면 읽지 않는다
+/// 가장 나중에 낸 미리 보기(카드나 오른쪽 창) 요청의 번호. 뒷줄이 그림을 읽기 직전에 보고, 그 사이 다른 요청이 나왔으면 읽지 않는다
 static LATEST_PREVIEW: AtomicU64 = AtomicU64::new(0);
 /// 그림을 읽기 전에 잠깐 기다리는 시간 (화살표 키를 누르고 있을 때 지나가는 사진을 하나하나 읽지 않게)
 const PREVIEW_SETTLE: Duration = Duration::from_millis(60);
@@ -117,6 +119,10 @@ pub struct ViewIvars {
     commands: OnceCell<Retained<NSTextField>>,
     /// 지금 보이는 마우스 모양 (바뀔 때만 다시 정한다: 입력 상자 위의 글자 커서를 덮지 않게)
     pointer: std::cell::Cell<crate::app::Pointer>,
+    /// 오른쪽 미리 보기 창의 본문을 덮는 Quick Look 보기 (QLPreviewView). 처음 쓸 때 만든다. 만들지 못했으면 None
+    look_view: OnceCell<Option<Retained<NSView>>>,
+    /// 그 보기에 넘긴 파일 (경로, 수정한 때). 바뀔 때만 다시 넘긴다 (그릴 때마다 넘기면 처음부터 다시 그린다)
+    look_item: RefCell<Option<(String, u64)>>,
 }
 
 define_class!(
@@ -536,6 +542,8 @@ impl SakaduView {
             search_keys: std::cell::Cell::new(false),
             commands: OnceCell::new(),
             pointer: std::cell::Cell::new(crate::app::Pointer::Arrow),
+            look_view: OnceCell::new(),
+            look_item: RefCell::new(None),
         });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         // 입력 상자와 검색 입력 칸: 테두리·바탕 없이 (바탕과 강조 색 테두리는 App이 그린다)
@@ -776,6 +784,58 @@ impl SakaduView {
         // 명령 메뉴의 입력 칸을 마지막에: 떠 있는 동안은 이 칸이 키보드를 갖는다
         self.place_commands();
         SYNCING.set(false);
+        self.place_look_view();
+    }
+
+    /// 미리 보기 창 본문의 Quick Look 보기를 App에 맞춘다: 보여야 하면 그 자리에 그 파일로 보이고, 아니면 감추고 파일을 놓는다
+    /// (감춘 동영상이 계속 소리 내지 않게). 처음 보여야 할 때 만들고, 만들 수 없으면 App에 알린다 (그때부터 큰 썸네일로 보인다)
+    fn place_look_view(&self) {
+        let want = with_app(|a| a.look_view()).flatten();
+        let ivars = self.ivars();
+        let Some((r, path, modified)) = want else {
+            if let Some(Some(v)) = ivars.look_view.get()
+                && !v.isHidden()
+            {
+                v.setHidden(true);
+                // SAFETY: QLPreviewView의 previewItem 속성 (nil이면 보던 것을 놓는다)
+                let _: () = unsafe { msg_send![&**v, setPreviewItem: None::<&AnyObject>] };
+                ivars.look_item.replace(None);
+            }
+            return;
+        };
+        let Some(v) = ivars.look_view.get_or_init(|| self.make_look_view()) else {
+            with_app(App::look_view_missing);
+            pump();
+            self.setNeedsDisplay(true);
+            return;
+        };
+        v.setFrame(NSRect::new(NSPoint::new(r.l as f64, r.t as f64), NSSize::new(r.w().max(0.0) as f64, r.h().max(0.0) as f64)));
+        let item = (path, modified);
+        if ivars.look_item.borrow().as_ref() != Some(&item) {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&item.0));
+            // SAFETY: QLPreviewView의 previewItem 속성. NSURL은 QLPreviewItem을 따른다
+            let _: () = unsafe { msg_send![&**v, setPreviewItem: &*url] };
+            ivars.look_item.replace(Some(item));
+        }
+        v.setHidden(false);
+    }
+
+    /// 미리 보기 창 본문의 Quick Look 보기를 만든다 (Quartz를 열어 QLPreviewView를 찾는다). 만들 수 없으면 None
+    fn make_look_view(&self) -> Option<Retained<NSView>> {
+        look_class()?;
+        let Some(cls) = AnyClass::get(c"QLPreviewView") else {
+            sakadu::diag::log(|| "quick look: no QLPreviewView".to_string());
+            return None;
+        };
+        // SAFETY: alloc 뒤의 지정 초기화 메서드 -[QLPreviewView initWithFrame:style:] (QLPreviewViewStyleNormal = 0)
+        let view: Option<Retained<NSView>> = unsafe {
+            let fresh: Allocated<NSView> = msg_send![cls, alloc];
+            msg_send![fresh, initWithFrame: NSRect::ZERO, style: 0usize]
+        };
+        let view = view?;
+        view.setHidden(true);
+        self.addSubview(&view);
+        Some(view)
     }
 
     /// 명령 메뉴의 입력 칸을 App에 맞춘다: 명령 메뉴가 떠 있으면 판의 입력 자리에 보이고 키보드를 받는다. 닫히면 감추고 키보드를 뷰에 돌려준다
@@ -1212,6 +1272,18 @@ fn pump() {
     // 그림이 늦으면 카드에 '불러오는 중…'이 보이게, 그때 한 번 더 그린다
     if picture && let Ok(when) = DispatchTime::try_from(Duration::from_millis(LOADING_NOTE_MS + 20)) {
         let _ = DispatchQueue::main().after(when, redraw);
+    }
+    // 미리 보기 창에 고정한 파일이 그대로 있는지 (꺼진 네트워크 폴더라도 창이 멈추지 않게 뒷줄에서)
+    for c in with_app(App::take_pin_checks).unwrap_or_default() {
+        std::thread::spawn(move || {
+            let found = crate::app::check_pin(&c);
+            DispatchQueue::main().exec_async(move || {
+                with_app(|a| a.on_pin_checked(&c, found));
+                // 옮겨졌거나 바뀌었으면 새로 읽는다
+                pump();
+                redraw();
+            });
+        });
     }
     for p in probes {
         std::thread::spawn(move || {
@@ -1702,6 +1774,7 @@ pub(super) fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
     keyed(&e, "찾기", sel!(sakaduFind:), Action::Search);
     let v = submenu(&bar, "보기");
     act(&v, Action::Hidden);
+    act(&v, Action::Preview);
     sep(&v);
     for a in [Action::Huge, Action::Thumbs, Action::Medium, Action::SmallIcons, Action::List, Action::Details] {
         act(&v, a);

@@ -403,6 +403,18 @@ mod tests {
         assert!(!hwp_has_image(&without.to_string_lossy()));
         assert!(render(&without.to_string_lossy(), 64, true).is_none());
         assert!(hwp_text(&without.to_string_lossy()).is_some());
+        // 맥이 쓰는 공통 복합 파일 읽기(sakadu::cfb)도 COM이 쓴 파일에서 같은 스트림을 읽고,
+        // 그 시험용 파일 만들기(cfb::build)가 만든 파일은 COM도 읽는다
+        let open = |p: &std::path::Path| sakadu::cfb::Cfb::open(std::fs::File::open(p).unwrap()).expect("compound file");
+        assert_eq!(open(&with).stream("PrvImage"), Some(tiny_bmp()));
+        let text: Vec<u8> = "회의 자료\r\n둘째 줄".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert_eq!((open(&without).stream("PrvText"), open(&without).stream("PrvImage")), (Some(text.clone()), None));
+        let built = d.join("만든 문서.hwp");
+        let big: Vec<u8> = (0..9000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&built, sakadu::cfb::build(&[("PrvImage", &tiny_bmp()), ("BodyText", &big), ("PrvText", &text)])).unwrap();
+        assert!(hwp_has_image(&built.to_string_lossy()));
+        assert_eq!(hwp_text(&built.to_string_lossy()).as_deref(), Some("회의 자료\r\n둘째 줄"));
+        assert_eq!(read_stream(&hwp_storage(&built.to_string_lossy()).unwrap(), "BodyText"), Some(big));
         std::fs::remove_dir_all(d).unwrap();
     }
 }
