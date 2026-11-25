@@ -18,6 +18,7 @@ use crate::gfx::{Gfx, MONO_LINE_H, Picture};
 use sakadu::draw::{Color, Font, R};
 use sakadu::favorites::{self, Favorite, Favorites, Row};
 use sakadu::fileops::{Undo, UndoStack};
+use sakadu::keys::{self, Action, Combo, Keymap};
 use sakadu::listing::{self, Entry, Kind};
 use sakadu::palette::{self, R_ROW, System, Theme, alpha};
 use sakadu::pane::{DATE_AUTO, DEFAULT_COLS, LoadState, Location, Restore, Sort, SortKey, Tab, ViewMode, child_toward};
@@ -292,10 +293,12 @@ pub struct Seen {
     pub flash: Option<String>,
     /// 맡긴 파일 작업의 결과를 아직 다 받지 않았다 (그동안은 되돌리기를 받지 않는다)
     pub busy: bool,
+    /// 지금 칸의 탭 수
+    pub tabs: usize,
 }
 
 /// 설정 창에 보이는 값. 창 쪽이 이것으로 스위치와 글을 맞춘다 (입력과 뒷줄 결과를 처리할 때마다)
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub struct Prefs {
     pub hidden: bool,
     pub auto_preview: bool,
@@ -306,6 +309,8 @@ pub struct Prefs {
     pub crawling: bool,
     /// 맥이 묻는 폴더(데스크탑·문서·다운로드·iCloud Drive)를 읽지 못했다
     pub denied: bool,
+    /// 모양: "system", "light", "dark"
+    pub theme: String,
 }
 
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
@@ -354,6 +359,8 @@ pub enum Key {
     Return,
     /// 지우기 키(⌫). ⌘와 함께 누르면 휴지통으로 보낸다
     Delete,
+    /// F1~F20
+    F(u8),
     Char(char),
 }
 
@@ -364,6 +371,40 @@ impl Key {
     pub fn repeats(self) -> bool {
         !matches!(self, Key::Return | Key::Delete | Key::Char('n' | 'd' | 'v' | ' ' | 'y'))
     }
+
+    /// 단축키 표(keys.rs)의 키 조합으로: 키는 Windows 가상 키 코드로 적는다
+    pub fn combo(self, m: Mods) -> Option<Combo> {
+        let vk = match self {
+            Key::Up => 0x26,
+            Key::Down => 0x28,
+            Key::Left => 0x25,
+            Key::Right => 0x27,
+            Key::Home => 0x24,
+            Key::End => 0x23,
+            Key::PageUp => 0x21,
+            Key::PageDown => 0x22,
+            Key::Tab => 0x09,
+            Key::Esc => 0x1B,
+            Key::Return => 0x0D,
+            Key::Delete => 0x08,
+            Key::F(n) => 0x6F + n as u16,
+            Key::Char(' ') => 0x20,
+            Key::Char(c) => keys::key_code(&c.to_ascii_uppercase().to_string())?,
+        };
+        Some(Combo { ctrl: m.ctrl, shift: m.shift, alt: m.alt, cmd: m.cmd, vk })
+    }
+}
+
+/// 맥에서 도는 동작 (단축키 표와 메뉴 막대, 설정의 단축키에 보인다). 나머지는 맥에 아직 없다
+pub fn mac_runs(a: Action) -> bool {
+    !matches!(a, Action::Favorites | Action::Commands | Action::Preview)
+}
+
+/// 바꾸지 않는 기본 조작의 키 (App::key가 단축키 표 다음에 받는 것, 편집 메뉴의 실행 복귀). 단축키로 정하지 않는다:
+/// 정하면 단축키 표가 먼저 받아 그 조작을 키로 부를 수 없게 된다
+pub fn fixed_key(c: Combo) -> bool {
+    const FIXED: [&str; 13] = ["Shift+Cmd+G", "Cmd+Down", "Cmd+O", "Cmd+Backspace", "Cmd+D", "Alt+Cmd+V", "Cmd+Up", "Cmd+[", "Cmd+]", "Ctrl+Tab", "Ctrl+Shift+Tab", "Cmd+Y", "Shift+Cmd+Z"];
+    FIXED.iter().filter_map(|s| Combo::parse(s)).any(|f| f == c)
 }
 
 /// 입력 상자(창 쪽의 글 상자 하나)가 지금 무엇을 고치는지
@@ -911,6 +952,14 @@ pub struct App {
     find: find::Find,
     /// 열어 달라는 주소 (창 쪽이 macOS '열기'로 연다. 시스템 설정의 개인정보 보호 쪽 등)
     pub open_url: Option<String>,
+    /// 단축키 (keys.txt. 창 쪽이 처음에 읽어 넣는다. 시험과 그림은 기본값)
+    keys: Keymap,
+    /// 닫은 탭 (칸, 위치). '닫은 탭 다시 열기'가 가장 나중 것부터 연다
+    closed: Vec<(usize, Location)>,
+    /// 설정 창을 열어 달라는 표시 (설정·도움말 단축키. 창 쪽이 연다)
+    pub open_settings: bool,
+    /// 모양: "system"(맥 설정을 따른다), "light", "dark". 창 쪽이 앱의 모양으로 정하고, 세션에 남긴다
+    theme_pref: String,
 }
 
 impl App {
@@ -984,6 +1033,10 @@ impl App {
             scale: 2.0,
             find: find::Find::default(),
             open_url: None,
+            keys: Keymap::default(),
+            closed: Vec::new(),
+            open_settings: false,
+            theme_pref: "system".to_string(),
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
@@ -1018,6 +1071,7 @@ impl App {
             },
             flash: self.flash.as_ref().map(|(_, note)| note.clone()),
             busy: self.ops_running > 0 || self.batch.is_some(),
+            tabs: self.panes[self.active].tabs.len(),
         }
     }
 
@@ -1053,6 +1107,11 @@ impl App {
     /// 지금 칸의 정렬 (smoke가 머리글을 누른 뒤 본다)
     pub fn active_sort(&self) -> Sort {
         self.panes[self.active].sort
+    }
+
+    /// 지금 칸 번호 (메뉴 막대의 뒤로·앞으로·위 폴더)
+    pub fn active_pane(&self) -> usize {
+        self.active
     }
 
     /// 칸 p의 지금 탭 (그림 시험에서 고른 줄을 정할 때)
@@ -2285,7 +2344,7 @@ impl App {
             query: String::new(),
             scope_here: false,
             folded: Vec::new(),
-            look: Look::default(),
+            look: Look { theme: self.theme_pref.clone(), ..Look::default() },
             panes: self
                 .panes
                 .iter()
@@ -2367,6 +2426,10 @@ impl App {
     /// 세션이 지금 공간의 화면이면 그 화면(마지막으로 본 모습)으로, 아니면 그 공간에 저장된 화면으로 연다.
     /// 작업 공간이 없으면(처음 실행했거나 작업 공간이 없던 시제품을 쓰던 경우) 지난번 화면이 '기본' 공간이 된다
     pub fn open_saved(&mut self, ws: Workspaces, session: Option<&Session>, home: &str) {
+        // 모양은 앱 전체의 것이라 작업 공간을 오갈 때가 아니라 여기서만 읽는다
+        if let Some(s) = session {
+            self.set_theme_pref(&s.look.theme);
+        }
         if ws.list.is_empty() {
             if let Some(s) = session {
                 self.restore(s, home);
@@ -2619,14 +2682,32 @@ impl App {
         if pane.tabs.len() <= 1 || i >= pane.tabs.len() {
             return;
         }
-        let closed = pane.tabs.remove(i);
-        self.stale.remove(&closed.id);
-        self.reading.remove(&closed.id);
-        self.rereading.remove(&closed.id);
+        let gone = pane.tabs.remove(i);
+        self.stale.remove(&gone.id);
+        self.reading.remove(&gone.id);
+        self.rereading.remove(&gone.id);
         if pane.active > i || pane.active >= pane.tabs.len() {
             pane.active = pane.active.saturating_sub(1);
         }
+        // 다시 열 수 있게 남겨 둔다 (Windows와 같이 스무 개까지)
+        self.closed.push((p, gone.loc));
+        if self.closed.len() > 20 {
+            self.closed.remove(0);
+        }
         self.load_if_new(p);
+    }
+
+    /// 가장 나중에 닫은 탭을 그 칸에 다시 연다 (그 칸이 지금 보이지 않으면 지금 칸에). 닫은 탭이 없으면 false
+    pub fn reopen_tab(&mut self) -> bool {
+        let Some((p, loc)) = self.closed.pop() else { return false };
+        let p = if p < self.layout.count() { p } else { self.active };
+        let tab = self.new_tab_at(loc);
+        let pane = &mut self.panes[p];
+        pane.active += 1;
+        pane.tabs.insert(pane.active, tab);
+        self.activate_pane(p);
+        self.load(p);
+        true
     }
 
     pub fn activate_tab(&mut self, p: usize, i: usize) {
@@ -2674,7 +2755,7 @@ impl App {
     /// 설정 창에 보이는 값
     pub fn prefs(&self) -> Prefs {
         let (search_on, icloud, crawling, denied) = self.find_prefs();
-        Prefs { hidden: self.show_hidden, auto_preview: self.auto_preview, search_on, icloud, crawling, denied }
+        Prefs { hidden: self.show_hidden, auto_preview: self.auto_preview, search_on, icloud, crawling, denied, theme: self.theme_pref.clone() }
     }
 
     /// 설정 창의 '숨김 항목 보기' (⌘⇧.와 같은 값)
@@ -3844,17 +3925,17 @@ impl App {
         }
         let p = self.active;
         self.flash = None;
+        // 바꿀 수 있는 단축키 (keys.txt): 새 탭, 새 폴더, 보기 방식, 칸 나누기, 이름 바꾸기(Return) 같은 것
+        if let Some(a) = key.combo(m).and_then(|c| self.keys.find(c)).filter(|a| mac_runs(*a)) {
+            return self.run_action(a);
+        }
+        // 바꾸지 않는 기본 조작 (Finder와 같다)
         match (key, m.cmd, m.ctrl, m.alt) {
-            // 경로 입력: ⌘L(Windows Ctrl+L), ⌘⇧G(Finder '폴더로 이동')
-            (Key::Char('l'), true, false, false) => self.begin_address(p),
-            // 검색 (편집 메뉴의 '찾기'와 같다)
-            (Key::Char('f'), true, false, false) => self.open_find(),
+            // 경로 입력의 다른 키: ⌘⇧G(Finder '폴더로 이동')
             (Key::Char('g'), true, false, false) if m.shift => self.begin_address(p),
             (Key::Up | Key::Down | Key::Left | Key::Right, false, false, false) | (Key::Home | Key::End | Key::PageUp | Key::PageDown, false, false, false) => self.move_cursor(key, m.shift),
             (Key::Down, true, false, false) | (Key::Char('o'), true, false, false) => self.open_selected(p),
-            // 파일 작업: Return 이름 바꾸기, ⇧⌘N 새 폴더, ⌘⌫ 휴지통 (Finder와 같다). 되돌리기(⌘Z)는 편집 메뉴로 온다
-            (Key::Return, false, false, false) => self.begin_item_rename(p),
-            (Key::Char('n'), true, false, false) if m.shift => self.new_folder(p),
+            // ⌘⌫ 휴지통 (Finder와 같다). 되돌리기(⌘Z)는 편집 메뉴로 온다
             (Key::Delete, true, false, false) => self.trash_selected(p),
             // 복제. 복사(⌘C)와 붙여넣기(⌘V)는 되돌리기처럼 편집 메뉴로 온다
             (Key::Char('d'), true, false, false) => self.duplicate_selected(p),
@@ -3863,12 +3944,6 @@ impl App {
             (Key::Up, true, false, false) => self.go_up(p),
             (Key::Char('['), true, false, false) => self.go_back(p),
             (Key::Char(']'), true, false, false) => self.go_forward(p),
-            (Key::Char('t'), true, true, false) => self.toggle_pin_selected(),
-            (Key::Char('t'), true, false, false) => self.new_tab(p),
-            (Key::Char('w'), true, false, false) => {
-                let i = self.panes[p].active;
-                self.close_tab(p, i)
-            }
             (Key::Tab, false, true, false) => self.cycle_tab(p, m.shift),
             (Key::Tab, false, false, false) => self.cycle_pane(),
             (Key::Char('a'), true, false, false) => self.select_all(),
@@ -3879,12 +3954,93 @@ impl App {
             // Esc: 복사 중이면 그만두고, 아니면 고른 것을 푼다
             (Key::Esc, false, false, false) if self.batch.is_some() => self.cancel_copy(),
             (Key::Esc, false, false, false) => self.clear_selection(),
-            (Key::Char('.'), true, false, false) if m.shift => self.toggle_hidden(),
-            (Key::Char('r'), true, false, false) => self.refresh(p),
-            (Key::Char(c @ '1'..='5'), true, false, true) => self.set_layout(Layout::ALL[c as usize - '1' as usize]),
             _ => return false,
         }
         true
+    }
+
+    /// 누르고 있을 때 되풀이해 받아도 되는 키인지. 단축키 표의 동작(새 탭, 새 폴더, 칸 나누기 …)은 한 번 누름에 한 번만 한다
+    pub fn key_repeats(&self, key: Key, m: Mods) -> bool {
+        match key.combo(m).and_then(|c| self.keys.find(c)).filter(|a| mac_runs(*a)) {
+            Some(_) => false,
+            None => key.repeats(),
+        }
+    }
+
+    /// 단축키 표의 동작을 한다 (키, 메뉴 막대). 한 것이 있으면 true
+    pub fn run_action(&mut self, a: Action) -> bool {
+        let p = self.active;
+        self.flash = None;
+        match a {
+            Action::Search => self.open_find(),
+            Action::AddFavorite => self.toggle_pin_selected(),
+            Action::NewTab => self.new_tab(p),
+            Action::CloseTab => {
+                let i = self.panes[p].active;
+                self.close_tab(p, i)
+            }
+            Action::ReopenTab => return self.reopen_tab(),
+            Action::NewFolder => self.new_folder(p),
+            Action::Hidden => self.toggle_hidden(),
+            Action::Undo => self.undo(),
+            Action::Layout1 | Action::Layout2 | Action::Layout3 | Action::Layout4 | Action::Layout5 => {
+                let i = [Action::Layout1, Action::Layout2, Action::Layout3, Action::Layout4, Action::Layout5].iter().position(|x| *x == a).unwrap_or(1);
+                self.set_layout(Layout::ALL[i])
+            }
+            Action::Huge => self.set_view(p, ViewMode::Huge),
+            Action::Thumbs => self.set_view(p, ViewMode::Large),
+            Action::Medium => self.set_view(p, ViewMode::Medium),
+            Action::SmallIcons => self.set_view(p, ViewMode::Small),
+            Action::List => self.set_view(p, ViewMode::List),
+            Action::Details => self.set_view(p, ViewMode::Details),
+            Action::Address => self.begin_address(p),
+            Action::Rename => self.begin_item_rename(p),
+            Action::Refresh => self.refresh(p),
+            // 설정 창에 단축키와 도움말이 있다
+            Action::Settings | Action::Help => self.open_settings = true,
+            Action::Favorites | Action::Commands | Action::Preview => return false,
+        }
+        true
+    }
+
+    /// 단축키 표 (메뉴 막대와 설정 창이 본다)
+    pub fn keymap(&self) -> &Keymap {
+        &self.keys
+    }
+
+    /// 창 쪽이 읽은 keys.txt를 넣는다
+    pub fn set_keymap(&mut self, keys: Keymap) {
+        self.keys = keys;
+    }
+
+    /// 동작 a의 키를 c로 바꾼다 (None이면 비운다). 다른 동작이 쓰던 키면 그 동작의 키는 비우고 그 동작을 돌려준다. 저장도 한다
+    pub fn rebind(&mut self, a: Action, c: Option<Combo>) -> Option<Action> {
+        let taken = self.keys.set(a, c);
+        self.save_keys();
+        taken
+    }
+
+    /// 모든 단축키를 기본으로
+    pub fn reset_keys(&mut self) {
+        self.keys = Keymap::default();
+        self.save_keys();
+    }
+
+    fn save_keys(&self) {
+        if self.persist
+            && let Err(e) = self.keys.save()
+        {
+            sakadu::diag::log(|| format!("keys: {e}"));
+        }
+    }
+
+    /// 모양 설정 ("system", "light", "dark")
+    pub fn theme_pref(&self) -> &str {
+        &self.theme_pref
+    }
+
+    pub fn set_theme_pref(&mut self, pref: &str) {
+        self.theme_pref = if matches!(pref, "light" | "dark") { pref.to_string() } else { "system".to_string() };
     }
 
     // ---------- 훑어보기 ----------
@@ -4460,6 +4616,82 @@ mod tests {
         let (x, y) = row_point(&a, 0, 0);
         a.scroll(&g, x, y, 500.0);
         assert_eq!(a.pane(0).tab().scroll, 0.0, "a short list does not scroll");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 단축키 표: 기본 키(Finder 관례)로 동작을 하고, 키를 바꾸면 새 키로만 하며, 기본 조작 키는 단축키로 정하지 않는다
+    #[test]
+    fn keymap_runs_actions_and_can_be_rebound() {
+        let (root, home) = demo();
+        let (mut a, _) = app(&util::join(&home, "업무"));
+        let cmd = Mods { cmd: true, ..Default::default() };
+        let cmd_shift = Mods { cmd: true, shift: true, ..Default::default() };
+        // ⌘T 새 탭, ⌘W 닫기, ⇧⌘T 닫은 탭 다시 열기
+        assert!(a.key(Key::Char('t'), cmd));
+        a.settle();
+        assert_eq!(a.pane(0).tabs.len(), 2);
+        a.navigate(0, Location::Dir(util::join(&home, "다운로드")), None);
+        a.settle();
+        assert!(a.key(Key::Char('w'), cmd));
+        assert_eq!(a.pane(0).tabs.len(), 1);
+        assert!(a.key(Key::Char('t'), cmd_shift));
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(util::join(&home, "다운로드")), "the closed tab comes back");
+        assert!(!a.key(Key::Char('t'), cmd_shift) || a.pane(0).tabs.len() == 2, "nothing more to reopen");
+        // ⌘2 큰 아이콘, ⌘6 자세히, ⌥⌘1 한 칸
+        assert!(a.key(Key::Char('2'), cmd));
+        assert_eq!(a.pane(0).view, ViewMode::Large);
+        assert!(a.key(Key::Char('6'), cmd));
+        assert_eq!(a.pane(0).view, ViewMode::Details);
+        assert!(a.key(Key::Char('1'), Mods { cmd: true, alt: true, ..Default::default() }));
+        assert_eq!(a.layout(), Layout::One);
+        // Return 이름 바꾸기 (줄을 하나 고른 뒤. 다시 연 '다운로드' 탭에는 파일이 하나뿐이다)
+        a.tab_mut(0).select_only(0);
+        assert!(a.key(Key::Return, Mods::default()));
+        assert!(matches!(a.edit, Editing::Item(_)));
+        a.edit = Editing::None;
+        // 새 탭을 ⌘J로 바꾸면 ⌘J로만 연다 (⌘T는 이제 아무것도 아니다). 다른 동작이 쓰던 키면 그 동작은 비운다
+        let cmd_j = Combo::parse("Cmd+J").unwrap();
+        assert_eq!(a.rebind(Action::NewTab, Some(cmd_j)), None);
+        let tabs = a.pane(0).tabs.len();
+        assert!(!a.key(Key::Char('t'), cmd));
+        assert!(a.key(Key::Char('j'), cmd));
+        assert_eq!(a.pane(0).tabs.len(), tabs + 1);
+        assert_eq!(a.rebind(Action::Refresh, Some(cmd_j)), Some(Action::NewTab));
+        assert_eq!(a.keymap().get(Action::NewTab), None);
+        a.reset_keys();
+        assert_eq!(a.keymap().get(Action::NewTab), Combo::parse("Cmd+T"));
+        // 누르고 있어도 동작은 한 번 (새 폴더), 화살표는 되풀이한다
+        assert!(!a.key_repeats(Key::Char('n'), cmd_shift));
+        assert!(a.key_repeats(Key::Down, Mods::default()));
+        // 기본 조작(⌘O 열기, ⌘[ 뒤로, ⇧⌘Z 실행 복귀)은 단축키로 정하지 않는다
+        for s in ["Cmd+O", "Cmd+[", "Shift+Cmd+Z", "Cmd+Up"] {
+            assert!(fixed_key(Combo::parse(s).unwrap()), "{s}");
+        }
+        assert!(!fixed_key(cmd_j));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 모양 설정은 세션에 남고 다음에 열 때 돌아온다. 작업 공간을 오가도 바뀌지 않는다 (앱 전체의 것)
+    #[test]
+    fn theme_preference_is_saved_and_survives_workspace_switches() {
+        let (root, home) = demo();
+        let (mut a, _) = app(&home);
+        assert_eq!(a.theme_pref(), "system");
+        a.set_theme_pref("dark");
+        assert_eq!(a.prefs().theme, "dark");
+        let s = a.to_session();
+        assert_eq!(s.look.theme, "dark");
+        let (mut b, _) = app(&home);
+        b.open_saved(Workspaces::default(), Some(&s), &home);
+        assert_eq!(b.theme_pref(), "dark");
+        b.new_workspace();
+        b.edit = Editing::None;
+        b.set_theme_pref("light");
+        b.switch_workspace(0);
+        assert_eq!(b.theme_pref(), "light", "switching workspaces keeps the app's look");
+        b.set_theme_pref("sepia");
+        assert_eq!(b.theme_pref(), "system", "an unknown value means follow the Mac");
         std::fs::remove_dir_all(root).unwrap();
     }
 

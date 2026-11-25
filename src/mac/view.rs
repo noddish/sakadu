@@ -21,7 +21,7 @@ use objc2::ffi::NSInteger;
 use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, Sel};
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
     NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
     NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo, NSDraggingItem, NSDraggingSession, NSDraggingSource, NSPasteboard, NSPasteboardTypeFileURL,
     NSPasteboardWriting,
@@ -612,8 +612,8 @@ impl SakaduView {
     /// 키 하나를 App에 넘긴다 (이 뷰가 받은 키, 그리고 훑어보기 창이 넘겨준 키). 받았으면 true
     fn handle_key(&self, e: &NSEvent) -> bool {
         let key = key_of(e.keyCode());
-        // 파일을 만들거나 고치는 키, 열고 닫는 키는 누르고 있어도 한 번만 받는다
-        if e.isARepeat() && key.is_some_and(|k| !k.repeats()) {
+        // 파일을 만들거나 고치는 키, 열고 닫는 키, 단축키 표의 동작은 누르고 있어도 한 번만 받는다
+        if e.isARepeat() && key.is_some_and(|k| !with_app(|a| a.key_repeats(k, mods(e))).unwrap_or(false)) {
             return true;
         }
         // 스페이스·⌘Y가 열지 닫을지는 훑어보기 창이 지금 떠 있는지로 정한다: 창에 물어 App에 맞춰 둔다
@@ -1000,6 +1000,12 @@ fn sync_look() {
 /// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다). 미리 보기 카드의 그림과 글도 뒷줄에서 읽는다
 fn pump() {
     pump_find();
+    // 설정·도움말 단축키: 설정 창을 연다 (단축키와 도움말이 거기 있다)
+    if with_app(|a| std::mem::take(&mut a.open_settings)) == Some(true)
+        && let Some(mtm) = MainThreadMarker::new()
+    {
+        settings::open(mtm);
+    }
     // 클립보드: 담아 달라는 것을 담고, 붙여넣어 달라고 했으면 읽어서 넘긴다 (그러면 아래에서 맡길 작업이 생긴다)
     if let Some((out, cut, wanted, left)) = with_app(|a| (a.clip_out.take(), std::mem::take(&mut a.clip_cut), a.clip_in.take(), a.clip_left.take())) {
         // 잘라 둔 것을 옮기는 묶음이 끝났다: 옮겨 간 것은 클립보드에서 빼고, 옮기지 못한 것만 잘라 둔 채로 남긴다
@@ -1240,29 +1246,69 @@ fn key_of(code: u16) -> Option<Key> {
         // 지우기(⌫)
         0x33 => Key::Delete,
         0x31 => Key::Char(' '),
-        0x00 => Key::Char('a'),
-        0x25 => Key::Char('l'),
-        0x2D => Key::Char('n'),
-        0x02 => Key::Char('d'),
-        0x09 => Key::Char('v'),
-        0x10 => Key::Char('y'),
-        0x05 => Key::Char('g'),
-        0x1F => Key::Char('o'),
-        0x0F => Key::Char('r'),
-        0x03 => Key::Char('f'),
-        0x11 => Key::Char('t'),
-        0x0D => Key::Char('w'),
-        0x21 => Key::Char('['),
-        0x1E => Key::Char(']'),
-        0x2F => Key::Char('.'),
-        0x12 => Key::Char('1'),
-        0x13 => Key::Char('2'),
-        0x14 => Key::Char('3'),
-        0x15 => Key::Char('4'),
-        0x17 => Key::Char('5'),
-        _ => return None,
+        _ => {
+            // 글자·숫자·기호 (자판의 자리. 한글 2벌식도 같은 자리를 쓴다)와 F키
+            if let Some(i) = KEY_CHARS.iter().position(|k| k.0 == code) {
+                return Some(Key::Char(KEY_CHARS[i].1));
+            }
+            return F_KEYS.iter().position(|k| *k == code).map(|n| Key::F(n as u8 + 1));
+        }
     })
 }
+
+/// 맥 자판의 키 번호 ↔ 글자 (US 자판의 자리, Carbon Events.h의 kVK_ANSI_*)
+const KEY_CHARS: [(u16, char); 47] = [
+    (0x00, 'a'),
+    (0x0B, 'b'),
+    (0x08, 'c'),
+    (0x02, 'd'),
+    (0x0E, 'e'),
+    (0x03, 'f'),
+    (0x05, 'g'),
+    (0x04, 'h'),
+    (0x22, 'i'),
+    (0x26, 'j'),
+    (0x28, 'k'),
+    (0x25, 'l'),
+    (0x2E, 'm'),
+    (0x2D, 'n'),
+    (0x1F, 'o'),
+    (0x23, 'p'),
+    (0x0C, 'q'),
+    (0x0F, 'r'),
+    (0x01, 's'),
+    (0x11, 't'),
+    (0x20, 'u'),
+    (0x09, 'v'),
+    (0x0D, 'w'),
+    (0x07, 'x'),
+    (0x10, 'y'),
+    (0x06, 'z'),
+    (0x1D, '0'),
+    (0x12, '1'),
+    (0x13, '2'),
+    (0x14, '3'),
+    (0x15, '4'),
+    (0x17, '5'),
+    (0x16, '6'),
+    (0x1A, '7'),
+    (0x1C, '8'),
+    (0x19, '9'),
+    (0x1B, '-'),
+    (0x18, '='),
+    (0x21, '['),
+    (0x1E, ']'),
+    (0x2A, '\\'),
+    (0x29, ';'),
+    (0x27, '\''),
+    (0x2B, ','),
+    (0x2F, '.'),
+    (0x2C, '/'),
+    (0x32, '`'),
+];
+
+/// F1~F20의 키 번호 (kVK_F1 …)
+const F_KEYS: [u16; 20] = [0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A, 0x40, 0x4F, 0x50, 0x5A];
 
 /// 사이드바 '모든 공간'에 늘 있는 줄: 홈 아래 폴더들과 연결된 디스크
 fn places() -> Vec<(String, String)> {
@@ -1299,9 +1345,11 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
             let app = NSApplication::sharedApplication(mtm);
-            main_menu(mtm, &app);
             let smoke = SMOKE.with(|s| s.borrow().clone());
             let window = open_window(mtm, smoke.clone());
+            // 메뉴 막대의 키는 단축키 표에서 온다: 창(App)을 만든 뒤에 짓는다
+            main_menu(mtm, &app);
+            apply_theme(mtm);
             window.setDelegate(Some(ProtocolObject::from_ref(self)));
             let _ = self.ivars().window.set(window);
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -1357,8 +1405,44 @@ define_class!(
         fn sakadu_settings(&self, _sender: Option<&AnyObject>) {
             settings::open(self.mtm());
         }
+
+        /// 메뉴 막대의 동작 줄 (파일·보기·이동·도움말): 줄의 tag가 단축키 표(ACTIONS)의 번호다.
+        /// 메뉴 단축키(⌘T, ⌘W, ⇧⌘N…)는 뷰의 handle_key를 거치지 않으므로, 단축키 표의 동작은 누르고 있어도 한 번만 한다는 규칙을 여기서도 지킨다
+        #[unsafe(method(sakaduAction:))]
+        fn sakadu_action(&self, sender: &NSMenuItem) {
+            if held_key(self.mtm()) {
+                return;
+            }
+            let Some(&(a, ..)) = usize::try_from(sender.tag()).ok().and_then(|i| sakadu::keys::ACTIONS.get(i)) else { return };
+            with_app(|app| app.run_action(a));
+            after_menu();
+        }
+
+        /// 이동 메뉴의 뒤로·앞으로·위 폴더 (tag 0, 1, 2. 바꾸지 않는 키)
+        #[unsafe(method(sakaduGo:))]
+        fn sakadu_go(&self, sender: &NSMenuItem) {
+            let tag = sender.tag();
+            with_app(|app| {
+                let p = app.active_pane();
+                match tag {
+                    0 => app.go_back(p),
+                    1 => app.go_forward(p),
+                    _ => app.go_up(p),
+                }
+            });
+            after_menu();
+        }
     }
 );
+
+/// 메뉴 막대에서 동작을 한 뒤: 본 창을 입력 뒤처럼 맞춘다 (읽기 시작, 입력 상자, 다시 그리기)
+fn after_menu() {
+    VIEW.with(|v| {
+        if let Some(v) = v.get() {
+            v.after_input();
+        }
+    });
+}
 
 impl Delegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
@@ -1395,6 +1479,7 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
         app.persist = true;
         app.open_saved(sakadu::workspaces::load(), sakadu::session::load().as_ref(), &home);
         app.load_find_setting();
+        app.set_keymap(sakadu::keys::Keymap::load());
     }
     app.lights_bottom = lights_bottom(&window);
     window.setTitle(&NSString::from_str(&app.title()));
@@ -1411,14 +1496,34 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
     window
 }
 
-/// 앱 메뉴: Sakadu(정보·설정·가리기·끝내기), 편집(실행 취소·오려두기·복사·붙여넣기·모두 선택), 윈도(최소화·확대/축소).
-/// 편집 메뉴의 줄은 키 입력을 가진 쪽이 받는다: 입력 상자에서는 글자에, 목록에서는 실행 취소가 파일 작업 되돌리기, 전체 선택이 모든 줄 고르기
-fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
+/// 앱 메뉴: Sakadu(정보·설정·가리기·끝내기), 파일, 편집(실행 취소·오려두기·복사·붙여넣기·모두 선택·찾기), 보기, 이동, 윈도(최소화·확대/축소), 도움말.
+/// 편집 메뉴의 줄은 키 입력을 가진 쪽이 받는다: 입력 상자에서는 글자에, 목록에서는 실행 취소가 파일 작업 되돌리기, 전체 선택이 모든 줄 고르기.
+/// 동작 줄의 키는 단축키 표(App::keymap)에서 온다: 설정에서 키를 바꾸면 다시 짓는다
+pub(super) fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
+    use sakadu::keys::{ACTIONS, Action, name};
+    let keys = with_app(|a| a.keymap().clone()).unwrap_or_default();
     let item = |menu: &NSMenu, title: &str, action: Sel, key: &str, mods: Option<NSEventModifierFlags>| {
         let it = unsafe { menu.addItemWithTitle_action_keyEquivalent(&NSString::from_str(title), Some(action), &NSString::from_str(key)) };
         if let Some(m) = mods {
             it.setKeyEquivalentModifierMask(m);
         }
+        it
+    };
+    // 단축키 표의 키를 줄에 단다 (⌘나 ⌃가 없는 키는 달지 않는다: 메뉴 키는 입력 상자의 글자 입력보다 먼저 받아 간다)
+    let keyed = |menu: &NSMenu, title: &str, action: Sel, a: Action| {
+        let it = item(menu, title, action, "", None);
+        if let Some((key, mods)) = keys.get(a).and_then(menu_key) {
+            it.setKeyEquivalent(&NSString::from_str(&key));
+            it.setKeyEquivalentModifierMask(mods);
+        }
+        it
+    };
+    let act = |menu: &NSMenu, a: Action| {
+        let it = keyed(menu, name(a), sel!(sakaduAction:), a);
+        it.setTag(ACTIONS.iter().position(|x| x.0 == a).unwrap_or(0) as NSInteger);
+    };
+    let go = |menu: &NSMenu, title: &str, tag: NSInteger, key: &str, mods: NSEventModifierFlags| {
+        item(menu, title, sel!(sakaduGo:), key, Some(mods)).setTag(tag);
     };
     let submenu = |bar: &NSMenu, title: &str| {
         let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
@@ -1427,32 +1532,110 @@ fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
         bar.addItem(&top);
         menu
     };
+    let sep = |menu: &NSMenu| menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let cmd = NSEventModifierFlags::Command;
     let bar = NSMenu::new(mtm);
     let m = submenu(&bar, "Sakadu");
     item(&m, "Sakadu 정보", sel!(orderFrontStandardAboutPanel:), "", None);
-    m.addItem(&NSMenuItem::separatorItem(mtm));
-    item(&m, "설정…", sel!(sakaduSettings:), ",", None);
-    m.addItem(&NSMenuItem::separatorItem(mtm));
+    sep(&m);
+    keyed(&m, "설정…", sel!(sakaduSettings:), Action::Settings);
+    sep(&m);
     item(&m, "Sakadu 가리기", sel!(hide:), "h", None);
-    item(&m, "기타 가리기", sel!(hideOtherApplications:), "h", Some(NSEventModifierFlags::Command | NSEventModifierFlags::Option));
+    item(&m, "기타 가리기", sel!(hideOtherApplications:), "h", Some(cmd | NSEventModifierFlags::Option));
     item(&m, "모두 보기", sel!(unhideAllApplications:), "", None);
-    m.addItem(&NSMenuItem::separatorItem(mtm));
+    sep(&m);
     item(&m, "Sakadu 종료", sel!(terminate:), "q", None);
+    let f = submenu(&bar, "파일");
+    for a in [Action::NewTab, Action::NewFolder, Action::CloseTab, Action::ReopenTab] {
+        act(&f, a);
+    }
+    sep(&f);
+    for a in [Action::Rename, Action::AddFavorite] {
+        act(&f, a);
+    }
     let e = submenu(&bar, "편집");
-    item(&e, "실행 취소", sel!(undo:), "z", None);
-    item(&e, "실행 복귀", sel!(redo:), "z", Some(NSEventModifierFlags::Command | NSEventModifierFlags::Shift));
-    e.addItem(&NSMenuItem::separatorItem(mtm));
+    keyed(&e, "실행 취소", sel!(undo:), Action::Undo);
+    item(&e, "실행 복귀", sel!(redo:), "z", Some(cmd | NSEventModifierFlags::Shift));
+    sep(&e);
     item(&e, "오려두기", sel!(cut:), "x", None);
     item(&e, "복사하기", sel!(copy:), "c", None);
     item(&e, "붙여넣기", sel!(paste:), "v", None);
     item(&e, "전체 선택", sel!(selectAll:), "a", None);
-    e.addItem(&NSMenuItem::separatorItem(mtm));
-    item(&e, "찾기", sel!(sakaduFind:), "f", None);
+    sep(&e);
+    keyed(&e, "찾기", sel!(sakaduFind:), Action::Search);
+    let v = submenu(&bar, "보기");
+    act(&v, Action::Hidden);
+    sep(&v);
+    for a in [Action::Huge, Action::Thumbs, Action::Medium, Action::SmallIcons, Action::List, Action::Details] {
+        act(&v, a);
+    }
+    sep(&v);
+    for a in [Action::Layout1, Action::Layout2, Action::Layout3, Action::Layout4, Action::Layout5] {
+        act(&v, a);
+    }
+    sep(&v);
+    act(&v, Action::Refresh);
+    let g = submenu(&bar, "이동");
+    act(&g, Action::Address);
+    sep(&g);
+    go(&g, "뒤로", 0, "[", cmd);
+    go(&g, "앞으로", 1, "]", cmd);
+    go(&g, "위 폴더", 2, "\u{F700}", cmd);
     let w = submenu(&bar, "윈도우");
     item(&w, "최소화", sel!(performMiniaturize:), "m", None);
     item(&w, "확대/축소", sel!(performZoom:), "", None);
+    let h = submenu(&bar, "도움말");
+    act(&h, Action::Help);
     app.setMainMenu(Some(&bar));
     app.setWindowsMenu(Some(&w));
+    app.setHelpMenu(Some(&h));
+}
+
+/// 단축키를 메뉴의 키로: (키 글자, 수정 키). ⌘나 ⌃가 없으면 None (메뉴에 달지 않고 목록이 키로 받는다)
+fn menu_key(c: sakadu::keys::Combo) -> Option<(String, NSEventModifierFlags)> {
+    if !(c.cmd || c.ctrl) {
+        return None;
+    }
+    // AppKit의 기능 키 글자 (NSUpArrowFunctionKey 등)
+    let special = |u: u32| char::from_u32(u).map(String::from);
+    let key = match c.vk {
+        0x41..=0x5A => ((c.vk as u8) as char).to_ascii_lowercase().to_string(),
+        0x30..=0x39 => ((c.vk as u8) as char).to_string(),
+        0x70..=0x83 => special(0xF704 + (c.vk - 0x70) as u32)?,
+        0x26 => special(0xF700)?,
+        0x28 => special(0xF701)?,
+        0x25 => special(0xF702)?,
+        0x27 => special(0xF703)?,
+        0x24 => special(0xF729)?,
+        0x23 => special(0xF72B)?,
+        0x21 => special(0xF72C)?,
+        0x22 => special(0xF72D)?,
+        0x0D => "\r".to_string(),
+        0x08 => "\u{8}".to_string(),
+        0x09 => "\t".to_string(),
+        0x1B => "\u{1b}".to_string(),
+        0x20 => " ".to_string(),
+        vk => sakadu::keys::key_name(vk).filter(|n| n.chars().count() == 1)?,
+    };
+    let mut mods = NSEventModifierFlags::empty();
+    for (on, flag) in [(c.cmd, NSEventModifierFlags::Command), (c.ctrl, NSEventModifierFlags::Control), (c.alt, NSEventModifierFlags::Option), (c.shift, NSEventModifierFlags::Shift)] {
+        if on {
+            mods |= flag;
+        }
+    }
+    Some((key, mods))
+}
+
+/// 앱의 모양을 App의 설정(시스템·밝게·어둡게)으로 정한다. 바뀌면 본 창이 맥 모양 바뀜으로 받아 테마를 다시 정한다
+pub(super) fn apply_theme(mtm: MainThreadMarker) {
+    let pref = with_app(|a| a.theme_pref().to_string()).unwrap_or_default();
+    let name = match pref.as_str() {
+        "light" => Some(unsafe { NSAppearanceNameAqua }),
+        "dark" => Some(unsafe { NSAppearanceNameDarkAqua }),
+        _ => None,
+    };
+    let appearance = name.and_then(NSAppearance::appearanceNamed);
+    NSApplication::sharedApplication(mtm).setAppearance(appearance.as_deref());
 }
 
 /// 신호등(닫기 단추)의 아래 끝을 창 위에서부터 잰 값

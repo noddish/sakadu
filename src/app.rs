@@ -1115,7 +1115,7 @@ impl App {
                     ];
                     // Sakadu 안 단축키로 정해 둔 키는 고르지 않는다 (어디서든 키가 먼저 가로채 그 동작을 키로 부를 수 없게 된다)
                     let taken = |m: HOT_KEY_MODIFIERS, vk: u32| {
-                        let c = crate::keys::Combo { ctrl: m.contains(MOD_CONTROL), shift: m.contains(MOD_SHIFT), alt: m.contains(MOD_ALT), vk: vk as u16 };
+                        let c = crate::keys::Combo { ctrl: m.contains(MOD_CONTROL), shift: m.contains(MOD_SHIFT), alt: m.contains(MOD_ALT), cmd: false, vk: vk as u16 };
                         !m.contains(MOD_WIN) && self.keys.find(c).is_some()
                     };
                     candidates
