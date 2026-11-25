@@ -61,6 +61,8 @@ thread_local! {
     static OPS: OnceCell<std::sync::mpsc::Sender<crate::fileops::Op>> = const { OnceCell::new() };
     /// 폴더 감시 (처음 쓸 때 띄운다). 띄우지 못했으면 None: 그때는 창이 다시 앞으로 올 때와 파일 작업 뒤에만 다시 읽는다
     static WATCH: OnceCell<Option<crate::watch::Watcher>> = const { OnceCell::new() };
+    /// 사이드바 줄의 움직임 때문에 다음 그림을 부탁해 두었다 (schedule_flow)
+    static FLOW_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// 가장 나중에 낸 미리 보기 카드 요청의 번호. 뒷줄이 그림을 읽기 직전에 보고, 그 사이 다른 요청이 나왔으면 읽지 않는다
@@ -147,11 +149,19 @@ define_class!(
             let size = self.bounds().size;
             // 화면 배율 (레티나는 2): 썸네일을 몇 픽셀로 읽을지 정한다
             let scale = self.window().map_or(2.0, |w| w.backingScaleFactor() as f32);
-            with_app(|a| {
+            // 맥 설정의 '동작 줄이기'를 켰으면 사이드바 줄이 미끄러지지 않고 바로 옮겨진다
+            let motion = !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+            let moving = with_app(|a| {
                 a.scale = scale;
+                a.motion = motion;
                 a.resize(size.width as f32, size.height as f32);
                 a.paint(&mut g);
+                a.side_moving()
             });
+            // 사이드바 줄이 아직 미끄러지는 중이면 다음 그림을 곧 다시 그린다
+            if moving == Some(true) {
+                schedule_flow();
+            }
             self.sync_field();
             // 방금 그린 화면에 보이는데 아직 없는 썸네일을 읽기 시작한다
             pump_thumbs();
@@ -184,7 +194,8 @@ define_class!(
         }
 
         /// 오른쪽 단추: 작업 공간 아이콘이면 그 공간의 메뉴 (색, 이름 바꾸기, 지우기),
-        /// 사이드바의 고정한 줄이나 즐겨찾기 항목이면 그 줄의 메뉴 (옮기기, '모든 공간'에 두고 빼기, 고정 풀기),
+        /// 사이드바의 고정한 줄이나 즐겨찾기 항목이면 그 줄의 메뉴 (옮기기, '모든 공간'에 두고 빼기, 고정 풀기, 그룹으로 옮기기),
+        /// 즐겨찾기 그룹 머리면 그룹 메뉴 (이름 바꾸기, 그룹 풀기, 그룹 지우기),
         /// 목록의 줄이면 고른 항목들의 메뉴 (열기, Finder에서 보기, 이름 바꾸기, 휴지통으로 이동), 목록의 빈 곳이면 새 폴더와 새로 고침
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, e: &NSEvent) {
@@ -232,7 +243,7 @@ define_class!(
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _e: &NSEvent) {
-            with_app(|a| a.hover = crate::app::Hit::None);
+            with_app(App::mouse_left);
             self.sync_pointer();
             self.setNeedsDisplay(true);
         }
@@ -966,6 +977,24 @@ fn board_paths(board: &NSPasteboard) -> Vec<String> {
         }
     }
     out
+}
+
+/// 사이드바 줄이 미끄러지는 동안: 한 틀(약 1/60초) 뒤에 다시 그려 달라고 한다. 이미 부탁해 두었으면 그대로 둔다
+/// (그릴 때마다 부탁이 쌓이지 않게). 다 미끄러지면 그리기가 더는 부탁하지 않는다
+fn schedule_flow() {
+    if FLOW_PENDING.get() {
+        return;
+    }
+    let Ok(when) = DispatchTime::try_from(Duration::from_millis(15)) else { return };
+    FLOW_PENDING.set(true);
+    let _ = DispatchQueue::main().after(when, || {
+        FLOW_PENDING.set(false);
+        VIEW.with(|v| {
+            if let Some(v) = v.get() {
+                v.setNeedsDisplay(true);
+            }
+        });
+    });
 }
 
 /// 뒷줄 결과를 받은 뒤 (메인 줄에서): 입력 상자를 App 상태에 맞추고 다시 그려 달라고 한다.

@@ -10,6 +10,9 @@
 //! 끌어서 놓기도 그렇다: 앱은 끌어 낼 항목(take_drag)을 내주고, 끌려 온 것이 어디에 놓일지(drag_over)와 놓기(drop_paths)를 맡는다.
 //! 검색(⌘F)은 find.rs: 도구 막대에서 입력 칸이 늘어나고, 결과는 사이드바 자리에 보인다.
 //! 명령 메뉴(⌘K)는 commands.rs, 새 탭 시작 화면과 최근 위치는 start.rs (둘 다 Windows와 같은 공통 코드를 쓴다).
+//! 사이드바 줄은 누를 때가 아니라 뗄 때 열고, 위아래로 끌면 옮긴다: 고정한 것끼리, 즐겨찾기 항목과 그룹, 그 둘 사이
+//! (빈자리·놓을 곳 계산과 미끄러지는 움직임은 Windows와 같은 공통 ui::side_flow). 즐겨찾기 그룹은 '모든 공간' 줄의 단추로 만들고,
+//! 그룹 머리의 메뉴로 이름을 바꾸고 풀고 지운다. 끌려 온 파일은 탭 칩 위에 놓으면 그 탭의 폴더로 간다.
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
 mod commands;
@@ -26,7 +29,7 @@ use sakadu::favorites::{self, Favorite, Favorites, Row};
 use sakadu::fileops::{Undo, UndoStack};
 use sakadu::keys::{self, Action, Combo, Keymap};
 use sakadu::listing::{self, Entry, Kind};
-use sakadu::palette::{self, R_ROW, System, Theme, alpha};
+use sakadu::palette::{self, R_CTRL, R_ROW, System, Theme, alpha};
 use sakadu::pane::{DATE_AUTO, DEFAULT_COLS, LoadState, Location, Restore, Sort, SortKey, Tab, ViewMode, child_toward};
 use sakadu::session::{self, Look, PaneState, Session};
 use sakadu::ui::glyph::*;
@@ -34,6 +37,7 @@ use sakadu::ui::menu::{MenuIcon, MenuLine, MenuScene, menu_height, menu_hit, men
 use sakadu::ui::paint::{EntryArt, PaneHover, PaneScene, paint_pane_border, paint_pane_head, paint_pane_list};
 use sakadu::ui::preview_card::{CardArt, CardBody, CardGeom, CardHover, CardScene, IMAGE_EXTS, TEXT_EXTS, card_geom, paint_preview_card};
 use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, rail_geom};
+use sakadu::ui::side_flow::{DropPlan, DropTo, FlowKind, FlowSlot, SideFlow, drop_plan, group_span, paint_drag_card, paint_drop_area, paint_group_plate};
 use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, paint_toolbar, toolbar_geom};
 use sakadu::ui::*;
 use sakadu::util;
@@ -84,6 +88,8 @@ pub enum Hit {
     SideTitle,
     /// 사이드바 목록의 줄 (side_rows의 번호)
     SideRow(usize),
+    /// '모든 공간' 이름 줄 오른쪽 끝의 새 그룹 단추 (Windows의 같은 자리 단추)
+    NewGroup,
     /// 도구 막대의 칸 나누기 단추, 칸의 경로 줄에 있는 보기 방식 단추 (누르면 메뉴가 열린다)
     LayoutPick,
     ViewPick(usize),
@@ -163,8 +169,11 @@ pub enum MenuKind {
     Spaces,
     /// 사이드바의 고정한 줄을 오른쪽 단추로 눌렀을 때 (이 공간에 고정한 것 가운데 번호): 위·아래로 옮기기, 모든 공간에 두기, 고정 풀기
     Pin(usize),
-    /// 사이드바 '모든 공간'의 즐겨찾기 항목을 오른쪽 단추로 눌렀을 때 (Favorites::rows의 줄 번호): 이 작업 공간에만 두기, 모든 공간에서 빼기
+    /// 사이드바 '모든 공간'의 즐겨찾기 항목을 오른쪽 단추로 눌렀을 때 (Favorites::rows의 줄 번호): 이 작업 공간에만 두기, 모든 공간에서 빼기,
+    /// 그룹으로 옮기기 (Windows의 '그룹으로 이동' 하위 메뉴를 펼쳐 둔 줄들)
     Fav(usize),
+    /// 즐겨찾기 그룹 머리를 오른쪽 단추로 눌렀을 때 (그룹 번호): 이름 바꾸기, 그룹 풀기, 그룹과 안의 즐겨찾기 빼기
+    Group(usize),
     /// 목록의 줄을 오른쪽 단추로 눌렀을 때: 고른 항목들의 메뉴 (열기, Finder에서 보기, 이름 바꾸기, 휴지통으로 이동)
     Rows,
     /// 목록의 빈 곳을 오른쪽 단추로 눌렀을 때: 그 폴더의 메뉴 (새 폴더, 새로 고침)
@@ -200,6 +209,19 @@ impl PinAct {
             PinAct::Unpin => "고정 풀기",
         }
     }
+}
+
+/// 즐겨찾기 항목 메뉴의 줄
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FavAct {
+    /// 이 작업 공간에만 두기
+    ToPins,
+    /// 모든 공간에서 빼기
+    Remove,
+    /// 그 그룹으로 (None이면 그룹 밖으로)
+    ToGroup(Option<usize>),
+    /// 새 그룹을 만들어 넣기
+    NewGroup,
 }
 
 /// 목록 메뉴(고른 항목들)의 줄
@@ -262,6 +284,8 @@ pub enum DropAt {
     Row(usize, usize),
     /// 사이드바의 폴더 줄 (side_rows의 번호)
     Side(usize),
+    /// 칸 p의 탭 칩 i (그 탭이 보이는 폴더로. 지금 탭이 아니어도)
+    Tab(usize, usize),
 }
 
 /// 고른 줄을 누른 것: 누른 채 조금 넘게 움직이면 그 항목들을 끌어 낸다
@@ -285,6 +309,23 @@ struct Clicked {
 
 /// 누른 채 이만큼 넘게 움직여야 끌기로 본다 (누르다가 손이 조금 떨린 것은 끌기가 아니다)
 const DRAG_START: f32 = 4.0;
+
+/// 누른 사이드바 줄 (Windows의 FavPress·PinPress, 끌기 시작하면 FavMove·PinMove): 그대로 떼면 그 줄을 열고,
+/// 위아래로 조금 넘게 움직이면 그 줄을 카드로 띄워 끌어 옮긴다
+#[derive(Clone, Copy, Debug)]
+struct SidePress {
+    /// side_rows의 번호
+    row: usize,
+    /// 끌 수 있는 줄이면 무엇인지 (고정한 줄, 즐겨찾기 항목·그룹 머리). 바로가기는 끌지 않는다
+    what: Option<FlowKind>,
+    /// 누른 y
+    y0: f32,
+    /// 끄는 중이면 (마우스 y, 카드 위쪽에서 잡은 자리까지)
+    moving: Option<(f32, f32)>,
+}
+
+/// '모든 공간' 이름 줄의 작은 단추 (새 그룹) 한 변
+const MINI: f32 = 24.0;
 
 /// 창 시험(`sakadu-mac --smoke`)이 보는 앱의 상태: 지금 칸의 지금 탭
 #[derive(Debug)]
@@ -433,6 +474,8 @@ pub enum Editing {
     Space,
     /// 목록 항목의 이름
     Item(ItemEdit),
+    /// 즐겨찾기 그룹 g의 이름 (사이드바의 그 머리 줄에서)
+    Group(usize),
 }
 
 /// 이름을 고치는 항목. 줄 번호가 아니라 탭·폴더·이름·파일 번호로 적어 둔다: 고치는 동안 목록이 다시 읽히거나 탭이 다른 곳으로
@@ -812,15 +855,48 @@ struct SideRow {
     indent: bool,
     y: f32,
     h: f32,
+    /// 끌어 옮기기에서 맡는 몫 (공통 ui::side_flow): 고정한 것의 번호, 즐겨찾기 줄, 즐겨찾기 바로 위 줄
+    flow: FlowKind,
+}
+
+impl SideRow {
+    /// 공통 끌기 계산에 넘길 자리
+    fn slot(&self) -> FlowSlot {
+        FlowSlot { t: self.y, b: self.y + self.h, kind: self.flow }
+    }
+
+    /// 움직임을 이어 가는 열쇠: 같은 줄이면 자리가 바뀌어도 같다 (고정한 것·즐겨찾기 항목·바로가기는 경로, 그룹은 이름)
+    fn key(&self) -> String {
+        let path = self.path.as_deref().unwrap_or_default();
+        match self.kind {
+            SideKind::Pin => pin_key(path),
+            SideKind::Fav => fav_key(path),
+            SideKind::Group(..) => format!("g|{}", self.label),
+            SideKind::Place => format!("s|{path}"),
+            SideKind::Hint => "hint".to_string(),
+            SideKind::Label => "label".to_string(),
+        }
+    }
+}
+
+/// 고정한 줄의 움직임 열쇠
+fn pin_key(path: &str) -> String {
+    format!("p|{path}")
+}
+
+/// 즐겨찾기 항목 줄의 움직임 열쇠
+fn fav_key(path: &str) -> String {
+    format!("f|{path}")
 }
 
 /// 사이드바 줄 i를 오른쪽 단추로 눌렀을 때 여는 메뉴: 고정한 줄이면 고정한 것 가운데 번호로, 즐겨찾기 항목이면 즐겨찾기 줄
-/// (Favorites::rows) 번호로 가리킨다. 바로가기와 그룹 머리, 안내, 구역 이름에는 메뉴가 없다
+/// (Favorites::rows) 번호로, 그룹 머리면 그룹 번호로 가리킨다. 바로가기, 안내, 구역 이름에는 메뉴가 없다
 fn side_menu(rows: &[SideRow], i: usize) -> Option<MenuKind> {
     let before = |same: fn(SideKind) -> bool| rows[..i].iter().filter(|r| same(r.kind)).count();
     match rows.get(i)?.kind {
         SideKind::Pin => Some(MenuKind::Pin(before(|k| k == SideKind::Pin))),
         SideKind::Fav => Some(MenuKind::Fav(before(|k| matches!(k, SideKind::Group(..) | SideKind::Fav)))),
+        SideKind::Group(g, _) => Some(MenuKind::Group(g)),
         _ => None,
     }
 }
@@ -991,6 +1067,14 @@ pub struct App {
     /// 명령 메뉴(⌘K)와 그 입력 칸의 글
     cmd: Option<sakadu::ui::commands::CmdMenu>,
     cmd_text: String,
+    /// 누르고 있는 사이드바 줄 (떼면 열고, 끌면 옮긴다)
+    side_press: Option<SidePress>,
+    /// 사이드바 줄이 미끄러지는 움직임 (공통 ui::side_flow). 그릴 때 한 걸음씩 나아가므로 그리기(&self) 안에서 고친다
+    side_flow: RefCell<SideFlow>,
+    /// 움직임을 보일지. 맥 설정의 '동작 줄이기'를 켜면 false: 사이드바 줄이 미끄러지지 않고 바로 옮겨진다 (창 쪽이 그리기 전에 넣는다)
+    pub motion: bool,
+    /// 마우스가 사이드바 목록 위에 있다: '모든 공간' 줄의 새 그룹 단추가 보인다 (Windows처럼 마우스를 올릴 때만)
+    side_hot: bool,
 }
 
 impl App {
@@ -1075,6 +1159,10 @@ impl App {
             volumes_wanted: false,
             cmd: None,
             cmd_text: String::new(),
+            side_press: None,
+            side_flow: RefCell::new(SideFlow::default()),
+            motion: true,
+            side_hot: false,
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
@@ -1163,7 +1251,7 @@ impl App {
         &self.favs
     }
 
-    #[cfg(test)]
+    /// 작업 공간 (시험과 창 시험이 고정한 것을 본다)
     pub fn workspaces(&self) -> &Workspaces {
         &self.workspaces
     }
@@ -1520,6 +1608,7 @@ impl App {
         match std::mem::replace(&mut self.edit, Editing::None) {
             Editing::Space => self.commit_rename(text),
             Editing::Address(p) => self.probe_path(p, text.to_string(), false),
+            Editing::Group(g) => self.commit_group_rename(g, text),
             Editing::None | Editing::Item(_) => {}
         }
     }
@@ -1568,7 +1657,8 @@ impl App {
         }
     }
 
-    /// 입력 상자 자리: 공간 이름이면 사이드바의 이름 자리, 항목 이름이면 그 줄의 이름 자리, 경로면 칸의 경로 자리 (app.rs addr_rect)
+    /// 입력 상자 자리: 공간 이름이면 사이드바의 이름 자리, 항목 이름이면 그 줄의 이름 자리, 그룹 이름이면 사이드바의 그 머리 줄,
+    /// 경로면 칸의 경로 자리 (app.rs addr_rect)
     pub fn address_rect(&self) -> Option<R> {
         match &self.edit {
             Editing::None => None,
@@ -1578,16 +1668,18 @@ impl App {
                 Some(addr_rect(&geom(r)))
             }
             Editing::Item(_) => self.item_edit().map(|(_, r)| r),
+            Editing::Group(g) => self.group_edit_rect(*g),
         }
     }
 
-    /// 입력 상자에 처음 넣을 글자: 지금 공간의 이름, 고치는 항목의 이름, 또는 지금 폴더
+    /// 입력 상자에 처음 넣을 글자: 지금 공간의 이름, 고치는 항목·그룹의 이름, 또는 지금 폴더
     pub fn address_text(&self) -> String {
         match &self.edit {
             Editing::None => String::new(),
             Editing::Space => self.workspaces.current_name().unwrap_or_default().to_string(),
             Editing::Address(p) => self.panes[*p].tab().loc.dir().unwrap_or_default().to_string(),
             Editing::Item(e) => e.name.clone(),
+            Editing::Group(g) => self.favs.groups.get(*g).map(|grp| grp.name.clone()).unwrap_or_default(),
         }
     }
 
@@ -1600,18 +1692,20 @@ impl App {
         }
     }
 
-    /// 입력 상자의 글자가 상자 왼쪽 끝에서 들어가 시작하는 거리. 항목 이름은 목록에 그려져 있던 이름과 같은 자리에서 시작한다
+    /// 입력 상자의 글자가 상자 왼쪽 끝에서 들어가 시작하는 거리. 항목·그룹 이름은 그려져 있던 이름과 같은 자리에서 시작한다
     pub fn address_pad(&self) -> f32 {
-        if matches!(self.edit, Editing::Item(_)) { 2.0 } else { 6.0 }
+        if matches!(self.edit, Editing::Item(_) | Editing::Group(_)) { 2.0 } else { 6.0 }
     }
 
-    /// 입력 상자가 지금 무엇을 담는지 가리는 값 (바뀌면 창 쪽이 글자를 다시 채운다): 경로를 입력하는 칸, 공간 이름, 항목 이름 고치기의 번호
+    /// 입력 상자가 지금 무엇을 담는지 가리는 값 (바뀌면 창 쪽이 글자를 다시 채운다): 경로를 입력하는 칸, 공간 이름, 항목 이름 고치기의 번호,
+    /// 그룹 번호 (항목 고치기의 번호와 겹치지 않게 높은 자리에 둔다)
     pub fn edit_key(&self) -> Option<u64> {
         match &self.edit {
             Editing::None => None,
             Editing::Address(p) => Some(*p as u64),
             Editing::Space => Some(100),
             Editing::Item(e) => Some(1000 + e.serial),
+            Editing::Group(g) => Some((1 << 40) + *g as u64),
         }
     }
 
@@ -1830,8 +1924,9 @@ impl App {
     }
 
     /// 끌려 온 것(paths)을 (x, y)에 놓으면 어디로 가는지: 놓을 곳, 받는 폴더, 그 묶음을 맡을 탭.
-    /// 폴더 줄 위면 그 폴더 안으로, 그 밖의 목록 자리면 그 칸이 보이는 폴더로, 사이드바의 폴더 줄이면 그 폴더로.
-    /// 놓을 수 없는 곳(도구 막대, 탭, 파일을 가리키는 사이드바 줄)이나 놓아도 달라질 것이 없는 곳(이미 그 폴더에 있다,
+    /// 폴더 줄 위면 그 폴더 안으로, 그 밖의 목록 자리면 그 칸이 보이는 폴더로, 사이드바의 폴더 줄이면 그 폴더로,
+    /// 탭 칩 위면 그 탭이 보이는 폴더로 (지금 탭이 아니어도. Windows와 같다).
+    /// 놓을 수 없는 곳(도구 막대, 시작 화면 탭, 파일을 가리키는 사이드바 줄)이나 놓아도 달라질 것이 없는 곳(이미 그 폴더에 있다,
     /// 끌고 있는 폴더 자신이나 그 안)이면 None
     fn drop_target(&self, g: &Gfx, x: f32, y: f32, paths: &[String]) -> Option<(DropAt, String, u64)> {
         // 미리 보기 카드는 없는 것으로 보고 그 아래 칸을 찾는다
@@ -1842,7 +1937,12 @@ impl App {
                 let row = rows.get(i).filter(|row| row.is_dir)?;
                 (DropAt::Side(i), row.path.clone()?, self.panes[self.active].tab().id)
             }
-            // 탭 위는 놓을 곳이 아니다 (다른 탭 위에 놓았는데 지금 탭의 폴더로 가면 엉뚱한 곳에 놓인다). 경로 줄은 지금 탭의 것이다
+            // 탭 칩: 그 탭의 폴더 (닫기 단추 위도 그 탭이다). 묶음도 그 탭이 맡는다
+            Hit::Tab(p, i) | Hit::TabClose(p, i) => {
+                let tab = self.panes[p].tabs.get(i)?;
+                (DropAt::Tab(p, i), tab.loc.dir()?.to_string(), tab.id)
+            }
+            // 경로 줄은 지금 탭의 것이다
             Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) | Hit::Crumb(p, _) | Hit::CrumbEmpty(p) | Hit::Star(p) => {
                 let tab = self.panes[p].tab();
                 let here = tab.loc.dir()?.to_string();
@@ -1893,7 +1993,7 @@ impl App {
         // 놓을 곳은 끄는 동안 보던 그 목록에서 찾는다 (미뤄 둔 읽기 결과와 다시 읽기는 그다음에 한다)
         let started = match self.drop_target(g, x, y, &paths) {
             Some((at, dir, tab)) => {
-                if let DropAt::Pane(p) | DropAt::Row(p, _) = at {
+                if let DropAt::Pane(p) | DropAt::Row(p, _) | DropAt::Tab(p, _) = at {
                     self.activate_pane(p);
                 }
                 self.edit = Editing::None;
@@ -1999,6 +2099,12 @@ impl App {
     /// 목록에서 사라졌거나, 그 줄이 가려졌으면) 고치기를 끝낸다. 창 쪽이 입력 상자를 맞추기 전에 부른다
     pub fn sync_edit(&mut self) {
         if matches!(self.edit, Editing::Item(_)) && self.item_edit().is_none() {
+            self.edit = Editing::None;
+        }
+        // 그룹 이름: 그 그룹이 없어졌거나 머리 줄이 사이드바 목록에 다 보이지 않으면(검색 패널로 바뀌었으면) 끝낸다
+        if let Editing::Group(g) = self.edit
+            && self.group_edit_rect(g).is_none()
+        {
             self.edit = Editing::None;
         }
         // 경로·이름을 고치기 시작했으면 키보드는 그 상자로 갔다 (고치기를 마쳐도 검색 입력 칸으로 돌아가지 않는다)
@@ -2583,6 +2689,7 @@ impl App {
         self.start_keys = false;
         self.drag = None;
         self.col_drag = None;
+        self.side_press = None;
         self.side_scroll = 0.0;
         self.retheme();
     }
@@ -2961,7 +3068,7 @@ impl App {
             MenuKind::Space(i) => self.rail().spaces.iter().find(|(s, _)| *s == i)?.1,
             MenuKind::Spaces => self.rail().add,
             // 사이드바 줄의 메뉴는 그 줄에 붙인다
-            MenuKind::Pin(_) | MenuKind::Fav(_) => {
+            MenuKind::Pin(_) | MenuKind::Fav(_) | MenuKind::Group(_) => {
                 let rows = self.side_rows();
                 let i = (0..rows.len()).find(|i| side_menu(&rows, *i) == Some(kind))?;
                 self.side_rect(&rows[i])
@@ -3037,7 +3144,9 @@ impl App {
     /// 공간 메뉴는 색 여섯 가지 다음에 이름 바꾸기(지금 공간만), 지우기(공간이 둘 이상일 때만).
     /// 모든 작업 공간 메뉴는 공간 이름들.
     /// 고정한 줄의 메뉴는 위로·아래로 이동(갈 수 있는 쪽만), 모든 공간에 두기, 고정 풀기.
-    /// 즐겨찾기 항목의 메뉴는 이 작업 공간에만 두기, 모든 공간에서 빼기
+    /// 즐겨찾기 항목의 메뉴는 이 작업 공간에만 두기, 모든 공간에서 빼기, 그리고 그룹으로 옮기는 줄들 (그룹마다, 지금 그룹에 체크.
+    /// 그룹 안 항목이면 그룹에서 빼기. 맨 끝은 새 그룹을 만들어 넣기). 앱이 그리는 메뉴에는 하위 메뉴가 없어 Windows의 '그룹으로 이동'을 펼쳐 둔다.
+    /// 그룹 머리의 메뉴는 이름 바꾸기, 그룹 풀기, 그룹과 안의 즐겨찾기 빼기 (묻지 않고 지운다)
     pub fn menu_items(&self, kind: MenuKind) -> Vec<(String, bool)> {
         use sakadu::keys::{Action, name};
         match kind {
@@ -3064,9 +3173,23 @@ impl App {
             }
             MenuKind::Spaces => self.workspaces.list.iter().enumerate().map(|(i, w)| (w.name.clone(), self.workspaces.current == Some(i))).collect(),
             MenuKind::Pin(p) => self.pin_menu(p).into_iter().map(|act| (act.label().to_string(), false)).collect(),
-            MenuKind::Fav(row) => match self.favs.rows().get(row) {
-                Some(Row::Item { .. }) => vec![("이 작업 공간에만 두기".to_string(), false), ("모든 공간에서 빼기".to_string(), false)],
-                _ => Vec::new(),
+            MenuKind::Fav(row) => {
+                let current = match self.favs.rows().get(row) {
+                    Some(Row::Item { group, .. }) => *group,
+                    _ => None,
+                };
+                let line = |act: FavAct| match act {
+                    FavAct::ToPins => ("이 작업 공간에만 두기".to_string(), false),
+                    FavAct::Remove => ("모든 공간에서 빼기".to_string(), false),
+                    FavAct::ToGroup(Some(g)) => (format!("‘{}’ 그룹으로 이동", self.favs.groups.get(g).map_or("", |grp| grp.name.as_str())), current == Some(g)),
+                    FavAct::ToGroup(None) => ("그룹에서 빼기".to_string(), false),
+                    FavAct::NewGroup => ("새 그룹을 만들어 넣기".to_string(), false),
+                };
+                self.fav_menu(row).into_iter().map(line).collect()
+            }
+            MenuKind::Group(g) => match self.favs.groups.get(g) {
+                Some(_) => ["이름 바꾸기", "그룹 풀기 (안의 즐겨찾기는 남김)", "그룹과 안의 즐겨찾기 빼기"].map(|s| (s.to_string(), false)).to_vec(),
+                None => Vec::new(),
             },
             MenuKind::Rows => self.row_menu().into_iter().map(|act| (act.label().to_string(), false)).collect(),
             MenuKind::Blank => vec![("새 폴더".to_string(), false), ("붙여넣기".to_string(), false), ("새로 고침".to_string(), false)],
@@ -3099,11 +3222,27 @@ impl App {
         v
     }
 
+    /// 즐겨찾기 줄 row(Favorites::rows의 번호)의 메뉴에 넣을 줄: 항목이 아니면 비어 있다.
+    /// 그룹으로 옮기는 줄은 그룹이 있을 때만, 그룹에서 빼기는 그룹 안 항목일 때만 있다
+    fn fav_menu(&self, row: usize) -> Vec<FavAct> {
+        let Some(Row::Item { group, .. }) = self.favs.rows().get(row).copied() else { return Vec::new() };
+        let mut v = vec![FavAct::ToPins, FavAct::Remove];
+        v.extend((0..self.favs.groups.len()).map(|g| FavAct::ToGroup(Some(g))));
+        if group.is_some() {
+            v.push(FavAct::ToGroup(None));
+        }
+        v.push(FavAct::NewGroup);
+        v
+    }
+
     /// 메뉴에서 이 번호의 줄 앞에 구분선을 둔다 (보기 방식과 숨김 항목 보기 사이, 색과 그 밖의 줄 사이,
-    /// 고정한 줄을 옮기는 줄과 그 밖의 줄 사이)
+    /// 고정한 줄을 옮기는 줄과 그 밖의 줄 사이, 즐겨찾기 항목을 두고 빼는 줄과 그룹으로 옮기는 줄 사이,
+    /// 그룹 이름 바꾸기와 그룹을 없애는 줄 사이)
     pub fn menu_break(&self, kind: MenuKind) -> Option<usize> {
         match kind {
-            MenuKind::Layout | MenuKind::View | MenuKind::Spaces | MenuKind::Fav(_) | MenuKind::Blank => None,
+            MenuKind::Layout | MenuKind::View | MenuKind::Spaces | MenuKind::Blank => None,
+            MenuKind::Fav(_) => Some(2),
+            MenuKind::Group(_) => Some(1),
             // 보는 줄(열기, Finder에서 보기)과 그 밖의 줄(이름 바꾸기, 복사, 복제, 휴지통으로 이동) 사이
             MenuKind::Rows => Some(2),
             MenuKind::Space(_) => Some(workspaces::COLORS.len()),
@@ -3147,15 +3286,23 @@ impl App {
             },
             MenuKind::Fav(row) => {
                 let Some(Row::Item { group, index }) = self.favs.rows().get(row).copied() else { return };
-                match i {
-                    0 => self.fav_to_pins(group, index),
-                    1 => {
+                match self.fav_menu(row).get(i) {
+                    Some(FavAct::ToPins) => self.fav_to_pins(group, index),
+                    Some(FavAct::Remove) => {
                         self.favs.remove_item(group, index);
                         self.save_favorites();
                     }
-                    _ => {}
+                    Some(FavAct::ToGroup(to)) => self.fav_move_to_group(group, index, *to),
+                    Some(FavAct::NewGroup) => self.fav_move_to_new_group(group, index),
+                    None => {}
                 }
             }
+            MenuKind::Group(g) => match i {
+                0 => self.begin_group_rename(g),
+                1 => self.fav_ungroup(g),
+                2 => self.fav_delete_group(g),
+                _ => {}
+            },
             MenuKind::Rows | MenuKind::Blank => self.pick_list_menu(kind, i),
         }
     }
@@ -3365,6 +3512,14 @@ impl App {
         self.save_workspaces();
     }
 
+    /// 고정한 줄 from을 slot 번째 줄 앞에 끼워 넣는다 (slot이 줄 수와 같으면 맨 끝). 제자리면 그대로 (Windows pin_move와 같다)
+    fn pin_move(&mut self, from: usize, slot: usize) {
+        let Some(ws) = self.workspaces.current_mut().filter(|ws| from < ws.pins.len() && slot <= ws.pins.len() && slot != from && slot != from + 1) else { return };
+        let f = ws.pins.remove(from);
+        ws.pins.insert(if slot > from { slot - 1 } else { slot }, f);
+        self.save_workspaces();
+    }
+
     /// 고정한 것 i를 푼다
     fn unpin(&mut self, i: usize) {
         let Some(ws) = self.workspaces.current_mut().filter(|ws| i < ws.pins.len()) else { return };
@@ -3410,34 +3565,106 @@ impl App {
         self.save_favorites();
     }
 
+    /// '모든 공간' 줄의 새 그룹 단추: 맨 끝에 '새 그룹'을 만들고 이름을 바로 고칠 수 있게 한다 (Windows add_fav_group과 같다)
+    fn add_fav_group(&mut self) {
+        let g = self.favs.add_group("새 그룹".to_string());
+        self.save_favorites();
+        self.begin_group_rename(g);
+    }
+
+    /// 그룹 g의 이름을 그 머리 줄에서 고치기 시작한다 (줄이 보이게 스크롤한다. 확정은 commit_address, 취소는 cancel_address)
+    fn begin_group_rename(&mut self, g: usize) {
+        if g >= self.favs.groups.len() || self.find_shown() {
+            return;
+        }
+        let rows = self.side_rows();
+        if let Some(i) = rows.iter().position(|r| matches!(r.kind, SideKind::Group(h, _) if h == g)) {
+            self.side_reveal(&rows[i]);
+        }
+        self.edit = Editing::Group(g);
+    }
+
+    /// 고친 그룹 이름을 적는다. 비었거나 그대로면 둔다
+    fn commit_group_rename(&mut self, g: usize, text: &str) {
+        let name = favorites::clean_name(text);
+        if !name.is_empty() && self.favs.set_row_name(Row::Group(g), name) {
+            self.save_favorites();
+        }
+    }
+
+    /// 그룹 이름을 고치던 중이면 그만둔다 (그룹 번호가 달라지기 전에)
+    fn end_group_rename(&mut self) {
+        if matches!(self.edit, Editing::Group(_)) {
+            self.edit = Editing::None;
+        }
+    }
+
+    /// 그룹 풀기: 그룹만 없애고 안의 즐겨찾기는 그룹 없음 끝으로 옮긴다
+    fn fav_ungroup(&mut self, g: usize) {
+        self.end_group_rename();
+        self.favs.ungroup(g);
+        self.save_favorites();
+    }
+
+    /// 그룹과 안의 즐겨찾기를 함께 지운다 (Windows의 '그룹과 안의 즐겨찾기 빼기'. 앱이 그리는 메뉴라 묻지 않는다)
+    fn fav_delete_group(&mut self, g: usize) {
+        self.end_group_rename();
+        self.favs.delete_group(g);
+        self.save_favorites();
+    }
+
+    /// 즐겨찾기 항목을 그룹 to의 끝으로 (None이면 그룹 없음 끝으로)
+    fn fav_move_to_group(&mut self, group: Option<usize>, index: usize, to: Option<usize>) {
+        let at = self.favs.section(to).len();
+        if self.favs.move_item((group, index), to, at).is_some() {
+            self.save_favorites();
+        }
+    }
+
+    /// 즐겨찾기 항목으로 새 그룹을 만든다: 맨 끝에 '새 그룹'을 만들어 그 항목을 넣고, 그룹 이름을 바로 고칠 수 있게 한다
+    fn fav_move_to_new_group(&mut self, group: Option<usize>, index: usize) {
+        if self.favs.item(group, index).is_none() {
+            return;
+        }
+        self.end_group_rename();
+        let g = self.favs.add_group("새 그룹".to_string());
+        self.favs.move_item((group, index), Some(g), 0);
+        self.save_favorites();
+        self.begin_group_rename(g);
+    }
+
     /// 사이드바 목록의 줄. 위에는 이 공간에 고정한 것(없으면 안내), 아래에는 '모든 공간': 구역 이름, 바로가기, 즐겨찾기.
     /// '모든 공간'은 줄이 적으면 목록 아래 끝에 붙고, 많아서 넘치면 고정한 것 바로 아래에 이어져 함께 스크롤된다
     fn side_rows(&self) -> Vec<SideRow> {
-        let row = |kind, label: &str, path: Option<&str>, is_dir, indent, y, h| SideRow { kind, label: label.to_string(), path: path.map(str::to_string), is_dir, indent, y, h };
+        let row = |kind, label: &str, path: Option<&str>, is_dir, indent, y, h, flow| SideRow { kind, label: label.to_string(), path: path.map(str::to_string), is_dir, indent, y, h, flow };
         let mut rows = Vec::new();
         let mut y = 0.0;
         let pins = self.pins();
-        for f in pins {
-            rows.push(row(SideKind::Pin, &f.name, Some(&f.path), f.is_dir, false, y, SIDE_ROW_H));
+        for (i, f) in pins.iter().enumerate() {
+            rows.push(row(SideKind::Pin, &f.name, Some(&f.path), f.is_dir, false, y, SIDE_ROW_H, FlowKind::Pin(i)));
             y += SIDE_ROW_H;
         }
         if pins.is_empty() {
-            rows.push(row(SideKind::Hint, "", None, false, false, y, HINT_H));
+            rows.push(row(SideKind::Hint, "", None, false, false, y, HINT_H, FlowKind::PinHint));
             y += HINT_H;
         }
         let favs = self.favs.rows();
         let common_h = SIDE_LABEL_H + (self.places.len() + favs.len()) as f32 * SIDE_ROW_H;
         let mut y = side_common_top(y, common_h, self.side_list().h(), COMMON_GAP);
-        rows.push(row(SideKind::Label, "모든 공간", None, false, false, y, SIDE_LABEL_H));
+        rows.push(row(SideKind::Label, "모든 공간", None, false, false, y, SIDE_LABEL_H, FlowKind::Other));
         y += SIDE_LABEL_H;
         for (label, path) in &self.places {
-            rows.push(row(SideKind::Place, label, Some(path), true, false, y, SIDE_ROW_H));
+            rows.push(row(SideKind::Place, label, Some(path), true, false, y, SIDE_ROW_H, FlowKind::Other));
             y += SIDE_ROW_H;
+        }
+        // 즐겨찾기 바로 위 줄(마지막 바로가기, 없으면 구역 이름): 즐겨찾기가 없을 때 끌어 온 줄은 그 아래에 놓인다
+        if let Some(last) = rows.last_mut() {
+            last.flow = FlowKind::FavAnchor;
         }
         for fav in favs {
             let r = match fav {
-                Row::Group(g) => self.favs.groups.get(g).map(|grp| row(SideKind::Group(g, grp.collapsed), &grp.name, None, false, false, y, SIDE_ROW_H)),
-                Row::Item { group, index } => self.favs.item(group, index).map(|f| row(SideKind::Fav, &f.name, Some(&f.path), f.is_dir, group.is_some(), y, SIDE_ROW_H)),
+                Row::Group(g) => self.favs.groups.get(g).map(|grp| row(SideKind::Group(g, grp.collapsed), &grp.name, None, false, false, y, SIDE_ROW_H, FlowKind::Fav(fav))),
+                Row::Item { group, index } => self.favs.item(group, index).map(|f| row(SideKind::Fav, &f.name, Some(&f.path), f.is_dir, group.is_some(), y, SIDE_ROW_H, FlowKind::Fav(fav))),
             };
             if let Some(r) = r {
                 rows.push(r);
@@ -3445,6 +3672,136 @@ impl App {
             }
         }
         rows
+    }
+
+    /// 사이드바 줄의 가운데 (창 좌표). 그 이름의 줄이 없거나 목록 밖으로 스크롤돼 있으면 None. 창 시험과 그림이 실제로 누르고 끌 때 쓴다
+    pub fn side_row_center(&self, label: &str) -> Option<(f32, f32)> {
+        let rows = self.side_rows();
+        let r = self.side_rect(rows.iter().find(|r| r.label == label && !matches!(r.kind, SideKind::Hint | SideKind::Label))?);
+        let list = self.side_list();
+        let (x, y) = ((r.l + r.r) / 2.0, (r.t + r.b) / 2.0);
+        (y >= list.t && y < list.b).then_some((x, y))
+    }
+
+    /// 사이드바 줄이 아직 미끄러지는 중인지 (창 쪽이 곧 다시 그린다)
+    pub fn side_moving(&self) -> bool {
+        self.side_flow.borrow().moving
+    }
+
+    // ---------- 사이드바 끌어 옮기기 (공통 ui::side_flow. Windows side_flow.rs와 같다) ----------
+
+    /// 화면 y를 사이드바 목록 좌표(스크롤 전)로
+    fn side_list_y(&self, y: f32) -> f32 {
+        y - self.side_list().t + self.side_scroll
+    }
+
+    /// 누른 줄에서 잡은 자리 (줄 위쪽에서 마우스까지)
+    fn side_grab(&self, row: usize, y: f32) -> f32 {
+        let top = self.side_rows().get(row).map_or(0.0, |r| r.y);
+        (self.side_list_y(y) - top).clamp(0.0, SIDE_ROW_H)
+    }
+
+    /// 끄는 위치 y가 이 공간에 고정한 쪽(true, '모든 공간' 이름 줄보다 위)인지 '모든 공간' 쪽(false)인지. 목록 밖이면 None
+    fn side_over_pins(&self, rows: &[SideRow], y: f32) -> Option<bool> {
+        let list = self.side_list();
+        if y < list.t || y > list.b {
+            return None;
+        }
+        let label = rows.iter().find(|r| r.kind == SideKind::Label)?;
+        Some(y < self.side_rect(label).t)
+    }
+
+    /// 끄는 동안의 그림과 놓을 곳: 끄는 줄과 그 계획 (빈자리는 카드 가운데가 지난 줄 다음, 그룹은 그룹 사이 틈에만). 끄는 중이 아니면 None
+    fn side_drop_plan(&self, rows: &[SideRow]) -> Option<(FlowKind, DropPlan)> {
+        let press = self.side_press?;
+        let ((y, grab), dragged) = (press.moving?, press.what?);
+        let slots: Vec<FlowSlot> = rows.iter().map(SideRow::slot).collect();
+        let card_t = self.side_list_y(y) - grab;
+        Some((dragged, drop_plan(&slots, dragged, card_t, SIDE_ROW_H, self.side_over_pins(rows, y), &self.favs)))
+    }
+
+    /// 끌어서 놓았다: 보이던 빈자리 그대로 옮기고 저장한다. 옮긴 줄은 카드 자리에서 새 자리로 미끄러져 들어간다
+    fn side_drop(&mut self, rows: &[SideRow], dragged: FlowKind, p: DropPlan) {
+        let key_of = |k: FlowKind| rows.iter().find(|r| r.flow == k).map(SideRow::key).unwrap_or_default();
+        let key = match (dragged, p.to) {
+            // 고정한 것 안에서: 빼낸 뒤 기준 자리를 pin_move의 옮기기 전 기준으로
+            (FlowKind::Pin(i), DropTo::Pin(gap)) => {
+                self.pin_move(i, if gap >= i { gap + 1 } else { gap });
+                key_of(dragged)
+            }
+            // '모든 공간' → 이 공간: '이 작업 공간에만 두기'와 같고, 놓은 자리에 끼운다
+            (FlowKind::Fav(Row::Item { group, index }), DropTo::Pin(gap)) => {
+                let path = self.favs.item(group, index).map(|f| f.path.clone()).unwrap_or_default();
+                let before = self.pins().len();
+                self.fav_to_pins(group, index);
+                if self.pins().len() > before {
+                    self.pin_move(before, gap);
+                }
+                pin_key(&path)
+            }
+            // 이 공간 → '모든 공간': '모든 공간에 두기'와 같고, 놓은 자리(그룹)에 끼운다
+            (FlowKind::Pin(i), DropTo::FavItem(group, index)) => {
+                let Some(path) = self.pins().get(i).map(|f| f.path.clone()) else { return };
+                let already = self.favs.find(&path).is_some();
+                self.pin_to_common(i);
+                if !already
+                    && let Some(from) = self.favs.find(&path)
+                    && self.favs.move_item_to(from, group, index).is_some()
+                {
+                    self.save_favorites();
+                }
+                fav_key(&path)
+            }
+            (FlowKind::Fav(Row::Item { group, index }), DropTo::FavItem(to, at)) => {
+                if self.favs.move_item_to((group, index), to, at).is_some() {
+                    self.save_favorites();
+                }
+                key_of(dragged)
+            }
+            (FlowKind::Fav(Row::Group(g)), DropTo::FavGroup(to)) => {
+                if self.favs.move_group(g, to).is_some() {
+                    self.save_favorites();
+                }
+                key_of(dragged)
+            }
+            _ => return,
+        };
+        self.side_flow.get_mut().start_at(key, p.card_t);
+    }
+
+    /// 그 줄이 목록 안에 다 보이도록 스크롤한다
+    fn side_reveal(&mut self, row: &SideRow) {
+        let (list, r) = (self.side_list(), self.side_rect(row));
+        if r.t < list.t {
+            self.side_scroll -= list.t - r.t;
+        } else if r.b > list.b {
+            self.side_scroll += r.b - list.b;
+        }
+        self.clamp_side_scroll();
+    }
+
+    /// 그룹 g의 이름 상자 자리 (머리 줄의 이름 칸: 이름이 그려지던 자리에서 시작한다).
+    /// 그 그룹이 없거나, 검색 패널이 사이드바 자리에 있거나, 줄이 목록에 다 보이지 않으면 None
+    fn group_edit_rect(&self, g: usize) -> Option<R> {
+        if self.find_shown() {
+            return None;
+        }
+        let rows = self.side_rows();
+        let r = self.side_rect(rows.iter().find(|r| matches!(r.kind, SideKind::Group(h, _) if h == g))?);
+        let list = self.side_list();
+        if r.t < list.t - 1.0 || r.b > list.b + 1.0 {
+            return None;
+        }
+        let lx = r.l + SIDE_LABEL_L;
+        Some(R::new(lx - SP_XS, r.t + 3.0, r.r - SP_S, r.b - 3.0))
+    }
+
+    /// '모든 공간' 이름 줄 오른쪽 끝의 새 그룹 단추 자리 (화면 좌표. 목록과 함께 스크롤된다)
+    fn new_group_rect(&self, rows: &[SideRow]) -> Option<R> {
+        let head = self.side_rect(rows.iter().find(|r| r.kind == SideKind::Label)?);
+        // 구역 이름 글자는 위쪽 선 아래(SP_XS부터)에 놓인다: 단추도 그 글자 줄의 가운데에
+        let t = head.t + SP_XS + (head.h() - SP_XS - MINI) / 2.0;
+        Some(R::new(head.r - SP_HAIR - MINI, t, head.r - SP_HAIR, t + MINI))
     }
 
     fn open_side_row(&mut self, i: usize) {
@@ -3620,8 +3977,11 @@ impl App {
             if !self.side_list().contains(x, y) {
                 return Hit::None;
             }
-            // 안내와 구역 이름은 누를 수 없다
+            // 안내와 구역 이름은 누를 수 없다. 구역 이름 줄 오른쪽 끝에는 새 그룹 단추가 있다
             let rows = self.side_rows();
+            if self.new_group_rect(&rows).is_some_and(|r| r.contains(x, y)) {
+                return Hit::NewGroup;
+            }
             return rows.iter().position(|r| !matches!(r.kind, SideKind::Hint | SideKind::Label) && self.side_rect(r).contains(x, y)).map_or(Hit::None, Hit::SideRow);
         }
         if y < WORKBAR_H {
@@ -3792,10 +4152,11 @@ impl App {
         } else if on_card {
             hit = self.hit_with(g, x, y, false);
         }
-        // 입력 상자 밖을 누르면 입력(경로, 공간 이름, 항목 이름)을 그만둔다. 알림은 다음 입력 때 지운다
+        // 입력 상자 밖을 누르면 입력(경로, 공간 이름, 항목·그룹 이름)을 그만둔다. 알림은 다음 입력 때 지운다
         self.edit = Editing::None;
         self.flash = None;
         self.press = None;
+        self.side_press = None;
         // 마우스를 쓰면 시작 화면의 키보드 초점 테두리는 감춘다
         self.start_keys = false;
         // 검색(돋보기, 입력 칸, 검색 패널)은 검색이 받는다. 다른 곳을 누르면 키보드만 검색 입력 칸에서 떠난다
@@ -3849,7 +4210,19 @@ impl App {
                     self.begin_rename();
                 }
             }
-            Hit::SideRow(i) => self.open_side_row(i),
+            // 사이드바 줄은 누를 때가 아니라 뗄 때 연다: 그 사이 위아래로 끌면 그 줄을 옮긴다 (mouse_dragged, mouse_up).
+            // 두 번째 누름(두 번 누르기)은 버린다: 첫 누름을 뗄 때 이미 열었다 (파일을 두 번 열거나 그룹이 접혔다 펼쳐지지 않게)
+            Hit::SideRow(i) => {
+                if clicks < 2 {
+                    let what = self.side_rows().get(i).map(|r| r.flow).filter(|k| matches!(k, FlowKind::Pin(_) | FlowKind::Fav(_)));
+                    self.side_press = Some(SidePress { row: i, what, y0: y, moving: None });
+                }
+            }
+            Hit::NewGroup => {
+                if clicks < 2 {
+                    self.add_fav_group();
+                }
+            }
             Hit::LayoutPick => self.open_menu(g, MenuKind::Layout),
             Hit::ViewPick(_) => self.open_menu(g, MenuKind::View),
             Hit::HiddenToggle => self.toggle_hidden(),
@@ -3931,6 +4304,29 @@ impl App {
     }
 
     pub fn mouse_dragged(&mut self, x: f32, y: f32) {
+        // 사이드바 줄: 위아래로 조금 넘게 움직이면 끌기 시작. 줄에서 잡은 자리를 기억해 카드가 그 자리를 잡은 채 따라오게 한다.
+        // 끌 수 없는 줄(바로가기)은 그만큼 움직이면 누르기를 그만둔다 (떼도 열지 않는다)
+        if let Some(mut sp) = self.side_press {
+            if sp.moving.is_none() && (y - sp.y0).abs() <= DRAG_START {
+                return;
+            }
+            if sp.what.is_none() {
+                self.side_press = None;
+                return;
+            }
+            let grab = sp.moving.map_or_else(|| self.side_grab(sp.row, sp.y0), |(_, grab)| grab);
+            sp.moving = Some((y, grab));
+            self.side_press = Some(sp);
+            // 목록 끝에 가까이 끌면 자동 스크롤
+            let list = self.side_list();
+            if y < list.t + 12.0 {
+                self.side_scroll -= 8.0;
+            } else if y > list.b - 12.0 {
+                self.side_scroll += 8.0;
+            }
+            self.clamp_side_scroll();
+            return;
+        }
         // 고른 줄을 누른 채 조금 넘게 움직였다: 고른 항목들을 끌어 내 달라고 한다 (맥의 끌기는 창 쪽이 시작한다)
         if let Some(press) = self.press.as_ref().filter(|press| (x - press.x).hypot(y - press.y) > DRAG_START) {
             let paths = self.panes[press.pane].tab().marked_paths();
@@ -3962,6 +4358,12 @@ impl App {
         }
     }
 
+    /// 마우스가 창을 떠났다: 가리키는 것이 없다
+    pub fn mouse_left(&mut self) {
+        self.hover = Hit::None;
+        self.side_hot = false;
+    }
+
     /// 지금 보일 마우스 모양: 끄는 동안은 끄는 것의, 아니면 마우스 아래 것의
     pub fn pointer(&self) -> Pointer {
         if self.col_drag.is_some() {
@@ -3975,6 +4377,22 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        // 사이드바 줄: 그대로 떼면 열고(그룹 머리는 접고 펼치고), 끌었으면 보이던 빈자리 그대로 옮긴다
+        if self.side_press.is_some() {
+            let rows = self.side_rows();
+            let plan = self.side_drop_plan(&rows);
+            if let Some(sp) = self.side_press.take() {
+                match plan {
+                    Some((dragged, p)) => {
+                        self.side_drop(&rows, dragged, p);
+                        // 줄이 바뀌었으니 마우스 아래 줄은 다음에 움직일 때 다시 본다 (그 사이 엉뚱한 줄이 강조되지 않게)
+                        self.hover = Hit::None;
+                    }
+                    None if sp.moving.is_none() => self.open_side_row(sp.row),
+                    None => {}
+                }
+            }
+        }
         self.drag = None;
         self.col_drag = None;
         // 여럿을 고른 것 가운데 하나를 누르고 끌지 않은 채 뗐다: 그 줄만 고른다
@@ -3993,6 +4411,10 @@ impl App {
         let h = self.hit(g, x, y);
         let mut changed = h != self.hover;
         self.hover = h;
+        // 사이드바 목록 위: '모든 공간' 줄의 새 그룹 단추가 보인다
+        let hot = !self.find_shown() && self.side_list().contains(x, y);
+        changed |= hot != self.side_hot;
+        self.side_hot = hot;
         // 메뉴: 마우스 아래 줄을 가리킨다 (키보드로 가리킨 줄과 같은 표시)
         if let Some(m) = self.menu.as_mut()
             && let Hit::Menu(Some(i)) = h
@@ -4333,9 +4755,45 @@ impl App {
         }
 
         let dir = self.panes[self.active].tab().loc.dir();
-        g.clip(self.side_list());
-        for (i, row) in self.side_rows().iter().enumerate() {
-            let r = self.side_rect(row);
+        let list = self.side_list();
+        let rows = self.side_rows();
+        let slots: Vec<FlowSlot> = rows.iter().map(SideRow::slot).collect();
+        // 끄는 중: 놓일 빈자리와 줄마다 보일 자리 (공통 ui::side_flow). 줄은 지금 자리에서 그 자리로 미끄러져 간다
+        let plan = self.side_drop_plan(&rows);
+        let targets: Vec<Option<f32>> = match &plan {
+            Some((_, p)) => p.targets.clone(),
+            None => rows.iter().map(|r| Some(r.y)).collect(),
+        };
+        let keys: Vec<String> = rows.iter().map(SideRow::key).collect();
+        let shown = self.side_flow.borrow_mut().step(&keys, &targets, Instant::now(), self.motion);
+        // 목록 좌표를 화면 y로 옮기는 양. 줄의 왼쪽·오른쪽은 side_rect와 같다
+        let dy = list.t - self.side_scroll;
+        let (row_l, row_r) = (list.l + SP_S, list.r - SP_S);
+        g.clip(list);
+        // 그룹 판: 끌어 온 줄이 들어갈 그룹(진하게), 끄는 중이 아니면 마우스가 올라간 그룹 머리 줄의 그룹(옅게). Windows와 같다
+        let group_box = match &plan {
+            Some((_, p)) => p.gap_group.map(|gi| (gi, true)),
+            None => match self.hover {
+                Hit::SideRow(i) => match rows.get(i).map(|r| r.kind) {
+                    Some(SideKind::Group(gi, _)) => Some((gi, false)),
+                    _ => None,
+                },
+                _ => None,
+            },
+        };
+        if let Some((gi, strong)) = group_box {
+            let gap = plan.as_ref().filter(|_| strong).map(|(_, p)| (p.gap_t, p.card_h));
+            if let Some((top, bot)) = group_span(&slots, &shown, gi, gap) {
+                paint_group_plate(g, t, R::new(row_l - SP_XS, top + dy - SP_XS, row_r + SP_XS, bot + dy + SP_XS), strong);
+            }
+        }
+        for (i, row) in rows.iter().enumerate() {
+            // 끄는 줄은 카드로 따로 그린다
+            let Some(vy) = shown[i] else { continue };
+            let r = R::new(row_l, vy + dy, row_r, vy + dy + row.h);
+            if r.b < list.t || r.t > list.b {
+                continue;
+            }
             // 끌려 온 것이 놓일 폴더 줄은 마우스를 올린 것처럼 보인다
             let hovered = self.hover == Hit::SideRow(i) || self.drop == Some(DropAt::Side(i));
             match row.kind {
@@ -4344,16 +4802,31 @@ impl App {
                     g.text("이 공간에 고정한 곳이 없어요", R::new(l, r.t + SP_XS, w, r.t + SP_XS + 16.0), Font::Small, t.faint);
                     g.text("책갈피나 ⌃⌘T로 고정해 보세요", R::new(l, r.t + SP_XS + 16.0, w, r.t + SP_XS + 32.0), Font::Small, t.faint);
                 }
-                // 구역 이름: 위에 얇은 선, 그 아래 작은 글자
+                // 구역 이름: 위에 얇은 선, 그 아래 작은 글자. 마우스가 목록 위에 있으면 오른쪽 끝에 새 그룹 단추
                 SideKind::Label => {
                     g.fill(R::new(r.l + SP_S, r.t, r.r - SP_S, r.t + 1.0), t.border);
                     g.text(&row.label, R::new(r.l + SP_S, r.t + SP_XS, r.r - SP_S, r.b), Font::Label, t.faint);
+                    if let Some(b) = self.new_group_rect(&rows).filter(|_| self.side_hot || self.hover == Hit::NewGroup) {
+                        let over = self.hover == Hit::NewGroup;
+                        if over {
+                            g.fill_round(b, R_CTRL, hover_fill(t));
+                        }
+                        g.glyph(G_NEW_FOLDER, b, false, if over { t.text } else { t.dim });
+                    }
                 }
-                SideKind::Group(_, collapsed) => {
+                SideKind::Group(gi, collapsed) => {
                     side_row_bg(g, t, r, false, hovered);
                     g.glyph(if collapsed { G_CHEVRON } else { G_CHEVRON_DOWN }, R::new(r.l + SP_S, r.t, r.l + SP_S + ICON, r.b), true, t.faint);
-                    // 그룹 머리는 굵게 (안의 항목과 구분)
-                    g.text(&row.label, R::new(r.l + SIDE_LABEL_L, r.t, r.r - SP_S, r.b), Font::Strong, t.text);
+                    let lx = r.l + SIDE_LABEL_L;
+                    if self.edit == Editing::Group(gi) {
+                        // 이름을 고치는 중: 입력 상자의 바탕과 테두리만 (글자는 창 쪽 입력 상자가 그린다. 자리는 group_edit_rect와 같다)
+                        let er = R::new(lx - SP_XS, r.t + 3.0, r.r - SP_S, r.b - 3.0);
+                        g.fill_round(er, R_ROW, t.pane);
+                        g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
+                    } else {
+                        // 그룹 머리는 굵게 (안의 항목과 구분)
+                        g.text(&row.label, R::new(lx, r.t, r.r - SP_S, r.b), Font::Strong, t.text);
+                    }
                 }
                 // 고정한 것, 바로가기, 즐겨찾기 항목: 지금 칸의 폴더면 떠 있는 카드
                 SideKind::Pin | SideKind::Place | SideKind::Fav => {
@@ -4365,6 +4838,35 @@ impl App {
                         g.icon_for_path(path, R::new(lx - SP_S - ICON, it, lx - SP_S, it + ICON));
                     }
                     g.text(&row.label, R::new(lx, r.t, r.r - SP_S, r.b), Font::Normal, t.text);
+                }
+            }
+        }
+        if let Some((dragged, p)) = &plan {
+            // 고정한 것이 비어 있는데 그쪽으로 끌어 오면 안내 자리를 강조한다 (빈자리를 보일 줄이 없다)
+            if matches!(p.to, DropTo::Pin(_))
+                && let Some(hint) = rows.iter().find(|r| r.kind == SideKind::Hint)
+            {
+                let r = self.side_rect(hint);
+                paint_drop_area(g, t, R::new(r.l - SP_HAIR, r.t - SP_HAIR, r.r + SP_HAIR, r.b + SP_HAIR));
+            }
+            // 끄는 줄: 흰 카드로 떠서 마우스를 따라온다 (아이콘과 이름. 그룹이면 안의 항목 수도)
+            let cr = R::new(row_l, p.card_t + dy, row_r, p.card_t + p.card_h + dy);
+            paint_drag_card(g, t, cr);
+            let label = R::new(cr.l + SIDE_LABEL_L, cr.t, cr.r - SP_S, cr.b);
+            match dragged {
+                FlowKind::Fav(Row::Group(gi)) => {
+                    g.glyph(G_CHEVRON, R::new(cr.l + SP_S, cr.t, cr.l + SP_S + ICON, cr.b), true, t.faint);
+                    let name = self.favs.groups.get(*gi).map(|grp| format!("{} · {}", grp.name, grp.items.len())).unwrap_or_default();
+                    g.text(&name, label, Font::Strong, t.text);
+                }
+                _ => {
+                    if let Some(row) = rows.iter().find(|r| r.flow == *dragged) {
+                        if let Some(path) = &row.path {
+                            let it = cr.t + (cr.h() - ICON) / 2.0;
+                            g.icon_for_path(path, R::new(cr.l + SP_S, it, cr.l + SP_S + ICON, it + ICON));
+                        }
+                        g.text(&row.label, label, Font::Normal, t.text);
+                    }
                 }
             }
         }
@@ -4441,7 +4943,11 @@ impl App {
             active,
             multi: self.layout.count() > 1,
             keyboard_here: active,
-            hover: pane_hover(self.hover, p),
+            // 끌려 온 것이 탭 칩 위에 있으면 그 칩을 마우스를 올린 것처럼 보인다 (칸 테두리도 강조한다: 그 칸의 탭으로 간다)
+            hover: match self.drop {
+                Some(DropAt::Tab(q, i)) if q == p => PaneHover::Tab(i),
+                _ => pane_hover(self.hover, p),
+            },
             chips: tabs,
             add,
             count_text,
@@ -4458,7 +4964,7 @@ impl App {
             renaming: naming.is_some(),
             dragged_tab: None,
             tab_drop: None,
-            drop_on_pane: self.drop == Some(DropAt::Pane(p)),
+            drop_on_pane: matches!(self.drop, Some(DropAt::Pane(q) | DropAt::Tab(q, _)) if q == p),
             drop_row: match self.drop {
                 Some(DropAt::Row(q, vi)) if q == p => Some(vi),
                 _ => None,
@@ -4758,6 +5264,7 @@ mod tests {
         a.settle();
         let r = side_row(&a, "업무");
         a.mouse_down(&g, r.l + 40.0, r.t + 10.0, Mods::default(), 1);
+        a.mouse_up();
         a.settle();
         assert_eq!(a.pane(1).tab().loc, Location::Dir(util::join(&home, "업무")));
         a.toggle_star(1);
@@ -5136,6 +5643,7 @@ mod tests {
         let last = side_row(&a, "폴더 39");
         assert!(last.b <= a.side_list().b + 0.5 && last.t >= a.side_list().t, "{last:?}");
         a.mouse_down(&g, last.l + 40.0, last.t + 10.0, Mods::default(), 1);
+        a.mouse_up();
         a.settle();
         assert_eq!(a.pane(0).tab().loc, Location::Dir(util::join(&home, "다운로드")));
         // 이름 줄 위로 밀려난 줄은 누를 수 없다 (그 자리는 공간 이름이다)
@@ -5621,9 +6129,11 @@ mod tests {
         assert!(a.key(Key::Char('t'), ctrl_cmd));
         assert_eq!(pin_names(&a), ["업무", "예산.csv"]);
         assert!(!a.workspaces().current().unwrap().pins[1].is_dir);
-        // 고정한 파일 줄을 누르면 macOS '열기'로 넘긴다
+        // 고정한 파일 줄을 누르면 macOS '열기'로 넘긴다 (누를 때가 아니라 뗄 때)
         let r = side_row(&a, "예산.csv");
         a.mouse_down(&g, r.l + 40.0, r.t + 10.0, Mods::default(), 1);
+        assert!(a.open_files.is_empty(), "a press alone does not open the row");
+        a.mouse_up();
         assert_eq!(a.open_files, [util::join(&work, "예산.csv")]);
         let (x, y) = row_point(&a, 0, 1);
         a.mouse_down(&g, x, y, Mods::default(), 1);
@@ -5703,7 +6213,7 @@ mod tests {
     }
 
     /// 고정한 줄은 '모든 공간'에 둘 수 있고, '모든 공간'의 즐겨찾기 항목은 이 작업 공간에만 두거나 뺄 수 있다.
-    /// 바로가기와 그룹 머리에는 메뉴가 없다
+    /// 바로가기에는 메뉴가 없고, 그룹 머리에는 그룹 메뉴가 있다
     #[test]
     fn rows_move_between_the_workspace_and_the_common_block() {
         let (root, home) = demo();
@@ -5722,8 +6232,9 @@ mod tests {
         let (x, y) = mid(row);
         assert!(a.right_down(&g, x, y));
         assert_eq!(take_menu(&mut a), Some((MenuKind::Fav(0), row)));
-        assert_eq!(menu_labels(&a, MenuKind::Fav(0)), ["이 작업 공간에만 두기", "모든 공간에서 빼기"]);
-        assert_eq!(a.menu_break(MenuKind::Fav(0)), None);
+        // 그룹이 없으면 그룹으로 옮기는 줄은 새 그룹뿐이다 (구분선 다음)
+        assert_eq!(menu_labels(&a, MenuKind::Fav(0)), ["이 작업 공간에만 두기", "모든 공간에서 빼기", "새 그룹을 만들어 넣기"]);
+        assert_eq!(a.menu_break(MenuKind::Fav(0)), Some(2));
         // 이 작업 공간에만 두기: 즐겨찾기에서 빠지고 이 공간에 고정한 것의 끝으로 돌아온다
         a.pick_menu(MenuKind::Fav(0), 0);
         assert!(a.favorites().items.is_empty() && a.flash.is_none());
@@ -5735,16 +6246,18 @@ mod tests {
         a.workspaces.current_mut().unwrap().pin(&work, true);
         a.pick_menu(MenuKind::Fav(0), 0);
         assert_eq!((pin_names(&a), a.favorites().items.len()), (vec!["다운로드".to_string(), "업무".to_string()], 0));
-        // 그룹 안의 항목: 번호는 즐겨찾기 줄(그룹 머리도 한 줄)로 센다. 바로가기와 그룹 머리에는 메뉴가 없다
+        // 그룹 안의 항목: 번호는 즐겨찾기 줄(그룹 머리도 한 줄)로 센다. 바로가기에는 메뉴가 없고, 그룹 머리는 그룹 메뉴를 연다
         let budget = Favorite { name: "예산".into(), path: util::join(&work, "예산.csv"), is_dir: false };
         a.favs.groups.push(Group { name: "묶음".into(), collapsed: false, items: vec![budget] });
-        for label in ["홈", "묶음"] {
-            let (x, y) = mid(side_row(&a, label));
-            assert!(matches!(a.hit(&g, x, y), Hit::SideRow(_)), "{label}");
-            assert!(!a.right_down(&g, x, y), "{label}");
-            assert!(take_menu(&mut a).is_none(), "{label}");
-        }
-        assert!(a.menu_items(MenuKind::Fav(0)).is_empty(), "the group header has no menu");
+        let (x, y) = mid(side_row(&a, "홈"));
+        assert!(matches!(a.hit(&g, x, y), Hit::SideRow(_)));
+        assert!(!a.right_down(&g, x, y));
+        assert!(take_menu(&mut a).is_none());
+        let head = side_row(&a, "묶음");
+        let (x, y) = mid(head);
+        assert!(a.right_down(&g, x, y));
+        assert_eq!(take_menu(&mut a), Some((MenuKind::Group(0), head)));
+        assert!(a.menu_items(MenuKind::Fav(0)).is_empty(), "the group header has no item menu");
         let item = side_row(&a, "예산");
         let (x, y) = mid(item);
         assert!(a.right_down(&g, x, y));
@@ -5757,6 +6270,270 @@ mod tests {
         a.pick_menu(MenuKind::Fav(0), 1);
         a.pick_menu(MenuKind::Fav(9), 0);
         assert_eq!((a.favorites().groups.len(), pin_names(&a).len()), (1, 2));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 사이드바의 그 줄을 누르고, 아래로 dy만큼(위로는 음수) 두 번에 나눠 끌고, 뗀다 (실제 마우스 입력의 길)
+    fn drag_side(a: &mut App, g: &Gfx, label: &str, dy: f32) {
+        let (x, y) = mid(side_row(a, label));
+        a.mouse_down(g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x, y + dy / 2.0);
+        a.mouse_dragged(x, y + dy);
+        a.mouse_up();
+    }
+
+    /// 저장하는 작업 공간 파일의 글자로 다시 읽은 지금 공간의 고정한 것 (시험은 파일에 쓰지 않는다: 쓰는 그 내용을 본다)
+    fn saved_pins(a: &App) -> Vec<String> {
+        let w = workspaces::parse(&workspaces::serialize(a.workspaces())).unwrap();
+        w.current().unwrap().pins.iter().map(|f| f.name.clone()).collect()
+    }
+
+    /// 저장하는 즐겨찾기 파일의 글자로 다시 읽은 즐겨찾기
+    fn saved_favs(a: &App) -> Favorites {
+        favorites::parse(&favorites::serialize(a.favorites()))
+    }
+
+    fn names_of(items: &[Favorite]) -> Vec<String> {
+        items.iter().map(|f| f.name.clone()).collect()
+    }
+
+    /// 고정한 줄을 끌어 다른 고정한 줄 아래에 놓으면 그 자리로 옮겨지고 작업 공간에 저장된다. 끄는 동안 줄은 카드로 뜨고
+    /// 다른 줄이 빈자리를 내준다. 목록 밖에서 놓으면 고정한 것 안에 남는다
+    #[test]
+    fn dragging_a_pin_below_another_reorders_and_saves() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let work = util::join(&home, "업무");
+        for (path, is_dir) in [(work.clone(), true), (util::join(&home, "다운로드"), true), (util::join(&work, "예산.csv"), false)] {
+            a.toggle_pin(&path, is_dir);
+        }
+        assert_eq!(pin_names(&a), ["업무", "다운로드", "예산.csv"]);
+        // 끄는 동안: 첫 줄은 감춰지고(카드), 둘째 줄이 첫 자리로 올라와 그 아래에 빈자리가 열린다
+        let (x, y) = mid(side_row(&a, "업무"));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x, y + 2.0);
+        assert!(a.side_drop_plan(&a.side_rows()).is_none(), "a small move is still a click");
+        a.mouse_dragged(x, y + SIDE_ROW_H - 2.0);
+        let (dragged, p) = a.side_drop_plan(&a.side_rows()).unwrap();
+        assert_eq!((dragged, p.to, p.gap_t, p.gap_group), (FlowKind::Pin(0), DropTo::Pin(1), SIDE_ROW_H, None));
+        assert_eq!(p.targets[..3], [None, Some(0.0), Some(2.0 * SIDE_ROW_H)]);
+        a.mouse_up();
+        assert_eq!(pin_names(&a), ["다운로드", "업무", "예산.csv"]);
+        assert_eq!(saved_pins(&a), ["다운로드", "업무", "예산.csv"]);
+        assert!(a.side_moving(), "the dropped row slides in from where the card was");
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(home.clone()), "a drag does not open the row");
+        // 맨 아래로, 그리고 목록 밖(창 아래)으로 끌어 놓아도 고정한 것 안의 맨 끝
+        drag_side(&mut a, &g, "다운로드", 3.0 * SIDE_ROW_H);
+        assert_eq!(pin_names(&a), ["업무", "예산.csv", "다운로드"]);
+        drag_side(&mut a, &g, "업무", 2000.0);
+        assert_eq!(saved_pins(&a), ["예산.csv", "다운로드", "업무"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 즐겨찾기 항목을 펼친 그룹 안으로 끌면 그 그룹에 들어가고(끄는 동안 그룹이 판으로 묶인다), 맨 위로 끌어내면 그룹 밖으로 나온다.
+    /// 그룹 머리를 끌면 그룹이 통째로 옮겨진다
+    #[test]
+    fn favorites_are_dragged_into_and_out_of_groups() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let work = util::join(&home, "업무");
+        let f = |name: &str, path: String, is_dir| Favorite { name: name.into(), path, is_dir };
+        a.places = vec![("홈".to_string(), home.clone())];
+        a.favs = Favorites {
+            items: vec![f("업무", work.clone(), true)],
+            groups: vec![
+                Group { name: "묶음".into(), collapsed: false, items: vec![f("예산", util::join(&work, "예산.csv"), false)] },
+                Group { name: "둘째".into(), collapsed: false, items: vec![f("회의록", util::join(&work, "회의록.md"), false)] },
+            ],
+        };
+        // '업무'를 '예산' 아래로: 묶음의 끝 (끄는 동안 빈자리가 묶음 안에 있어 묶음을 판으로 묶는다)
+        let (x, y) = mid(side_row(&a, "업무"));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x, y + 40.0);
+        let (_, p) = a.side_drop_plan(&a.side_rows()).unwrap();
+        assert_eq!((p.to, p.gap_group), (DropTo::FavItem(Some(0), 1), Some(0)));
+        a.mouse_up();
+        assert!(a.favorites().items.is_empty());
+        assert_eq!(names_of(&a.favorites().groups[0].items), ["예산", "업무"]);
+        assert_eq!(saved_favs(&a), a.favorites().clone(), "the favorites file is written");
+        // 맨 위(그룹 머리 위)로 끌어내면 그룹 없는 맨 앞
+        drag_side(&mut a, &g, "업무", -60.0);
+        assert_eq!(names_of(&a.favorites().items), ["업무"]);
+        assert_eq!(names_of(&a.favorites().groups[0].items), ["예산"]);
+        // 그룹 머리 '둘째'를 '묶음' 위로: 안의 항목과 함께 옮겨진다
+        drag_side(&mut a, &g, "둘째", -2.0 * SIDE_ROW_H - 4.0);
+        let groups: Vec<&str> = a.favorites().groups.iter().map(|grp| grp.name.as_str()).collect();
+        assert_eq!(groups, ["둘째", "묶음"]);
+        assert_eq!(names_of(&a.favorites().groups[0].items), ["회의록"]);
+        assert_eq!(saved_favs(&a), a.favorites().clone());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 즐겨찾기 항목을 고정한 쪽으로 끌면 이 공간에만 두고(놓은 자리에 끼운다), 고정한 줄을 '모든 공간' 쪽으로 끌면 모든 공간에 둔다
+    /// (놓은 자리의 그룹에 넣는다). 메뉴의 '이 작업 공간에만 두기'·'모든 공간에 두기'와 같다
+    #[test]
+    fn rows_are_dragged_between_the_workspace_and_the_common_block() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        a.places = vec![("홈".to_string(), home.clone())];
+        a.toggle_pin(&downloads, true);
+        a.favs = Favorites {
+            items: vec![Favorite { name: "업무".into(), path: work.clone(), is_dir: true }],
+            groups: vec![Group { name: "묶음".into(), collapsed: false, items: vec![Favorite { name: "예산".into(), path: util::join(&work, "예산.csv"), is_dir: false }] }],
+        };
+        // '업무'를 고정한 첫 줄 자리로: 고정한 것의 맨 앞에 들어가고 즐겨찾기에서 빠진다
+        let (from, to) = (mid(side_row(&a, "업무")), mid(side_row(&a, "다운로드")));
+        drag_side(&mut a, &g, "업무", to.1 - from.1);
+        assert_eq!(pin_names(&a), ["업무", "다운로드"]);
+        assert_eq!(saved_pins(&a), ["업무", "다운로드"]);
+        assert!(a.favorites().items.is_empty());
+        // 고정한 '다운로드'를 '예산' 줄 자리로: 모든 공간의 묶음 맨 앞에 들어가고 이 공간에서 빠진다
+        let (from, to) = (mid(side_row(&a, "다운로드")), mid(side_row(&a, "예산")));
+        drag_side(&mut a, &g, "다운로드", to.1 - from.1);
+        assert_eq!(pin_names(&a), ["업무"]);
+        assert_eq!(names_of(&a.favorites().groups[0].items), ["다운로드", "예산"]);
+        assert_eq!(saved_favs(&a), a.favorites().clone());
+        // 고정한 것이 하나 남았을 때 그 줄을 '모든 공간'으로 끌면 안내가 다시 보인다
+        let (from, to) = (mid(side_row(&a, "업무")), mid(side_row(&a, "홈")));
+        drag_side(&mut a, &g, "업무", to.1 - from.1 + SIDE_ROW_H);
+        assert!(pin_names(&a).is_empty() && a.side_rows()[0].kind == SideKind::Hint);
+        assert_eq!(names_of(&a.favorites().items), ["업무"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 사이드바 줄은 누를 때가 아니라 뗄 때 연다. 4보다 적게 움직였으면 그대로 연다. 그룹 머리는 접고 펼친다.
+    /// 바로가기는 끌 수 없어 조금 넘게 움직이면 열지 않는다. 두 번 누르기의 둘째 누름은 버린다
+    #[test]
+    fn a_click_without_moving_still_opens_the_row() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        a.places = vec![("다운로드".to_string(), downloads.clone())];
+        a.toggle_pin(&work, true);
+        a.favs.groups.push(Group { name: "묶음".into(), collapsed: false, items: vec![Favorite { name: "예산".into(), path: util::join(&work, "예산.csv"), is_dir: false }] });
+        let (x, y) = mid(side_row(&a, "업무"));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x + 6.0, y + 3.0);
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(home.clone()), "nothing opens while the button is down");
+        a.mouse_up();
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(work.clone()));
+        assert_eq!(pin_names(&a), ["업무"]);
+        // 두 번 누르기: 첫 누름을 뗄 때 접히고, 둘째 누름은 버린다
+        let (x, y) = mid(side_row(&a, "묶음"));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_up();
+        a.mouse_down(&g, x, y, Mods::default(), 2);
+        a.mouse_up();
+        assert!(a.favorites().groups[0].collapsed);
+        // 바로가기를 끌다 놓으면 열지 않는다
+        let (x, y) = mid(side_row(&a, "다운로드"));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x, y - 20.0);
+        a.mouse_up();
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(work.clone()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 그룹 머리의 메뉴: 이름 바꾸기(그 줄에서 입력 상자), 그룹 풀기(안의 것은 남는다), 그룹 지우기(안의 것도 지운다).
+    /// '모든 공간' 줄의 새 그룹 단추와 항목 메뉴의 그룹 줄들로 그룹을 만들고 옮긴다
+    #[test]
+    fn groups_are_made_renamed_ungrouped_and_deleted_from_the_menus() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        let work = util::join(&home, "업무");
+        let f = |name: &str, file: &str| Favorite { name: name.into(), path: util::join(&work, file), is_dir: false };
+        a.favs.groups = vec![
+            Group { name: "묶음".into(), collapsed: false, items: vec![f("예산", "예산.csv")] },
+            Group { name: "둘째".into(), collapsed: false, items: vec![f("회의록", "회의록.md")] },
+        ];
+        assert_eq!(menu_labels(&a, MenuKind::Group(0)), ["이름 바꾸기", "그룹 풀기 (안의 즐겨찾기는 남김)", "그룹과 안의 즐겨찾기 빼기"]);
+        assert_eq!(a.menu_break(MenuKind::Group(0)), Some(1));
+        assert!(a.menu_items(MenuKind::Group(5)).is_empty());
+        // 이름 바꾸기: 그 머리 줄의 이름 자리에 입력 상자가 뜨고, 확정하면 바뀐다
+        a.pick_menu(MenuKind::Group(0), 0);
+        assert_eq!(a.edit, Editing::Group(0));
+        let (head, rect) = (side_row(&a, "묶음"), a.address_rect().unwrap());
+        assert!(rect.t >= head.t && rect.b <= head.b && rect.l > head.l, "{rect:?} {head:?}");
+        assert_eq!((a.address_text().as_str(), a.address_select(), a.address_pad()), ("묶음", None, 2.0));
+        a.commit_address("월말 정산");
+        assert_eq!((a.edit.clone(), a.favorites().groups[0].name.as_str()), (Editing::None, "월말 정산"));
+        // 비운 이름은 그대로 둔다
+        a.pick_menu(MenuKind::Group(0), 0);
+        a.commit_address("  ");
+        assert_eq!(a.favorites().groups[0].name, "월말 정산");
+        // 새 그룹 단추: 맨 끝에 '새 그룹'을 만들고 이름을 바로 고친다
+        let rows = a.side_rows();
+        let b = a.new_group_rect(&rows).unwrap();
+        let (x, y) = mid(b);
+        assert_eq!(a.hit(&g, x, y), Hit::NewGroup);
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_up();
+        assert_eq!((a.favorites().groups.len(), a.edit.clone()), (3, Editing::Group(2)));
+        assert_eq!(a.address_text(), "새 그룹");
+        a.commit_address("셋째");
+        // 그룹 풀기: 안의 즐겨찾기는 그룹 없음 끝으로 남는다
+        a.pick_menu(MenuKind::Group(0), 1);
+        assert_eq!(names_of(&a.favorites().items), ["예산"]);
+        assert_eq!(a.favorites().groups.iter().map(|grp| grp.name.as_str()).collect::<Vec<_>>(), ["둘째", "셋째"]);
+        // 그룹 지우기: 안의 즐겨찾기도 함께 없어진다 (묻지 않는다)
+        a.pick_menu(MenuKind::Group(0), 2);
+        assert_eq!(a.favorites().groups.iter().map(|grp| grp.name.as_str()).collect::<Vec<_>>(), ["셋째"]);
+        assert!(a.favorites().find(&util::join(&work, "회의록.md")).is_none());
+        assert_eq!(saved_favs(&a), a.favorites().clone());
+        // 항목 메뉴의 그룹 줄들: 그룹마다 하나(지금 그룹에 체크), 그룹 안이면 그룹에서 빼기, 맨 끝은 새 그룹
+        assert_eq!(menu_labels(&a, MenuKind::Fav(0)), ["이 작업 공간에만 두기", "모든 공간에서 빼기", "‘셋째’ 그룹으로 이동", "새 그룹을 만들어 넣기"]);
+        a.pick_menu(MenuKind::Fav(0), 2);
+        assert!(a.favorites().items.is_empty());
+        assert_eq!(names_of(&a.favorites().groups[0].items), ["예산"]);
+        // 이제 '예산'은 셋째 머리 다음 줄 (줄 번호 1)
+        let items = a.menu_items(MenuKind::Fav(1));
+        assert_eq!(items[2], ("‘셋째’ 그룹으로 이동".to_string(), true));
+        assert_eq!(items[3].0, "그룹에서 빼기");
+        a.pick_menu(MenuKind::Fav(1), 3);
+        assert_eq!(names_of(&a.favorites().items), ["예산"]);
+        // 새 그룹을 만들어 넣기: 그 항목이 든 그룹을 맨 끝에 만들고 이름을 고친다
+        a.pick_menu(MenuKind::Fav(0), 3);
+        assert_eq!(a.favorites().groups.len(), 2);
+        assert_eq!((a.favorites().groups[1].name.as_str(), names_of(&a.favorites().groups[1].items)), ("새 그룹", vec!["예산".to_string()]));
+        assert_eq!(a.edit, Editing::Group(1));
+        // 그 그룹이 없어지면 이름 고치기도 끝난다
+        a.favs.groups.truncate(1);
+        a.sync_edit();
+        assert_eq!(a.edit, Editing::None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 탭 칩 위에 놓으면 그 탭이 보이는 폴더로 간다 (지금 탭이 아니어도). 지금 탭은 그대로고 그 칸이 지금 칸이 된다
+    #[test]
+    fn dropping_on_a_tab_goes_into_that_tabs_folder() {
+        let (root, home) = demo();
+        let (work, downloads) = (util::join(&home, "업무"), util::join(&home, "다운로드"));
+        let (mut a, g) = app(&work);
+        a.navigate(1, Location::Dir(downloads.clone()), None);
+        a.new_tab(1);
+        a.navigate(1, Location::Dir(home.clone()), None);
+        a.settle();
+        let src = util::join(&work, "예산.csv");
+        let (tabs, _) = a.chips(&g, 1, &geom(a.pane_rects()[1].1));
+        let (x, y) = mid(tabs[0]);
+        assert_eq!(a.drag_over(&g, x, y, std::slice::from_ref(&src)), Some(downloads.clone()));
+        assert!(a.drop_paths(&g, x, y, vec![src.clone()], Paste::Drop));
+        assert_eq!((a.drop, a.active(), a.pane(1).active), (None, 1, 1));
+        a.settle();
+        assert!(noted(&a, "1개를 옮겼어요"), "{:?}", a.flash);
+        assert!(std::fs::metadata(util::join(&downloads, "예산.csv")).is_ok() && std::fs::metadata(&src).is_err());
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(home.clone()), "the current tab stays");
+        // 시작 화면 탭에는 놓지 않는다
+        a.set_new_tab_start(true);
+        a.new_tab(0);
+        a.settle();
+        let (tabs, _) = a.chips(&g, 0, &geom(a.pane_rects()[0].1));
+        let (x, y) = mid(tabs[1]);
+        assert_eq!(a.drag_over(&g, x, y, &[util::join(&downloads, "예산.csv")]), None);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5782,6 +6559,7 @@ mod tests {
         assert_eq!(a.hit(&g, hint.l + 20.0, hint.t + 10.0), Hit::None);
         assert_eq!(a.hit(&g, label.l + 20.0, label.t + 10.0), Hit::None);
         a.mouse_down(&g, last.l + 40.0, last.t + 10.0, Mods::default(), 1);
+        a.mouse_up();
         a.settle();
         assert_eq!(a.pane(0).tab().loc, Location::Dir(downloads));
         // 고정한 것이 많고 창이 낮으면: '모든 공간'이 고정한 것 바로 아래에 이어지고, 끝까지 스크롤하면 마지막 줄이 보인다
@@ -6621,17 +7399,20 @@ mod tests {
         let (x, y) = mid(a.toolbar().layout);
         assert_eq!(a.drag_over(&g, x, y, &dragged), None);
         assert_eq!(a.drop, None);
-        // 탭 위도 놓을 곳이 아니다: 다른 탭 위에 놓았는데 지금 탭의 폴더로 가지 않게
+        // 탭 칩 위: 그 탭이 보이는 폴더로 (지금 탭이 아니어도). 그 칩이 강조된다. 그 폴더에 이미 있으면 놓을 곳이 아니다
         a.new_tab(1);
+        a.navigate(1, Location::Dir(home.clone()), None);
         a.settle();
         let gm = geom(a.pane_rects()[1].1);
         let (tabs, _) = a.chips(&g, 1, &gm);
-        for tab in &tabs {
-            let (x, y) = mid(*tab);
-            assert_eq!(a.drag_over(&g, x, y, &dragged), None);
-            assert!(!a.drop_paths(&g, x, y, dragged.clone(), Paste::Drop));
-        }
-        assert!(std::fs::metadata(&dragged[0]).is_ok());
+        let (x, y) = mid(tabs[0]);
+        assert_eq!(a.drag_over(&g, x, y, &dragged), Some(downloads.clone()));
+        assert_eq!(a.drop, Some(DropAt::Tab(1, 0)));
+        let (x, y) = mid(tabs[1]);
+        assert_eq!(a.drag_over(&g, x, y, &dragged), Some(home.clone()));
+        assert_eq!(a.drop, Some(DropAt::Tab(1, 1)));
+        let (x, y) = mid(a.chips(&g, 0, &geom(a.pane_rects()[0].1)).0[0]);
+        assert_eq!(a.drag_over(&g, x, y, &dragged), None, "the left pane's tab already shows the file's folder");
         a.drag_over(&g, l1.l + 60.0, l1.b - 10.0, &dragged);
         a.drag_exit();
         assert_eq!(a.drop, None);

@@ -5,6 +5,7 @@
 //! 설정 창도: 앱 메뉴의 '설정…'이 보내는 동작으로 열고, 스위치를 눌러 본 창의 값이 바뀌는지, 본 창에서 바꾼 값을 따라오는지 본다.
 //! 메뉴(앱이 그린다)도: 목록의 빈 곳을 오른쪽 단추로 눌러 열고, 실제 키(Esc, ↓, Return)로 닫고 고른다.
 //! 새 탭 시작 화면(⌘T)과 명령 메뉴(⌘K)도: 시작 화면을 키로 열어 보고, 명령 메뉴의 입력 칸에 쳐서 걸러 보고 Esc로 닫는다.
+//! 사이드바 끌기도: 둘을 고정하고 실제 마우스 입력(mouseDown:·mouseDragged:·mouseUp:)으로 첫 줄을 아래로 끌어 순서를 바꾸고, 눌렀다 떼서 연다.
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
 //! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
@@ -543,7 +544,53 @@ fn script(dir: &str) -> usize {
             cmd_state().is_none() && on_main(|| VIEW.with(|v| v.get().and_then(|v| v.ivars().commands.get().cloned())).is_some_and(|f| f.isHidden()))
         });
     }
+
+    // 사이드바 끌기: ⌃⌘T로 '폴더'와 '가나다.txt'를 이 공간에 고정하고, 첫 줄을 실제로 눌러(mouseDown:) 한 줄 아래로 끌어(mouseDragged:)
+    // 떼면(mouseUp:) 순서가 바뀐다. 움직이지 않고 눌렀다 떼면 그 줄을 연다 (누를 때가 아니라 뗄 때 연다)
+    let pins = || on_main(|| with_app(|a| a.workspaces().current().map(|w| w.pins.iter().map(|f| f.name.clone()).collect::<Vec<_>>()).unwrap_or_default())).unwrap_or_default();
+    for name in ["폴더", "가나다.txt"] {
+        if run.select(name) {
+            key_with(KEY_T, NSEventModifierFlags::Control | NSEventModifierFlags::Command);
+        }
+    }
+    if run.wait("ctrl-cmd-T pins both to this workspace", 5, || pins() == ["폴더", "가나다.txt"]) {
+        let pressed = press_side("폴더", ROW_H);
+        run.check("the pinned row is in the sidebar", pressed, || format!("{:?}", pins()));
+        run.wait("dragging the first pin below the second swaps them", 5, || pins() == ["가나다.txt", "폴더"]);
+        press_side("폴더", 0.0);
+        run.wait("a click without moving opens the pinned folder", 5, || seen().is_some_and(|s| s.ready && s.dir == sub));
+        key(UP, true);
+        run.wait("cmd-up goes back", 5, || seen().is_some_and(|s| s.ready && s.dir == dir));
+    }
     run.failed
+}
+
+/// 사이드바에서 그 이름의 줄을 실제 창이 받는 길로 누르고(mouseDown:), dy만큼 아래로 몇 번에 나눠 끌고(mouseDragged:), 뗀다(mouseUp:).
+/// dy가 0이면 끌지 않고 눌렀다 뗀다. 그 줄이 사이드바에 보이지 않으면 false (창 좌표는 왼쪽 아래가 0)
+fn press_side(label: &'static str, dy: f32) -> bool {
+    on_main(move || {
+        let Some(view) = VIEW.with(|v| v.get().cloned()) else { return false };
+        let Some(window) = view.window() else { return false };
+        let Some((x, y)) = with_app(|a| a.side_row_center(label)).flatten() else { return false };
+        let event = |kind: NSEventType, y: f32| {
+            let at = view.convertPoint_toView(NSPoint::new(x as f64, y as f64), None);
+            NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(kind, at, NSEventModifierFlags::empty(), 0.0, window.windowNumber(), None, 0, 1, 1.0)
+        };
+        if let Some(e) = event(NSEventType::LeftMouseDown, y) {
+            view.mouseDown(&e);
+        }
+        if dy != 0.0 {
+            for step in [0.25, 0.6, 1.0] {
+                if let Some(e) = event(NSEventType::LeftMouseDragged, y + dy * step) {
+                    view.mouseDragged(&e);
+                }
+            }
+        }
+        if let Some(e) = event(NSEventType::LeftMouseUp, y + dy) {
+            view.mouseUp(&e);
+        }
+        true
+    })
 }
 
 /// 명령 메뉴가 보이는 것: (입력 칸이 키보드를 가졌는지, 줄의 이름). 닫혀 있으면 None

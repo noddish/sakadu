@@ -11,6 +11,7 @@ pub mod menu;
 pub mod paint;
 pub mod preview_card;
 pub mod rail;
+pub mod side_flow;
 pub mod start;
 pub mod toolbar;
 
