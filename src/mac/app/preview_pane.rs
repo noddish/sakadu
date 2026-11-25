@@ -297,7 +297,15 @@ impl App {
     pub fn toggle_preview_pin(&mut self) {
         let round = self.next_seq();
         let Some(pv) = self.preview.as_mut() else { return };
-        if pv.pin.take().is_some() || pv.target.is_none() {
+        if pv.pin.take().is_some() {
+            // 세션에서 되살려 아직 확인하지 않은 고정이었으면(느린 네트워크 디스크) 확인을 기다리던 표시와 그 대상(종류·크기를 모른다)도
+            // 버린다: 표시가 남으면 다시 고른 것을 읽지 않고 계속 기다린다. 늦게 온 확인 결과는 고정이 없어 버려진다
+            if std::mem::take(&mut pv.unchecked) {
+                pv.target = None;
+            }
+            return;
+        }
+        if pv.target.is_none() {
             return;
         }
         // 압축 파일 안의 항목은 디스크에서 다시 찾을 수 없어 고정하지 않는다
