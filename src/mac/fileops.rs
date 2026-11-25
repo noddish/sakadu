@@ -571,8 +571,12 @@ thread_local! {
     /// 시험: 켜 두면 이 줄에서 휴지통으로 보내기가 실패한다 (원본을 휴지통으로 보내지 못한 경우를 본다. 시험마다 제 줄에서 돈다)
     pub static TRASH_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 시험: 다른 디스크로 옮기기에서 복사를 마친 뒤, 원본을 다시 재기 전에 한 번 부른다 (옮기는 동안 원본이 바뀐 경우를 본다)
-    pub static MID_MOVE: std::cell::RefCell<Option<Box<dyn FnOnce(&str)>>> = const { std::cell::RefCell::new(None) };
+    pub static MID_MOVE: std::cell::RefCell<MidMove> = const { std::cell::RefCell::new(None) };
 }
+
+/// 시험: 옮기는 사이에 부를 것 (원본 경로를 받는다)
+#[cfg(test)]
+type MidMove = Option<Box<dyn FnOnce(&str)>>;
 
 /// 다른 디스크로 옮기기에서 복사를 마친 뒤 (앱에서는 아무것도 하지 않는다. 시험은 그 사이에 원본을 바꿔 본다)
 #[cfg(not(test))]
