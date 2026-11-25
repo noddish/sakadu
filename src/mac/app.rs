@@ -4817,8 +4817,8 @@ mod tests {
         assert_eq!(a.pane(0).view, ViewMode::Details);
         assert!(a.key(Key::Char('1'), Mods { cmd: true, alt: true, ..Default::default() }));
         assert_eq!(a.layout(), Layout::One);
-        // Return 이름 바꾸기 (줄을 하나 고른 뒤)
-        a.tab_mut(0).select_only(1);
+        // Return 이름 바꾸기 (줄을 하나 고른 뒤. 다시 연 '다운로드' 탭에는 파일이 하나뿐이다)
+        a.tab_mut(0).select_only(0);
         assert!(a.key(Key::Return, Mods::default()));
         assert!(matches!(a.edit, Editing::Item(_)));
         a.edit = Editing::None;
