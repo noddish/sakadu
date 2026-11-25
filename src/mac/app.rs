@@ -5923,14 +5923,15 @@ mod tests {
         a.mouse_down(&g, x, y, Mods::default(), 1);
         assert!(a.cmd_seen().is_none(), "opening a line closes the menu");
         assert_eq!(a.active(), 1);
-        // 앞부분이 맞는 것이 먼저: '보기'는 모두 가운데가 맞아 표의 순서대로. ↓ 두 번과 Return은 '큰 아이콘 보기'
+        // 앞부분이 맞는 것이 먼저: '보기'는 모두 가운데가 맞아 표의 순서대로 ('미리 보기 창'도 맥 동작이다). ↓ 세 번과 Return은 '큰 아이콘 보기'
         a.run_action(Action::Commands);
         a.cmd_typed("보기");
         let names = a.cmd_seen().unwrap().1;
-        assert_eq!(names[..3], ["숨김 항목 보기", "아주 큰 아이콘 보기", "큰 아이콘 보기"]);
+        assert_eq!(names[..4], ["숨김 항목 보기", "미리 보기 창", "아주 큰 아이콘 보기", "큰 아이콘 보기"]);
         a.key(Key::Down, Mods::default());
         a.cmd_key(Key::Down, Mods::default());
-        assert_eq!(a.cmd_seen().unwrap().2, 2);
+        a.cmd_key(Key::Down, Mods::default());
+        assert_eq!(a.cmd_seen().unwrap().2, 3);
         assert!(a.cmd_key(Key::Return, Mods::default()));
         assert_eq!((a.pane(1).view, a.cmd_seen().is_none()), (ViewMode::Large, true));
         // ↑는 맨 위에서 맨 아래로, Esc와 판 밖 누르기는 닫는다
