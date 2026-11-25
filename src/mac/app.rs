@@ -2694,6 +2694,8 @@ impl App {
         for p in 0..self.layout.count() {
             self.load_if_new(p);
         }
+        // 오른쪽 미리 보기 창(열림, 고정한 파일)은 작업 공간마다 기억한다 (Windows와 같다)
+        self.restore_preview(s.preview, s.pin.as_deref(), s.pin_id);
     }
 
     // ---------- 작업 공간 ----------
@@ -2717,12 +2719,12 @@ impl App {
     /// 세션이 지금 공간의 화면이면 그 화면(마지막으로 본 모습)으로, 아니면 그 공간에 저장된 화면으로 연다.
     /// 작업 공간이 없으면(처음 실행했거나 작업 공간이 없던 시제품을 쓰던 경우) 지난번 화면이 '기본' 공간이 된다
     pub fn open_saved(&mut self, ws: Workspaces, session: Option<&Session>, home: &str) {
-        // 모양·새 탭 설정·최근 위치·오른쪽 미리 보기 창(열림, 고정한 파일)은 앱 전체의 것이라 작업 공간을 오갈 때가 아니라 여기서만 읽는다
+        // 모양·새 탭 설정·최근 위치는 앱 전체의 것이라 작업 공간을 오갈 때가 아니라 여기서만 읽는다
+        // (오른쪽 미리 보기 창은 작업 공간마다라 restore가 읽는다)
         if let Some(s) = session {
             self.set_theme_pref(&s.look.theme);
             self.set_new_tab_start(s.new_tab != session::NEW_TAB_SAME);
             self.recent = s.recent.iter().take(sakadu::ui::start::RECENT_KEEP).cloned().collect();
-            self.restore_preview(s.preview, s.pin.as_deref(), s.pin_id);
         }
         if ws.list.is_empty() {
             if let Some(s) = session {
@@ -8951,6 +8953,24 @@ mod tests {
     }
 
     /// 오른쪽 미리 보기 창: ⌥⌘P와 메뉴 막대의 동작으로 열고 닫는다. 열리면 칸들이 그만큼 좁아지고(도구 막대 단추는 제자리),
+    /// 오른쪽 미리 보기 창이 열렸는지는 작업 공간마다 기억한다 (Windows와 같다)
+    #[test]
+    fn preview_pane_is_remembered_per_workspace() {
+        let (root, home) = demo();
+        let (mut a, _) = app(&home);
+        a.toggle_preview();
+        assert!(a.preview.is_some());
+        a.new_workspace();
+        a.edit = Editing::None;
+        assert!(a.preview.is_some(), "a new workspace starts from the current screen");
+        a.toggle_preview();
+        a.switch_workspace(0);
+        assert!(a.preview.is_some(), "the first workspace had it open");
+        a.switch_workspace(1);
+        assert!(a.preview.is_none(), "the second one had it closed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// 지금 칸에서 고른 것을 따라 보인다: 그림, 글, 폴더·압축 파일·글이 아닌 것은 정보, 문서는 창 쪽의 Quick Look 보기
     /// (앱이 그린 메뉴가 떠 있으면 감춘다. 그 보기를 만들 수 없으면 큰 썸네일). 열려 있는 동안 자동 미리 보기 카드는 뜨지 않는다
     #[test]
