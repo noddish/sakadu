@@ -4380,7 +4380,8 @@ impl App {
 
     /// 사이드바 끌기의 자동 스크롤 한 걸음: 끄는 줄을 목록 끝 가까이에 대고 있으면 지난 걸음 뒤로 지난 때만큼 그쪽으로 스크롤한다.
     /// 창 쪽이 그릴 때마다 부른다: 마우스가 멈춰 있어도 이어진다. 더 스크롤할 수 있으면 true (창 쪽이 곧 다시 그린다).
-    /// 끝 자리를 벗어나거나, 떼거나, 목록 끝까지 가면 false
+    /// 끝 자리를 벗어나거나, 떼거나, 그쪽 목록 끝까지 가면 false.
+    /// 걸음 사이의 때가 거의 없어 움직이지 않은 걸음도 아직 갈 곳이 있으면 true다 (그리기가 잇달아 와도 멈추지 않게)
     pub fn side_edge_step(&mut self, now: Instant) -> bool {
         let dir = self.side_edge_dir();
         if dir == 0.0 {
@@ -4390,18 +4391,22 @@ impl App {
         // 첫 걸음은 한 틀(1/60초)만큼, 오래 쉬었다 온 걸음도 몇 틀까지만 (한 번에 멀리 뛰지 않게)
         let dt = self.side_edge_at.map_or(1.0 / 60.0, |at| now.saturating_duration_since(at).as_secs_f32().min(0.05));
         self.side_edge_at = Some(now);
-        let before = self.side_scroll;
-        self.side_scroll += dir * SIDE_EDGE_SPEED * dt;
-        self.clamp_side_scroll();
-        self.side_scroll != before
+        let max = self.side_scroll_max();
+        self.side_scroll = (self.side_scroll + dir * SIDE_EDGE_SPEED * dt).clamp(0.0, max);
+        if dir < 0.0 { self.side_scroll > 0.0 } else { self.side_scroll < max }
     }
 
     /// 사이드바 스크롤을 줄 수 안으로 (줄이 바뀌거나 창 크기가 바뀐 뒤)
     fn clamp_side_scroll(&mut self) {
+        self.side_scroll = self.side_scroll.clamp(0.0, self.side_scroll_max());
+    }
+
+    /// 사이드바 스크롤의 끝 (줄이 목록에 다 들어가면 0)
+    fn side_scroll_max(&self) -> f32 {
         let content = self.side_rows().last().map_or(0.0, |r| r.y + r.h);
         // '모든 공간'을 아래 끝에 붙인 목록은 내용 높이가 목록 높이와 같다 (계산 오차만큼의 스크롤은 없는 것으로 본다)
         let max = content - self.side_list().h();
-        self.side_scroll = self.side_scroll.clamp(0.0, if max < 0.5 { 0.0 } else { max });
+        if max < 0.5 { 0.0 } else { max }
     }
 
     /// 도구 막대 단추 자리: 칸 카드의 왼쪽 가장자리와 오른쪽 끝(미리 보기 창이 열려 있으면 그 창의 오른쪽)에 맞춘다.
@@ -6962,8 +6967,12 @@ mod tests {
         a.mouse_dragged(x, list.b - 4.0);
         assert!(a.side_edge_step(ms(5_000)));
         assert!((a.side_scroll - held - SIDE_EDGE_SPEED / 60.0).abs() < 0.01, "{}", a.side_scroll);
+        // 때가 지나지 않은 걸음(그리기가 잇달아 왔다)은 움직이지 않아도 멈추지 않는다
+        let now = a.side_scroll;
+        assert!(a.side_edge_step(ms(5_000)), "a step with no time passed keeps going");
+        assert_eq!(a.side_scroll, now);
         // 목록 끝까지 가면 더 스크롤하지 않는다 (창 쪽이 다시 그려 달라고 하지 않는다)
-        let mut t = 5_000;
+        let mut t = 5_016;
         while a.side_edge_step(ms(t)) {
             t += 16;
             assert!(t < 100_000, "it reaches the end");
