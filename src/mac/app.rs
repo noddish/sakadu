@@ -20,12 +20,12 @@ use sakadu::favorites::{self, Favorite, Favorites, Row};
 use sakadu::fileops::{Undo, UndoStack};
 use sakadu::listing::{self, Entry, Kind};
 use sakadu::palette::{self, R_ROW, System, Theme, alpha};
-use sakadu::pane::{DEFAULT_COLS, LoadState, Location, Restore, Sort, Tab, ViewMode, child_toward};
+use sakadu::pane::{DATE_AUTO, DEFAULT_COLS, LoadState, Location, Restore, Sort, SortKey, Tab, ViewMode, child_toward};
 use sakadu::session::{self, Look, PaneState, Session};
 use sakadu::ui::glyph::*;
 use sakadu::ui::menu::{MenuIcon, MenuLine, MenuScene, menu_height, menu_hit, menu_max_scroll, menu_place, menu_reveal, menu_step, menu_width, paint_menu};
 use sakadu::ui::paint::{EntryArt, PaneHover, PaneScene, paint_pane_border, paint_pane_head, paint_pane_list};
-use sakadu::ui::preview_card::{CardArt, CardBody, CardGeom, CardHover, CardScene, card_geom, paint_preview_card};
+use sakadu::ui::preview_card::{CardArt, CardBody, CardGeom, CardHover, CardScene, IMAGE_EXTS, TEXT_EXTS, card_geom, paint_preview_card};
 use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, rail_geom};
 use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, paint_toolbar, toolbar_geom};
 use sakadu::ui::*;
@@ -44,14 +44,6 @@ const HINT_H: f32 = 44.0;
 /// 고정한 것과 '모든 공간' 사이 간격 (줄이 많아 둘이 이어질 때)
 const COMMON_GAP: f32 = 12.0;
 
-/// 미리 보기 카드에 띄우는 파일의 확장자 (Windows app/preview.rs의 IMAGE_EXTS·TEXT_EXTS와 같은 목록)
-const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jfif", "png", "gif", "bmp", "dib", "webp", "heic", "heif", "avif", "tif", "tiff", "ico"];
-const TEXT_EXTS: &[&str] = &[
-    "txt", "log", "md", "markdown", "csv", "tsv", "json", "jsonc", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "config", "env",
-    "gitignore", "editorconfig", "properties", "rs", "c", "h", "cpp", "hpp", "cc", "cs", "java", "kt", "kts", "go", "py", "rb", "php",
-    "js", "mjs", "cjs", "ts", "tsx", "jsx", "css", "scss", "less", "html", "htm", "vue", "svelte", "sql", "sh", "bash", "zsh", "ps1",
-    "psm1", "bat", "cmd", "lua", "r", "swift", "dart", "gradle", "cmake", "srt", "vtt", "nfo", "reg", "lock",
-];
 /// 카드의 글: 파일 앞쪽 64KB에서 앞 80줄, 한 줄은 200자까지 (그릴 때마다 긴 글을 배치하지 않게 앞부분만 둔다)
 const TEXT_READ: u64 = 64 * 1024;
 const TEXT_LINES: usize = 80;
@@ -112,6 +104,10 @@ pub enum Hit {
     /// 경로 줄의 빈 곳 (누르면 경로 입력)
     CrumbEmpty(usize),
     Star(usize),
+    /// 열 머리글(자세히 보기)이나 정렬 칩(아이콘·목록 보기): 누르면 그 열로 정렬한다
+    Header(usize, SortKey),
+    /// 머리글의 열 경계 (resizable의 번호: 0 날짜, 1 유형, 2 크기): 끌어서 폭을 바꾼다
+    HeaderResize(usize, usize),
     Row(usize, usize),
     List(usize),
     Pane(usize),
@@ -121,6 +117,15 @@ pub enum Hit {
     SplitXY,
     /// 열린 메뉴 안 (고를 수 있는 줄이면 그 번호). 메뉴가 열려 있으면 메뉴 밖은 Hit::None이다
     Menu(Option<usize>),
+}
+
+/// 마우스 모양: 경계를 끌 수 있는 곳(열 경계, 칸 나눔선)에서는 끄는 방향의 화살표.
+/// 두 나눔선이 만나는 곳은 맥에 네 방향 모양이 없어 보통 화살표다
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pointer {
+    Arrow,
+    LeftRight,
+    UpDown,
 }
 
 /// 누른 수정 키
@@ -393,6 +398,10 @@ pub struct Pane {
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub view: ViewMode,
+    /// 정렬 (칸마다. 머리글이나 정렬 칩을 눌러 바꾼다)
+    pub sort: Sort,
+    /// 수정한 날짜·유형·크기 열 폭 (칸마다. 날짜가 pane::DATE_AUTO면 내용 폭)
+    pub cols: [f32; 3],
 }
 
 impl Pane {
@@ -402,6 +411,16 @@ impl Pane {
     fn tab_mut(&mut self) -> &mut Tab {
         &mut self.tabs[self.active]
     }
+}
+
+/// 끌고 있는 열 경계: 칸, 선 오른쪽 열, 선 왼쪽에 보이는 열(없으면 이름 칸), 누른 x, 누를 때의 열 폭 (ui::drag_column)
+#[derive(Clone, Copy, Debug)]
+struct ColDrag {
+    pane: usize,
+    col: usize,
+    prev: Option<usize>,
+    start_x: f32,
+    start: [f32; 3],
 }
 
 /// 폴더 읽기 요청: 창 쪽이 뒷줄에서 읽고 on_listed로 돌려준다
@@ -778,9 +797,12 @@ pub struct App {
     show_hidden: bool,
     pub hover: Hit,
     next_id: u64,
-    sort: Sort,
     /// 끌고 있는 칸 경계
     drag: Option<Hit>,
+    /// 끌고 있는 열 경계 (자세히 보기 머리글)
+    col_drag: Option<ColDrag>,
+    /// 날짜 열의 내용 폭 (글꼴로 한 번 재어 둔다: ui::date_col_width)
+    date_w: std::cell::Cell<Option<f32>>,
     /// '모든 공간'에 늘 있는 줄 (이름, 경로): 홈·문서·다운로드·디스크
     places: Vec<(String, String)>,
     requests: Vec<Request>,
@@ -906,8 +928,9 @@ impl App {
             show_hidden: false,
             hover: Hit::None,
             next_id: 1,
-            sort: Sort::default(),
             drag: None,
+            col_drag: None,
+            date_w: std::cell::Cell::new(None),
             places,
             requests: Vec::new(),
             lights_bottom: LIGHTS_BOTTOM,
@@ -964,7 +987,7 @@ impl App {
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
-            app.panes.push(Pane { tabs: vec![tab], active: 0, view: ViewMode::Details });
+            app.panes.push(Pane { tabs: vec![tab], active: 0, view: ViewMode::Details, sort: Sort::default(), cols: DEFAULT_COLS });
         }
         for p in 0..app.layout.count() {
             app.load(p);
@@ -1027,6 +1050,11 @@ impl App {
         &self.panes[p]
     }
 
+    /// 지금 칸의 정렬 (smoke가 머리글을 누른 뒤 본다)
+    pub fn active_sort(&self) -> Sort {
+        self.panes[self.active].sort
+    }
+
     /// 칸 p의 지금 탭 (그림 시험에서 고른 줄을 정할 때)
     pub fn tab_mut(&mut self, p: usize) -> &mut Tab {
         self.panes[p].tab_mut()
@@ -1067,8 +1095,9 @@ impl App {
 
     /// 뒷줄에서 읽은 결과. 그 사이 다른 곳으로 옮겼으면(세대 번호가 다르면) 버린다
     pub fn on_listed(&mut self, tab_id: u64, generation: u64, result: Result<Vec<Entry>, String>) {
-        let (sort, hidden) = (self.sort, self.show_hidden);
+        let hidden = self.show_hidden;
         let Some(p) = self.panes.iter().position(|pane| pane.tabs.iter().any(|t| t.id == tab_id)) else { return };
+        let sort = self.panes[p].sort;
         let (list, view) = (self.list_rect(p), self.panes[p].view);
         let current = self.panes[p].tabs.iter().any(|t| t.id == tab_id && t.generation == generation);
         if !current {
@@ -1858,7 +1887,7 @@ impl App {
     fn item_name_rect(&self, p: usize) -> Option<R> {
         let list = self.list_rect(p)?;
         let tab = self.panes[p].tab();
-        name_edit_rect(list, self.panes[p].view, DEFAULT_COLS, tab.cursor, tab.scroll)
+        name_edit_rect(list, self.panes[p].view, self.cols(p), tab.cursor, tab.scroll)
     }
 
     /// 고친 이름을 확정한다: 이름 바꾸기를 맡기고, 끝날 때까지 상자는 그대로 둔다.
@@ -2263,9 +2292,9 @@ impl App {
                 .map(|pane| PaneState {
                     tabs: pane.tabs.iter().map(|t| t.loc.to_session()).collect(),
                     active: pane.active,
-                    cols: DEFAULT_COLS,
-                    sort_key: 0,
-                    sort_desc: false,
+                    cols: pane.cols,
+                    sort_key: pane.sort.key.to_u8(),
+                    sort_desc: pane.sort.desc,
                     view: pane.view.code(),
                 })
                 .collect(),
@@ -2301,7 +2330,14 @@ impl App {
             }
             if !tabs.is_empty() {
                 let active = ps.active.min(tabs.len() - 1);
-                self.panes[p] = Pane { tabs, active, view: ViewMode::from_code(ps.view) };
+                // 열 폭은 Windows와 같은 범위로 (저장한 파일을 손으로 고쳐도 열이 사라지거나 넘치지 않게)
+                self.panes[p] = Pane {
+                    tabs,
+                    active,
+                    view: ViewMode::from_code(ps.view),
+                    sort: Sort { key: SortKey::from_u8(ps.sort_key), desc: ps.sort_desc },
+                    cols: ps.cols.map(|c| c.clamp(COL_MIN, COL_MAX)),
+                };
             }
         }
         self.active = s.active.min(self.layout.count() - 1);
@@ -2410,6 +2446,7 @@ impl App {
         self.flash = None;
         self.menu = None;
         self.drag = None;
+        self.col_drag = None;
         self.side_scroll = 0.0;
         self.retheme();
     }
@@ -2656,8 +2693,9 @@ impl App {
 
     pub fn toggle_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
-        let (sort, hidden) = (self.sort, self.show_hidden);
+        let hidden = self.show_hidden;
         for p in 0..self.panes.len() {
+            let sort = self.panes[p].sort;
             for tab in &mut self.panes[p].tabs {
                 tab.rebuild_view(sort, hidden);
             }
@@ -2670,6 +2708,36 @@ impl App {
         self.panes[p].view = view;
         self.clamp_scroll(p);
         self.ensure_visible(p);
+    }
+
+    /// 칸 p를 key로 정렬한다 (머리글이나 정렬 칩을 눌렀다). 같은 열을 다시 누르면 순서를 뒤집는다.
+    /// 날짜·크기는 큰 값(최신·큰 파일)부터 보는 경우가 많아 내림차순으로 시작한다 (Windows와 같다)
+    pub fn toggle_sort(&mut self, p: usize, key: SortKey) {
+        let hidden = self.show_hidden;
+        let pane = &mut self.panes[p];
+        pane.sort = if pane.sort.key == key { Sort { key, desc: !pane.sort.desc } } else { Sort { key, desc: matches!(key, SortKey::Modified | SortKey::Size) } };
+        let sort = pane.sort;
+        for tab in &mut pane.tabs {
+            tab.rebuild_view(sort, hidden);
+        }
+        self.clamp_scroll(p);
+        self.ensure_visible(p);
+    }
+
+    /// 날짜 열의 내용 폭 (ui::date_col_width). 글꼴이 바뀌지 않으므로 한 번 재어 둔다
+    fn date_col_w(&self, g: &Gfx) -> f32 {
+        if let Some(w) = self.date_w.get() {
+            return w;
+        }
+        let w = date_col_width(g, true);
+        self.date_w.set(Some(w));
+        w
+    }
+
+    /// 칸 p의 열 폭: '자동' 날짜 열(pane::DATE_AUTO)은 내용 폭으로. 그리기·누르기·열 끌기·이름 상자가 모두 이것을 쓴다.
+    /// 아직 한 번도 재지 않았으면(그리기 전) 기본 폭
+    fn cols(&self, p: usize) -> [f32; 3] {
+        resolve_cols(self.panes[p].cols, self.date_w.get().unwrap_or(DATE_AUTO))
     }
 
     /// 메뉴를 연다: 붙일 자리와 줄을 정한다. 줄이 없거나 붙일 자리가 없으면 열지 않는다
@@ -3440,6 +3508,9 @@ impl App {
                 }
                 return Hit::CrumbEmpty(p);
             }
+            if gm.header.contains(x, y) {
+                return self.header_hit(g, p, &gm, x, y);
+            }
             if gm.list.contains(x, y) {
                 let grid = Grid::of(gm.list, self.panes[p].view);
                 return grid.at(x, y, tab.scroll, tab.view.len()).map_or(Hit::List(p), |vi| Hit::Row(p, vi));
@@ -3447,6 +3518,56 @@ impl App {
             return Hit::Pane(p);
         }
         Hit::None
+    }
+
+    /// 지금 칸에서 key 열 머리글(다른 보기면 그 정렬 칩)의 가운데. smoke가 실제 창에서 누른다
+    pub fn header_point(&self, g: &Gfx, key: SortKey) -> Option<(f32, f32)> {
+        let p = self.active;
+        let gm = geom(self.pane_rects().into_iter().find(|(q, _)| *q == p)?.1);
+        let y = (gm.header.t + gm.header.b) / 2.0;
+        let mid = |(l, r): (f32, f32)| ((l + r) / 2.0, y);
+        if self.panes[p].view != ViewMode::Details {
+            return sort_chips(g, gm.header, self.panes[p].sort.key).into_iter().find(|(k, _, _)| *k == key).map(|(_, _, c)| mid((c.l, c.r)));
+        }
+        self.date_col_w(g);
+        let cols = columns(gm.list, self.cols(p));
+        match key {
+            SortKey::Name => Some(cols.name),
+            SortKey::Modified => cols.modified,
+            SortKey::Type => cols.kind,
+            SortKey::Size => cols.size,
+        }
+        .map(mid)
+    }
+
+    /// 칸 p의 머리글 줄에서 가리키는 것 (Windows layout.rs와 같은 판정): 자세히 보기는 열 경계(±4)와 열, 다른 보기는 정렬 칩
+    fn header_hit(&self, g: &Gfx, p: usize, gm: &PaneGeom, x: f32, y: f32) -> Hit {
+        let pane = &self.panes[p];
+        if pane.view != ViewMode::Details {
+            return match sort_chips(g, gm.header, pane.sort.key).into_iter().find(|(_, _, r)| r.contains(x, y)) {
+                Some((key, _, _)) => Hit::Header(p, key),
+                None => Hit::Pane(p),
+            };
+        }
+        self.date_col_w(g);
+        let cols = columns(gm.list, self.cols(p));
+        for (ci, c) in cols.resizable().iter().enumerate() {
+            if let Some((l, _)) = c
+                && (x - l).abs() <= 4.0
+            {
+                return Hit::HeaderResize(p, ci);
+            }
+        }
+        let key = if cols.size.is_some_and(|(l, _)| x >= l) {
+            SortKey::Size
+        } else if cols.kind.is_some_and(|(l, _)| x >= l) {
+            SortKey::Type
+        } else if cols.modified.is_some_and(|(l, _)| x >= l) {
+            SortKey::Modified
+        } else {
+            SortKey::Name
+        };
+        Hit::Header(p, key)
     }
 
     // ---------- 마우스·키 ----------
@@ -3498,6 +3619,8 @@ impl App {
             | Hit::CrumbEmpty(p)
             | Hit::Star(p)
             | Hit::ViewPick(p)
+            | Hit::Header(p, _)
+            | Hit::HeaderResize(p, _)
             | Hit::Row(p, _)
             | Hit::List(p)
             | Hit::Pane(p) => self.activate_pane(p),
@@ -3583,6 +3706,16 @@ impl App {
                 }
             }
             Hit::SplitX | Hit::SplitY | Hit::SplitXY => self.drag = Some(hit),
+            Hit::Header(p, key) => self.toggle_sort(p, key),
+            Hit::HeaderResize(p, col) => {
+                // 선 왼쪽에 보이는 열 (좁은 칸에서는 숨은 열이 있다). 없으면 이름 칸.
+                // 끌기는 보이는 폭에서 시작한다 ('자동' 날짜 열은 내용 폭). 끌고 나면 그 폭으로 정해진다
+                let Some(list) = self.list_rect(p) else { return };
+                let start = self.cols(p);
+                let shown = columns(list, start).resizable();
+                let prev = (0..col).rev().find(|&i| shown[i].is_some());
+                self.col_drag = Some(ColDrag { pane: p, col, prev, start_x: x, start });
+            }
             // 검색은 위에서 받았다
             Hit::FindOpen | Hit::FindField | Hit::FindClose | Hit::Find(_) => {}
             Hit::None | Hit::Pane(_) | Hit::Menu(_) => {}
@@ -3602,6 +3735,11 @@ impl App {
             self.after_pointer();
             return;
         }
+        // 열 경계: 끄는 선만 따라가고 다른 선은 그대로 (ui::drag_column)
+        if let Some(d) = self.col_drag {
+            self.panes[d.pane].cols = drag_column(d.start, d.col, d.prev, d.start_x - x);
+            return;
+        }
         let a = self.area();
         match self.drag {
             Some(Hit::SplitX) => self.split.0 = ((x - GAP / 2.0 - a.l) / (a.w() - GAP)).clamp(0.15, 0.85),
@@ -3616,8 +3754,21 @@ impl App {
         }
     }
 
+    /// 지금 보일 마우스 모양: 끄는 동안은 끄는 것의, 아니면 마우스 아래 것의
+    pub fn pointer(&self) -> Pointer {
+        if self.col_drag.is_some() {
+            return Pointer::LeftRight;
+        }
+        match self.drag.unwrap_or(self.hover) {
+            Hit::HeaderResize(..) | Hit::SplitX => Pointer::LeftRight,
+            Hit::SplitY => Pointer::UpDown,
+            _ => Pointer::Arrow,
+        }
+    }
+
     pub fn mouse_up(&mut self) {
         self.drag = None;
+        self.col_drag = None;
         // 여럿을 고른 것 가운데 하나를 누르고 끌지 않은 채 뗐다: 그 줄만 고른다
         if let Some(press) = self.press.take().filter(|press| press.collapse) {
             let tab = self.panes[press.pane].tab_mut();
@@ -3959,12 +4110,14 @@ impl App {
         // 이 칸에서 이름을 고치는 항목 (커서 줄에 이름 상자가 뜬다)
         let naming = self.item_edit().filter(|(e, _)| e.pane == p);
         let dir = tab.loc.dir();
+        // 날짜 열 폭을 아직 재지 않았으면 여기서 잰다 (cols가 쓴다)
+        self.date_col_w(g);
         let scene = PaneScene {
             r,
             tabs: &pane.tabs,
             current: pane.active,
-            sort: self.sort,
-            cols: DEFAULT_COLS,
+            sort: pane.sort,
+            cols: self.cols(p),
             view: pane.view,
             active,
             multi: self.layout.count() > 1,
@@ -4027,6 +4180,7 @@ fn pane_hover(h: Hit, p: usize) -> PaneHover {
         Hit::Crumb(q, i) if q == p => PaneHover::Crumb(i),
         Hit::CrumbEmpty(q) if q == p => PaneHover::CrumbEmpty,
         Hit::Row(q, vi) if q == p => PaneHover::Row(vi),
+        Hit::Header(q, key) if q == p => PaneHover::Header(key),
         _ => PaneHover::None,
     }
 }
@@ -4306,6 +4460,54 @@ mod tests {
         let (x, y) = row_point(&a, 0, 0);
         a.scroll(&g, x, y, 500.0);
         assert_eq!(a.pane(0).tab().scroll, 0.0, "a short list does not scroll");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 머리글을 누르면 그 칸만 정렬이 바뀌고(크기·날짜는 큰 값부터, 다시 누르면 뒤집기), 열 경계를 끌면 그 선이 따라오고,
+    /// 둘 다 세션에 남아 다시 열 때(작업 공간을 오갈 때도) 돌아온다
+    #[test]
+    fn header_sorts_and_resizes_each_pane() {
+        let (root, home) = demo();
+        let dir = util::join(&home, "업무");
+        std::fs::write(std::path::Path::new(&dir).join("회의록.md"), b"xyz").unwrap();
+        let (mut a, mut g) = app(&dir);
+        a.paint(&mut g);
+        let gm = geom(a.pane_rects()[0].1);
+        let y = (gm.header.t + gm.header.b) / 2.0;
+        let cols = columns(gm.list, a.cols(0));
+        let (sl, sr) = cols.size.expect("a two-pane window shows the size column");
+        assert_eq!(a.hit(&g, (sl + sr) / 2.0, y), Hit::Header(0, SortKey::Size));
+        a.mouse_down(&g, (sl + sr) / 2.0, y, Mods::default(), 1);
+        assert_eq!(names(&a, 0), ["2026 4분기", "회의록.md", "예산.csv"], "biggest file first, folders stay on top");
+        assert_eq!(names(&a, 1), ["2026 4분기", "예산.csv", "회의록.md"], "the other pane keeps its own order");
+        a.mouse_down(&g, (sl + sr) / 2.0, y, Mods::default(), 1);
+        assert_eq!(names(&a, 0), ["2026 4분기", "예산.csv", "회의록.md"], "a second click flips the order");
+        // 크기 열의 왼쪽 경계를 왼쪽으로 40 끌면 그 경계가 따라오고 크기 열이 40 넓어진다
+        let start = a.cols(0);
+        let edge = cols.resizable()[2].unwrap().0;
+        assert_eq!(a.hit(&g, edge + 2.0, y), Hit::HeaderResize(0, 2));
+        a.mouse_moved(&g, edge + 2.0, y);
+        assert_eq!(a.pointer(), Pointer::LeftRight);
+        a.mouse_down(&g, edge + 2.0, y, Mods::default(), 1);
+        a.mouse_dragged(edge - 38.0, y);
+        a.mouse_up();
+        assert_eq!(a.pane(0).cols[2], start[2] + 40.0);
+        let moved = columns(gm.list, a.cols(0)).resizable()[2].unwrap().0;
+        assert!((moved - (edge - 40.0)).abs() < 0.5, "the edge follows the pointer: {edge} -> {moved}");
+        assert_eq!(a.pane(1).cols, DEFAULT_COLS, "the other pane keeps its columns");
+        a.mouse_moved(&g, (sl + sr) / 2.0, gm.list.t + 10.0);
+        assert_eq!(a.pointer(), Pointer::Arrow);
+        // 세션: 정렬과 열 폭이 칸마다 남는다
+        let s = a.to_session();
+        assert_eq!((s.panes[0].sort_key, s.panes[0].sort_desc), (SortKey::Size.to_u8(), false));
+        assert_eq!(s.panes[0].cols, a.pane(0).cols);
+        assert_eq!(s.panes[1].cols[0], DATE_AUTO, "an untouched date column stays automatic");
+        let (mut b, _) = app(&dir);
+        b.restore(&s, &dir);
+        b.settle();
+        assert_eq!(b.pane(0).sort, Sort { key: SortKey::Size, desc: false });
+        assert_eq!(b.pane(0).cols, a.pane(0).cols);
+        assert_eq!(names(&b, 0), ["2026 4분기", "예산.csv", "회의록.md"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::app::{MenuKind, Seen};
+use sakadu::pane::{Sort, SortKey};
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -459,7 +460,45 @@ fn script(dir: &str) -> usize {
         key(RETURN, false);
         run.wait("Return picks the line and closes the menu", 5, || shown().is_none() && seen().is_some_and(|s| s.ready));
     }
+
+    // 정렬: 지금 칸의 '이름' 머리글을 실제로 누르면(mouseDown:·mouseUp:) 거꾸로 정렬되고, 한 번 더 누르면 돌아온다
+    let sort = || on_main(|| with_app(|a| a.active_sort()));
+    let before = seen().map(|s| s.names).unwrap_or_default();
+    click_header(SortKey::Name);
+    let backwards = Some(Sort { key: SortKey::Name, desc: true });
+    run.wait("clicking the name header sorts the list backwards", 5, || sort() == backwards && seen().is_some_and(|s| s.names != before));
+    click_header(SortKey::Name);
+    run.wait("a second click sorts it forwards again", 5, || seen().is_some_and(|s| s.names == before));
     run.failed
+}
+
+/// 지금 칸의 key 열 머리글 가운데를 실제 창이 받는 길(mouseDown:·mouseUp:)로 누른다 (창 좌표는 왼쪽 아래가 0)
+fn click_header(key: SortKey) {
+    on_main(move || {
+        let Some(view) = VIEW.with(|v| v.get().cloned()) else { return };
+        let Some(window) = view.window() else { return };
+        let Some((x, y)) = with_app(|a| a.header_point(&view.ivars().measure, key)).flatten() else { return };
+        let at = view.convertPoint_toView(NSPoint::new(x as f64, y as f64), None);
+        for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                kind,
+                at,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window.windowNumber(),
+                None,
+                0,
+                1,
+                1.0,
+            );
+            let Some(e) = event else { continue };
+            if kind == NSEventType::LeftMouseDown {
+                view.mouseDown(&e);
+            } else {
+                view.mouseUp(&e);
+            }
+        }
+    });
 }
 
 /// 지금 칸 목록의 아래쪽 빈 곳을 오른쪽 단추로 누른다 (실제 창이 받는 rightMouseDown:. 창 좌표는 왼쪽 아래가 0)
