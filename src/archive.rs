@@ -103,12 +103,48 @@ pub fn list(path: &str, archive: &str) -> Result<Vec<Entry>, String> {
         }
         out.push(e);
     }
-    // 손상된 압축 파일은 셸이 오류 없이 빈 목록을 준다. 맨 위가 비었는데 파일은 크면 읽지 못한 것으로 본다
-    // (항목이 하나도 없는 zip은 22바이트다)
-    if out.is_empty() && util::eq_path(path, archive) && std::fs::metadata(archive).is_ok_and(|m| m.len() > 1024) {
+    // 손상된 압축 파일은 셸이 오류 없이 빈 목록을 준다. 맨 위가 비었으면 형식의 표식으로 정말 빈 것인지 가린다
+    if out.is_empty() && util::eq_path(path, archive) && marks_missing(archive) {
         return Err("압축 파일을 읽지 못했어요 · 손상됐거나 이 PC가 읽지 못하는 형식이에요".to_string());
     }
     Ok(out)
+}
+
+/// zip의 끝 레코드는 마지막 22바이트에 주석(최대 65,535바이트)이 붙은 자리에 있다
+const ZIP_TAIL: u64 = 22 + 65_535;
+
+/// 압축 파일에 그 형식의 표식이 없는지 (파일을 읽지 못해도 없다고 본다)
+fn marks_missing(archive: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let ext = archive.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let Ok(mut f) = std::fs::File::open(archive) else { return true };
+    let mut head = [0u8; 8];
+    let n = f.read(&mut head).unwrap_or(0);
+    let mut tail = Vec::new();
+    if ext == "zip" {
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if f.seek(SeekFrom::Start(len.saturating_sub(ZIP_TAIL))).is_err() || f.read_to_end(&mut tail).is_err() {
+            return true;
+        }
+    }
+    unreadable(&ext, &head[..n], &tail)
+}
+
+/// 셸이 빈 목록을 준 압축 파일이 정말 빈 것인지, 손상되거나 다른 형식이라 읽지 못한 것인지 표식으로 가린다.
+/// zip은 끝 레코드(PK 05 06), 나머지는 맨 앞의 표식. tar는 빈 파일이 0으로 채워져 있어 가리지 않는다
+fn unreadable(ext: &str, head: &[u8], tail: &[u8]) -> bool {
+    let starts = |m: &[u8]| head.starts_with(m);
+    match ext {
+        "zip" => !tail.windows(4).any(|w| w == [0x50, 0x4b, 0x05, 0x06]),
+        "7z" => !starts(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]),
+        "rar" => !starts(&[0x52, 0x61, 0x72, 0x21, 0x1a, 0x07]),
+        "gz" | "tgz" => !starts(&[0x1f, 0x8b]),
+        "bz2" | "tbz2" => !starts(b"BZh"),
+        "xz" | "txz" => !starts(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]),
+        "zst" | "tzst" => !starts(&[0x28, 0xb5, 0x2f, 0xfd]),
+        "cab" => !starts(b"MSCF"),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +159,27 @@ mod tests {
         assert!(!is_archive_name(".zip"));
         assert!(!is_archive_name("zip"));
         assert!(!is_archive_name("notes.txt"));
+    }
+
+    /// 빈 압축 파일(주석이 긴 빈 zip, 0으로 채운 빈 tar)은 읽은 것이고, 표식이 없는 것만 읽지 못한 것이다
+    #[test]
+    fn empty_archives_are_not_broken() {
+        let mut empty_zip = vec![0x50, 0x4b, 0x05, 0x06];
+        empty_zip.resize(22, 0);
+        assert!(!unreadable("zip", &empty_zip[..8], &empty_zip));
+        // 주석 2,000바이트가 붙은 빈 zip
+        let mut commented = empty_zip.clone();
+        commented.extend(std::iter::repeat_n(b'x', 2000));
+        assert!(!unreadable("zip", &commented[..8], &commented));
+        // 0으로 채운 빈 tar (10,240바이트)
+        assert!(!unreadable("tar", &[0; 8], &[]));
+        assert!(!unreadable("7z", &[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0, 4], &[]));
+        assert!(!unreadable("gz", &[0x1f, 0x8b, 8, 0], &[]));
+        // 아무 바이트나 든 가짜 압축 파일
+        let junk = [0xc8, 0x9f, 0xe3, 0x11, 0x42, 0x07, 0x99, 0x31];
+        assert!(unreadable("zip", &junk, &junk));
+        assert!(unreadable("7z", &junk, &[]));
+        assert!(unreadable("gz", &junk, &[]));
     }
 
     #[test]

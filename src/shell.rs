@@ -1295,6 +1295,18 @@ mod tests {
         assert!(!done.is_empty(), "copies out of an archive are recorded for undo");
         // 꺼내기는 복사라 압축 파일은 그대로
         assert_eq!(crate::archive::list(&z, &z).unwrap().len(), 2);
+        // 빈 압축 파일은 빈 목록 (주석이 긴 빈 zip, 0으로 채운 빈 tar), 표식이 없는 가짜는 읽지 못했다고
+        let mut empty_zip = vec![0x50, 0x4b, 0x05, 0x06];
+        empty_zip.resize(20, 0);
+        empty_zip.extend_from_slice(&2000u16.to_le_bytes());
+        empty_zip.extend(std::iter::repeat_n(b'x', 2000));
+        for (name, bytes, ok) in [("빈.zip", empty_zip, true), ("빈.tar", vec![0u8; 10240], true), ("가짜.zip", vec![0x5a; 4096], false)] {
+            let f = s(&dir.join(name));
+            std::fs::write(&f, bytes).unwrap();
+            let r = crate::archive::list(&f, &f);
+            assert_eq!(r.is_ok(), ok, "{name}: {r:?}");
+            assert!(r.map_or(true, |v| v.is_empty()));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
