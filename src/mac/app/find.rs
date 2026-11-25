@@ -12,6 +12,8 @@ use std::time::Duration;
 
 /// 결과 수 (Windows와 같다)
 pub const FIND_LIMIT: usize = 200;
+/// 네트워크 디스크 위의 더한 폴더를 다시 훑는 간격 (Windows의 RESCAN_UNWATCHED처럼)
+const RESCAN_EVERY: Duration = Duration::from_secs(30 * 60);
 /// 늘어난 입력 칸의 폭 (창이 좁으면 공통 도구 막대가 줄인다)
 pub(super) const FIELD_W: f32 = 240.0;
 /// 범위 고르기 판, 결과 한 줄, 아래 한 줄의 높이
@@ -355,6 +357,40 @@ impl App {
             return;
         }
         self.find.setting.icloud = icloud;
+        self.find_scope_changed();
+    }
+
+    /// 설정 창의 '폴더 더하기…': 검색 범위에 폴더를 더한다 (외장 디스크·NAS의 폴더도. 그 디스크가 붙어 있는 동안 찾는다).
+    /// 이미 있으면 그대로다. 검색이 켜져 있으면 색인을 버리고 새 범위로 다시 훑는다
+    pub fn add_find_folder(&mut self, path: &str) {
+        let path = util::normalize(path);
+        // 설정 파일은 한 줄에 폴더 하나다
+        if !path.starts_with('/') || path.contains(['\n', '\r']) || self.find.setting.folders.contains(&path) {
+            return;
+        }
+        self.find.setting.folders.push(path);
+        self.find_scope_changed();
+    }
+
+    /// 설정 창 폴더 줄의 '빼기': 더한 폴더 i를 검색 범위에서 뺀다
+    pub fn remove_find_folder(&mut self, i: usize) {
+        if i < self.find.setting.folders.len() {
+            self.find.setting.folders.remove(i);
+            self.find_scope_changed();
+        }
+    }
+
+    /// 디스크 at이 붙거나 떨어졌다: 검색에 더한 폴더 가운데 그 디스크 위의 것을 다시 훑는다 (붙었으면 안이 들어오고, 떨어졌으면 빠진다.
+    /// 네트워크 디스크와 나중에 붙은 디스크는 변경 기록이 오지 않는다)
+    pub(super) fn rescan_folders_on(&self, at: &str) {
+        let Some(index) = &self.find.index else { return };
+        for f in self.find.setting.folders.iter().filter(|f| under(f, at).is_some()) {
+            index.rescan(f);
+        }
+    }
+
+    /// 검색 범위가 바뀌었다: 설정에 적고, 검색이 켜져 있으면 색인을 버리고 새 범위로 다시 훑는다
+    fn find_scope_changed(&mut self) {
         self.save_find_setting();
         if self.find.setting.on {
             self.drop_index();
@@ -401,14 +437,20 @@ impl App {
         }
     }
 
-    /// 훑는 범위: 홈 폴더와 응용 프로그램 폴더 둘 (iCloud Drive는 고른 사람만). 시험에서는 정해 준 폴더만
+    /// 훑는 범위: 홈 폴더와 응용 프로그램 폴더 둘 (iCloud Drive는 고른 사람만)과 설정에서 더한 폴더. 시험에서는 정해 준 폴더와 더한 폴더만.
+    /// 더한 폴더가 네트워크 디스크 위에 있으면 30분마다 다시 훑는다 (맥이 바뀐 것을 알려 주지 않는다)
     fn index_options(&self) -> Options {
         let home = std::env::var("HOME").map(|h| util::normalize(&h)).unwrap_or_else(|_| self.home.clone());
-        let (roots, protected) = match &self.find.roots {
+        let (mut roots, protected) = match &self.find.roots {
             Some(r) => (r.clone(), Vec::new()),
             None => search::default_scope(&home, self.find.setting.icloud),
         };
-        Options { roots, home, protected, threads: 3, packages_are_files: true, max_entries: usize::MAX, watch: true }
+        for f in &self.find.setting.folders {
+            if !roots.contains(f) {
+                roots.push(f.clone());
+            }
+        }
+        Options { roots, home, protected, threads: 3, packages_are_files: true, max_entries: usize::MAX, watch: true, rescan_every: Some(RESCAN_EVERY) }
     }
 
     /// 색인을 시작해 달라는 요청 (창 쪽이 가져가 시작하고 set_index로 넘긴다)
@@ -1118,6 +1160,48 @@ mod tests {
         a.settle();
         assert!(a.find.status.ready && !a.prefs().crawling);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 설정 창의 더한 폴더(외장 디스크·NAS의 폴더 대신 다른 임시 폴더): 범위에 더해 훑고, 그 안의 결과를 찾아 연다.
+    /// 같은 폴더는 한 번만, '/'로 시작하지 않는 것은 받지 않는다. 빼면 새 범위로 다시 훑어 결과에서 빠진다
+    #[test]
+    fn settings_extra_folders_are_crawled_and_opened() {
+        let (root, home) = demo("folders");
+        let extra = std::env::temp_dir().join(format!("sakadu-find-extra-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&extra);
+        std::fs::create_dir_all(extra.join("NAS 사진")).unwrap();
+        std::fs::write(extra.join("NAS 사진/가족 여행.jpg"), b"x").unwrap();
+        let extra_path = util::normalize(&std::fs::canonicalize(&extra).unwrap().to_string_lossy());
+        let (mut a, _g) = app(&home);
+        a.add_find_folder(&format!("{extra_path}/"));
+        a.add_find_folder(&extra_path);
+        a.add_find_folder("상대 경로");
+        assert_eq!(a.prefs().folders, std::slice::from_ref(&extra_path));
+        assert!(a.find.start.is_none(), "nothing is read while search is off");
+        a.set_find_on(true);
+        let opts = a.find.start.as_ref().expect("an index is asked for");
+        assert_eq!((opts.roots.clone(), opts.rescan_every), (vec![home.clone(), extra_path.clone()], Some(RESCAN_EVERY)));
+        a.settle();
+        a.open_find();
+        a.find_typed("가족 여행");
+        a.settle();
+        assert_eq!(found(&a), ["가족 여행.jpg"]);
+        // ⌘Return: 그 폴더를 열고 그 파일을 골라 둔다
+        assert!(a.find_key(Key::Return, true));
+        a.settle();
+        let tab = a.panes[a.active].tab();
+        assert_eq!(tab.loc.dir(), Some(util::join(&extra_path, "NAS 사진").as_str()));
+        assert_eq!(tab.cursor_entry().map(Entry::name_string).as_deref(), Some("가족 여행.jpg"));
+        // 빼면 새 범위로 다시 훑는다
+        a.remove_find_folder(0);
+        assert!(a.prefs().folders.is_empty() && a.find.index.is_none() && a.find.start.as_ref().is_some_and(|o| o.roots == [home.clone()]));
+        a.settle();
+        a.open_find();
+        a.find_typed("가족");
+        a.settle();
+        assert!(found(&a).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(extra).unwrap();
     }
 
     /// 설정 창의 숨김 항목 보기·자동 미리 보기는 ⌘⇧.와 눈 단추와 같은 값이다

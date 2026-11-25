@@ -154,6 +154,35 @@ pub fn grouped(n: u64) -> String {
     out
 }
 
+/// 네트워크 공유 주소의 앞부분 (맥 Finder의 '서버에 연결'이 받는 것)
+const SHARE_SCHEMES: [&str; 5] = ["smb", "cifs", "afp", "nfs", "ftp"];
+
+/// 친 글이 네트워크 공유 주소(smb://, cifs://, afp://, nfs://, ftp://)면 연결에 쓸 주소로 돌려준다 (맥 주소 칸).
+/// 앞부분은 소문자로, 공백·한글처럼 주소에 그대로 쓸 수 없는 글자는 %로 바꾼다 (이미 %로 바꾼 것은 그대로 둔다).
+/// 서버 이름이 없으면 None
+pub fn share_url(text: &str) -> Option<String> {
+    let (scheme, rest) = text.trim().split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if !SHARE_SCHEMES.contains(&scheme.as_str()) {
+        return None;
+    }
+    // 서버: 첫 '/' 앞에서 사용자 이름(…@) 뒤
+    let server = rest.split('/').next().unwrap_or_default();
+    let host = server.rsplit('@').next().unwrap_or_default();
+    if host.is_empty() || host.starts_with(':') {
+        return None;
+    }
+    let mut out = format!("{scheme}://");
+    for b in rest.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~:/@!$&'()*+,;=%[]".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +278,19 @@ mod tests {
     fn invalid_chars() {
         assert_eq!(invalid_name_char("a?b"), Some('?'));
         assert_eq!(invalid_name_char("보고서 (최종).txt"), None);
+    }
+
+    /// 네트워크 공유 주소: 아는 앞부분만, 서버 이름이 있을 때만. 공백과 한글은 %로 바꾸고 이미 바꾼 것은 그대로
+    #[test]
+    fn share_urls() {
+        assert_eq!(share_url("smb://nas.local/사진 폴더").as_deref(), Some("smb://nas.local/%EC%82%AC%EC%A7%84%20%ED%8F%B4%EB%8D%94"));
+        assert_eq!(share_url("  SMB://hong@NAS/share  ").as_deref(), Some("smb://hong@NAS/share"));
+        assert_eq!(share_url("afp://nas/a%20b/").as_deref(), Some("afp://nas/a%20b/"));
+        for ok in ["cifs://nas/x", "nfs://192.0.2.1/export", "ftp://ftp.example.com", "smb://nas:445/share"] {
+            assert!(share_url(ok).is_some(), "{ok}");
+        }
+        for no in ["smb://", "smb:///share", "smb://user@/share", "http://nas/share", "/Volumes/nas", "smb:/nas", "~/smb://nas", "smb://:445/x"] {
+            assert_eq!(share_url(no), None, "{no}");
+        }
     }
 }

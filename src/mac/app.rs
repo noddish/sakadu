@@ -14,19 +14,22 @@
 //! 끌어서 놓기도 그렇다: 앱은 끌어 낼 항목(take_drag)을 내주고, 끌려 온 것이 어디에 놓일지(drag_over)와 놓기(drop_paths)를 맡는다.
 //! 검색(⌘F)은 find.rs: 도구 막대에서 입력 칸이 늘어나고, 결과는 사이드바 자리에 보인다.
 //! 명령 메뉴(⌘K)는 commands.rs, 새 탭 시작 화면과 최근 위치는 start.rs (둘 다 Windows와 같은 공통 코드를 쓴다).
+//! 사이드바의 디스크 줄(붙고 떨어짐, 남은 용량, 꺼내기)과 주소 칸의 smb:// 따위로 네트워크 공유에 연결하기는 disks.rs.
 //! 사이드바 줄은 누를 때가 아니라 뗄 때 열고, 위아래로 끌면 옮긴다: 고정한 것끼리, 즐겨찾기 항목과 그룹, 그 둘 사이
 //! (빈자리·놓을 곳 계산과 미끄러지는 움직임은 Windows와 같은 공통 ui::side_flow). 즐겨찾기 그룹은 '모든 공간' 줄의 단추로 만들고,
 //! 그룹 머리의 메뉴로 이름을 바꾸고 풀고 지운다. 끌려 온 파일은 탭 칩 위에 놓으면 그 탭의 폴더로 간다.
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
 mod commands;
+mod disks;
 mod find;
 mod preview_pane;
 mod start;
 
 pub use commands::CMD_PLACEHOLDER;
+pub use disks::VolumeEvent;
 pub use preview_pane::{PinCheck, check_pin};
-pub use start::volume_space;
+pub use start::{Space, volume_space};
 
 use crate::fileops::{self, Done, Fail, Job, Op, Then};
 use crate::gfx::{Gfx, MONO_LINE_H, Picture};
@@ -194,6 +197,8 @@ pub enum MenuKind {
     Group(usize),
     /// 그룹과 안의 즐겨찾기를 뺄지 한 번 더 묻는다 (Windows의 확인 창과 같은 물음): 빼기, 그만두기
     GroupDelete(usize),
+    /// 사이드바 '모든 공간'의 디스크 줄(꺼낼 수 있는 디스크)을 오른쪽 단추로 눌렀을 때 (바로가기 places의 번호): 꺼내기
+    Volume(usize),
     /// 목록의 줄을 오른쪽 단추로 눌렀을 때: 고른 항목들의 메뉴 (열기, Finder에서 보기, 이름 바꾸기, 휴지통으로 이동)
     Rows,
     /// 목록의 빈 곳을 오른쪽 단추로 눌렀을 때: 그 폴더의 메뉴 (새 폴더, 새로 고침)
@@ -390,6 +395,8 @@ pub struct Prefs {
     pub theme: String,
     /// 새 탭(⌘T)을 시작 화면으로 연다 (아니면 지금 폴더)
     pub new_tab_start: bool,
+    /// 검색에 더한 폴더 (외장 디스크·NAS의 폴더 따위)
+    pub folders: Vec<String>,
 }
 
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
@@ -407,13 +414,34 @@ struct Batch {
     sources: Vec<String>,
     renamed: usize,
     failed: Vec<(String, String)>,
-    /// made와 같은 순서로, 그것을 옮겼는지(아니면 복사했다). 끌어다 놓기는 디스크에 따라 항목마다 다를 수 있다
-    moved: Vec<bool>,
+    /// made와 같은 순서로, 그것을 어떻게 했는지. 끌어다 놓기와 옮기기는 디스크에 따라 항목마다 다를 수 있다
+    how_made: Vec<Made>,
     /// 복제(같은 폴더 안으로): 번호가 붙는 것이 당연해서 알리지 않는다
     duplicate: bool,
     /// 복사인지, 옮기기인지(잘라 둔 것이면 끝난 뒤 클립보드에서 뺀다), 끌어다 놓기인지
     how: Paste,
     cancelled: bool,
+}
+
+impl Batch {
+    /// 한 항목을 끝냈다: 받는 폴더에서의 이름과 파일 번호, 원래 전체 경로, 어떻게 했는지, 번호를 붙였는지를 적는다
+    fn add(&mut self, how: Made, src: &str, name: String, file_id: u64, renamed: bool) {
+        self.how_made.push(how);
+        self.made.push((name, file_id));
+        self.sources.push(src.to_string());
+        self.renamed += usize::from(renamed);
+    }
+}
+
+/// 복사·옮기기 묶음의 한 항목을 어떻게 했는지
+#[derive(Clone, PartialEq, Debug)]
+enum Made {
+    Copied,
+    Moved,
+    /// 다른 디스크로 옮겼다: 복사한 뒤 원본을 휴지통으로 보냈다 (휴지통으로 간 원본)
+    Crossed(sakadu::fileops::Trashed),
+    /// 다른 디스크로 옮기려고 복사했지만 원본을 휴지통으로 보내지 못해 그대로 뒀다 (까닭): 복사한 것과 같다
+    Kept(String),
 }
 
 /// path가 old이거나 그 아래면, old 뒤에 남는 부분 (빈 글자이거나 '/'로 시작한다)
@@ -1001,6 +1029,7 @@ fn fav_key(path: &str) -> String {
 
 /// 사이드바 줄 i를 오른쪽 단추로 눌렀을 때 여는 메뉴: 고정한 줄이면 고정한 것 가운데 번호로, 즐겨찾기 항목이면 즐겨찾기 줄
 /// (Favorites::rows) 번호로, 그룹 머리면 그룹 번호로 가리킨다. 바로가기, 안내, 구역 이름에는 메뉴가 없다
+/// (꺼낼 수 있는 디스크 줄의 메뉴는 App::volume_menu)
 fn side_menu(rows: &[SideRow], i: usize) -> Option<MenuKind> {
     let before = |same: fn(SideKind) -> bool| rows[..i].iter().filter(|r| same(r.kind)).count();
     match rows.get(i)?.kind {
@@ -1182,9 +1211,13 @@ pub struct App {
     recent: Vec<String>,
     /// 시작 화면에서 키보드(화살표·Return)를 썼다: 초점 테두리가 보이고 Return이 연다
     start_keys: bool,
-    /// 시작 화면 위치 칸의 디스크 용량 (경로 → 남은·전체 바이트)과, 다시 읽어 달라는 표시 (시작 화면을 열 때)
-    volumes: HashMap<String, (u64, u64)>,
+    /// 시작 화면 위치 칸과 사이드바 디스크 줄의 용량 (경로 → 남은·전체 바이트, 꺼낼 수 있는 디스크인지)과, 다시 읽어 달라는 표시
+    volumes: HashMap<String, Space>,
     volumes_wanted: bool,
+    /// 꺼내 달라는 디스크의 자리 (창 쪽이 뒷줄에서 꺼내고 on_ejected로 돌려준다)
+    ejects: Vec<String>,
+    /// 연결해 달라는 네트워크 공유 (주소 칸·명령 메뉴에 친 smb:// 따위. 글은 다듬은 주소). 창 쪽이 뒷줄에서 연결하고 on_mounted로 돌려준다
+    mount_asks: Vec<Probe>,
     /// 명령 메뉴(⌘K)와 그 입력 칸의 글
     cmd: Option<sakadu::ui::commands::CmdMenu>,
     cmd_text: String,
@@ -1282,7 +1315,10 @@ impl App {
             recent: Vec::new(),
             start_keys: false,
             volumes: HashMap::new(),
-            volumes_wanted: false,
+            // 사이드바의 디스크 줄에 남은 용량을 보이려고 처음부터 읽는다
+            volumes_wanted: true,
+            ejects: Vec::new(),
+            mount_asks: Vec::new(),
             cmd: None,
             cmd_text: String::new(),
             side_press: None,
@@ -1776,6 +1812,10 @@ impl App {
         let (tab, generation) = (self.panes[p].tab().id, self.panes[p].tab().generation);
         self.probe_seq[p] += 1;
         self.probe_at[p] = (tab, generation);
+        // 네트워크 공유 주소면 연결해 달라고 한다 (붙은 뒤 그 자리로 간다. 기다리는 순서는 경로 확인과 같다)
+        if let Some(url) = util::share_url(&text) {
+            return self.ask_mount(Probe { pane: p, tab, seq: self.probe_seq[p], text: url, new_tab });
+        }
         self.probes.push(Probe { pane: p, tab, seq: self.probe_seq[p], text, new_tab });
     }
 
@@ -2035,7 +2075,7 @@ impl App {
             sources: Vec::new(),
             renamed: 0,
             failed: Vec::new(),
-            moved: Vec::new(),
+            how_made: Vec::new(),
             duplicate,
             how,
             cancelled: false,
@@ -2053,7 +2093,7 @@ impl App {
                 let (tab, dir, how) = (b.tab, b.dir.clone(), b.how);
                 let job = match how {
                     Paste::Copy => Job::Copy { src, dir, file_id },
-                    // 끌어다 놓기만: 다른 디스크면 옮기는 대신 복사한다
+                    // 끌어다 놓기는 다른 디스크면 옮기는 대신 복사한다 (Finder와 같다). 옮기기는 복사한 뒤 원본을 휴지통으로 보낸다
                     Paste::Move | Paste::Cut(_) | Paste::Drop => Job::Move { src, dir, file_id, or_copy: how == Paste::Drop },
                 };
                 self.push_op(tab, job);
@@ -2065,16 +2105,21 @@ impl App {
     /// 묶음을 끝낸다: 무엇을 했는지 알리고, 만든 복사본(옮긴 것)을 고르고, 되돌리기 기록에 남기고, 다시 읽는다
     fn finish_batch(&mut self) {
         let Some(b) = self.batch.take() else { return };
-        // 옮긴 것(원래 전체 경로, 이름, 파일 번호)과 복사한 것(이름, 파일 번호)을 가른다
-        let (mut moved, mut copied) = (Vec::new(), Vec::new());
-        for (((name, file_id), src), was_moved) in b.made.iter().zip(&b.sources).zip(&b.moved) {
-            if *was_moved {
-                moved.push((src.clone(), name.clone(), *file_id));
-            } else {
-                copied.push((name.clone(), *file_id));
+        // 옮긴 것(원래 전체 경로, 이름, 파일 번호), 다른 디스크로 옮긴 것, 복사한 것(이름, 파일 번호)을 가른다.
+        // 원본을 휴지통으로 보내지 못한 것은 복사한 것이다 (원래 전체 경로, 까닭)
+        let (mut moved, mut crossed, mut copied, mut kept) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (((name, file_id), src), how) in b.made.iter().zip(&b.sources).zip(&b.how_made) {
+            match how {
+                Made::Moved => moved.push((src.clone(), name.clone(), *file_id)),
+                Made::Crossed(t) => crossed.push(sakadu::fileops::Crossed { orig: src.clone(), trashed: t.clone(), name: name.clone(), file_id: *file_id }),
+                Made::Copied => copied.push((name.clone(), *file_id)),
+                Made::Kept(why) => {
+                    copied.push((name.clone(), *file_id));
+                    kept.push((src.clone(), why.clone()));
+                }
             }
         }
-        let done = match (moved.len(), copied.len()) {
+        let done = match (moved.len() + crossed.len(), copied.len()) {
             (0, 0) => None,
             (m, 0) => Some(format!("{m}개를 옮겼")),
             (0, c) => Some(format!("{c}개를 복사했")),
@@ -2094,13 +2139,19 @@ impl App {
         if b.renamed > 0 && !b.duplicate {
             note.push_str(&format!(" · 같은 이름이 있던 {}개에는 번호를 붙였어요", b.renamed));
         }
+        // 다른 디스크로 옮기며 복사는 했는데 원본을 휴지통으로 보내지 못했다: 원본도 그대로 있다
+        if let Some((src, why)) = kept.first() {
+            note.push_str(&format!(" · 원본 {}개는 휴지통으로 보내지 못해 그대로 뒀어요: {} · {why}", kept.len(), util::file_name(src)));
+        }
         if !b.todo.is_empty() {
             note.push_str(&format!(" · 그만둬서 {}개는 하지 않았어요", b.todo.len()));
         }
         // 옮겨 간 것은 원래 폴더를 보이는 탭의 고른 것에서 빼고, 옮긴 폴더 안을 보던 탭은 새 경로로 따라가게 한다
-        for (src, name, file_id) in &moved {
+        // (다른 디스크로 옮긴 것은 원본의 파일 번호로 뺀다)
+        let gone = moved.iter().map(|(src, name, file_id)| (src, name, *file_id)).chain(crossed.iter().map(|c| (&c.orig, &c.name, c.trashed.file_id)));
+        for (src, name, file_id) in gone.collect::<Vec<_>>() {
             if let Some(from) = util::parent(src) {
-                self.deselect_file(&from, *file_id);
+                self.deselect_file(&from, file_id);
             }
             self.tabs_moved(src, &util::join(&b.dir, name));
         }
@@ -2115,7 +2166,10 @@ impl App {
             records.push(Undo::Copy { dir: b.dir.clone(), items: copied });
         }
         if !moved.is_empty() {
-            records.push(Undo::Move { to: b.dir, items: moved });
+            records.push(Undo::Move { to: b.dir.clone(), items: moved });
+        }
+        if !crossed.is_empty() {
+            records.push(Undo::Across { to: b.dir, items: crossed });
         }
         if records.len() > 1 {
             self.undos.push(Undo::Group(records));
@@ -2393,13 +2447,9 @@ impl App {
         if let Job::Copy { src, .. } | Job::Move { src, .. } = &op.job {
             if let Some(b) = &mut self.batch {
                 match result {
-                    Ok(done @ (Done::Copied { .. } | Done::Moved { .. })) => {
-                        b.moved.push(matches!(done, Done::Moved { .. }));
-                        let (Done::Copied { name, file_id, renamed } | Done::Moved { name, file_id, renamed }) = done else { unreachable!() };
-                        b.made.push((name, file_id));
-                        b.sources.push(src.clone());
-                        b.renamed += usize::from(renamed);
-                    }
+                    Ok(Done::Copied { name, file_id, renamed }) => b.add(Made::Copied, src, name, file_id, renamed),
+                    Ok(Done::Moved { name, file_id, renamed }) => b.add(Made::Moved, src, name, file_id, renamed),
+                    Ok(Done::Crossed { name, file_id, renamed, trashed }) => b.add(trashed.map_or_else(Made::Kept, Made::Crossed), src, name, file_id, renamed),
                     Ok(_) => {}
                     Err(fail) => {
                         let why = match fail {
@@ -2469,7 +2519,7 @@ impl App {
                     (_, []) => undo.label(),
                     (Undo::Copy { .. }, [(name, why), ..]) => format!("복사본 {}개는 그대로 뒀어요: {name} · {why}", left.len()),
                     (Undo::Move { .. }, [(path, why), ..]) => format!("{}개는 옮긴 자리에 그대로 있어요: {} · {why}", left.len(), util::file_name(path)),
-                    (Undo::Group(_), [(name, why), ..]) => format!("{}개는 되돌리지 못했어요: {} · {why}", left.len(), util::file_name(name)),
+                    (Undo::Across { .. } | Undo::Group(_), [(name, why), ..]) => format!("{}개는 되돌리지 못했어요: {} · {why}", left.len(), util::file_name(name)),
                     (_, [(name, why)]) => format!("‘{name}’은(는) 휴지통에 그대로 있어요: {why}"),
                     (_, [(_, why), ..]) => format!("{}개는 휴지통에 그대로 있어요: {why}", left.len()),
                 })
@@ -2602,6 +2652,12 @@ impl App {
                     self.select_after(p, &names);
                 }
             }
+            Undo::Across { to, items } => {
+                // 원본이 돌아오고 복사본이 휴지통으로 간 것만: 복사본을 고른 것에서 빼고, 그 안을 보던 탭은 원래 경로로 따라가게 한다
+                let back: Vec<(String, String, u64)> =
+                    items.iter().filter(|c| !left.iter().any(|(path, _)| *path == c.orig)).map(|c| (c.orig.clone(), c.name.clone(), c.file_id)).collect();
+                self.after_undo(tab, &Undo::Move { to: to.clone(), items: back }, &[]);
+            }
             Undo::Group(list) => {
                 for undo in list {
                     self.after_undo(tab, undo, left);
@@ -2619,10 +2675,15 @@ impl App {
     /// 폴더 old가 new가 됐다 (이름 바꾸기와 그 되돌리기): 그 안을 보던 탭과 방문 기록을 새 경로로 고친다.
     /// 고친 탭은 읽던 것을 버린다 (옛 경로로 읽던 결과가 뒤늦게 와서 '열 수 없어요'가 되지 않게). 다시 읽기는 refresh_changed가 한다
     fn tabs_moved(&mut self, old: &str, new: &str) {
+        self.tabs_moved_with(|d| under(d, old).map(|rest| format!("{new}{rest}")));
+    }
+
+    /// 탭과 방문 기록의 폴더 경로를 moved가 돌려주는 새 경로로 고친다 (None이면 그대로). 고친 탭은 읽던 것을 버린다 (tabs_moved)
+    fn tabs_moved_with(&mut self, moved: impl Fn(&str) -> Option<String>) {
         let fix = |loc: &mut Location| {
             let Location::Dir(d) = loc else { return false };
-            let Some(rest) = under(d, old) else { return false };
-            *d = format!("{new}{rest}");
+            let Some(new) = moved(d) else { return false };
+            *d = new;
             true
         };
         for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
@@ -2637,7 +2698,12 @@ impl App {
 
     /// 폴더 gone이 휴지통으로 갔다: 그 안을 보던 탭은 남아 있는 위 폴더 up으로 올리고, 방문 기록에서 그 안의 곳들을 뺀다
     fn tabs_left(&mut self, gone: &str, up: &str) {
-        let inside = |loc: &Location| loc.dir().is_some_and(|d| under(d, gone).is_some());
+        self.tabs_left_where(|d| under(d, gone).is_some(), up);
+    }
+
+    /// gone(d)가 참인 폴더 d를 보던 탭은 up으로 올리고, 방문 기록에서 그런 곳들을 뺀다 (tabs_left)
+    fn tabs_left_where(&mut self, gone: impl Fn(&str) -> bool, up: &str) {
+        let inside = |loc: &Location| loc.dir().is_some_and(&gone);
         for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
             tab.back.retain(|loc| !inside(loc));
             tab.fwd.retain(|loc| !inside(loc));
@@ -2691,6 +2757,8 @@ impl App {
         }
         // 다른 앱에서 고정한 파일을 고치거나 옮겼을 수 있다
         self.pin_check();
+        // 디스크의 남은 용량도 그 사이 바뀌었을 수 있다
+        self.volumes_wanted = true;
     }
 
     // ---------- 폴더 감시 ----------
@@ -3259,7 +3327,17 @@ impl App {
     /// 설정 창에 보이는 값
     pub fn prefs(&self) -> Prefs {
         let (search_on, icloud, crawling, denied) = self.find_prefs();
-        Prefs { hidden: self.show_hidden, auto_preview: self.auto_preview, search_on, icloud, crawling, denied, theme: self.theme_pref.clone(), new_tab_start: self.new_tab_starts() }
+        Prefs {
+            hidden: self.show_hidden,
+            auto_preview: self.auto_preview,
+            search_on,
+            icloud,
+            crawling,
+            denied,
+            theme: self.theme_pref.clone(),
+            new_tab_start: self.new_tab_starts(),
+            folders: self.find.setting.folders.clone(),
+        }
     }
 
     /// 설정 창의 '숨김 항목 보기' (⌘⇧.와 같은 값)
@@ -3385,6 +3463,11 @@ impl App {
             }
             // 그룹을 지울지 묻는 메뉴는 그 그룹 머리에 붙인다
             MenuKind::GroupDelete(g) => return self.menu_anchor(MenuKind::Group(g)),
+            // 디스크 메뉴는 그 디스크 줄에
+            MenuKind::Volume(i) => {
+                let rows = self.side_rows();
+                self.side_rect(rows.iter().filter(|r| r.kind == SideKind::Place).nth(i)?)
+            }
             // 목록 메뉴는 누른 자리에 연다 (메뉴는 붙인 자리의 아래 끝에서 4 내려 놓는다)
             MenuKind::Rows | MenuKind::Blank => {
                 let (x, y) = self.list_target.as_ref()?.at;
@@ -3523,6 +3606,7 @@ impl App {
             },
             MenuKind::Rows => self.row_menu().into_iter().map(|act| (act.label().to_string(), false)).collect(),
             MenuKind::Blank => vec![("새 폴더".to_string(), false), ("붙여넣기".to_string(), false), ("새로 고침".to_string(), false)],
+            MenuKind::Volume(_) => vec![("꺼내기".to_string(), false)],
         }
     }
 
@@ -3573,7 +3657,7 @@ impl App {
     /// 그룹 이름 바꾸기와 그룹을 없애는 줄 사이)
     pub fn menu_break(&self, kind: MenuKind) -> Option<usize> {
         match kind {
-            MenuKind::Layout | MenuKind::View | MenuKind::Spaces | MenuKind::Blank => None,
+            MenuKind::Layout | MenuKind::View | MenuKind::Spaces | MenuKind::Blank | MenuKind::Volume(_) => None,
             MenuKind::Fav(_) => Some(2),
             MenuKind::Group(_) => Some(1),
             // 빼기와 그만두기 사이
@@ -3645,6 +3729,11 @@ impl App {
                 }
             }
             MenuKind::Rows | MenuKind::Blank => self.pick_list_menu(kind, i),
+            MenuKind::Volume(v) => {
+                if i == 0 {
+                    self.eject_place(v);
+                }
+            }
         }
     }
 
@@ -3711,7 +3800,10 @@ impl App {
             Hit::Space(i) => Some(MenuKind::Space(i)),
             // 창이 낮으면 레일에 공간이 다 보이지 않는다: 안 보이는 공간은 이 목록에서 고른다
             Hit::SpaceAdd => Some(MenuKind::Spaces),
-            Hit::SideRow(i) => side_menu(&self.side_rows(), i),
+            Hit::SideRow(i) => {
+                let rows = self.side_rows();
+                side_menu(&rows, i).or_else(|| self.volume_menu(&rows, i))
+            }
             Hit::Row(p, vi) => self.list_menu(p, Some(vi), x, y),
             Hit::List(p) => self.list_menu(p, None, x, y),
             _ => None,
@@ -5231,7 +5323,14 @@ impl App {
                         let it = r.t + (r.h() - ICON) / 2.0;
                         g.icon_for_path(path, R::new(lx - SP_S - ICON, it, lx - SP_S, it + ICON));
                     }
-                    g.text(&row.label, R::new(lx, r.t, r.r - SP_S, r.b), Font::Normal, t.text);
+                    // 디스크 줄은 오른쪽 끝에 남은 용량을 옅게 (줄이 좁으면 이름이 먼저다)
+                    let mut name_r = R::new(lx, r.t, r.r - SP_S, r.b);
+                    if let Some(hint) = row.path.as_deref().filter(|_| row.kind == SideKind::Place).and_then(|p| self.volume_hint(p)) {
+                        let w = g.measure(&hint, Font::Small).min(name_r.w() * 0.45);
+                        g.text(&hint, R::new(name_r.r - w, r.t, name_r.r, r.b), Font::Small, t.faint);
+                        name_r.r -= w + SP_S;
+                    }
+                    g.text(&row.label, name_r, Font::Normal, t.text);
                 }
             }
         }
@@ -5314,7 +5413,7 @@ impl App {
         // 복사 중이면 그 자리에 진행을 보인다 (받는 폴더를 보이는 칸, 없으면 지금 칸. 잠깐 뜨는 알림이 있으면 그것이 먼저)
         let copying = self.batch.as_ref().filter(|b| self.pane_showing(b.tab, &b.dir).unwrap_or(self.active) == p).and(self.copy_progress());
         // 끌어다 놓은 것은 디스크에 따라 옮기거나 복사한다: 방금 끝낸 항목이 복사였으면 복사하는 중으로 적는다
-        let doing = if self.batch.as_ref().is_some_and(|b| b.how != Paste::Copy && b.moved.last() != Some(&false)) { "옮기는 중" } else { "복사하는 중" };
+        let doing = if self.batch.as_ref().is_some_and(|b| b.how != Paste::Copy && b.how_made.last() != Some(&Made::Copied)) { "옮기는 중" } else { "복사하는 중" };
         let flash = flash.or_else(|| copying.map(|(at, total)| format!("{doing} · {total}개 중 {at}개")));
         let count_hot = flash.is_some();
         let count_text = flash.unwrap_or_else(|| count_text(tab));
@@ -5541,7 +5640,7 @@ mod tests {
     use std::path::Path;
 
     /// 시험용 폴더: 하위 폴더 둘, 파일 셋, 숨김 파일 하나
-    fn demo() -> (std::path::PathBuf, String) {
+    pub(super) fn demo() -> (std::path::PathBuf, String) {
         let root = std::env::temp_dir().join(format!("sakadu-mac-app-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("업무").join("2026 4분기")).unwrap();
@@ -5553,7 +5652,7 @@ mod tests {
         (root, path)
     }
 
-    fn app(home: &str) -> (App, Gfx) {
+    pub(super) fn app(home: &str) -> (App, Gfx) {
         let mut a = App::new(1280.0, 800.0, Theme::LIGHT, home, Favorites::default(), Vec::new());
         // 새 탭은 지금 폴더로 (시작 화면은 따로 시험한다)
         a.set_new_tab_start(false);
@@ -5567,13 +5666,13 @@ mod tests {
         (l.l + 60.0, l.t + vi as f32 * ROW_H + ROW_H / 2.0 - a.pane(p).tab().scroll)
     }
 
-    fn names(a: &App, p: usize) -> Vec<String> {
+    pub(super) fn names(a: &App, p: usize) -> Vec<String> {
         let t = a.pane(p).tab();
         t.view.iter().map(|&i| t.entries[i as usize].name_string()).collect()
     }
 
     /// 사이드바에서 그 이름을 가진 줄의 자리
-    fn side_row(a: &App, label: &str) -> R {
+    pub(super) fn side_row(a: &App, label: &str) -> R {
         let rows = a.side_rows();
         a.side_rect(rows.iter().find(|r| r.label == label).unwrap_or_else(|| panic!("no sidebar row named {label}")))
     }
@@ -5590,7 +5689,7 @@ mod tests {
         m
     }
 
-    fn mid(r: R) -> (f32, f32) {
+    pub(super) fn mid(r: R) -> (f32, f32) {
         ((r.l + r.r) / 2.0, (r.t + r.b) / 2.0)
     }
 
@@ -7313,7 +7412,7 @@ mod tests {
     }
 
     /// 잠깐 뜨는 알림 글에 그 말이 들어 있는지
-    fn noted(a: &App, word: &str) -> bool {
+    pub(super) fn noted(a: &App, word: &str) -> bool {
         a.flash.as_ref().is_some_and(|(_, m)| m.contains(word))
     }
 
@@ -7918,6 +8017,49 @@ mod tests {
         assert!(noted(&a, "복사본 1개") && noted(&a, "원래 자리"), "{:?}", a.flash);
         a.undo();
         assert!(noted(&a, "되돌릴 작업이 없어요"), "{:?}", a.flash);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 다른 디스크로 옮기기(⌥⌘V): 복사한 뒤 원본을 휴지통으로 보내고 '옮겼어요'라고 알린다. ⌘Z 한 번으로 원본이 같은 파일로
+    /// 돌아오고 복사본은 휴지통으로 간다. 원본을 휴지통으로 보내지 못하면 복사본을 남기고 그렇게 알린다.
+    /// CI가 임시 폴더와 다른 디스크의 폴더를 알려 줄 때만 돈다 (디스크가 하나뿐이면 볼 것이 없다)
+    #[test]
+    fn move_to_another_disk_trashes_the_original_and_undo_brings_it_back() {
+        let Some(other) = crate::fileops::other_volume() else { return };
+        let (root, home) = demo();
+        let far = util::join(&other, &format!("sakadu-app-other-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&far);
+        std::fs::create_dir_all(&far).unwrap();
+        let work = util::join(&home, "업무");
+        let (mut a, _g) = app(&work);
+        a.navigate(1, Location::Dir(far.clone()), None);
+        a.settle();
+        a.activate_pane(1);
+        let src = util::join(&work, "예산.csv");
+        let file = sakadu::fileops::inode(&src).unwrap();
+        assert!(a.paste_paths(vec![src.clone(), util::join(&work, "2026 4분기")], Paste::Move));
+        a.settle();
+        assert!(noted(&a, "2개를 옮겼어요"), "{:?}", a.flash);
+        assert_eq!((names(&a, 0), names(&a, 1)), (vec!["회의록.md".to_string()], vec!["2026 4분기".to_string(), "예산.csv".to_string()]));
+        assert_eq!(std::fs::read(util::join(&util::join(&far, "2026 4분기"), "보고서.docx")).unwrap(), b"x");
+        // 되돌리기 기록은 하나: 다른 디스크로 옮긴 둘
+        let Some(Undo::Across { to, items }) = a.undos.pop() else { panic!("one record for the move") };
+        assert_eq!((to.as_str(), items.len()), (far.as_str(), 2));
+        a.undos.push(Undo::Across { to, items });
+        a.undo();
+        a.settle();
+        assert!(noted(&a, "2개를 원래 자리로"), "{:?}", a.flash);
+        assert_eq!(sakadu::fileops::inode(&src).unwrap(), file, "the original came back as the same file");
+        assert_eq!(names(&a, 0), ["2026 4분기", "예산.csv", "회의록.md"]);
+        assert!(names(&a, 1).is_empty(), "the copies went to the Trash");
+        // 원본을 휴지통으로 보내지 못하면: 복사본은 남고 원본도 그대로다
+        crate::fileops::TRASH_FAILS.set(true);
+        assert!(a.paste_paths(vec![src.clone()], Paste::Move));
+        a.settle();
+        crate::fileops::TRASH_FAILS.set(false);
+        assert!(noted(&a, "1개를 복사했어요") && noted(&a, "휴지통으로 보내지 못해"), "{:?}", a.flash);
+        assert_eq!((names(&a, 0).len(), names(&a, 1)), (3, vec!["예산.csv".to_string()]));
+        std::fs::remove_dir_all(&far).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

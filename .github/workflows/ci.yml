@@ -43,7 +43,7 @@ jobs:
           test "$(ls "$RUNNER_TEMP/case/tmp/probe" | wc -l)" -eq 2
           TMPDIR="$RUNNER_TEMP/case/tmp" cargo test --lib --locked -- fileops listing pane
           mkdir -p "$RUNNER_TEMP/other-volume"
-          SAKADU_TEST_OTHER_VOLUME="$RUNNER_TEMP/other-volume" TMPDIR="$RUNNER_TEMP/case/tmp" cargo test --features mac-app --bin sakadu-mac --locked -- fileops rename new_folder search
+          SAKADU_TEST_OTHER_VOLUME="$RUNNER_TEMP/other-volume" TMPDIR="$RUNNER_TEMP/case/tmp" cargo test --features mac-app --bin sakadu-mac --locked -- fileops rename new_folder search another_disk
           hdiutil detach "$RUNNER_TEMP/case"
       - name: Build mac prototype
         run: cargo build --features mac-app --bin sakadu-mac --locked

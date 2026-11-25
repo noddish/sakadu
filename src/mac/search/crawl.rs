@@ -1,10 +1,11 @@
 //! 폴더 훑기: 폴더 하나를 읽어 색인에 넣을 항목으로 바꾼다. 폴더를 읽는 줄 여럿이 함께 부른다.
-//! 링크는 따라가지 않고, 패키지는 파일 하나로, 홈의 라이브러리·휴지통과 다른 디스크(마운트 지점)는 안을 훑지 않는다.
+//! 링크는 따라가지 않고, 패키지는 파일 하나로, 홈의 라이브러리·휴지통과 다른 디스크(마운트 지점)는 안을 훑지 않는다
+//! (다른 디스크도 설정에서 더한 폴더면 그 폴더를 범위의 맨 위로 따로 훑는다).
 //! 폴더를 읽어도 iCloud에만 있는 파일을 내려받게 하지 않는다 (prepare_thread)
 
 use sakadu::nametree::{Item, Kind, classify};
 use std::collections::HashSet;
-use std::ffi::{CStr, c_int};
+use std::ffi::c_int;
 
 /// 폴더를 읽는 규칙
 pub struct Rules {
@@ -14,6 +15,8 @@ pub struct Rules {
     pub packages_are_files: bool,
     /// 다른 디스크가 붙은 자리: 그 안으로 넘어가지 않는다 ('/' 아래의 /System/Volumes/Data처럼 같은 내용이 두 번 보이는 곳도)
     pub mounts: HashSet<String>,
+    /// 훑는 범위의 맨 위 폴더들: 다른 디스크가 붙은 자리여도 막지 않는다 (설정에서 더한 외장 디스크·NAS의 폴더는 따로 훑는다)
+    pub roots: HashSet<String>,
 }
 
 /// 폴더 하나를 읽은 결과
@@ -40,16 +43,26 @@ pub fn list(dir: &str, rules: &Rules) -> Listed {
         let Ok(t) = entry.file_type() else { continue };
         let name = entry.file_name().to_string_lossy().into_owned();
         let (is_dir, is_link) = (t.is_dir(), t.is_symlink());
-        let mut kind = classify(&rules.home, dir, &name, is_dir, is_link);
-        if kind == Kind::File && is_dir && !is_link && !rules.packages_are_files {
-            kind = Kind::Dir;
-        }
-        if kind == Kind::Dir && rules.mounts.contains(&sakadu::util::join(dir, &name)) {
-            kind = Kind::Closed;
-        }
+        let kind = child_kind(rules, dir, &name, is_dir, is_link);
         items.push(Item { name, kind });
     }
     Listed::Items(items)
+}
+
+/// 폴더 dir 안의 항목 name을 색인에 어떻게 둘지: 링크와 패키지는 파일, 홈의 라이브러리·휴지통은 훑지 않는 폴더,
+/// 다른 디스크가 붙은 자리도 훑지 않는다. 다만 그 자리가 훑는 범위의 맨 위 폴더면 그대로 훑는 폴더다 (그 범위로 따로 훑는다)
+pub fn child_kind(rules: &Rules, dir: &str, name: &str, is_dir: bool, is_link: bool) -> Kind {
+    let mut kind = classify(&rules.home, dir, name, is_dir, is_link);
+    if kind == Kind::File && is_dir && !is_link && !rules.packages_are_files {
+        kind = Kind::Dir;
+    }
+    if kind == Kind::Dir {
+        let path = sakadu::util::join(dir, name);
+        if rules.mounts.contains(&path) && !rules.roots.contains(&path) {
+            kind = Kind::Closed;
+        }
+    }
+    kind
 }
 
 fn failure(e: std::io::Error) -> Listed {
@@ -66,26 +79,7 @@ fn failure(e: std::io::Error) -> Listed {
 
 /// 지금 붙어 있는 디스크의 자리들 ('/'는 빼고). 꺼진 네트워크 디스크를 기다리지 않는다 (MNT_NOWAIT)
 pub fn mount_points() -> HashSet<String> {
-    // SAFETY: 받을 곳 없이 개수만 묻는다
-    let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
-    if n <= 0 {
-        return HashSet::new();
-    }
-    // 그사이 붙은 디스크를 위해 넉넉히
-    let mut list: Vec<libc::statfs> = Vec::with_capacity(n as usize + 16);
-    let bytes = (list.capacity() * std::mem::size_of::<libc::statfs>()) as c_int;
-    // SAFETY: list의 칸만큼만 채운다
-    let got = unsafe { libc::getfsstat(list.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
-    if got <= 0 {
-        return HashSet::new();
-    }
-    // SAFETY: getfsstat이 앞의 got칸을 채웠다
-    unsafe { list.set_len(got as usize) };
-    list.iter()
-        // SAFETY: f_mntonname은 NUL로 끝나는 C 문자열이다
-        .map(|fs| unsafe { CStr::from_ptr(fs.f_mntonname.as_ptr()) }.to_string_lossy().into_owned())
-        .filter(|p| p != "/")
-        .collect()
+    crate::volumes::mounts().into_iter().map(|m| m.on).filter(|p| p != "/").collect()
 }
 
 /// 폴더를 읽는 줄의 준비: 낮은 우선순위(사용자가 하는 일을 늦추지 않게)로, iCloud에만 있는 항목을 내려받지 않게 한다

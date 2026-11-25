@@ -123,6 +123,18 @@ pub struct Trashed {
     pub trash_path: String,
 }
 
+/// 다른 디스크로 옮긴 항목 하나: 받는 폴더에 복사한 뒤 원본을 휴지통으로 보냈다
+#[derive(Debug, Clone, PartialEq)]
+pub struct Crossed {
+    /// 원본의 원래 전체 경로
+    pub orig: String,
+    /// 휴지통으로 간 원본
+    pub trashed: Trashed,
+    /// 받는 폴더 안의 복사본 (이름, 파일 번호)
+    pub name: String,
+    pub file_id: u64,
+}
+
 /// 되돌릴 수 있는 파일 작업 하나 (맥 앱의 것. Windows 앱은 undo.rs를 쓴다).
 /// 되돌릴 때는 그 항목이 그때의 그 항목인지(파일 번호) 다시 보고, 덮어쓰지 않으며, 만든 것을 없앨 때도 휴지통으로 보낸다
 #[derive(Debug, Clone, PartialEq)]
@@ -137,6 +149,9 @@ pub enum Undo {
     Copy { dir: String, items: Vec<(String, u64)> },
     /// 항목들을 폴더 to로 옮겼다: (원래 전체 경로, to 안에서의 지금 이름, 파일 번호). 되돌리면 원래 자리로 옮긴다
     Move { to: String, items: Vec<(String, String, u64)> },
+    /// 항목들을 다른 디스크의 폴더 to로 옮겼다 (복사한 뒤 원본을 휴지통으로). 되돌리면 원본을 휴지통에서 원래 자리로 꺼내고,
+    /// 꺼낸 것의 복사본만 휴지통으로 보낸다 (원본이 돌아오지 못하면 복사본은 그대로 둔다)
+    Across { to: String, items: Vec<Crossed> },
     /// 한 번에 한 일이 여러 기록으로 갈린 것 (끌어다 놓은 것 가운데 일부는 옮기고 일부는 복사했다): 되돌릴 때 함께 되돌린다
     Group(Vec<Undo>),
 }
@@ -150,6 +165,7 @@ impl Undo {
             Undo::Trash { items, .. } => format!("{}개를 휴지통에서 되돌려 놓았어요", items.len()),
             Undo::Copy { items, .. } => format!("복사본 {}개를 휴지통으로 보냈어요", items.len()),
             Undo::Move { items, .. } => format!("{}개를 원래 자리로 되돌려 놓았어요", items.len()),
+            Undo::Across { items, .. } => format!("{}개를 원래 자리로 되돌려 놓았어요", items.len()),
             Undo::Group(list) => list.iter().map(Undo::label).collect::<Vec<_>>().join(" · "),
         }
     }
@@ -404,6 +420,8 @@ mod tests {
         let trashed = |name: &str| Trashed { name: name.into(), file_id: 1, trash_path: String::new() };
         assert!(Undo::Rename { dir: "/t".into(), from: "a.txt".into(), to: "b.txt".into(), file_id: 1 }.label().contains("a.txt"));
         assert!(Undo::Trash { dir: "/t".into(), items: vec![trashed("a"), trashed("b")] }.label().starts_with("2개"));
+        let crossed = Crossed { orig: "/s/a".into(), trashed: trashed("a"), name: "a".into(), file_id: 2 };
+        assert_eq!(Undo::Across { to: "/t".into(), items: vec![crossed] }.label(), "1개를 원래 자리로 되돌려 놓았어요");
     }
 
     /// 빈 폴더: 아무것도 없거나 .DS_Store뿐일 때. 없는 폴더는 오류

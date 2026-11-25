@@ -1,13 +1,17 @@
 //! 설정 창: 앱 메뉴의 '설정…'(⌘,)으로 여는, 본 창과 따로 뜨는 창. 맥 기본 조작(스위치·단추·팝업)을 시스템 설정처럼
 //! 묶음 카드 안에 줄로 놓는다. 줄에는 이름만 쓴다. 내용이 창보다 길면 스크롤한다.
-//! 묶음: 일반(숨김 항목, 자동 미리 보기, 새 탭, 모양), 단축키(동작마다 키 단추, 기본으로), 검색, 도움말(바꾸지 않는 기본 키), 정보.
+//! 묶음: 일반(숨김 항목, 자동 미리 보기, 새 탭, 모양), 단축키(동작마다 키 단추, 기본으로), 검색(켜기, iCloud Drive, 더 찾을 폴더),
+//! 도움말(바꾸지 않는 기본 키), 정보. 더 찾을 폴더는 '폴더 더하기…'로 맥의 폴더 고르기 창에서 고르고, 줄마다 '빼기'가 있다.
 //! 값은 App이 갖고(App::prefs, keymap, set_…), 이 창은 그것을 보이고 바꾼다. 본 창에서 바뀐 값(⌘⇧., 눈 단추, 훑기 상태)은
 //! 입력과 뒷줄 결과를 처리할 때마다 refresh로 따라온다.
 //! 단축키 단추를 누르면 다음에 누르는 키를 그 동작의 키로 받는다 (Esc는 그만두기, ⌫는 비우기)
 
 use super::*;
 use crate::app::{Prefs, fixed_key, mac_runs};
-use objc2_app_kit::{NSAccessibility, NSAppearance, NSAppearanceCustomization, NSBox, NSBoxType, NSButton, NSPopUpButton, NSScrollView, NSSwitch, NSTitlePosition};
+use objc2_app_kit::{
+    NSAccessibility, NSAppearance, NSAppearanceCustomization, NSBox, NSBoxType, NSButton, NSLineBreakMode, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSScrollView, NSSwitch,
+    NSTitlePosition,
+};
 use sakadu::keys::{ACTIONS, Action, name};
 
 /// 창 안쪽 폭, 둘레 여백, 묶음 제목 높이, 묶음 사이, 줄 높이(단축키·도움말은 낮게), 카드 안쪽 여백, 창 내용의 가장 큰 높이
@@ -61,6 +65,10 @@ enum Ctl {
     Search,
     ICloud,
     Allow,
+    /// 검색에 폴더 더하기 (맥의 폴더 고르기 창)
+    FolderAdd,
+    /// 검색에 더한 i번째 폴더의 줄 ('빼기' 단추)
+    FolderRemove(usize),
     /// 도움말 줄 (조작 없이 키 글만)
     Help(usize),
     GitHub,
@@ -68,7 +76,7 @@ enum Ctl {
 }
 
 impl Ctl {
-    const FIXED: [Ctl; 10] = [Ctl::Hidden, Ctl::Preview, Ctl::NewTab, Ctl::Theme, Ctl::KeysReset, Ctl::Search, Ctl::ICloud, Ctl::Allow, Ctl::GitHub, Ctl::Folder];
+    const FIXED: [Ctl; 11] = [Ctl::Hidden, Ctl::Preview, Ctl::NewTab, Ctl::Theme, Ctl::KeysReset, Ctl::Search, Ctl::ICloud, Ctl::Allow, Ctl::FolderAdd, Ctl::GitHub, Ctl::Folder];
 
     fn tag(self) -> NSInteger {
         match self {
@@ -82,14 +90,17 @@ impl Ctl {
             Ctl::Theme => 8,
             Ctl::KeysReset => 9,
             Ctl::NewTab => 10,
+            Ctl::FolderAdd => 11,
             Ctl::Key(i) => 100 + i as NSInteger,
             Ctl::Help(i) => 200 + i as NSInteger,
+            Ctl::FolderRemove(i) => 1000 + i as NSInteger,
         }
     }
 
     fn from_tag(tag: NSInteger) -> Option<Ctl> {
         match tag {
             100..=199 => Some(Ctl::Key((tag - 100) as usize)),
+            1000.. => Some(Ctl::FolderRemove((tag - 1000) as usize)),
             _ => Ctl::FIXED.into_iter().find(|c| c.tag() == tag),
         }
     }
@@ -127,6 +138,9 @@ struct Parts {
 #[derive(Default)]
 pub struct PaneIvars {
     parts: OnceCell<Parts>,
+    /// 검색에 더한 폴더의 줄 ('폴더 더하기' 줄 바로 아래에 놓는다)과, 그 줄들을 만든 폴더 목록 (바뀌면 다시 만든다)
+    folders: RefCell<Vec<Line>>,
+    folders_shown: RefCell<Option<Vec<String>>>,
     /// 지난번에 놓을 때 '읽지 못한 폴더' 줄을 보였는지 (바뀌면 다시 놓고 창 높이를 맞춘다)
     denied: std::cell::Cell<Option<bool>>,
     /// 키를 받는 중인 단축키 단추 (ACTIONS의 번호)
@@ -241,6 +255,18 @@ define_class!(
                     with_app(App::ask_folder_access);
                     after_change();
                 }
+                // 폴더 줄을 다시 만드는 것(after_change → refresh)은 이 단추의 동작이 끝난 뒤에 한다: 누른 '빼기' 단추가
+                // 제 동작을 하는 도중에 없어지지 않게
+                Some(Ctl::FolderAdd) => {
+                    for path in choose_folders(self.mtm()) {
+                        with_app(|a| a.add_find_folder(&path));
+                    }
+                    DispatchQueue::main().exec_async(after_change);
+                }
+                Some(Ctl::FolderRemove(i)) => {
+                    with_app(|a| a.remove_find_folder(i));
+                    DispatchQueue::main().exec_async(after_change);
+                }
                 Some(Ctl::GitHub) => open_link(GITHUB),
                 Some(Ctl::Folder) => reveal_config(),
                 _ => {}
@@ -319,7 +345,12 @@ impl SettingsPane {
             rows.push((1, Ctl::Key(i), name(*a).to_string()));
         }
         rows.push((1, Ctl::KeysReset, String::new()));
-        rows.extend([(2, Ctl::Search, "이름으로 찾기".into()), (2, Ctl::ICloud, "iCloud Drive도 찾기".into()), (2, Ctl::Allow, "읽지 못한 폴더가 있어요".into())]);
+        rows.extend([
+            (2, Ctl::Search, "이름으로 찾기".into()),
+            (2, Ctl::ICloud, "iCloud Drive도 찾기".into()),
+            (2, Ctl::Allow, "읽지 못한 폴더가 있어요".into()),
+            (2, Ctl::FolderAdd, "더 찾을 폴더 (외장 디스크·NAS)".into()),
+        ]);
         for (i, (what, _)) in HELP.iter().enumerate() {
             rows.push((3, Ctl::Help(i), what.to_string()));
         }
@@ -357,6 +388,9 @@ impl SettingsPane {
                     button("기본으로").into_super()
                 }
                 Ctl::Allow => button("설정에서 허용").into_super(),
+                Ctl::FolderAdd => button("폴더 더하기…").into_super(),
+                // 더한 폴더의 줄은 set_folders가 따로 만든다
+                Ctl::FolderRemove(_) => button("빼기").into_super(),
                 Ctl::GitHub => button("GitHub").into_super(),
                 Ctl::Folder => button("Finder에서 보기").into_super(),
                 Ctl::Help(i) => {
@@ -379,9 +413,10 @@ impl SettingsPane {
         self.ivars().parts.get().expect("설정 창의 줄은 만들 때 채운다")
     }
 
-    /// 줄을 놓는다. 읽지 못한 폴더 줄은 denied일 때만 보인다. 내용의 높이를 돌려준다
+    /// 줄을 놓는다. 읽지 못한 폴더 줄은 denied일 때만 보인다. 더한 폴더의 줄은 '폴더 더하기' 줄 바로 아래에. 내용의 높이를 돌려준다
     fn layout(&self, denied: bool) -> f64 {
         let p = self.parts();
+        let folders = self.ivars().folders.borrow();
         let (l, r) = (MARGIN, W - MARGIN);
         let rect = |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
         let mut y = MARGIN;
@@ -393,7 +428,11 @@ impl SettingsPane {
             y += TITLE_H + 6.0;
             let top = y;
             let mut first = true;
-            for line in p.lines.iter().filter(|line| line.group == g) {
+            let group = p.lines.iter().filter(|line| line.group == g).flat_map(|line| {
+                let more: &[Line] = if line.ctl == Ctl::FolderAdd { &folders } else { &[] };
+                std::iter::once(line).chain(more)
+            });
+            for line in group {
                 let shown = line.ctl != Ctl::Allow || denied;
                 line.label.setHidden(!shown);
                 line.control.setHidden(!shown);
@@ -449,12 +488,45 @@ impl SettingsPane {
         }
         p.crawling.setHidden(!prefs.crawling);
         self.show_keys();
-        if self.ivars().denied.get() != Some(prefs.denied) {
+        let folders_changed = self.ivars().folders_shown.borrow().as_deref() != Some(prefs.folders.as_slice());
+        if folders_changed {
+            self.set_folders(&prefs.folders);
+        }
+        if folders_changed || self.ivars().denied.get() != Some(prefs.denied) {
             self.ivars().denied.set(Some(prefs.denied));
             let h = self.layout(prefs.denied);
             self.setFrameSize(NSSize::new(W, h));
             fit_height(window, h.min(MAX_H));
         }
+    }
+
+    /// 더한 폴더의 줄을 folders로 다시 만든다: 줄마다 경로(길면 가운데를 줄인다)와 '빼기' 단추
+    fn set_folders(&self, folders: &[String]) {
+        let mtm = self.mtm();
+        let mut lines = self.ivars().folders.borrow_mut();
+        for line in lines.drain(..) {
+            line.label.removeFromSuperview();
+            line.control.removeFromSuperview();
+            line.divider.removeFromSuperview();
+        }
+        let target: &AnyObject = self;
+        for (i, path) in folders.iter().enumerate() {
+            let divider = NSBox::new(mtm);
+            divider.setBoxType(NSBoxType::Separator);
+            self.addSubview(&divider);
+            let label = NSTextField::labelWithString(&NSString::from_str(path), mtm);
+            label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+            label.setToolTip(Some(&NSString::from_str(path)));
+            self.addSubview(&label);
+            let ctl = Ctl::FolderRemove(i);
+            // SAFETY: 이 뷰가 press:를 받는다 (define_class에 있다)
+            let button = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str("빼기"), Some(target), Some(sel!(press:)), mtm) };
+            button.setAccessibilityLabel(Some(&NSString::from_str(&format!("{path} 빼기"))));
+            button.setTag(ctl.tag());
+            self.addSubview(&button);
+            lines.push(Line { group: 2, ctl, label, control: button.into_super(), divider });
+        }
+        *self.ivars().folders_shown.borrow_mut() = Some(folders.to_vec());
     }
 
     /// 단축키 단추의 글: 지금 키(맥 기호), 없으면 '없음', 키를 받는 중이면 '키를 누르세요'
@@ -526,6 +598,20 @@ fn fit_height(window: &NSWindow, h: f64) {
 fn after_change() {
     pump();
     redraw();
+}
+
+/// '폴더 더하기…': 맥의 폴더 고르기 창을 띄워 고른 폴더들의 경로를 돌려준다 (그만두면 비어 있다)
+fn choose_folders(mtm: MainThreadMarker) -> Vec<String> {
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(true);
+    panel.setPrompt(Some(&NSString::from_str("더하기")));
+    panel.setMessage(Some(&NSString::from_str("검색에 더할 폴더를 고르세요 · 외장 디스크와 NAS의 폴더도 돼요")));
+    if panel.runModal() != NSModalResponseOK {
+        return Vec::new();
+    }
+    panel.URLs().iter().filter_map(|u| u.path()).map(|p| p.to_string()).collect()
 }
 
 fn open_link(link: &str) {

@@ -1,6 +1,6 @@
 //! 그림 시험: 창 없이 App을 몇 가지 상태로 만들어 PNG로 그린다 (CI에서 맥 화면을 확인하는 용도)
 
-use crate::app::{App, Hit, Key, MenuKind, Mods};
+use crate::app::{App, Hit, Key, MenuKind, Mods, Space};
 use sakadu::ui::Layout;
 use crate::gfx::Gfx;
 use sakadu::favorites::{Favorite, Favorites, Group};
@@ -145,7 +145,7 @@ fn ditto_demo(src: &Path, zip: &Path) -> std::io::Result<bool> {
     Ok(status.success())
 }
 
-/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 스물다섯 가지 × 밝은·어두운 테마를 out에 그린다.
+/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 스물여섯 가지 × 밝은·어두운 테마를 out에 그린다.
 /// 작업 공간은 셋: 업무(파랑, 두 칸), 사진 정리(보라, 네 칸), 개인(주황, 세 칸). 공간마다 고정한 것이 다르고,
 /// 아래 '모든 공간'(바로가기와 즐겨찾기)은 어느 공간에서나 같다.
 /// 미리 보기 카드와 창 장면에 쓸 그림·글·PDF 파일은 demo의 사진/제주살이에, 압축 파일 장면의 zip은 업무/문서에 직접 만든다
@@ -355,6 +355,19 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
             a.open_menu_for_render(&measure, kind, sel);
             shots.push((name, a));
         }
+
+        // 디스크: '모든 공간'의 디스크 줄 오른쪽에 남은 용량이 옅게 보이고, 꺼낼 수 있는 디스크 줄을 오른쪽 단추로 누르면 '꺼내기' 메뉴.
+        // 디스크 자리는 러너에 늘 있는 곳(시동 디스크로 가는 /Volumes의 바로가기, 데이터 볼륨)을 쓰고 용량은 고정한 값을 넣는다
+        let mut a = base(favs.clone(), true);
+        let (usb, link) = ("/System/Volumes/Data".to_string(), "/Volumes/Macintosh HD".to_string());
+        let mut disks = places.clone();
+        disks.extend([("Macintosh HD".to_string(), link.clone()), ("SAKADU".to_string(), usb.clone())]);
+        a.on_volumes(disks, None);
+        let gb = |n: u64| n << 30;
+        a.set_volumes([(link, Space { free: gb(182), total: gb(494), mount: false }), (usb, Space { free: gb(23), total: gb(64), mount: true })].into());
+        let (x, y) = a.side_row_center("SAKADU").ok_or("사이드바에 'SAKADU' 줄이 없음")?;
+        a.right_down(&measure, x, y);
+        shots.push(("disks", a));
 
         // 사이드바 끌기 한가운데: '제주살이' 그룹의 '맛집 메모'를 누른 채 한 줄 위로 끈 모습. 그 줄은 흰 카드로 떠 있고,
         // 그룹 머리 바로 아래에 빈자리가 열리며 그룹이 판으로 묶인다 (처음 그리는 그림이라 줄은 이미 제자리에 있다)

@@ -8,7 +8,9 @@
 //!
 //! 변경 기록은 훑기 전에 듣기 시작한다: 훑는 동안 바뀐 것은 모아 두었다가 처음 훑기를 마친 뒤 반영한다
 //! (폴더를 다시 읽는 것이라 여러 번 해도 같다). 맥이 접근을 묻는 폴더(데스크탑·문서·다운로드, iCloud Drive)는
-//! 나머지를 다 훑은 뒤 하나씩 읽는다: 묻는 창이 한꺼번에 뜨지 않고, 답을 기다리는 동안에도 다른 폴더는 찾을 수 있다
+//! 나머지를 다 훑은 뒤 하나씩 읽는다: 묻는 창이 한꺼번에 뜨지 않고, 답을 기다리는 동안에도 다른 폴더는 찾을 수 있다.
+//! 설정에서 더한 폴더(외장 디스크·NAS의 폴더)도 범위의 맨 위 폴더로 훑는다. 네트워크 디스크 위의 것은 변경 기록 대신
+//! 정해 둔 간격마다 다시 훑는다 (Options::rescan_every)
 
 mod crawl;
 mod fsevents;
@@ -48,6 +50,9 @@ pub struct Options {
     pub max_entries: usize,
     /// 변경 기록을 받아 최신으로 둔다
     pub watch: bool,
+    /// 네트워크 디스크 위의 맨 위 폴더를 이 간격으로 다시 훑는다 (맥은 다른 컴퓨터가 NAS에서 바꾼 것을 알려 주지 않는다.
+    /// Windows의 RESCAN_UNWATCHED와 같다). None이면 다시 훑지 않는다
+    pub rescan_every: Option<Duration>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -98,11 +103,13 @@ pub fn icloud_drive(home: &str) -> String {
     sakadu::util::join(home, "Library/Mobile Documents/com~apple~CloudDocs")
 }
 
-/// 검색 설정 (설정 폴더의 search.txt): 켰는지, iCloud Drive도 찾는지. 기본은 꺼짐
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// 검색 설정 (설정 폴더의 search.txt): 켰는지, iCloud Drive도 찾는지, 더 찾을 폴더. 기본은 꺼짐
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Setting {
     pub on: bool,
     pub icloud: bool,
+    /// 더 찾을 폴더 (외장 디스크·NAS의 폴더 따위, 디스크의 실제 경로): 처음 정한 범위에 더해 훑는다
+    pub folders: Vec<String>,
 }
 
 impl Setting {
@@ -134,6 +141,8 @@ impl Setting {
             match line.split_once('=') {
                 Some(("on", v)) => s.on = v == "1",
                 Some(("icloud", v)) => s.icloud = v == "1",
+                // 폴더 줄은 여럿일 수 있다 (예전 파일에는 없다). 경로에 든 '='는 그대로 둔다
+                Some(("folder", v)) if v.starts_with('/') && !s.folders.iter().any(|f| f == v) => s.folders.push(v.to_string()),
                 _ => {}
             }
         }
@@ -141,7 +150,11 @@ impl Setting {
     }
 
     fn text(&self) -> String {
-        format!("{}\non={}\nicloud={}\n", Setting::HEADER, self.on as u8, self.icloud as u8)
+        let mut t = format!("{}\non={}\nicloud={}\n", Setting::HEADER, self.on as u8, self.icloud as u8);
+        for f in &self.folders {
+            t.push_str(&format!("folder={f}\n"));
+        }
+        t
     }
 }
 
@@ -211,6 +224,8 @@ struct Job {
 enum Msg {
     Listed(Job, Listed),
     Changes(Vec<Change>),
+    /// 그 맨 위 폴더를 그 아래까지 다시 읽는다 (변경 기록이 오지 않는 네트워크 디스크)
+    Rescan(String),
     /// 할 일이 없어지면 답한다
     Idle(Sender<()>),
     Stop,
@@ -234,16 +249,20 @@ pub struct Search {
     shared: Arc<Shared>,
     tx: Sender<Msg>,
     stream: Option<fsevents::Stream>,
+    /// 다시 훑기 줄을 멈추는 손잡이: 없애면 그 줄이 끝난다
+    _rescan: Option<Sender<()>>,
 }
 
 impl Search {
     /// 훑기를 시작한다 (바로 돌아온다). 색인이 바뀔 때마다(훑는 동안은 NOTICE_EVERY마다) 주인 줄에서 on_change를 부른다
     pub fn start(opts: Options, on_change: impl Fn() + Send + 'static) -> Search {
         let (tx, rx) = channel();
-        // 변경 기록부터 듣는다: 훑는 사이에 바뀐 것도 놓치지 않는다
+        // 변경 기록부터 듣는다: 훑는 사이에 바뀐 것도 놓치지 않는다. 네트워크 디스크 위의 폴더는 빼고 (다른 컴퓨터가 바꾼 것은
+        // 오지 않고, 꺼진 서버면 듣기를 거는 동안 멈출 수 있다) 시간마다 다시 훑는다 (rescan_every)
         let stream = if opts.watch {
             let tx = tx.clone();
-            fsevents::Stream::start(&opts.roots, LATENCY, move |changes| {
+            let local: Vec<String> = opts.roots.iter().filter(|r| !crate::volumes::on_network(r)).cloned().collect();
+            fsevents::Stream::start(&local, LATENCY, move |changes| {
                 let _ = tx.send(Msg::Changes(changes));
             })
         } else {
@@ -252,14 +271,22 @@ impl Search {
         let mut tree = NameTree::new();
         let first: Vec<Job> = opts.roots.iter().map(|r| Job { slot: tree.add_root(r), path: r.clone(), deep: false }).collect();
         let shared = Arc::new(Shared { tree: RwLock::new(tree), status: Mutex::new(Status::default()), work: Mutex::new(Work::default()), work_ready: Condvar::new() });
-        let rules = Arc::new(Rules { home: opts.home, packages_are_files: opts.packages_are_files, mounts: crawl::mount_points() });
+        let roots: HashSet<String> = opts.roots.iter().cloned().collect();
+        let rules = Arc::new(Rules { home: opts.home, packages_are_files: opts.packages_are_files, mounts: crawl::mount_points(), roots });
         for _ in 0..opts.threads.max(1) {
             let (shared, tx, rules) = (shared.clone(), tx.clone(), rules.clone());
             std::thread::spawn(move || read_folders(&shared, &tx, &rules));
         }
         let owner = Owner::new(shared.clone(), opts.protected, opts.max_entries, Box::new(on_change));
         std::thread::spawn(move || owner.run(rx, first));
-        Search { shared, tx, stream }
+        let rescan = opts.rescan_every.map(|every| rescan_network_roots(opts.roots, every, tx.clone()));
+        Search { shared, tx, stream, _rescan: rescan }
+    }
+
+    /// 그 맨 위 폴더를 그 아래까지 지금 다시 훑으라고 한다 (다시 훑기 줄이 시간마다 보내는 것과 같다. 그 폴더가 있는 디스크가
+    /// 붙거나 떨어졌을 때 앱이 부른다). 처음 훑기를 마치기 전이면 하지 않는다
+    pub fn rescan(&self, root: &str) {
+        let _ = self.tx.send(Msg::Rescan(root.to_string()));
     }
 
     pub fn status(&self) -> Status {
@@ -293,6 +320,22 @@ impl Drop for Search {
         self.stream = None;
         let _ = self.tx.send(Msg::Stop);
     }
+}
+
+/// 다시 훑기 줄: every마다 맨 위 폴더 가운데 네트워크 디스크 위의 것을 다시 훑으라고 주인 줄에 보낸다.
+/// 돌려준 손잡이를 없애면(색인을 버리면) 바로 끝난다. 네트워크 디스크인지는 그때마다 붙은 디스크 목록으로 본다 (기다리지 않는다)
+fn rescan_network_roots(roots: Vec<String>, every: Duration, tx: Sender<Msg>) -> Sender<()> {
+    let (stop, wait) = channel::<()>();
+    std::thread::spawn(move || {
+        while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = wait.recv_timeout(every) {
+            for root in roots.iter().filter(|r| crate::volumes::on_network(r)) {
+                if tx.send(Msg::Rescan(root.clone())).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    stop
 }
 
 /// 폴더를 읽는 줄: 일을 받아 폴더를 읽고 결과를 주인 줄에 넘긴다
@@ -372,6 +415,15 @@ impl Owner {
                     self.push(jobs);
                 }
                 Msg::Changes(changes) => self.held.extend(changes),
+                // 처음 훑기를 마친 뒤에만 (그 전에는 지금 훑고 있다)
+                Msg::Rescan(root) if self.ready => {
+                    let job = match read(&self.shared.tree).locate(&root) {
+                        Place::Dir(slot) => Some(Job { slot, path: root, deep: true }),
+                        _ => None,
+                    };
+                    self.push(job.into_iter().collect());
+                }
+                Msg::Rescan(_) => {}
                 Msg::Idle(answer) => self.waiting.push(answer),
                 Msg::Stop => break,
             }
@@ -600,7 +652,7 @@ pub fn bench(args: &[String]) {
     }
     let home = std::env::var("HOME").unwrap_or_default();
     let started = Instant::now();
-    let search = Search::start(Options { roots: roots.clone(), home, protected: Vec::new(), threads, packages_are_files, max_entries, watch: false }, || {});
+    let search = Search::start(Options { roots: roots.clone(), home, protected: Vec::new(), threads, packages_are_files, max_entries, watch: false, rescan_every: None }, || {});
     let finished = search.settle(Duration::from_secs(limit));
     let took = started.elapsed();
     let st = search.status();
@@ -641,6 +693,7 @@ fn change_latency() {
         packages_are_files: true,
         max_entries: usize::MAX,
         watch: true,
+        rescan_every: None,
     };
     let search = Search::start(opts, || {});
     search.settle(Duration::from_secs(10));
@@ -695,7 +748,7 @@ mod tests {
     }
 
     fn start(root: &Path, protected: Vec<String>, watch: bool) -> Search {
-        let opts = Options { roots: vec![text(root)], home: text(root), protected, threads: 2, packages_are_files: true, max_entries: usize::MAX, watch };
+        let opts = Options { roots: vec![text(root)], home: text(root), protected, threads: 2, packages_are_files: true, max_entries: usize::MAX, watch, rescan_every: None };
         Search::start(opts, || {})
     }
 
@@ -959,7 +1012,7 @@ mod tests {
         std::fs::write(Path::new(&drive).join("클라우드 메모.txt"), b"x").unwrap();
         std::fs::create_dir_all(home.join("Library/Caches")).unwrap();
         std::fs::write(home.join("Library/Caches/캐시.txt"), b"x").unwrap();
-        let opts = Options { roots: vec![text(&home), drive.clone()], home: text(&home), protected: vec![drive.clone()], threads: 2, packages_are_files: true, max_entries: usize::MAX, watch: true };
+        let opts = Options { roots: vec![text(&home), drive.clone()], home: text(&home), protected: vec![drive.clone()], threads: 2, packages_are_files: true, max_entries: usize::MAX, watch: true, rescan_every: None };
         let s = Search::start(opts, || {});
         assert!(s.settle(SOON));
         assert_eq!((total(&s, "클라우드"), total(&s, "캐시")), (1, 0));
@@ -973,15 +1026,61 @@ mod tests {
     fn search_setting_is_off_unless_turned_on() {
         assert_eq!(Setting::parse(""), Setting::default());
         assert_eq!(Setting::parse("other\non=1"), Setting::default());
-        let s = Setting { on: true, icloud: true };
+        let s = Setting { on: true, icloud: true, folders: Vec::new() };
         assert_eq!(Setting::parse(&s.text()), s);
-        assert_eq!(Setting::parse("sakadu-search 1\non=1\n"), Setting { on: true, icloud: false });
+        assert_eq!(Setting::parse("sakadu-search 1\non=1\n"), Setting { on: true, icloud: false, folders: Vec::new() });
         let (roots, protected) = default_scope("/Users/hong", false);
         assert_eq!(roots, ["/Users/hong", "/Applications", "/System/Applications"]);
         assert_eq!(protected, ["/Users/hong/Desktop", "/Users/hong/Documents", "/Users/hong/Downloads"]);
         let (roots, protected) = default_scope("/Users/hong", true);
         assert_eq!(roots.last().map(String::as_str), Some("/Users/hong/Library/Mobile Documents/com~apple~CloudDocs"));
         assert_eq!(protected.len(), 4);
+    }
+
+    /// 더 찾을 폴더: 폴더 줄로 저장하고 읽는다 (여럿, 경로의 '='와 공백 그대로, 같은 것은 한 번). 폴더 줄이 없는 예전 파일도 그대로 읽힌다
+    #[test]
+    fn search_setting_keeps_extra_folders() {
+        let s = Setting { on: true, icloud: false, folders: vec!["/Volumes/NAS/사진 = 2026".to_string(), "/Volumes/USB 메모리".to_string()] };
+        assert_eq!(s.text(), "sakadu-search 1\non=1\nicloud=0\nfolder=/Volumes/NAS/사진 = 2026\nfolder=/Volumes/USB 메모리\n");
+        assert_eq!(Setting::parse(&s.text()), s);
+        let old = Setting::parse("sakadu-search 1\non=1\nicloud=1\n");
+        assert_eq!(old, Setting { on: true, icloud: true, folders: Vec::new() });
+        let twice = Setting::parse("sakadu-search 1\nfolder=/Volumes/A\nfolder=/Volumes/A\nfolder=상대 경로\n");
+        assert_eq!(twice.folders, ["/Volumes/A"]);
+    }
+
+    /// 더한 폴더는 그 자체가 다른 디스크가 붙은 자리여도 훑는다 (다른 맨 위 폴더 안에 붙어 있어도 막지 않는다).
+    /// 범위가 아닌 붙은 자리는 그대로 막는다. 맨 위 폴더 둘을 함께 훑고, 다시 훑으라고 하면 변경 기록 없이도 바뀐 것이 들어온다
+    #[test]
+    fn search_crawls_extra_roots_even_on_other_disks() {
+        let home = temp("extra-home");
+        let extra = temp("extra-disk");
+        std::fs::create_dir_all(home.join("붙은 디스크")).unwrap();
+        std::fs::create_dir_all(home.join("다른 디스크")).unwrap();
+        let (mounted, other) = (text(&home.join("붙은 디스크")), text(&home.join("다른 디스크")));
+        let rules = Rules { home: String::new(), packages_are_files: true, mounts: [mounted.clone(), other.clone()].into(), roots: [text(&home), mounted].into() };
+        let Listed::Items(mut items) = crawl::list(&text(&home), &rules) else { panic!("the folder could not be read") };
+        items.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(items, [Item { name: "다른 디스크".to_string(), kind: Kind::Closed }, Item { name: "붙은 디스크".to_string(), kind: Kind::Dir }]);
+        // 맨 위 폴더 둘 (홈 같은 곳과 다른 곳에 있는 더한 폴더)
+        std::fs::write(home.join("집 파일.txt"), b"x").unwrap();
+        std::fs::create_dir_all(extra.join("사진")).unwrap();
+        std::fs::write(extra.join("사진/외장 사진.jpg"), b"x").unwrap();
+        let opts = Options { roots: vec![text(&home), text(&extra)], home: text(&home), protected: Vec::new(), threads: 2, packages_are_files: true, max_entries: usize::MAX, watch: false, rescan_every: None };
+        let s = Search::start(opts, || {});
+        assert!(s.settle(SOON));
+        assert_eq!((total(&s, "집 파일"), total(&s, "외장 사진")), (1, 1));
+        assert!(s.finder().covers(&text(&extra.join("사진"))));
+        // 변경 기록을 받지 않는다: 다시 훑으라고 해야 새 파일이 들어온다 (네트워크 디스크를 시간마다 다시 훑는 것과 같은 길)
+        std::fs::write(extra.join("사진/새 사진.jpg"), b"x").unwrap();
+        assert!(s.settle(SOON));
+        assert_eq!(total(&s, "새 사진"), 0, "nothing is watched in this test");
+        s.rescan(&text(&extra));
+        assert!(s.settle(SOON));
+        assert_eq!(total(&s, "새 사진"), 1);
+        drop(s);
+        std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(extra).unwrap();
     }
 
     #[test]
@@ -1002,7 +1101,7 @@ mod tests {
         assert!(!mounts.contains("/"));
         let root = temp("mounts");
         std::fs::create_dir_all(root.join("붙은 디스크/안")).unwrap();
-        let rules = Rules { home: String::new(), packages_are_files: true, mounts: [text(&root.join("붙은 디스크"))].into() };
+        let rules = Rules { home: String::new(), packages_are_files: true, mounts: [text(&root.join("붙은 디스크"))].into(), roots: [text(&root)].into() };
         let Listed::Items(items) = crawl::list(&text(&root), &rules) else { panic!("the folder could not be read") };
         assert_eq!(items, [Item { name: "붙은 디스크".to_string(), kind: Kind::Closed }]);
         std::fs::remove_dir_all(root).unwrap();
