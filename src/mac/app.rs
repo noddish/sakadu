@@ -4482,18 +4482,24 @@ mod tests {
         assert_eq!(names(&a, 1), ["2026 4분기", "예산.csv", "회의록.md"], "the other pane keeps its own order");
         a.mouse_down(&g, (sl + sr) / 2.0, y, Mods::default(), 1);
         assert_eq!(names(&a, 0), ["2026 4분기", "예산.csv", "회의록.md"], "a second click flips the order");
-        // 크기 열의 왼쪽 경계를 왼쪽으로 40 끌면 그 경계가 따라오고 크기 열이 40 넓어진다
+        // 크기 열의 왼쪽 경계를 왼쪽으로 20 끌면 그 경계가 따라오고 크기 열이 20 넓어진다.
+        // 두 칸 창에서는 유형 열이 숨어 왼쪽 이웃이 날짜 열이라, 날짜 열이 가장 좁은 폭(COL_MIN)까지 내줄 수 있는 만큼 안에서 끈다
         let start = a.cols(0);
         let edge = cols.resizable()[2].unwrap().0;
         assert_eq!(a.hit(&g, edge + 2.0, y), Hit::HeaderResize(0, 2));
         a.mouse_moved(&g, edge + 2.0, y);
         assert_eq!(a.pointer(), Pointer::LeftRight);
         a.mouse_down(&g, edge + 2.0, y, Mods::default(), 1);
-        a.mouse_dragged(edge - 38.0, y);
+        a.mouse_dragged(edge - 18.0, y);
         a.mouse_up();
-        assert_eq!(a.pane(0).cols[2], start[2] + 40.0);
+        assert_eq!(a.pane(0).cols[2], start[2] + 20.0);
         let moved = columns(gm.list, a.cols(0)).resizable()[2].unwrap().0;
-        assert!((moved - (edge - 40.0)).abs() < 0.5, "the edge follows the pointer: {edge} -> {moved}");
+        assert!((moved - (edge - 20.0)).abs() < 0.5, "the edge follows the pointer: {edge} -> {moved}");
+        // 더 끌어도 왼쪽 이웃 열은 COL_MIN보다 좁아지지 않는다 (선이 거기서 멈춘다)
+        a.mouse_down(&g, moved + 2.0, y, Mods::default(), 1);
+        a.mouse_dragged(moved - 400.0, y);
+        a.mouse_up();
+        assert!(a.cols(0).iter().all(|w| *w >= COL_MIN), "{:?}", a.cols(0));
         assert_eq!(a.pane(1).cols, DEFAULT_COLS, "the other pane keeps its columns");
         a.mouse_moved(&g, (sl + sr) / 2.0, gm.list.t + 10.0);
         assert_eq!(a.pointer(), Pointer::Arrow);
