@@ -9281,6 +9281,35 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// 세션에서 되살린 고정을 확인이 끝나기 전에 풀어도(느린 네트워크 디스크) 창은 다시 고른 것을 보인다:
+    /// 확인을 기다리는 표시가 남아 고르는 파일마다 기다리게 하지 않는다. 늦게 온 확인 결과는 버린다
+    #[test]
+    fn unpinning_a_restored_pin_before_its_check_follows_the_selection() {
+        let (root, dir) = preview_demo();
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        a.run_action(Action::Preview);
+        click_name(&mut a, &g, 0, "메모.txt", none);
+        a.settle();
+        a.toggle_preview_pin();
+        a.settle();
+        let memo = util::join(&dir, "메모.txt");
+        assert_eq!(a.preview_pin().map(|p| p.0), Some(memo));
+        let s = session::parse(&session::serialize(&a.to_session())).expect("session");
+        let (mut b, g) = app(&dir);
+        b.open_saved(a.workspaces().clone(), Some(&s), &dir);
+        assert_eq!(b.preview_body_seen(), Some(("waiting", None)), "the restored pin waits for its check");
+        b.toggle_preview_pin();
+        assert!(b.preview_pin().is_none());
+        b.settle();
+        assert_eq!(b.preview_seen(), Some((None, None)), "nothing is chosen, so the hint shows");
+        click_name(&mut b, &g, 0, "메모.txt", none);
+        b.settle();
+        assert_eq!(b.preview_seen(), Some((Some("메모.txt".to_string()), Some("첫 줄\n    둘째 줄\n".to_string()))));
+        assert!(b.preview_pin().is_none(), "the late check does not pin it again");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// settle(시험·그림)은 보이는 썸네일을 바로 읽는다: 그림은 그 아이콘 크기에 맞게 줄여 읽고, 읽지 못한 것은 그렇게 적어 둔다
     #[test]
     fn settle_reads_the_visible_thumbnails() {
