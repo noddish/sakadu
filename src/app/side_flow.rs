@@ -7,7 +7,7 @@
 use super::sidebar::{Side, Slot, motion_on};
 use super::*;
 use crate::favorites::Row;
-use sakadu::ui::side_flow::{FlowKind, FlowSlot, drop_plan};
+use sakadu::ui::side_flow::{FlowKind, FlowSlot, drop_plan, group_flow_key};
 
 pub(super) use sakadu::ui::side_flow::{DropTo, SideFlow};
 
@@ -129,7 +129,8 @@ impl App {
         match s {
             Side::Pin(i) => format!("p|{}", self.pins().get(i).map(|f| f.path.to_lowercase()).unwrap_or_default()),
             Side::Fav(Row::Item { group, index }) => format!("f|{}", self.favs.item(group, index).map(|f| f.path.to_lowercase()).unwrap_or_default()),
-            Side::Fav(Row::Group(g)) => format!("g|{}", self.favs.groups.get(g).map(|g| g.name.as_str()).unwrap_or_default()),
+            // 그룹은 이름이 겹칠 수 있다: 앞에 있는 같은 이름 그룹의 수를 붙인 공통 열쇠
+            Side::Fav(Row::Group(g)) => group_flow_key(&self.favs, g),
             other => format!("{other:?}"),
         }
     }

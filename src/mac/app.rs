@@ -41,7 +41,7 @@ use sakadu::ui::menu::{MenuIcon, MenuLine, MenuScene, menu_height, menu_hit, men
 use sakadu::ui::paint::{EntryArt, PaneHover, PaneScene, paint_pane_border, paint_pane_head, paint_pane_list};
 use sakadu::ui::preview_card::{CardArt, CardBody, CardGeom, CardHover, CardScene, IMAGE_EXTS, TEXT_EXTS, card_geom, paint_preview_card};
 use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, rail_geom};
-use sakadu::ui::side_flow::{DropPlan, DropTo, FlowKind, FlowSlot, SideFlow, drop_plan, group_span, paint_drag_card, paint_drop_area, paint_group_plate};
+use sakadu::ui::side_flow::{DropPlan, DropTo, FlowKind, FlowSlot, SideFlow, drop_plan, group_flow_key, group_span, paint_drag_card, paint_drop_area, paint_group_plate};
 use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, paint_toolbar, toolbar_geom};
 use sakadu::ui::*;
 use sakadu::util;
@@ -319,6 +319,11 @@ struct Clicked {
 
 /// 누른 채 이만큼 넘게 움직여야 끌기로 본다 (누르다가 손이 조금 떨린 것은 끌기가 아니다)
 const DRAG_START: f32 = 4.0;
+
+/// 사이드바 줄을 끌 때 목록 위·아래 끝에서 이만큼 안이면 그쪽으로 자동 스크롤한다
+const SIDE_EDGE: f32 = 12.0;
+/// 그 자동 스크롤의 빠르기 (초당 점. 끌기 이벤트마다 8점씩 가던 것과 비슷하게)
+const SIDE_EDGE_SPEED: f32 = 480.0;
 
 /// 누른 사이드바 줄 (Windows의 FavPress·PinPress, 끌기 시작하면 FavMove·PinMove): 그대로 떼면 그 줄을 열고,
 /// 위아래로 조금 넘게 움직이면 그 줄을 카드로 띄워 끌어 옮긴다
@@ -934,6 +939,9 @@ struct SideRow {
     h: f32,
     /// 끌어 옮기기에서 맡는 몫 (공통 ui::side_flow): 고정한 것의 번호, 즐겨찾기 줄, 즐겨찾기 바로 위 줄
     flow: FlowKind,
+    /// 움직임을 이어 가는 열쇠: 같은 줄이면 자리가 바뀌어도 같다 (고정한 것·즐겨찾기 항목·바로가기는 경로,
+    /// 그룹은 공통 group_flow_key: 이름이 겹칠 수 있어 앞에 있는 같은 이름 그룹의 수를 붙인다)
+    key: String,
 }
 
 impl SideRow {
@@ -942,17 +950,8 @@ impl SideRow {
         FlowSlot { t: self.y, b: self.y + self.h, kind: self.flow }
     }
 
-    /// 움직임을 이어 가는 열쇠: 같은 줄이면 자리가 바뀌어도 같다 (고정한 것·즐겨찾기 항목·바로가기는 경로, 그룹은 이름)
     fn key(&self) -> String {
-        let path = self.path.as_deref().unwrap_or_default();
-        match self.kind {
-            SideKind::Pin => pin_key(path),
-            SideKind::Fav => fav_key(path),
-            SideKind::Group(..) => format!("g|{}", self.label),
-            SideKind::Place => format!("s|{path}"),
-            SideKind::Hint => "hint".to_string(),
-            SideKind::Label => "label".to_string(),
-        }
+        self.key.clone()
     }
 }
 
@@ -1089,6 +1088,8 @@ pub struct App {
     home: String,
     /// 사이드바 목록 스크롤 (줄이 창 아래로 넘칠 때)
     side_scroll: f32,
+    /// 사이드바 끌기의 자동 스크롤이 지난번에 한 걸음의 때 (끝 자리 밖이면 None. side_edge_step)
+    side_edge_at: Option<Instant>,
     /// 열어 달라는 파일 (창 쪽이 macOS '열기'로 연다)
     pub open_files: Vec<String>,
     /// 즐겨찾기를 파일에 저장할지 (시험·그림에서는 저장하지 않는다)
@@ -1214,6 +1215,7 @@ impl App {
             restored: std::collections::HashMap::new(),
             home: home.to_string(),
             side_scroll: 0.0,
+            side_edge_at: None,
             open_files: Vec::new(),
             persist: false,
             menu: None,
@@ -1420,21 +1422,21 @@ impl App {
                 }
             }
             // 세션에서 연 폴더가 없어졌거나 닿지 않으면 home을 연다 (기록은 남기지 않는다)
-            Err(_) if restored && tab.loc != Location::Dir(home.clone()) => {
-                let gone = std::mem::replace(&mut tab.loc, Location::Dir(home.clone()));
+            Err(msg) if restored && tab.loc != Location::Dir(home.clone()) => {
+                let old = std::mem::replace(&mut tab.loc, Location::Dir(home.clone()));
                 tab.generation += 1;
                 tab.state = LoadState::Loading;
                 self.requests.push(Request { tab: tab.id, generation: tab.generation, dir: home });
                 self.reading.insert(tab_id);
-                // 열지 못한 폴더는 최근 위치에서 뺀다 (시작 화면·명령 메뉴에 남지 않게)
-                if let Some(d) = gone.dir() {
+                // 지워진 폴더만 최근 위치에서 뺀다 (시작 화면·명령 메뉴에 남지 않게). 꺼진 NAS처럼 잠깐 닿지 않는 곳은
+                // 다시 시작해도 남긴다: 다시 켜지면 그 줄로 바로 간다
+                if let Some(d) = old.dir().filter(|_| dir_gone(&msg)) {
                     self.forget_recent(d);
                 }
             }
             Err(msg) => {
-                // 지워졌거나 폴더가 아닌 것만 최근 위치에서 뺀다 (Windows와 같다). 잠깐 닿지 않는 NAS·권한 없음은 그대로 둔다.
-                // 읽기 오류는 io::Error의 글이라 끝에 OS 오류 번호가 붙는다 (ENOENT 2, ENOTDIR 20)
-                let gone = msg.ends_with("(os error 2)") || msg.ends_with("(os error 20)");
+                // 지워졌거나 폴더가 아닌 것만 최근 위치에서 뺀다 (Windows와 같다). 잠깐 닿지 않는 NAS·권한 없음은 그대로 둔다
+                let gone = dir_gone(&msg);
                 tab.entries.clear();
                 tab.view.clear();
                 tab.state = LoadState::Error(msg);
@@ -3784,7 +3786,18 @@ impl App {
     /// 사이드바 목록의 줄. 위에는 이 공간에 고정한 것(없으면 안내), 아래에는 '모든 공간': 구역 이름, 바로가기, 즐겨찾기.
     /// '모든 공간'은 줄이 적으면 목록 아래 끝에 붙고, 많아서 넘치면 고정한 것 바로 아래에 이어져 함께 스크롤된다
     fn side_rows(&self) -> Vec<SideRow> {
-        let row = |kind, label: &str, path: Option<&str>, is_dir, indent, y, h, flow| SideRow { kind, label: label.to_string(), path: path.map(str::to_string), is_dir, indent, y, h, flow };
+        let row = |kind: SideKind, label: &str, path: Option<&str>, is_dir, indent, y, h, flow| {
+            let p = path.unwrap_or_default();
+            let key = match kind {
+                SideKind::Pin => pin_key(p),
+                SideKind::Fav => fav_key(p),
+                SideKind::Group(g, _) => group_flow_key(&self.favs, g),
+                SideKind::Place => format!("s|{p}"),
+                SideKind::Hint => "hint".to_string(),
+                SideKind::Label => "label".to_string(),
+            };
+            SideRow { kind, label: label.to_string(), path: path.map(str::to_string), is_dir, indent, y, h, flow, key }
+        };
         let mut rows = Vec::new();
         let mut y = 0.0;
         let pins = self.pins();
@@ -4054,6 +4067,37 @@ impl App {
         let list = self.side_list();
         let t = list.t + row.y - self.side_scroll;
         R::new(list.l + 8.0, t, list.r - 8.0, t + row.h)
+    }
+
+    /// 사이드바 줄을 끄는 중에 마우스가 목록 위·아래 끝 가까이(SIDE_EDGE 안)에 있으면 그쪽 (위 -1, 아래 1), 아니면 0
+    fn side_edge_dir(&self) -> f32 {
+        let Some((y, _)) = self.side_press.and_then(|sp| sp.moving) else { return 0.0 };
+        let list = self.side_list();
+        if y < list.t + SIDE_EDGE {
+            -1.0
+        } else if y > list.b - SIDE_EDGE {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// 사이드바 끌기의 자동 스크롤 한 걸음: 끄는 줄을 목록 끝 가까이에 대고 있으면 지난 걸음 뒤로 지난 때만큼 그쪽으로 스크롤한다.
+    /// 창 쪽이 그릴 때마다 부른다: 마우스가 멈춰 있어도 이어진다. 더 스크롤할 수 있으면 true (창 쪽이 곧 다시 그린다).
+    /// 끝 자리를 벗어나거나, 떼거나, 목록 끝까지 가면 false
+    pub fn side_edge_step(&mut self, now: Instant) -> bool {
+        let dir = self.side_edge_dir();
+        if dir == 0.0 {
+            self.side_edge_at = None;
+            return false;
+        }
+        // 첫 걸음은 한 틀(1/60초)만큼, 오래 쉬었다 온 걸음도 몇 틀까지만 (한 번에 멀리 뛰지 않게)
+        let dt = self.side_edge_at.map_or(1.0 / 60.0, |at| now.saturating_duration_since(at).as_secs_f32().min(0.05));
+        self.side_edge_at = Some(now);
+        let before = self.side_scroll;
+        self.side_scroll += dir * SIDE_EDGE_SPEED * dt;
+        self.clamp_side_scroll();
+        self.side_scroll != before
     }
 
     /// 사이드바 스크롤을 줄 수 안으로 (줄이 바뀌거나 창 크기가 바뀐 뒤)
@@ -4483,14 +4527,7 @@ impl App {
             let grab = sp.moving.map_or_else(|| self.side_grab(sp.row, sp.y0), |(_, grab)| grab);
             sp.moving = Some((y, grab));
             self.side_press = Some(sp);
-            // 목록 끝에 가까이 끌면 자동 스크롤
-            let list = self.side_list();
-            if y < list.t + 12.0 {
-                self.side_scroll -= 8.0;
-            } else if y > list.b - 12.0 {
-                self.side_scroll += 8.0;
-            }
-            self.clamp_side_scroll();
+            // 목록 끝에 가까이 끌면 자동 스크롤: 마우스가 멈춰 있어도 이어지게 그림마다 지난 때만큼 한다 (side_edge_step)
             return;
         }
         // 고른 줄을 누른 채 조금 넘게 움직였다: 고른 항목들을 끌어 내 달라고 한다 (맥의 끌기는 창 쪽이 시작한다)
@@ -5276,6 +5313,12 @@ fn count_text(tab: &Tab) -> String {
     }
 }
 
+/// 폴더 읽기 오류가 그 폴더가 지워졌거나 폴더가 아니라는 것인지 (그때만 최근 위치에서 뺀다).
+/// 읽기 오류는 io::Error의 글이라 끝에 OS 오류 번호가 붙는다 (ENOENT 2, ENOTDIR 20)
+fn dir_gone(msg: &str) -> bool {
+    msg.ends_with("(os error 2)") || msg.ends_with("(os error 20)")
+}
+
 /// 탭의 스크롤을 내용 길이 안으로 (보기 방식의 칸 배치에 맞춰)
 fn clamp_tab(tab: &mut Tab, list: R, view: ViewMode) {
     let grid = Grid::of(list, view);
@@ -5589,6 +5632,31 @@ mod tests {
         b.edit = Editing::None;
         b.switch_workspace(0);
         assert_eq!(b.recent, [work, down], "switching workspaces keeps the list");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 세션에서 다시 연 탭의 폴더를 읽지 못하면 home을 연다. 최근 위치에서는 지워진 폴더만 빼고,
+    /// 잠깐 닿지 않는 곳(꺼진 NAS)은 남긴다: 다시 켜지면 시작 화면·명령 메뉴에서 바로 간다
+    #[test]
+    fn restored_tab_that_cannot_be_read_keeps_offline_places_recent() {
+        let (root, home) = demo();
+        let (a, _) = app(&home);
+        let mut s = session::parse(&session::serialize(&a.to_session())).expect("session");
+        let nas = "/Volumes/꺼진 NAS/공유".to_string();
+        let gone = util::join(&home, "없는 곳");
+        let work = util::join(&home, "업무");
+        s.panes[0].tabs = vec![nas.clone(), gone.clone()];
+        s.panes[0].active = 0;
+        s.recent = vec![nas.clone(), gone.clone(), work.clone()];
+        let (mut b, _) = app(&home);
+        b.open_saved(Workspaces::default(), Some(&s), &home);
+        let tabs: Vec<(u64, u64)> = b.pane(0).tabs.iter().map(|t| (t.id, t.generation)).collect();
+        assert_eq!(tabs.len(), 2);
+        b.on_listed(tabs[0].0, tabs[0].1, Err("Operation timed out (os error 60)".to_string()));
+        b.on_listed(tabs[1].0, tabs[1].1, Err("No such file or directory (os error 2)".to_string()));
+        assert_eq!(b.recent, [nas, work], "only the folder that is gone leaves the list");
+        b.settle();
+        assert!(b.pane(0).tabs.iter().all(|t| t.loc == Location::Dir(home.clone())), "both tabs open home");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6514,6 +6582,78 @@ mod tests {
         assert_eq!(pin_names(&a), ["업무", "예산.csv", "다운로드"]);
         drag_side(&mut a, &g, "업무", 2000.0);
         assert_eq!(saved_pins(&a), ["예산.csv", "다운로드", "업무"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 이름이 같은 그룹 둘(새 그룹 둘의 이름 고치기를 그만둔 것)도 줄마다 움직임 열쇠가 따로라, 그리면 제자리에 멈춘다
+    /// (한 열쇠를 나눠 쓰면 앞 그룹이 뒤 그룹의 자리에서 끝없이 다시 미끄러진다)
+    #[test]
+    fn groups_with_the_same_name_settle_in_the_sidebar() {
+        let (root, home) = demo();
+        let (mut a, mut g) = app(&home);
+        for _ in 0..2 {
+            a.favs.groups.push(Group { name: "새 그룹".into(), collapsed: false, items: Vec::new() });
+        }
+        let keys: Vec<String> = a.side_rows().iter().map(SideRow::key).collect();
+        assert_eq!(keys.iter().collect::<HashSet<_>>().len(), keys.len(), "{keys:?}");
+        a.paint(&mut g);
+        a.paint(&mut g);
+        assert!(!a.side_moving(), "nothing moved, so nothing slides");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 사이드바 줄을 끌며 목록 끝에 대고 있으면 마우스가 멈춰 있어도 그림마다(side_edge_step) 지난 때만큼 스크롤된다.
+    /// 끝 자리를 벗어나거나 떼면 멈추고, 목록 끝까지 가면 더 부탁하지 않는다
+    #[test]
+    fn holding_a_dragged_row_at_the_edge_keeps_scrolling() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        for i in 0..40 {
+            a.workspaces.current_mut().unwrap().pin(&util::join(&home, &format!("폴더 {i}")), true);
+        }
+        a.resize(1280.0, 420.0);
+        let list = a.side_list();
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+        let (x, y) = mid(side_row(&a, "폴더 0"));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x, y + 20.0);
+        assert!(!a.side_edge_step(t0), "not near the edge yet");
+        a.mouse_dragged(x, list.b - 4.0);
+        assert_eq!(a.side_scroll, 0.0, "the drag event itself does not scroll");
+        // 첫 걸음은 한 틀만큼, 다음부터는 마우스가 그대로여도 지난 때만큼
+        assert!(a.side_edge_step(t0));
+        let first = a.side_scroll;
+        assert!((first - SIDE_EDGE_SPEED / 60.0).abs() < 0.01, "{first}");
+        assert!(a.side_edge_step(ms(30)));
+        assert!((a.side_scroll - first - SIDE_EDGE_SPEED * 0.03).abs() < 0.01, "{}", a.side_scroll);
+        assert!(a.side_edge_step(ms(60)));
+        let held = a.side_scroll;
+        // 끝 자리를 벗어나면 멈춘다
+        a.mouse_dragged(x, (list.t + list.b) / 2.0);
+        assert!(!a.side_edge_step(ms(90)));
+        assert_eq!(a.side_scroll, held);
+        // 다시 대면 처음처럼 한 틀만큼부터 (쉬는 동안의 때를 몰아서 가지 않는다)
+        a.mouse_dragged(x, list.b - 4.0);
+        assert!(a.side_edge_step(ms(5_000)));
+        assert!((a.side_scroll - held - SIDE_EDGE_SPEED / 60.0).abs() < 0.01, "{}", a.side_scroll);
+        // 목록 끝까지 가면 더 스크롤하지 않는다 (창 쪽이 다시 그려 달라고 하지 않는다)
+        let mut t = 5_000;
+        while a.side_edge_step(ms(t)) {
+            t += 16;
+            assert!(t < 100_000, "it reaches the end");
+        }
+        let rows = a.side_rows();
+        let last = a.side_rect(rows.last().expect("sidebar rows"));
+        assert!((last.b - list.b).abs() < 0.5, "the last row sits at the bottom: {last:?} {list:?}");
+        // 위 끝에 대면 거꾸로
+        let bottom = a.side_scroll;
+        a.mouse_dragged(x, list.t + 4.0);
+        assert!(a.side_edge_step(ms(t + 16)));
+        assert!(a.side_scroll < bottom);
+        // 떼면 멈춘다
+        a.mouse_up();
+        assert!(!a.side_edge_step(ms(t + 32)));
         std::fs::remove_dir_all(root).unwrap();
     }
 

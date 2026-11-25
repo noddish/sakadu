@@ -161,10 +161,12 @@ define_class!(
                 a.scale = scale;
                 a.motion = motion;
                 a.resize(size.width as f32, size.height as f32);
+                // 사이드바 줄을 끌며 목록 끝에 대고 있으면 지난 그림 뒤로 지난 때만큼 스크롤한다 (마우스가 멈춰 있어도)
+                let edge = a.side_edge_step(std::time::Instant::now());
                 a.paint(&mut g);
-                a.side_moving()
+                a.side_moving() || edge
             });
-            // 사이드바 줄이 아직 미끄러지는 중이면 다음 그림을 곧 다시 그린다
+            // 사이드바 줄이 아직 미끄러지는 중이거나 끌기 자동 스크롤 중이면 다음 그림을 곧 다시 그린다
             if moving == Some(true) {
                 schedule_flow();
             }
@@ -1039,8 +1041,8 @@ fn board_paths(board: &NSPasteboard) -> Vec<String> {
     out
 }
 
-/// 사이드바 줄이 미끄러지는 동안: 한 틀(약 1/60초) 뒤에 다시 그려 달라고 한다. 이미 부탁해 두었으면 그대로 둔다
-/// (그릴 때마다 부탁이 쌓이지 않게). 다 미끄러지면 그리기가 더는 부탁하지 않는다
+/// 사이드바 줄이 미끄러지는 동안(그리고 끄는 줄을 목록 끝에 대고 있어 자동 스크롤하는 동안): 한 틀(약 1/60초) 뒤에 다시 그려 달라고 한다.
+/// 이미 부탁해 두었으면 그대로 둔다 (그릴 때마다 부탁이 쌓이지 않게). 다 미끄러지면 그리기가 더는 부탁하지 않는다
 fn schedule_flow() {
     if FLOW_PENDING.get() {
         return;
@@ -1619,9 +1621,13 @@ define_class!(
             settings::open(self.mtm());
         }
 
-        /// 메뉴 막대의 동작 줄 (파일·보기·이동·도움말): 줄의 tag가 단축키 표(ACTIONS)의 번호다
+        /// 메뉴 막대의 동작 줄 (파일·보기·이동·도움말): 줄의 tag가 단축키 표(ACTIONS)의 번호다.
+        /// 메뉴 단축키(⌘T, ⌘W, ⇧⌘N…)는 뷰의 handle_key를 거치지 않으므로, 단축키 표의 동작은 누르고 있어도 한 번만 한다는 규칙을 여기서도 지킨다
         #[unsafe(method(sakaduAction:))]
         fn sakadu_action(&self, sender: &NSMenuItem) {
+            if held_key(self.mtm()) {
+                return;
+            }
             let Some(&(a, ..)) = usize::try_from(sender.tag()).ok().and_then(|i| sakadu::keys::ACTIONS.get(i)) else { return };
             with_app(|app| app.run_action(a));
             after_menu();
