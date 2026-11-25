@@ -525,7 +525,7 @@ impl App {
         let path = pv.source.clone().unwrap_or_else(|| t.path.clone());
         let e = ext.as_str();
         // 압축 파일 안의 파일은 정보만 (풀지 않고는 읽을 수 없다)
-        pv.content = if t.kind != Kind::File || e == "lnk" || crate::archive::archive_of(&path).is_some_and(|a| !util::eq_path(&a, &path)) {
+        pv.content = if t.kind != Kind::File || e == "lnk" || crate::archive::inside(&path) {
             Content::Info
         } else if crate::archive::is_archive_name(&t.name) {
             spawn_archive_list(hwnd, pv.seq, path);

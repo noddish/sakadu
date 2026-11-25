@@ -42,6 +42,11 @@ pub fn archive_of(path: &str) -> Option<String> {
     None
 }
 
+/// 경로가 압축 파일 '안'의 항목인지 (압축 파일 자체는 아니다). 압축 파일 자체는 보통 파일처럼 옮기고 끈다
+pub fn inside(path: &str) -> bool {
+    archive_of(path).is_some_and(|a| !util::eq_path(&a, path))
+}
+
 fn message(e: windows::core::Error) -> String {
     let m = e.message();
     if m.trim().is_empty() { format!("오류 {:#010x}", e.code().0) } else { m.trim().to_string() }
@@ -132,6 +137,9 @@ mod tests {
         assert_eq!(archive_of(&format!("{d}\\묶음.zip")), Some(format!("{d}\\묶음.zip")));
         assert_eq!(archive_of(&format!("{d}\\묶음.zip\\사진\\a.jpg")), Some(format!("{d}\\묶음.zip")));
         assert_eq!(archive_of(&d), None);
+        assert!(!inside(&format!("{d}\\묶음.zip")));
+        assert!(inside(&format!("{d}\\묶음.zip\\사진")));
+        assert!(!inside(&format!("{d}\\폴더.zip\\안")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -963,7 +963,7 @@ fn archive_paths(obj: &IDataObject) -> Option<Vec<String>> {
             CoTaskMemFree(Some(raw.0 as *const c_void));
             paths.push(path?);
         }
-        (!paths.is_empty() && paths.iter().all(|p| crate::archive::archive_of(p).is_some_and(|a| !util::eq_path(&a, p)))).then_some(paths)
+        (!paths.is_empty() && paths.iter().all(|p| crate::archive::inside(p))).then_some(paths)
     }
 }
 
@@ -1118,7 +1118,7 @@ pub fn drag_out(hwnd: HWND, paths: &[String]) -> Result<()> {
     let obj: IDataObject = ui_object(hwnd, paths).inspect_err(|e| crate::diag::log(|| format!("drag: data object failed: {e}")))?;
     // 탐색기 등 다른 앱에 놓을 때는 그쪽 규칙대로 (같은 드라이브면 이동, 다른 곳이면 복사).
     // 압축 파일 안의 항목은 꺼내 복사만 한다 (옮기면 압축 파일에서 지워진다)
-    let allowed = if paths.first().is_some_and(|p| crate::archive::archive_of(p).is_some()) { DROPEFFECT_COPY } else { DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK };
+    let allowed = if paths.iter().any(|p| crate::archive::inside(p)) { DROPEFFECT_COPY } else { DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK };
     crate::diag::log(|| format!("drag: SHDoDragDrop begin, lbutton down={}", key_down(windows::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON)));
     let r = unsafe { SHDoDragDrop(Some(hwnd), &obj, None, allowed) };
     crate::diag::log(|| format!("drag: SHDoDragDrop -> {r:?}"));

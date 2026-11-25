@@ -98,7 +98,7 @@ pub(super) fn open_one(hwnd: HWND, pane: usize, path: &str, dir: Option<&str>, e
         return;
     }
     // 압축 파일 안의 파일은 셸의 '열기'로 (임시 폴더에 풀어 연다)
-    if crate::archive::archive_of(path).is_some_and(|a| !util::eq_path(&a, path)) {
+    if crate::archive::inside(path) {
         if let Err(e) = shell::open_default(hwnd, path) {
             crate::diag::log(|| format!("open: archive item failed: {e}"));
         }
@@ -170,7 +170,7 @@ pub(super) fn build_menu(hwnd: HWND, paths: &[String], dir: Option<&str>, extend
     // 압축 파일 안을 보는 중인지 (칸의 폴더로, 칸이 없으면 항목 경로로). 압축 파일 자체의 메뉴는 그대로 둔다
     let in_archive = match (dir, paths.first()) {
         (Some(d), _) => crate::archive::archive_of(d).is_some(),
-        (None, Some(p)) => crate::archive::archive_of(p).is_some_and(|a| !util::eq_path(&a, p)),
+        (None, Some(p)) => crate::archive::inside(p),
         (None, None) => false,
     };
     let single_dir = paths.len() == 1 && if in_archive { crate::archive::is_folder(&paths[0]) == Some(true) } else { shell::is_dir(&paths[0]) };

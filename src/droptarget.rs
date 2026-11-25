@@ -75,7 +75,7 @@ fn own_effect(files: &[String], dest: &str, keys: MODIFIERKEYS_FLAGS, allowed: D
     }
     let (shift, ctrl) = (keys.0 & MK_SHIFT.0 != 0, keys.0 & MK_CONTROL.0 != 0);
     // 압축 파일 안에서 꺼내는 것은 늘 복사 (옮기면 압축 파일에서 지워야 한다)
-    let from_archive = files.iter().any(|f| crate::archive::archive_of(f).is_some());
+    let from_archive = files.iter().any(|f| crate::archive::inside(f));
     let want = match (shift, ctrl) {
         _ if from_archive => DROPEFFECT_COPY,
         (true, false) => DROPEFFECT_MOVE,
@@ -301,6 +301,22 @@ mod tests {
         // 다른 드라이브에서 섞여 온 파일은 복사
         let mixed = vec!["C:\\a\\x.txt".to_string(), "D:\\y.txt".to_string()];
         assert_eq!(own_effect(&mixed, "C:\\b", none, ALL), DROPEFFECT_COPY);
+    }
+
+    /// 압축 파일 안에서 꺼내는 것은 복사, 압축 파일 자체는 다른 파일처럼 같은 드라이브면 이동
+    #[test]
+    fn archive_contents_copy_but_archive_files_move() {
+        let dir = std::env::temp_dir().join(format!("sakadu-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip = dir.join("묶음.zip");
+        std::fs::write(&zip, b"PK").unwrap();
+        let z = zip.to_string_lossy().into_owned();
+        let dest = format!("{}\\다른 곳", &z[..2]);
+        let none = MODIFIERKEYS_FLAGS(0);
+        assert_eq!(own_effect(std::slice::from_ref(&z), &dest, none, ALL), DROPEFFECT_MOVE);
+        assert_eq!(own_effect(&[format!("{z}\\a.txt")], &dest, none, ALL), DROPEFFECT_COPY);
+        assert_eq!(own_effect(&[format!("{z}\\a.txt")], &dest, MK_SHIFT, ALL), DROPEFFECT_COPY);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
