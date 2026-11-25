@@ -4048,9 +4048,10 @@ impl App {
         (y >= list.t && y < list.b).then_some((x, y))
     }
 
-    /// 사이드바 줄이 아직 미끄러지는 중인지 (창 쪽이 곧 다시 그린다)
+    /// 사이드바 줄이 아직 미끄러지는 중인지 (창 쪽이 곧 다시 그린다). 검색 패널이 사이드바 자리를 덮는 동안은 줄을 그리지 않아
+    /// 움직임이 끝나지 않으므로 false다: 다시 그려 달라고 하지 않는다 (검색을 닫으면 남은 만큼 이어서 미끄러진다)
     pub fn side_moving(&self) -> bool {
-        self.side_flow.borrow().moving
+        self.side_flow.borrow().moving && !self.find_shown()
     }
 
     // ---------- 사이드바 끌어 옮기기 (공통 ui::side_flow. Windows side_flow.rs와 같다) ----------
@@ -4274,8 +4275,9 @@ impl App {
     }
 
     /// 사이드바 줄을 끄는 중에 마우스가 목록 위·아래 끝 가까이(SIDE_EDGE 안)에 있으면 그쪽 (위 -1, 아래 1), 아니면 0
+    /// 검색 패널이 사이드바 자리를 덮고 있으면 0 (보이지 않는 목록을 스크롤하지 않는다)
     fn side_edge_dir(&self) -> f32 {
-        let Some((y, _)) = self.side_press.and_then(|sp| sp.moving) else { return 0.0 };
+        let Some((y, _)) = self.side_press.and_then(|sp| sp.moving).filter(|_| !self.find_shown()) else { return 0.0 };
         let list = self.side_list();
         if y < list.t + SIDE_EDGE {
             -1.0
@@ -4962,6 +4964,12 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// 글을 치는 입력 상자가 키보드를 가졌는지: 이름·경로·공간 이름 고치기, 검색 칸, 명령 메뉴(⌘K) 칸.
+    /// 그동안 창 쪽 undo:(⌘Z)는 파일 작업이 아니라 친 글자를 되돌린다
+    pub fn typing(&self) -> bool {
+        self.edit != Editing::None || self.find_wants_keys() || self.cmd.is_some()
     }
 
     /// 누르고 있을 때 되풀이해 받아도 되는 키인지. 단축키 표의 동작(새 탭, 새 폴더, 칸 나누기 …)은 한 번 누름에 한 번만 한다
@@ -6039,6 +6047,32 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// 글을 치는 입력 상자가 키보드를 가진 동안은 창 쪽 ⌘Z(undo:)가 파일 작업이 아니라 친 글자를 되돌린다 (typing으로 가른다):
+    /// 경로 고치기·검색 칸처럼 명령 메뉴(⌘K) 칸도
+    #[test]
+    fn cmd_z_while_typing_in_the_command_menu_is_for_the_text() {
+        let (root, home) = demo();
+        let (mut a, _) = app(&home);
+        assert!(!a.typing(), "with the keys in the list ⌘Z undoes file operations");
+        a.toggle_commands();
+        assert!(a.typing(), "the command menu field");
+        a.cmd_typed("업무");
+        assert!(a.typing());
+        a.close_commands();
+        assert!(!a.typing());
+        a.begin_address(0);
+        assert!(a.typing(), "the path field");
+        a.cancel_address();
+        a.open_find();
+        assert!(a.typing(), "the search field");
+        a.toggle_commands();
+        assert!(a.typing(), "the command menu over the search panel");
+        a.close_commands();
+        a.close_find();
+        assert!(!a.typing());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// 머리글을 누르면 그 칸만 정렬이 바뀌고(크기·날짜는 큰 값부터, 다시 누르면 뒤집기), 열 경계를 끌면 그 선이 따라오고,
     /// 둘 다 세션에 남아 다시 열 때(작업 공간을 오갈 때도) 돌아온다
     #[test]
@@ -6889,6 +6923,45 @@ mod tests {
         // 떼면 멈춘다
         a.mouse_up();
         assert!(!a.side_edge_step(ms(t + 32)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 검색 패널이 사이드바 자리를 덮는 동안은 줄을 그리지 않아 움직임이 끝나지 않으므로, 미끄러지는 중이어도 다시 그려 달라고 하지
+    /// 않는다 (창이 15ms마다 끝없이 다시 그리지 않게). 끌기 자동 스크롤도 멈춘다. 검색을 닫으면 남은 만큼 이어서 미끄러진다
+    #[test]
+    fn search_over_the_sidebar_stops_its_redraw_ticks() {
+        let (root, home) = demo();
+        let (mut a, mut g) = app(&home);
+        let work = util::join(&home, "업무");
+        for (path, is_dir) in [(work.clone(), true), (util::join(&home, "다운로드"), true), (util::join(&work, "예산.csv"), false)] {
+            a.toggle_pin(&path, is_dir);
+        }
+        drag_side(&mut a, &g, "업무", SIDE_ROW_H + 4.0);
+        assert!(a.side_moving(), "the dropped row slides in");
+        a.open_find();
+        assert!(!a.side_moving(), "search covers the sidebar: no more redraw ticks");
+        a.paint(&mut g);
+        assert!(!a.side_moving());
+        a.close_find();
+        assert!(a.side_moving(), "closing search lets the rows finish sliding");
+        // 끌기 자동 스크롤: 끝 자리에 대고 있어도 검색이 덮으면 멈춘다
+        for i in 0..40 {
+            a.workspaces.current_mut().unwrap().pin(&util::join(&home, &format!("폴더 {i}")), true);
+        }
+        a.resize(1280.0, 420.0);
+        let list = a.side_list();
+        let (x, y) = mid(side_row(&a, "업무"));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x, y + 20.0);
+        a.mouse_dragged(x, list.b - 4.0);
+        let t0 = Instant::now();
+        assert!(a.side_edge_step(t0));
+        a.open_find();
+        let held = a.side_scroll;
+        assert!(!a.side_edge_step(t0 + std::time::Duration::from_millis(16)));
+        assert_eq!(a.side_scroll, held);
+        a.close_find();
+        a.mouse_up();
         std::fs::remove_dir_all(root).unwrap();
     }
 
