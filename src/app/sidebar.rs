@@ -11,6 +11,7 @@ use super::side_flow::{DropPlan, DropTo};
 use super::*;
 use crate::favorites::Row;
 use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, rail_geom};
+use sakadu::ui::side_flow::{group_span, paint_drag_card, paint_drop_area, paint_group_plate};
 use sakadu::ui::{SIDE_HEADER_H, SIDE_LABEL_H, side_common_top, side_row_bg};
 
 pub(super) use sakadu::ui::{BAR_W, SIDE_ROW_H, draw_pin, hover_fill, seg_on, seg_track, well};
@@ -988,23 +989,12 @@ impl App {
         g.clip(list);
         // 줄 안의 16px 아이콘 자리
         let icon_at = |r: R, l: f32| R::new(l, r.t + (SIDE_ROW_H - ICON) / 2.0, l + ICON, r.t + (SIDE_ROW_H + ICON) / 2.0);
-        // 그룹 판: 머리 줄부터 안의 마지막 줄(끌어 온 빈자리 포함)까지 둥근 판으로 묶는다
+        // 그룹 판: 머리 줄부터 안의 마지막 줄(끌어 온 빈자리 포함)까지 둥근 판으로 묶는다 (판의 위·아래와 그리기는 공통 코드)
         if let Some((gi, strong)) = group_box {
-            let (mut top, mut bot) = (f32::MAX, f32::MIN);
-            for (k, (r, Slot::Item(s))) in slots.iter().enumerate() {
-                let in_group = matches!(s, Side::Fav(Row::Group(h)) | Side::Fav(Row::Item { group: Some(h), .. }) if *h == gi);
-                if let (true, Some(y)) = (in_group, shown_y[k]) {
-                    top = top.min(y);
-                    bot = bot.max(y + r.h());
-                }
-            }
-            if let Some((_, _, h, gap_t)) = dragging.filter(|_| strong) {
-                top = top.min(gap_t);
-                bot = bot.max(gap_t + h);
-            }
-            if top < bot {
+            let gap = dragging.filter(|_| strong).map(|(_, _, h, gap_t)| (gap_t, h));
+            if let Some((top, bot)) = group_span(&super::side_flow::flow_slots(&slots), &shown_y, gi, gap) {
                 let box_r = R::new(dx + ROW_L - SP_XS, top + dy - SP_XS, dx + rr + SP_XS, bot + dy + SP_XS);
-                g.fill_round(box_r, R_ROW + SP_XS, if t.high_contrast { t.hover } else { alpha(t.text, if strong { A_PRESS } else { A_HOVER }) });
+                paint_group_plate(g, &t, box_r, strong);
             }
         }
         for (k, (r, slot)) in slots.iter().enumerate() {
@@ -1129,17 +1119,12 @@ impl App {
             _ => None,
         };
         if let Some(area) = drop_area {
-            g.fill_round(area, R_ROW + SP_HAIR, alpha(t.accent, A_PRESS));
-            g.stroke_round(area.inset(0.75, 0.75), R_ROW + SP_HAIR, t.accent, 1.5);
+            paint_drop_area(g, &t, area);
         }
-        // 끄는 줄: 흰 카드로 떠서 마우스를 따라온다
+        // 끄는 줄: 흰 카드로 떠서 마우스를 따라온다 (카드 바탕은 공통 코드)
         if let Some((s, card_t, card_h, _)) = dragging {
             let cr = R::new(dx + ROW_L, card_t + dy, dx + rr, card_t + card_h + dy);
-            if !t.high_contrast {
-                super::soft_shadow(g, cr, R_ROW, SHADOW_M.0, SHADOW_M.1, t.dark);
-            }
-            g.fill_round(cr, R_ROW, t.pane);
-            g.stroke_round(cr.inset(0.5, 0.5), R_ROW, if t.high_contrast { t.focus } else { t.border }, 1.0);
+            paint_drag_card(g, &t, cr);
             if let Side::Fav(Row::Group(_)) = s {
                 g.glyph(G_TWIST_CLOSED, R::new(cr.l + ROW_PAD, cr.t, cr.l + ROW_PAD + ICON, cr.b), true, t.faint);
             } else if let Some(ic) = card_icon {

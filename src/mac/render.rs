@@ -1,6 +1,6 @@
 //! 그림 시험: 창 없이 App을 몇 가지 상태로 만들어 PNG로 그린다 (CI에서 맥 화면을 확인하는 용도)
 
-use crate::app::{App, Hit, Key, MenuKind};
+use crate::app::{App, Hit, Key, MenuKind, Mods};
 use sakadu::ui::Layout;
 use crate::gfx::Gfx;
 use sakadu::favorites::{Favorite, Favorites, Group};
@@ -74,7 +74,7 @@ fn write_demo_previews(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 스무 가지 × 밝은·어두운 테마를 out에 그린다.
+/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 스물두 가지 × 밝은·어두운 테마를 out에 그린다.
 /// 작업 공간은 셋: 업무(파랑, 두 칸), 사진 정리(보라, 네 칸), 개인(주황, 세 칸). 공간마다 고정한 것이 다르고,
 /// 아래 '모든 공간'(바로가기와 즐겨찾기)은 어느 공간에서나 같다.
 /// 미리 보기 카드 장면에 쓸 그림과 글 파일은 demo의 사진/제주살이에 직접 만든다
@@ -248,13 +248,22 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         a.cmd_typed("ㄷㅇ");
         shots.push(("commands", a));
 
-        // 메뉴 (앱이 그린다): 보기 방식 단추의 메뉴, 파일 줄을 오른쪽 단추로 누른 메뉴, 작업 공간 아이콘의 색 메뉴. 한 줄을 가리킨 모습
+        // 메뉴 (앱이 그린다): 보기 방식 단추의 메뉴, 파일 줄을 오른쪽 단추로 누른 메뉴, 작업 공간 아이콘의 색 메뉴,
+        // 사이드바 즐겨찾기 그룹 머리의 메뉴(이름 바꾸기, 그룹 풀기, 그룹 지우기). 한 줄을 가리킨 모습
         let measure = Gfx::bitmap(8.0, 8.0, 1.0).ok_or("그림판을 만들지 못함")?;
-        for (name, kind, sel) in [("menu-view", MenuKind::View, 1), ("menu-rows", MenuKind::Rows, 3), ("menu-space", MenuKind::Space(1), 2)] {
+        for (name, kind, sel) in [("menu-view", MenuKind::View, 1), ("menu-rows", MenuKind::Rows, 3), ("menu-space", MenuKind::Space(1), 2), ("menu-group", MenuKind::Group(0), 1)] {
             let mut a = base(favs.clone(), true);
             a.open_menu_for_render(&measure, kind, sel);
             shots.push((name, a));
         }
+
+        // 사이드바 끌기 한가운데: '제주살이' 그룹의 '맛집 메모'를 누른 채 한 줄 위로 끈 모습. 그 줄은 흰 카드로 떠 있고,
+        // 그룹 머리 바로 아래에 빈자리가 열리며 그룹이 판으로 묶인다 (처음 그리는 그림이라 줄은 이미 제자리에 있다)
+        let mut a = base(favs.clone(), true);
+        let (x, y) = a.side_row_center("맛집 메모").ok_or("사이드바에 '맛집 메모' 줄이 없음")?;
+        a.mouse_down(&measure, x, y, Mods::default(), 1);
+        a.mouse_dragged(x, y - 30.0);
+        shots.push(("side-drag", a));
 
         for (name, a) in shots {
             let mut g = Gfx::bitmap(W, H, SCALE).ok_or("그림판을 만들지 못함")?;
