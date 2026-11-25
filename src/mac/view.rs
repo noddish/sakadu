@@ -13,6 +13,8 @@
 //! 디스크가 붙고 떨어지는 것은 NSWorkspace의 알림으로 듣고 사이드바를 고친다. 디스크 꺼내기와 네트워크 공유 연결(volumes.rs)은 뒷줄에서 한다.
 //! 끝낼 때 화면 상태(세션)와 작업 공간을 저장하고, 다음에 그대로 연다.
 //! 설정 창(앱 메뉴의 '설정…', ⌘,)은 본 창과 따로 뜬다 (settings.rs).
+//! Finder가 열어 달라고 보낸 폴더·파일('다음으로 열기', 서비스의 'Sakadu에서 열기', Dock 아이콘에 놓기)은 앱 위임이 받아 새 탭으로 연다.
+//! 메뉴 막대 대기(창을 닫으면 숨기만 한다), 어디서든 찾기(전역 단축키), 로그인할 때 열기는 standby.rs.
 //! 창 시험(smoke)은 이 창을 그대로 열고 실제 입력의 길로 파일 작업을 돌려 본다 (CI의 맥 러너에서)
 
 use crate::app::{App, Key, LIGHTS_BOTTOM, LOADING_NOTE_MS, Mods, Paste, VolumeEvent};
@@ -42,6 +44,7 @@ use std::time::Duration;
 
 mod settings;
 mod smoke;
+mod standby;
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -69,6 +72,8 @@ thread_local! {
     static FLOW_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 지금 끌어 내는 것이 압축 파일에서 꺼낸 임시 복사본이다: 받는 쪽에 복사만 허락한다
     static DRAG_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 앱이 뜨는 중에(창을 만들기 전에) Finder가 열어 달라고 보낸 경로. 창을 만든 뒤에 연다
+    static OPEN_LATER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 /// 가장 나중에 낸 미리 보기(카드나 오른쪽 창) 요청의 번호. 뒷줄이 그림을 읽기 직전에 보고, 그 사이 다른 요청이 나왔으면 읽지 않는다
@@ -1037,23 +1042,57 @@ fn same_volume(item: &str, dir: &str) -> bool {
     })
 }
 
-/// 그 클립보드(보통의 클립보드나 끌기의 클립보드)에 담긴 파일들의 경로
+/// 그 클립보드(보통의 클립보드나 끌기의 클립보드, 서비스가 넘긴 판)에 담긴 파일들의 경로
 fn board_paths(board: &NSPasteboard) -> Vec<String> {
     let Some(items) = board.pasteboardItems() else { return Vec::new() };
     let mut out = Vec::new();
     for item in items.iter() {
         let Some(text) = item.stringForType(unsafe { NSPasteboardTypeFileURL }) else { continue };
         let Some(url) = NSURL::URLWithString(&text) else { continue };
-        // Finder는 파일 번호로 된 주소를 줄 때가 있다: 경로로 된 주소로 바꿔 읽는다
-        let url = url.filePathURL().unwrap_or(url);
-        // 경로는 받은 글자 그대로 쓴다 (사용자가 친 경로처럼 다듬으면 이름 끝의 공백이나 따옴표가 잘려 다른 파일이 된다).
-        // 다만 한글은 모아 쓴 꼴(NFC)로 바꾼다: 파일 주소의 경로는 자모를 풀어 쓴 꼴(NFD)로 와서, 그대로 복사하면 복사본의
-        // 이름이 풀어 쓴 꼴로 생기고 목록에서 엉뚱한 자리에 선다 (창 시험에서 찾았다). 맥의 디스크는 두 꼴을 같은 이름으로 찾는다
-        if let Some(path) = url.path() {
-            out.push(path.precomposedStringWithCanonicalMapping().to_string());
-        }
+        out.extend(url_path(url));
     }
     out
+}
+
+/// 파일 주소의 경로. Finder는 파일 번호로 된 주소를 줄 때가 있다: 경로로 된 주소로 바꿔 읽는다.
+/// 경로는 받은 글자 그대로 쓴다 (사용자가 친 경로처럼 다듬으면 이름 끝의 공백이나 따옴표가 잘려 다른 파일이 된다).
+/// 다만 한글은 모아 쓴 꼴(NFC)로 바꾼다: 파일 주소의 경로는 자모를 풀어 쓴 꼴(NFD)로 와서, 그대로 복사하면 복사본의
+/// 이름이 풀어 쓴 꼴로 생기고 목록에서 엉뚱한 자리에 선다 (창 시험에서 찾았다). 맥의 디스크는 두 꼴을 같은 이름으로 찾는다
+fn url_path(url: Retained<NSURL>) -> Option<String> {
+    let url = url.filePathURL().unwrap_or(url);
+    url.path().map(|path| path.precomposedStringWithCanonicalMapping().to_string())
+}
+
+/// Finder가 열어 달라고 보낸 것 ('다음으로 열기', 서비스의 'Sakadu에서 열기', Dock 아이콘에 놓기): 지금 칸에 새 탭으로 연다
+/// (있는지는 뒷줄에서 확인한다). 창을 앞으로 가져온다 (대기 중에 숨겨 두었으면 다시 띄운다).
+/// 앱이 아직 뜨는 중이면 창을 만든 뒤에 연다
+fn open_from_finder(mtm: MainThreadMarker, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    if APP.with(|a| a.borrow().is_none()) {
+        OPEN_LATER.with(|l| l.borrow_mut().extend(paths));
+        return;
+    }
+    with_app(|a| a.open_external(paths));
+    standby::show_window(mtm);
+    after_menu();
+}
+
+/// 작업 공간과 화면 상태(세션)를 저장한다 (끝낼 때, 대기 중에 창을 숨길 때)
+fn save_state() {
+    let s = with_app(|a| {
+        a.persist.then(|| {
+            a.save_workspaces();
+            a.to_session()
+        })
+    })
+    .flatten();
+    if let Some(s) = s
+        && let Err(e) = sakadu::session::save(&s)
+    {
+        sakadu::diag::log(|| format!("session: {e}"));
+    }
 }
 
 /// 사이드바 줄이 미끄러지는 동안(그리고 끄는 줄을 목록 끝에 대고 있어 자동 스크롤하는 동안): 한 틀(약 1/60초) 뒤에 다시 그려 달라고 한다.
@@ -1239,6 +1278,16 @@ fn pump() {
                 });
                 pump();
                 redraw();
+            });
+        });
+    }
+    // Finder에서 열어 달라고 보낸 것: 있는지 뒷줄에서 확인하고(꺼진 네트워크 폴더라도 멈추지 않게) 새 탭으로 연다
+    for paths in with_app(App::take_external).unwrap_or_default() {
+        std::thread::spawn(move || {
+            let results = crate::app::resolve_external(&paths);
+            DispatchQueue::main().exec_async(move || {
+                with_app(|a| a.on_external(results));
+                after_menu();
             });
         });
     }
@@ -1639,6 +1688,8 @@ define_class!(
             let mtm = self.mtm();
             let app = NSApplication::sharedApplication(mtm);
             let smoke = SMOKE.with(|s| s.borrow().clone());
+            // 로그인 항목으로 열렸는지는 앱이 뜨는 동안에만 읽을 수 있다
+            let at_login = smoke.is_none() && standby::launched_at_login();
             let window = open_window(mtm, smoke.clone());
             // 디스크가 붙고 떨어지는 것을 듣는다 (사이드바의 디스크 줄)
             watch_volumes(self);
@@ -1646,35 +1697,60 @@ define_class!(
             main_menu(mtm, &app);
             apply_theme(mtm);
             window.setDelegate(Some(ProtocolObject::from_ref(self)));
-            let _ = self.ivars().window.set(window);
+            let _ = self.ivars().window.set(window.clone());
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-            #[allow(deprecated)]
-            app.activateIgnoringOtherApps(true);
+            // 서비스 메뉴의 'Sakadu에서 열기'를 이 위임이 받는다 (Info.plist의 NSServices)
+            let provider: &AnyObject = self;
+            // SAFETY: 이 위임에 openInSakadu:userData:error:가 있다 (define_class)
+            unsafe { app.setServicesProvider(Some(provider)) };
+            // 메뉴 막대 대기(아이콘)와 어디서든 찾기 키
+            standby::sync(mtm);
+            standby::register_hotkey();
+            // 뜨는 동안 Finder가 열어 달라고 보낸 것
+            let later = OPEN_LATER.with(|l| std::mem::take(&mut *l.borrow_mut()));
+            // 대기를 켜 두었으면 로그인할 때는 창 없이 메뉴 막대 아이콘만으로 시작한다 (Windows의 창 없이 트레이에서 시작과 같다)
+            let hidden = with_app(|a| a.starts_hidden(at_login, !later.is_empty())).unwrap_or(false);
+            if !later.is_empty() {
+                with_app(|a| a.open_external(later));
+                pump();
+            }
+            if !hidden {
+                window.makeKeyAndOrderFront(None);
+                #[allow(deprecated)]
+                app.activateIgnoringOtherApps(true);
+            }
             if let Some(dir) = smoke {
                 smoke::start(dir);
             }
         }
 
+        /// 마지막 창을 닫으면 끝낸다. 메뉴 막대에서 대기 중이면 끝내지 않는다 (본 창은 닫는 대신 숨긴다: windowShouldClose:)
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn quit_after_last_window(&self, _app: &NSApplication) -> bool {
-            true
+            !with_app(|a| a.stays_after_close()).unwrap_or(false)
         }
 
-        /// 끝낼 때(⌘Q, 창 닫기) 작업 공간과 화면 상태를 저장한다
+        /// Dock 아이콘을 눌렀다: 본 창이 숨어 있거나(대기 중에 닫았다) 최소화돼 있으면 다시 띄운다
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
+            if standby::main_window().is_some_and(|w| !w.isVisible()) {
+                standby::show_window(self.mtm());
+            }
+            false
+        }
+
+        /// Finder의 '다음으로 열기'나 Dock 아이콘에 놓은 폴더 (Info.plist의 CFBundleDocumentTypes): 새 탭으로 연다
+        #[unsafe(method(application:openURLs:))]
+        fn open_urls(&self, _app: &NSApplication, urls: &NSArray<NSURL>) {
+            let paths = urls.iter().filter_map(url_path).collect();
+            open_from_finder(self.mtm(), paths);
+        }
+
+        /// 끝낼 때(⌘Q, 창 닫기, 메뉴 막대 아이콘의 끝내기) 작업 공간과 화면 상태를 저장하고 어디서든 찾기 키를 놓는다
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
-            let s = with_app(|a| {
-                a.persist.then(|| {
-                    a.save_workspaces();
-                    a.to_session()
-                })
-            })
-            .flatten();
-            if let Some(s) = s
-                && let Err(e) = sakadu::session::save(&s)
-            {
-                sakadu::diag::log(|| format!("session: {e}"));
-            }
+            save_state();
+            standby::unregister_hotkey();
         }
     }
 
@@ -1685,6 +1761,23 @@ define_class!(
             with_app(App::refresh_shown);
             pump();
             redraw();
+        }
+
+        /// 본 창의 닫기 단추: 메뉴 막대에서 대기 중이면 닫지 않고 숨기기만 한다 (앱이 끝나지 않는다. Windows의 트레이로 숨기기와 같다).
+        /// 숨기기 전에 지금 화면을 저장하고(숨어 있는 동안 맥을 꺼도 남게), 설정 창과 훑어보기 창도 닫는다
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, sender: &NSWindow) -> bool {
+            // (define_class 안의 bool 메서드에서는 return을 쓰지 않는다: 돌려주는 꼴이 Bool로 바뀐다)
+            let hide = with_app(|a| a.stays_after_close()).unwrap_or(false);
+            if hide {
+                save_state();
+                settings::close();
+                if look_shown() {
+                    show_look(false);
+                }
+                sender.orderOut(None);
+            }
+            !hide
         }
 
         /// 본 창이 닫힌다: 설정 창도 닫는다 (마지막 창이 닫히면 앱이 끝나는 동작을 그대로 둔다)
@@ -1699,6 +1792,24 @@ define_class!(
         #[unsafe(method(sakaduSettings:))]
         fn sakadu_settings(&self, _sender: Option<&AnyObject>) {
             settings::open(self.mtm());
+        }
+
+        /// 서비스 메뉴의 'Sakadu에서 열기' (Info.plist의 NSServices가 부르는 이름): 판에 담긴 폴더·파일을 새 탭으로 연다
+        #[unsafe(method(openInSakadu:userData:error:))]
+        fn open_in_sakadu(&self, board: &NSPasteboard, _data: Option<&NSString>, _error: *mut *mut NSString) {
+            open_from_finder(self.mtm(), board_paths(board));
+        }
+
+        /// 메뉴 막대 아이콘의 '창 열기'
+        #[unsafe(method(sakaduShowWindow:))]
+        fn sakadu_show_window(&self, _sender: Option<&AnyObject>) {
+            standby::show_window(self.mtm());
+        }
+
+        /// 메뉴 막대 아이콘의 '찾기' (어디서든 찾기 키와 같다)
+        #[unsafe(method(sakaduFindAnywhere:))]
+        fn sakadu_find_anywhere(&self, _sender: Option<&AnyObject>) {
+            standby::find_anywhere(self.mtm());
         }
 
         /// 디스크가 붙거나 떨어지거나 이름이 바뀌었다 (NSWorkspace의 알림. watch_volumes가 건다): 사이드바의 디스크 줄을 다시 읽고,
@@ -1757,7 +1868,8 @@ impl Delegate {
 }
 
 /// 창: 제목 표시줄을 투명하게 하고 내용이 창 전체를 쓴다 (신호등은 사이드바 위에 겹친다).
-/// start가 있으면 그 폴더에서 시작한다 (없으면 홈)
+/// start가 있으면 그 폴더에서 시작한다 (없으면 홈). 띄우는 것(makeKeyAndOrderFront)은 부르는 쪽이 한다:
+/// 대기를 켜고 로그인할 때 열리면 창 없이 시작한다
 fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindow> {
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
     let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable | NSWindowStyleMask::Resizable | NSWindowStyleMask::FullSizeContentView;
@@ -1785,6 +1897,7 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
         app.open_saved(sakadu::workspaces::load(), sakadu::session::load().as_ref(), &home);
         app.load_find_setting();
         app.set_keymap(sakadu::keys::Keymap::load());
+        app.load_standby();
     }
     app.lights_bottom = lights_bottom(&window);
     window.setTitle(&NSString::from_str(&app.title()));
@@ -1797,7 +1910,6 @@ fn open_window(mtm: MainThreadMarker, start: Option<String>) -> Retained<NSWindo
         let _ = v.set(view);
     });
     pump();
-    window.makeKeyAndOrderFront(None);
     window
 }
 
@@ -1961,6 +2073,7 @@ pub fn snapshot(out: &std::path::Path, start: String) -> Result<(), String> {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let window = open_window(mtm, Some(start));
+    window.makeKeyAndOrderFront(None);
     with_app(|a| {
         for p in 0..2 {
             a.refresh(p);
@@ -1987,7 +2100,8 @@ pub fn snapshot_settings(out: &std::path::Path, start: String, dark: bool, searc
     let mtm = MainThreadMarker::new().ok_or("메인 줄이 아님")?;
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    let _main = open_window(mtm, Some(start.clone()));
+    let main = open_window(mtm, Some(start.clone()));
+    main.makeKeyAndOrderFront(None);
     with_app(|a| {
         if search {
             a.set_find_roots(vec![start]);
@@ -2011,7 +2125,7 @@ pub fn smoke() -> Result<(), String> {
     Ok(())
 }
 
-/// 창을 띄우고 앱을 돌린다 (창을 닫으면 끝난다)
+/// 창을 띄우고 앱을 돌린다 (창을 닫으면 끝난다. 메뉴 막대에서 대기 중이면 창만 숨는다)
 pub fn run() {
     let mtm = MainThreadMarker::new().expect("메인 줄에서 시작");
     let app = NSApplication::sharedApplication(mtm);
