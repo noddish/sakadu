@@ -8,6 +8,7 @@
 //! 사이드바 끌기도: 둘을 고정하고 실제 마우스 입력(mouseDown:·mouseDragged:·mouseUp:)으로 첫 줄을 아래로 끌어 순서를 바꾸고, 눌렀다 떼서 연다.
 //! 오른쪽 미리 보기 창(⌥⌘P)도: 열어 글 파일의 글을 보고, PDF를 고르면 본문 자리에 Quick Look 보기가 뜨는지 보고, 닫는다.
 //! 압축 파일도: 시험 폴더에 zip을 만들어(맥의 ditto) 고르고 ⌘↓로 폴더처럼 들어가고, 안에서는 읽기만 하는지 보고 ⌘↑로 나온다.
+//! 메뉴 막대 대기도: 설정 창의 스위치로 켜서 아이콘이 생기는지, 닫기 단추가 창만 숨기는지, 아이콘 메뉴로 창이 돌아오는지 본다.
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
 //! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
@@ -605,6 +606,37 @@ fn script(dir: &str) -> usize {
             key(UP, true);
             run.wait("cmd-up leaves the zip with it selected", 5, || seen().is_some_and(|s| s.ready && s.dir == dir && s.cursor == "묶음.zip"));
         }
+    }
+
+    // 메뉴 막대 대기: 설정 창의 스위치로 켜면 메뉴 막대에 아이콘이 생긴다. 그 뒤 본 창의 닫기 단추(performClose:)를 누르면
+    // 앱은 끝나지 않고 창만 숨는다. 아이콘 메뉴의 '창 열기'로 다시 뜨고, 끄면 아이콘이 없어진다.
+    // 로그인 항목과 어디서든 찾기 키는 건드리지 않는다 (창 시험에서는 등록하지 않는다). 창을 닫아 보는 것은 아이콘이 있을 때만
+    // (대기가 아닌데 닫으면 앱이 끝나 버린다)
+    send_settings_action();
+    if run.wait("the settings window opens again", 5, || on_main(|| settings::shown().is_some())) {
+        click_switch("standby");
+        run.wait("the standby switch puts an icon in the menu bar", 5, || on_main(|| standby::status_item().is_some() && with_app(|a| a.prefs().standby) == Some(true)));
+        on_main(settings::close);
+    }
+    if on_main(|| standby::status_item().is_some()) {
+        on_main(|| {
+            if let Some(w) = standby::main_window() {
+                w.performClose(None);
+            }
+        });
+        run.wait("the close button only hides the window while standing by", 5, || on_main(|| standby::main_window().is_some_and(|w| !w.isVisible())));
+        on_main(|| {
+            let mtm = MainThreadMarker::new().expect("main");
+            if let Some(menu) = standby::status_item().and_then(|s| s.menu(mtm)) {
+                menu.performActionForItemAtIndex(0);
+            }
+        });
+        run.wait("the icon's first line brings the window back", 5, || on_main(|| standby::main_window().is_some_and(|w| w.isVisible())));
+        on_main(|| {
+            with_app(|a| a.set_standby(false));
+            standby::sync(MainThreadMarker::new().expect("main"));
+        });
+        run.wait("turning standby off takes the icon away", 5, || on_main(|| standby::status_item().is_none()));
     }
     run.failed
 }

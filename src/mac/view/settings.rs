@@ -1,11 +1,14 @@
 //! 설정 창: 앱 메뉴의 '설정…'(⌘,)으로 여는, 본 창과 따로 뜨는 창. 맥 기본 조작(스위치·단추·팝업)을 시스템 설정처럼
 //! 묶음 카드 안에 줄로 놓는다. 줄에는 이름만 쓴다. 내용이 창보다 길면 스크롤한다.
-//! 묶음: 일반(숨김 항목, 자동 미리 보기, 새 탭, 모양), 단축키(동작마다 키 단추, 기본으로), 검색(켜기, iCloud Drive, 더 찾을 폴더),
-//! 도움말(바꾸지 않는 기본 키), 정보. 더 찾을 폴더는 '폴더 더하기…'로 맥의 폴더 고르기 창에서 고르고, 줄마다 '빼기'가 있다.
+//! 묶음: 일반(숨김 항목, 자동 미리 보기, 새 탭, 모양, 메뉴 막대에서 대기, 로그인할 때 열기), 단축키(어디서든 찾기, 동작마다 키 단추,
+//! 기본으로), 검색(켜기, iCloud Drive, 더 찾을 폴더), 도움말(바꾸지 않는 기본 키), 정보.
+//! 더 찾을 폴더는 '폴더 더하기…'로 맥의 폴더 고르기 창에서 고르고, 줄마다 '빼기'가 있다.
 //! 값은 App이 갖고(App::prefs, keymap, set_…), 이 창은 그것을 보이고 바꾼다. 본 창에서 바뀐 값(⌘⇧., 눈 단추, 훑기 상태)은
-//! 입력과 뒷줄 결과를 처리할 때마다 refresh로 따라온다.
-//! 단축키 단추를 누르면 다음에 누르는 키를 그 동작의 키로 받는다 (Esc는 그만두기, ⌫는 비우기)
+//! 입력과 뒷줄 결과를 처리할 때마다 refresh로 따라온다. 로그인할 때 열기는 맥(SMAppService)이 가진 값이라 창을 열 때 묻는다
+//! (시스템 설정에서 허용해야 하면 그 줄이 하나 더 보인다).
+//! 단축키 단추를 누르면 다음에 누르는 키를 그 동작의 키로 받는다 (Esc는 그만두기, ⌫는 비우기. 어디서든 찾기는 ⌫로 자동 후보)
 
+use super::standby::Login;
 use super::*;
 use crate::app::{Prefs, fixed_key, mac_runs};
 use objc2_app_kit::{
@@ -59,6 +62,13 @@ enum Ctl {
     /// 새 탭을 시작 화면으로 열지, 지금 폴더로 열지
     NewTab,
     Theme,
+    /// 메뉴 막대에서 대기 (창을 닫아도 끝내지 않는다)
+    Standby,
+    /// 로그인할 때 열기, 그리고 시스템 설정에서 허용을 기다릴 때만 보이는 줄 ('설정에서 허용' 단추)
+    Login,
+    LoginApprove,
+    /// 어디서든 찾기(전역 단축키)의 키 단추
+    Global,
     /// 단축키 표(ACTIONS)의 i번째 동작의 키 단추
     Key(usize),
     KeysReset,
@@ -76,7 +86,23 @@ enum Ctl {
 }
 
 impl Ctl {
-    const FIXED: [Ctl; 11] = [Ctl::Hidden, Ctl::Preview, Ctl::NewTab, Ctl::Theme, Ctl::KeysReset, Ctl::Search, Ctl::ICloud, Ctl::Allow, Ctl::FolderAdd, Ctl::GitHub, Ctl::Folder];
+    const FIXED: [Ctl; 15] = [
+        Ctl::Hidden,
+        Ctl::Preview,
+        Ctl::NewTab,
+        Ctl::Theme,
+        Ctl::Standby,
+        Ctl::Login,
+        Ctl::LoginApprove,
+        Ctl::Global,
+        Ctl::KeysReset,
+        Ctl::Search,
+        Ctl::ICloud,
+        Ctl::Allow,
+        Ctl::FolderAdd,
+        Ctl::GitHub,
+        Ctl::Folder,
+    ];
 
     fn tag(self) -> NSInteger {
         match self {
@@ -91,6 +117,10 @@ impl Ctl {
             Ctl::KeysReset => 9,
             Ctl::NewTab => 10,
             Ctl::FolderAdd => 11,
+            Ctl::Standby => 12,
+            Ctl::Login => 13,
+            Ctl::LoginApprove => 14,
+            Ctl::Global => 15,
             Ctl::Key(i) => 100 + i as NSInteger,
             Ctl::Help(i) => 200 + i as NSInteger,
             Ctl::FolderRemove(i) => 1000 + i as NSInteger,
@@ -107,7 +137,7 @@ impl Ctl {
 
     /// 줄 높이: 단축키와 도움말은 줄이 많아 낮게
     fn height(self) -> f64 {
-        if matches!(self, Ctl::Key(_) | Ctl::Help(_)) { SHORT_H } else { LINE_H }
+        if matches!(self, Ctl::Key(_) | Ctl::Global | Ctl::Help(_)) { SHORT_H } else { LINE_H }
     }
 }
 
@@ -127,6 +157,8 @@ struct Parts {
     switches: Vec<(Ctl, Retained<NSSwitch>)>,
     /// 단축키 단추 (ACTIONS의 번호, 단추)
     keys: Vec<(usize, Retained<NSButton>)>,
+    /// 어디서든 찾기의 키 단추
+    global: Retained<NSButton>,
     theme: Retained<NSPopUpButton>,
     new_tab: Retained<NSPopUpButton>,
     /// '이름으로 찾기' 옆의 '훑는 중'
@@ -141,10 +173,12 @@ pub struct PaneIvars {
     /// 검색에 더한 폴더의 줄 ('폴더 더하기' 줄 바로 아래에 놓는다)과, 그 줄들을 만든 폴더 목록 (바뀌면 다시 만든다)
     folders: RefCell<Vec<Line>>,
     folders_shown: RefCell<Option<Vec<String>>>,
-    /// 지난번에 놓을 때 '읽지 못한 폴더' 줄을 보였는지 (바뀌면 다시 놓고 창 높이를 맞춘다)
-    denied: std::cell::Cell<Option<bool>>,
-    /// 키를 받는 중인 단축키 단추 (ACTIONS의 번호)
-    capture: std::cell::Cell<Option<usize>>,
+    /// 지난번에 놓을 때 ('읽지 못한 폴더' 줄, '로그인 항목 허용' 줄)을 보였는지 (바뀌면 다시 놓고 창 높이를 맞춘다)
+    rows: std::cell::Cell<Option<(bool, bool)>>,
+    /// 키를 받는 중인 단추 (Ctl::Key 또는 Ctl::Global)
+    capture: std::cell::Cell<Option<Ctl>>,
+    /// 로그인할 때 열기의 상태 (창을 열 때와 스위치를 바꾼 뒤에 맥에 묻는다. 아직 묻지 않았으면 None)
+    login: std::cell::Cell<Option<Login>>,
 }
 
 define_class!(
@@ -205,12 +239,27 @@ define_class!(
         fn toggle(&self, sender: &NSSwitch) {
             let on = sender.state() == NSControlStateValueOn;
             match Ctl::from_tag(sender.tag()) {
-                Some(Ctl::Hidden) => with_app(|a| a.set_hidden(on)),
-                Some(Ctl::Preview) => with_app(|a| a.set_auto_preview(on)),
-                Some(Ctl::Search) => with_app(|a| a.set_find_on(on)),
-                Some(Ctl::ICloud) => with_app(|a| a.set_find_icloud(on)),
-                _ => None,
-            };
+                Some(Ctl::Hidden) => {
+                    with_app(|a| a.set_hidden(on));
+                }
+                Some(Ctl::Preview) => {
+                    with_app(|a| a.set_auto_preview(on));
+                }
+                Some(Ctl::Search) => {
+                    with_app(|a| a.set_find_on(on));
+                }
+                Some(Ctl::ICloud) => {
+                    with_app(|a| a.set_find_icloud(on));
+                }
+                // 메뉴 막대 아이콘을 붙이거나 뗀다
+                Some(Ctl::Standby) => {
+                    with_app(|a| a.set_standby(on));
+                    standby::sync(self.mtm());
+                }
+                // 맥에 등록하거나 풀고, 그 뒤의 상태로 스위치와 허용 줄을 맞춘다 (아래 refresh)
+                Some(Ctl::Login) => self.ivars().login.set(Some(standby::set_login(on))),
+                _ => {}
+            }
             after_change();
         }
 
@@ -235,10 +284,10 @@ define_class!(
         #[unsafe(method(press:))]
         fn press(&self, sender: &NSButton) {
             match Ctl::from_tag(sender.tag()) {
-                Some(Ctl::Key(i)) => {
+                Some(c @ (Ctl::Key(_) | Ctl::Global)) => {
                     // 같은 단추를 다시 누르면 그만둔다
-                    let again = self.ivars().capture.get() == Some(i);
-                    self.ivars().capture.set((!again).then_some(i));
+                    let again = self.ivars().capture.get() == Some(c);
+                    self.ivars().capture.set((!again).then_some(c));
                     self.note("");
                     if let Some(w) = self.window() {
                         w.makeFirstResponder(Some(self));
@@ -248,9 +297,12 @@ define_class!(
                 Some(Ctl::KeysReset) => {
                     self.ivars().capture.set(None);
                     with_app(App::reset_keys);
+                    // 어디서든 찾기도 자동 후보로 돌아간다
+                    standby::register_hotkey();
                     self.note("모든 단축키를 기본으로 되돌렸어요");
                     self.keys_changed();
                 }
+                Some(Ctl::LoginApprove) => standby::open_login_settings(),
                 Some(Ctl::Allow) => {
                     with_app(App::ask_folder_access);
                     after_change();
@@ -339,8 +391,16 @@ impl SettingsPane {
         let mut lines = Vec::new();
         let version = format!("Sakadu {}", env!("CARGO_PKG_VERSION"));
         // (묶음, 조작, 이름). 조작은 아래에서 만든다
-        let mut rows: Vec<(usize, Ctl, String)> =
-            vec![(0, Ctl::Hidden, "숨김 항목 보기".into()), (0, Ctl::Preview, "자동 미리 보기".into()), (0, Ctl::NewTab, "새 탭".into()), (0, Ctl::Theme, "모양".into())];
+        let mut rows: Vec<(usize, Ctl, String)> = vec![
+            (0, Ctl::Hidden, "숨김 항목 보기".into()),
+            (0, Ctl::Preview, "자동 미리 보기".into()),
+            (0, Ctl::NewTab, "새 탭".into()),
+            (0, Ctl::Theme, "모양".into()),
+            (0, Ctl::Standby, "메뉴 막대에서 대기".into()),
+            (0, Ctl::Login, "로그인할 때 열기".into()),
+            (0, Ctl::LoginApprove, "로그인 항목에서 허용해야 해요".into()),
+            (1, Ctl::Global, "어디서든 찾기".into()),
+        ];
         for (i, (a, ..)) in ACTIONS.iter().enumerate().filter(|(_, x)| mac_runs(x.0)) {
             rows.push((1, Ctl::Key(i), name(*a).to_string()));
         }
@@ -356,13 +416,14 @@ impl SettingsPane {
         }
         rows.extend([(4, Ctl::GitHub, version), (4, Ctl::Folder, "설정 폴더".into())]);
         let mut keys_note = None;
+        let mut global = None;
         for (group, ctl, text) in rows {
             let divider = NSBox::new(mtm);
             divider.setBoxType(NSBoxType::Separator);
             pane.addSubview(&divider);
             let name_field = label(&text);
             let control: Retained<NSControl> = match ctl {
-                Ctl::Hidden | Ctl::Preview | Ctl::Search | Ctl::ICloud => {
+                Ctl::Hidden | Ctl::Preview | Ctl::Search | Ctl::ICloud | Ctl::Standby | Ctl::Login => {
                     let s = NSSwitch::initWithFrame(NSSwitch::alloc(mtm), NSRect::ZERO);
                     // SAFETY: 이 뷰가 toggle:을 받는다 (define_class에 있다)
                     unsafe {
@@ -382,6 +443,13 @@ impl SettingsPane {
                     keys.push((i, b.clone()));
                     b.into_super()
                 }
+                Ctl::Global => {
+                    let b = button("");
+                    b.setAccessibilityLabel(Some(&NSString::from_str(&format!("{text} 단축키"))));
+                    global = Some(b.clone());
+                    b.into_super()
+                }
+                Ctl::LoginApprove => button("설정에서 허용").into_super(),
                 Ctl::KeysReset => {
                     quiet(&name_field);
                     keys_note = Some(name_field.clone());
@@ -404,7 +472,8 @@ impl SettingsPane {
             lines.push(Line { group, ctl, label: name_field, control, divider });
         }
         let keys_note = keys_note.expect("'기본으로' 줄은 늘 있다");
-        let _ = pane.ivars().parts.set(Parts { titles, cards, lines, switches, keys, theme, new_tab, crawling, keys_note });
+        let global = global.expect("'어디서든 찾기' 줄은 늘 있다");
+        let _ = pane.ivars().parts.set(Parts { titles, cards, lines, switches, keys, global, theme, new_tab, crawling, keys_note });
         pane.show_keys();
         pane
     }
@@ -413,8 +482,9 @@ impl SettingsPane {
         self.ivars().parts.get().expect("설정 창의 줄은 만들 때 채운다")
     }
 
-    /// 줄을 놓는다. 읽지 못한 폴더 줄은 denied일 때만 보인다. 더한 폴더의 줄은 '폴더 더하기' 줄 바로 아래에. 내용의 높이를 돌려준다
-    fn layout(&self, denied: bool) -> f64 {
+    /// 줄을 놓는다. 읽지 못한 폴더 줄은 denied일 때만, 로그인 항목 허용 줄은 approve일 때만 보인다.
+    /// 더한 폴더의 줄은 '폴더 더하기' 줄 바로 아래에. 내용의 높이를 돌려준다
+    fn layout(&self, (denied, approve): (bool, bool)) -> f64 {
         let p = self.parts();
         let folders = self.ivars().folders.borrow();
         let (l, r) = (MARGIN, W - MARGIN);
@@ -433,7 +503,11 @@ impl SettingsPane {
                 std::iter::once(line).chain(more)
             });
             for line in group {
-                let shown = line.ctl != Ctl::Allow || denied;
+                let shown = match line.ctl {
+                    Ctl::Allow => denied,
+                    Ctl::LoginApprove => approve,
+                    _ => true,
+                };
                 line.label.setHidden(!shown);
                 line.control.setHidden(!shown);
                 line.divider.setHidden(!shown || first);
@@ -444,7 +518,7 @@ impl SettingsPane {
                 line.divider.setFrame(rect(l + INSET, y, r - l - 2.0 * INSET, 1.0));
                 let c = line.control.intrinsicContentSize();
                 // 단축키 단추는 키 글이 바뀌어도 같은 폭으로
-                let cw = if matches!(line.ctl, Ctl::Key(_)) { c.width.max(120.0) } else { c.width };
+                let cw = if matches!(line.ctl, Ctl::Key(_) | Ctl::Global) { c.width.max(120.0) } else { c.width };
                 let cx = r - INSET - cw;
                 line.control.setFrame(rect(cx, y + (h - c.height) / 2.0, cw, c.height));
                 let t = line.label.intrinsicContentSize();
@@ -462,20 +536,30 @@ impl SettingsPane {
         y + MARGIN
     }
 
-    /// App의 값으로 스위치·팝업·단축키 단추를 맞춘다. 읽지 못한 폴더 줄이 생기거나 없어지면 다시 놓고 창 높이를 맞춘다
+    /// App의 값으로 스위치·팝업·단축키 단추를 맞춘다. 읽지 못한 폴더 줄이나 로그인 항목 허용 줄이 생기거나 없어지면
+    /// 다시 놓고 창 높이를 맞춘다
     fn show(&self, prefs: &Prefs, window: &NSWindow) {
         let p = self.parts();
+        let login = self.ivars().login.get();
         for (ctl, s) in &p.switches {
             let on = match ctl {
                 Ctl::Hidden => prefs.hidden,
                 Ctl::Preview => prefs.auto_preview,
                 Ctl::Search => prefs.search_on,
                 Ctl::ICloud => prefs.icloud,
+                Ctl::Standby => prefs.standby,
+                // 허용을 기다리는 것도 등록은 한 것이다 (끄면 등록을 푼다)
+                Ctl::Login => matches!(login, Some(Login::On | Login::NeedsApproval)),
                 _ => false,
             };
             let state = if on { NSControlStateValueOn } else { NSControlStateValueOff };
             if s.state() != state {
                 s.setState(state);
+            }
+            // 맥이 이 앱을 로그인 항목으로 쓸 수 없으면(앱 묶음 밖에서 돌렸을 때 따위) 누를 수 없게
+            let usable = login.is_some_and(|l| l != Login::Unavailable);
+            if *ctl == Ctl::Login && s.isEnabled() != usable {
+                s.setEnabled(usable);
             }
         }
         let theme = THEMES.iter().position(|t| t.1 == prefs.theme).unwrap_or(0) as NSInteger;
@@ -492,9 +576,10 @@ impl SettingsPane {
         if folders_changed {
             self.set_folders(&prefs.folders);
         }
-        if folders_changed || self.ivars().denied.get() != Some(prefs.denied) {
-            self.ivars().denied.set(Some(prefs.denied));
-            let h = self.layout(prefs.denied);
+        let rows = (prefs.denied, login == Some(Login::NeedsApproval));
+        if folders_changed || self.ivars().rows.get() != Some(rows) {
+            self.ivars().rows.set(Some(rows));
+            let h = self.layout(rows);
             self.setFrameSize(NSSize::new(W, h));
             fit_height(window, h.min(MAX_H));
         }
@@ -529,16 +614,21 @@ impl SettingsPane {
         *self.ivars().folders_shown.borrow_mut() = Some(folders.to_vec());
     }
 
-    /// 단축키 단추의 글: 지금 키(맥 기호), 없으면 '없음', 키를 받는 중이면 '키를 누르세요'
+    /// 단축키 단추의 글: 지금 키(맥 기호), 없으면 '없음', 키를 받는 중이면 '키를 누르세요'.
+    /// 어디서든 찾기는 자동으로 고른 키와 등록하지 못한 것도 보인다 (App::global_text)
     fn show_keys(&self) {
-        let keys = with_app(|a| a.keymap().clone()).unwrap_or_default();
+        let (keys, global) = with_app(|a| (a.keymap().clone(), a.global_text())).unwrap_or_default();
         let capture = self.ivars().capture.get();
-        for (i, b) in &self.parts().keys {
-            let text = if capture == Some(*i) { "키를 누르세요".to_string() } else { keys.get(ACTIONS[*i].0).map_or_else(|| "없음".to_string(), |c| c.glyphs()) };
+        let set = |b: &NSButton, text: String| {
             if b.title().to_string() != text {
                 b.setTitle(&NSString::from_str(&text));
             }
+        };
+        let waiting = || "키를 누르세요".to_string();
+        for (i, b) in &self.parts().keys {
+            set(b, if capture == Some(Ctl::Key(*i)) { waiting() } else { keys.get(ACTIONS[*i].0).map_or_else(|| "없음".to_string(), |c| c.glyphs()) });
         }
+        set(&self.parts().global, if capture == Some(Ctl::Global) { waiting() } else { global });
     }
 
     /// '기본으로' 줄의 이름 자리에 알림
@@ -550,26 +640,36 @@ impl SettingsPane {
         p.keys_note.setFrameSize(NSSize::new(s.width.min(W - 2.0 * MARGIN - 2.0 * INSET - 100.0), f.size.height.max(s.height)));
     }
 
-    /// 단축키를 받는 중에 누른 키: Esc는 그만두기, ⌫는 비우기, 그 밖은 그 동작의 키로 (쓸 수 없는 키면 알린다)
+    /// 단축키를 받는 중에 누른 키: Esc는 그만두기, ⌫는 비우기, 그 밖은 그 동작의 키로 (쓸 수 없는 키면 알린다).
+    /// 어디서든 찾기 키는 그 동작의 키로 받지 않는다 (맥이 먼저 가로채 앱 안에 오지 않는다)
     fn capture_key(&self, e: &NSEvent) {
-        let Some(i) = self.ivars().capture.take() else { return };
-        let a = ACTIONS[i].0;
+        let Some(target) = self.ivars().capture.take() else { return };
         let m = mods(e);
         let plain = !(m.cmd || m.ctrl || m.alt || m.shift);
-        let note = match e.keyCode() {
-            ESC if plain => String::new(),
-            BACKSPACE if plain => {
-                with_app(|app| app.rebind(a, None));
-                format!("‘{}’의 단축키를 비웠어요", name(a))
+        let note = match target {
+            Ctl::Global => capture_global(e.keyCode(), m, plain),
+            Ctl::Key(i) => {
+                let a = ACTIONS[i].0;
+                match e.keyCode() {
+                    ESC if plain => String::new(),
+                    BACKSPACE if plain => {
+                        with_app(|app| app.rebind(a, None));
+                        format!("‘{}’의 단축키를 비웠어요", name(a))
+                    }
+                    code => match key_of(code).and_then(|k| k.combo(m)) {
+                        Some(c) if fixed_key(c) => format!("{}는 기본 조작에 쓰는 키예요 · 도움말을 보세요", c.glyphs()),
+                        Some(c) if with_app(|app| app.keymap().global == Some(c) || app.hotkey == Some(c)).unwrap_or(false) => {
+                            format!("{}는 어디서든 찾기 키라서 여기에 쓸 수 없어요", c.glyphs())
+                        }
+                        Some(c) if c.usable() => match with_app(|app| app.rebind(a, Some(c))).flatten() {
+                            Some(other) => format!("‘{}’에 쓰던 키라서 그쪽 단축키는 비웠어요", name(other)),
+                            None => String::new(),
+                        },
+                        _ => "이 키는 쓸 수 없어요 · ⌘나 ⌃와 함께 눌러 보세요".to_string(),
+                    },
+                }
             }
-            code => match key_of(code).and_then(|k| k.combo(m)) {
-                Some(c) if fixed_key(c) => format!("{}는 기본 조작에 쓰는 키예요 · 도움말을 보세요", c.glyphs()),
-                Some(c) if c.usable() => match with_app(|app| app.rebind(a, Some(c))).flatten() {
-                    Some(other) => format!("‘{}’에 쓰던 키라서 그쪽 단축키는 비웠어요", name(other)),
-                    None => String::new(),
-                },
-                _ => "이 키는 쓸 수 없어요 · ⌘나 ⌃와 함께 눌러 보세요".to_string(),
-            },
+            _ => String::new(),
         };
         self.note(&note);
         self.keys_changed();
@@ -580,6 +680,40 @@ impl SettingsPane {
         self.show_keys();
         let mtm = self.mtm();
         main_menu(mtm, &NSApplication::sharedApplication(mtm));
+    }
+}
+
+/// 어디서든 찾기 키를 받았다: Esc는 그만두기, ⌫는 자동 후보로, 그 밖은 ⌘나 ⌃가 든 쓸 수 있는 키면 등록해 본다.
+/// 등록되면 그 키를 쓰던 앱 안 단축키는 비운다 (어디서든 키를 맥이 먼저 가로채 앱 안에서는 부를 수 없다. Windows와 같다).
+/// 맥이나 다른 앱이 쓰는 키라 등록하지 못하면 앞의 키로 되돌린다. 알릴 글을 돌려준다
+fn capture_global(code: u16, m: Mods, plain: bool) -> String {
+    match code {
+        ESC if plain => String::new(),
+        BACKSPACE if plain => {
+            with_app(|a| a.set_global_key(None));
+            standby::register_hotkey();
+            "어디서든 찾기는 비어 있는 후보 키를 저절로 써요".to_string()
+        }
+        code => match key_of(code).and_then(|k| k.combo(m)) {
+            Some(c) if fixed_key(c) => format!("{}는 기본 조작에 쓰는 키예요 · 도움말을 보세요", c.glyphs()),
+            Some(c) if c.usable() && (c.cmd || c.ctrl) => {
+                let before = with_app(|a| a.set_global_key(Some(c))).flatten();
+                standby::register_hotkey();
+                if with_app(|a| a.hotkey) != Some(Some(c)) {
+                    with_app(|a| a.set_global_key(before));
+                    standby::register_hotkey();
+                    return format!("{}는 맥이나 다른 앱이 쓰고 있어 쓸 수 없어요", c.glyphs());
+                }
+                match with_app(|a| a.keymap().find(c)).flatten() {
+                    Some(other) => {
+                        with_app(|a| a.rebind(other, None));
+                        format!("‘{}’에 쓰던 키라서 그쪽 단축키는 비웠어요", name(other))
+                    }
+                    None => String::new(),
+                }
+            }
+            _ => "이 키는 쓸 수 없어요 · ⌘나 ⌃와 함께 눌러 보세요".to_string(),
+        },
     }
 }
 
@@ -656,9 +790,10 @@ pub(super) fn open(mtm: MainThreadMarker) {
             .clone()
     });
     let fresh = !window.isVisible();
-    // 처음 놓기: 지금 값으로 줄을 놓고 높이를 맞춘다
-    pane.ivars().denied.set(None);
+    // 처음 놓기: 지금 값으로 줄을 놓고 높이를 맞춘다. 로그인할 때 열기는 맥에 묻는다 (시스템 설정에서 바꿨을 수 있다)
+    pane.ivars().rows.set(None);
     pane.ivars().capture.set(None);
+    pane.ivars().login.set(Some(standby::login_status()));
     if let Some(prefs) = with_app(|a| a.prefs()) {
         pane.show(&prefs, &window);
     }
@@ -675,6 +810,10 @@ pub(super) fn refresh() {
     let Some((window, pane)) = SETTINGS.with(|s| s.borrow().clone()) else { return };
     if !window.isVisible() {
         return;
+    }
+    // 로그인 항목 허용을 기다리는 동안은 시스템 설정에서 허용했는지 다시 묻는다 (그때만: 늘 묻기에는 자주 불린다)
+    if pane.ivars().login.get() == Some(Login::NeedsApproval) {
+        pane.ivars().login.set(Some(standby::login_status()));
     }
     if let Some(prefs) = with_app(|a| a.prefs()) {
         pane.show(&prefs, &window);
@@ -701,6 +840,7 @@ pub(super) fn switch(name: &str) -> Option<Retained<NSSwitch>> {
         "preview" => Ctl::Preview,
         "search" => Ctl::Search,
         "icloud" => Ctl::ICloud,
+        "standby" => Ctl::Standby,
         _ => return None,
     };
     SETTINGS.with(|s| s.borrow().as_ref().and_then(|(_, pane)| pane.parts().switches.iter().find(|(c, _)| *c == ctl).map(|(_, s)| s.clone())))

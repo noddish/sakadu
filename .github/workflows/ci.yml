@@ -109,51 +109,11 @@ jobs:
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
             cargo build --release --features mac-app --bin sakadu-mac --locked --target "$t"
           done
+      # 묶는 일(합치기, 아이콘, Info.plist, 애드혹 서명)은 scripts/mac-bundle.sh가 한다 (맥에서 손으로도 돌릴 수 있게)
       - name: Bundle Sakadu.app
         run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          APP=dist/Sakadu.app
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          lipo -create -output "$APP/Contents/MacOS/sakadu-mac" \
-            target/aarch64-apple-darwin/release/sakadu-mac target/x86_64-apple-darwin/release/sakadu-mac
-          lipo -archs "$APP/Contents/MacOS/sakadu-mac"
-          # 아이콘: Windows 아이콘(.ico)을 PNG로 바꿔 icns로 (안 되면 아이콘 없이 묶는다)
-          if sips -s format png assets/sakadu.ico --out dist/icon.png >/dev/null; then
-            mkdir -p dist/AppIcon.iconset
-            for s in 16 32 128 256; do
-              sips -z $s $s dist/icon.png --out "dist/AppIcon.iconset/icon_${s}x${s}.png" >/dev/null
-              d=$((s * 2)); sips -z $d $d dist/icon.png --out "dist/AppIcon.iconset/icon_${s}x${s}@2x.png" >/dev/null
-            done
-            iconutil -c icns dist/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns" || echo "icns 실패: 아이콘 없이 묶음"
-          fi
-          cat > "$APP/Contents/Info.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleName</key><string>Sakadu</string>
-            <key>CFBundleDisplayName</key><string>Sakadu</string>
-            <key>CFBundleIdentifier</key><string>io.github.noddish.sakadu</string>
-            <key>CFBundleExecutable</key><string>sakadu-mac</string>
-            <key>CFBundleIconFile</key><string>AppIcon</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-            <key>CFBundleVersion</key><string>${VERSION}</string>
-            <key>LSMinimumSystemVersion</key><string>13.0</string>
-            <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
-            <key>NSHighResolutionCapable</key><true/>
-            <key>NSHumanReadableCopyright</key><string>GPL-3.0-or-later</string>
-            <key>NSDesktopFolderUsageDescription</key><string>사카두에서 데스크탑의 파일을 보고 이름으로 찾을 수 있게 해요.</string>
-            <key>NSDocumentsFolderUsageDescription</key><string>사카두에서 문서 폴더의 파일을 보고 이름으로 찾을 수 있게 해요.</string>
-            <key>NSDownloadsFolderUsageDescription</key><string>사카두에서 다운로드 폴더의 파일을 보고 이름으로 찾을 수 있게 해요.</string>
-            <key>NSFileProviderDomainUsageDescription</key><string>사카두에서 iCloud Drive의 파일을 보고 이름으로 찾을 수 있게 해요.</string>
-          </dict>
-          </plist>
-          EOF
-          plutil -lint "$APP/Contents/Info.plist"
-          codesign --force --deep --sign - "$APP"
-          codesign --verify --verbose "$APP"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          bash scripts/mac-bundle.sh target dist
+          echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_ENV"
       - name: Window snapshot from the bundle
         run: |
           mkdir -p dist/check "$RUNNER_TEMP/demo/업무"

@@ -15,6 +15,7 @@
 //! 검색(⌘F)은 find.rs: 도구 막대에서 입력 칸이 늘어나고, 결과는 사이드바 자리에 보인다.
 //! 명령 메뉴(⌘K)는 commands.rs, 새 탭 시작 화면과 최근 위치는 start.rs (둘 다 Windows와 같은 공통 코드를 쓴다).
 //! 사이드바의 디스크 줄(붙고 떨어짐, 남은 용량, 꺼내기)과 주소 칸의 smb:// 따위로 네트워크 공유에 연결하기는 disks.rs.
+//! 메뉴 막대 대기, 어디서든 찾기(전역 단축키)의 키 고르기, Finder에서 열어 달라고 보낸 것은 standby.rs.
 //! 사이드바 줄은 누를 때가 아니라 뗄 때 열고, 위아래로 끌면 옮긴다: 고정한 것끼리, 즐겨찾기 항목과 그룹, 그 둘 사이
 //! (빈자리·놓을 곳 계산과 미끄러지는 움직임은 Windows와 같은 공통 ui::side_flow). 즐겨찾기 그룹은 '모든 공간' 줄의 단추로 만들고,
 //! 그룹 머리의 메뉴로 이름을 바꾸고 풀고 지운다. 끌려 온 파일은 탭 칩 위에 놓으면 그 탭의 폴더로 간다.
@@ -24,11 +25,13 @@ mod commands;
 mod disks;
 mod find;
 mod preview_pane;
+mod standby;
 mod start;
 
 pub use commands::CMD_PLACEHOLDER;
 pub use disks::VolumeEvent;
 pub use preview_pane::{PinCheck, check_pin};
+pub use standby::resolve_external;
 pub use start::{Space, volume_space};
 
 use crate::fileops::{self, Done, Fail, Job, Op, Then};
@@ -397,6 +400,8 @@ pub struct Prefs {
     pub new_tab_start: bool,
     /// 검색에 더한 폴더 (외장 디스크·NAS의 폴더 따위)
     pub folders: Vec<String>,
+    /// 메뉴 막대에서 대기: 창을 닫아도 끝내지 않고 메뉴 막대 아이콘으로 남는다
+    pub standby: bool,
 }
 
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
@@ -1229,6 +1234,12 @@ pub struct App {
     pub motion: bool,
     /// 마우스가 사이드바 목록 위에 있다: '모든 공간' 줄의 새 그룹 단추가 보인다 (Windows처럼 마우스를 올릴 때만)
     side_hot: bool,
+    /// 메뉴 막대에서 대기 (설정 폴더의 standby.txt): 창을 닫으면 숨기만 하고, 메뉴 막대 아이콘으로 남는다
+    standby: bool,
+    /// 어디서든 찾기로 지금 등록된 키 (창 쪽이 등록한 뒤 넣는다. 등록하지 못했거나 하지 않았으면 None)
+    pub hotkey: Option<Combo>,
+    /// Finder에서 열어 달라고 보낸 경로들 (한 번에 온 것끼리 묶는다). 창 쪽이 뒷줄에서 확인하고 on_external로 돌려준다
+    external: Vec<Vec<String>>,
 }
 
 impl App {
@@ -1325,6 +1336,9 @@ impl App {
             side_flow: RefCell::new(SideFlow::default()),
             motion: true,
             side_hot: false,
+            standby: false,
+            hotkey: None,
+            external: Vec::new(),
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
@@ -1551,6 +1565,11 @@ impl App {
         self.settle_find();
         if let Some(paths) = self.take_volume_ask() {
             self.set_volumes(volume_space(&paths));
+        }
+        // Finder에서 열어 달라고 보낸 것: 확인해서 탭을 연다 (그 탭들의 읽기는 아래에서)
+        for paths in self.take_external() {
+            let results = resolve_external(&paths);
+            self.on_external(results);
         }
         loop {
             let (reqs, probes, previews, thumbs, ops) = (self.take_requests(), self.take_probes(), self.take_previews(), self.take_thumbs(), self.take_ops());
@@ -3337,6 +3356,7 @@ impl App {
             theme: self.theme_pref.clone(),
             new_tab_start: self.new_tab_starts(),
             folders: self.find.setting.folders.clone(),
+            standby: self.standby,
         }
     }
 
