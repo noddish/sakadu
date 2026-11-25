@@ -432,11 +432,17 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
         let nr = row_name_rect(cols.name, it);
         gfx.text(&gfx.fit_name(e.name(), nr.w() - NAME_FIT_SLACK).0, nr, Font::Name, fg);
         if let Some((l, rr)) = cols.modified {
+            let avail = rr - l - SP_S * 2.0;
+            let fit = |gfx: &G| crate::listing::format_time_fit(e.modified, now, avail, |s| gfx.measure(s, Font::Meta));
             let s = match e.kind {
                 Kind::Drive if e.size > 0 => format!("{} 사용 가능", format_size(e.free)),
-                Kind::File | Kind::Dir if short_dates => format_time_short(e.modified, now),
+                // 짧은 꼴도 열보다 넓으면 (앞날짜는 짧은 꼴에서도 긴 꼴로 나온다, 사용자가 열을 좁혔을 때도) 열에 맞춘 짧은 꼴로
+                Kind::File | Kind::Dir if short_dates => {
+                    let s = format_time_short(e.modified, now);
+                    if gfx.measure(&s, Font::Meta) > avail { fit(gfx) } else { s }
+                }
                 // 긴 꼴은 열이 좁으면 말줄임 대신 더 짧은 꼴로
-                Kind::File | Kind::Dir => crate::listing::format_time_fit(e.modified, now, rr - l - SP_S * 2.0, |s| gfx.measure(s, Font::Meta)),
+                Kind::File | Kind::Dir => fit(gfx),
                 _ => String::new(),
             };
             gfx.text(&s, R::new(l + SP_S, y, rr - SP_S, y + ROW_H), Font::Meta, dim);
@@ -616,6 +622,25 @@ mod tests {
         let texts = g.texts.borrow();
         assert!(texts.contains(&p[0].loc.title()));
         assert!(!texts.contains(&p[1].loc.title()));
+    }
+
+    /// 짧은 날짜 꼴에서도 앞날짜는 긴 꼴로 나온다: 열이 좁으면 말줄임 대신 열에 맞춘 짧은 꼴로
+    #[test]
+    fn future_dates_shrink_to_the_column_in_short_mode() {
+        let mut p = tabs(1);
+        let now = crate::listing::now_filetime();
+        p[0].entries[0].modified = now + 400 * 864_000_000_000;
+        let r = R::new(0.0, 0.0, 800.0, 400.0);
+        let mut g = Rec::default();
+        let mut s = scene(&p, r, Vec::new());
+        s.now = now;
+        // 날짜 글자 자리 100 - 16 = 84: 긴 꼴(16자 × 7 = 112)도 '26-11-03 15:18'(98)도 넘치고 '26-11-03'(56)은 들어간다
+        s.cols = [100.0, 180.0, 84.0];
+        paint_pane_list(&mut g, &mut Art::default(), &Theme::LIGHT, &s);
+        let texts = g.texts.borrow();
+        let short = |t: &&String| t.len() == 8 && t.as_bytes()[2] == b'-' && t.as_bytes()[5] == b'-';
+        assert!(texts.iter().any(|t| short(&t)), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains('…')), "{texts:?}");
     }
 
     #[test]
