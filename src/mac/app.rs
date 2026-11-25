@@ -1257,10 +1257,13 @@ impl App {
                 }
             }
             Err(msg) => {
+                // 지워졌거나 폴더가 아닌 것만 최근 위치에서 뺀다 (Windows와 같다). 잠깐 닿지 않는 NAS·권한 없음은 그대로 둔다.
+                // 읽기 오류는 io::Error의 글이라 끝에 OS 오류 번호가 붙는다 (ENOENT 2, ENOTDIR 20)
+                let gone = msg.ends_with("(os error 2)") || msg.ends_with("(os error 20)");
                 tab.entries.clear();
                 tab.view.clear();
                 tab.state = LoadState::Error(msg);
-                if let Some(d) = tab.loc.dir().map(str::to_string) {
+                if let Some(d) = tab.loc.dir().map(str::to_string).filter(|_| gone) {
                     self.forget_recent(&d);
                 }
             }
@@ -4884,7 +4887,7 @@ mod tests {
         a.navigate(1, Location::Dir(gone.clone()), None);
         assert_eq!(a.recent[0], gone);
         a.settle();
-        assert!(!a.recent.contains(&gone), "a folder that cannot be read is dropped");
+        assert!(!a.recent.contains(&gone), "a folder that is not there is dropped");
         let s = session::parse(&session::serialize(&a.to_session())).expect("session");
         assert_eq!(s.recent, [work.clone(), down.clone()]);
         let (mut b, _) = app(&home);
