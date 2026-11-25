@@ -142,9 +142,14 @@ fn find_share(url: &str) -> Option<String> {
 
 /// 주소("smb://이름@서버:포트/공유/")의 서버 이름과 공유 경로 (host_of, share_path). 공유 폴더가 없으면 None
 fn share_parts(url: &str) -> Option<(String, String)> {
-    let rest = url.split_once("://")?.1;
+    let (scheme, rest) = url.split_once("://")?;
     let (server, path) = rest.split_once('/')?;
-    Some((host_of(server)?, share_path(path)?))
+    Some((host_of(server)?, share_path(path, folds_case(scheme))?))
+}
+
+/// 공유 이름의 대소문자를 가리지 않는 방식인가: SMB·CIFS·AFP는 가리지 않고, NFS·FTP의 경로는 서버 디스크의 경로라 가린다
+fn folds_case(scheme: &str) -> bool {
+    matches!(scheme.to_ascii_lowercase().as_str(), "smb" | "cifs" | "afp")
 }
 
 /// 붙은 디스크의 출처(from)가 그 서버의 그 공유인가. 서버 이름과 공유 경로를 통째로 견준다
@@ -154,21 +159,26 @@ fn share_matches(from: &str, server: &str, share: &str) -> bool {
 }
 
 /// 붙은 디스크 출처의 서버 이름과 공유 경로. smbfs·afpfs는 "//[이름[;도메인][:암호]@]서버[:포트]/공유",
-/// NFS는 "서버:/내보낸/경로", ftp는 주소 꼴("ftp://서버/경로")이다. 디스크 장치("/dev/disk4s1") 따위는 None
+/// NFS는 "서버:/내보낸/경로", ftp는 주소 꼴("ftp://서버/경로")이다. 디스크 장치("/dev/disk4s1") 따위는 None.
+/// 공유 경로의 대소문자는 SMB·AFP만 접는다 (folds_case)
 fn source_parts(from: &str) -> Option<(String, String)> {
-    let (server, path) = match from.strip_prefix("//").or_else(|| from.split_once("://").map(|(_, rest)| rest)) {
-        Some(rest) => rest.split_once('/')?,
+    let url = from.split_once("://").filter(|(scheme, _)| !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric()));
+    let (server, path, fold) = if let Some(rest) = from.strip_prefix("//") {
+        let (server, path) = rest.split_once('/')?;
+        (server, path, true)
+    } else if let Some((scheme, rest)) = url {
+        let (server, path) = rest.split_once('/')?;
+        (server, path, folds_case(scheme))
+    } else {
         // NFS: 서버 뒤 ':' 다음이 '/'로 시작하는 경로 (IPv6 서버는 [ ] 안이라 그 뒤의 ':'에서 자른다)
-        None => {
-            let at = if from.starts_with('[') { from.find("]:")? + 1 } else { from.find(':')? };
-            let (server, path) = (&from[..at], &from[at + 1..]);
-            if server.contains('/') || !path.starts_with('/') {
-                return None;
-            }
-            (server, path)
+        let at = if from.starts_with('[') { from.find("]:")? + 1 } else { from.find(':')? };
+        let (server, path) = (&from[..at], &from[at + 1..]);
+        if server.contains('/') || !path.starts_with('/') {
+            return None;
         }
+        (server, path, false)
     };
-    Some((host_of(server)?, share_path(path)?))
+    Some((host_of(server)?, share_path(path, fold)?))
 }
 
 /// 서버 칸("이름;도메인:암호@서버:포트", "[IPv6]:포트")의 서버 이름: 소문자로, %를 푼 것. 비었으면 None
@@ -178,10 +188,11 @@ fn host_of(server: &str) -> Option<String> {
     (!host.is_empty()).then(|| decode(host).to_lowercase())
 }
 
-/// 공유 경로: 앞뒤 '/'를 떼고 %를 풀어 소문자로 (SMB 공유 이름은 대소문자를 가리지 않는다). 비었으면 None
-fn share_path(path: &str) -> Option<String> {
+/// 공유 경로: 앞뒤 '/'를 떼고 %를 푼 것. fold면 소문자로 (SMB·AFP 공유 이름은 대소문자를 가리지 않는다.
+/// NFS 경로는 가려서 /exports/Data와 /exports/data가 다른 공유다). 비었으면 None
+fn share_path(path: &str, fold: bool) -> Option<String> {
     let p = path.trim_matches('/');
-    (!p.is_empty()).then(|| decode(p).to_lowercase())
+    (!p.is_empty()).then(|| if fold { decode(p).to_lowercase() } else { decode(p) })
 }
 
 /// 주소의 %XX를 푼다 (UTF-8이 아니면 그대로 둔다)
@@ -244,6 +255,17 @@ mod tests {
         assert!(share_matches("NAS:/volume1/data", &nfs.0, &nfs.1));
         assert!(!share_matches("othernas:/volume1/data", &nfs.0, &nfs.1));
         assert!(!share_matches("nas:/volume2/data", &nfs.0, &nfs.1));
+        // 대소문자: 서버 이름은 늘 가리지 않는다. 공유 경로는 SMB·AFP만 가리지 않고, NFS·FTP는 가린다 (다른 내보낸 폴더다)
+        assert!(!share_matches("nas:/volume1/Data", &nfs.0, &nfs.1), "NFS paths keep their case");
+        let upper = share_parts("nfs://nas/exports/Data").unwrap();
+        assert_eq!(upper.1, "exports/Data");
+        assert!(share_matches("nas:/exports/Data", &upper.0, &upper.1) && !share_matches("nas:/exports/data", &upper.0, &upper.1));
+        let smb = share_parts("smb://NAS.local/Photos").unwrap();
+        assert!(share_matches("//hong@nas.local/photos", &smb.0, &smb.1) && share_matches("//nas.local/PHOTOS", &smb.0, &smb.1));
+        let afp = share_parts("afp://nas.local/Photos").unwrap();
+        assert!(share_matches("//hong@nas.local/photos", &afp.0, &afp.1));
+        assert!(!share_matches("ftp://ftp.example.com/Pub", &share_parts("ftp://ftp.example.com/pub").unwrap().0, "pub"));
+        assert!(source_parts("nas:/a://b").is_some_and(|(h, p)| h == "nas" && p == "a://b"), "not an address");
         let v6 = share_parts("smb://[FE80::1]:445/공유").unwrap();
         assert_eq!(v6.0, "[fe80::1]");
         assert!(share_matches("//hong@[fe80::1]/공유", &v6.0, &v6.1));
