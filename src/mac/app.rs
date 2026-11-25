@@ -6428,13 +6428,21 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// 사이드바의 그 줄을 누르고, 아래로 dy만큼(위로는 음수) 두 번에 나눠 끌고, 뗀다 (실제 마우스 입력의 길)
+    /// 사이드바의 그 줄을 누르고, 아래로 dy만큼(위로는 음수) 두 번에 나눠 끌고, 뗀다 (실제 마우스 입력의 길).
+    /// 앞서 놓은 줄이 미끄러지던 것은 다 멈춘 것으로 본다 (그 줄의 제자리에서 누른다)
     fn drag_side(a: &mut App, g: &Gfx, label: &str, dy: f32) {
+        settle_side(a);
         let (x, y) = mid(side_row(a, label));
         a.mouse_down(g, x, y, Mods::default(), 1);
         a.mouse_dragged(x, y + dy / 2.0);
         a.mouse_dragged(x, y + dy);
         a.mouse_up();
+    }
+
+    /// 미끄러지던 사이드바 줄을 다 멈춘 것으로 한다: 시험은 그리지 않아 놓은 줄의 움직임이 끝나지 않는다. 그동안 누르기는
+    /// 그린 자리로 가리므로(side_rect_shown), 줄을 제자리에서 누르는 시험은 먼저 부른다
+    fn settle_side(a: &App) {
+        a.side_flow.borrow_mut().moving = false;
     }
 
     /// 저장하는 작업 공간 파일의 글자로 다시 읽은 지금 공간의 고정한 것 (시험은 파일에 쓰지 않는다: 쓰는 그 내용을 본다)
@@ -6622,6 +6630,7 @@ mod tests {
         }
         a.resize(1280.0, 420.0);
         let list = a.side_list();
+        settle_side(&a);
         let (x, y) = mid(side_row(&a, "업무"));
         a.mouse_down(&g, x, y, Mods::default(), 1);
         a.mouse_dragged(x, y + 20.0);
