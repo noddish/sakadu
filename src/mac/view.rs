@@ -337,11 +337,11 @@ define_class!(
         }
 
         /// 편집 메뉴의 실행 취소(⌘Z): 키 입력이 목록에 있을 때 가장 나중에 한 파일 작업(이름 바꾸기, 새 폴더, 휴지통, 복사)을 되돌린다.
-        /// 이름이나 경로, 검색어를 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라 친 글자를 되돌린다:
-        /// 이 뷰가 받지 않았을 때 창이 하던 대로, 창의 되돌리기 관리자에 넘긴다
+        /// 이름이나 경로, 검색어, 명령 메뉴(⌘K)의 글을 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라
+        /// 친 글자를 되돌린다: 이 뷰가 받지 않았을 때 창이 하던 대로, 창의 되돌리기 관리자에 넘긴다 (App::typing)
         #[unsafe(method(undo:))]
         fn undo(&self, _sender: Option<&objc2::runtime::AnyObject>) {
-            if with_app(|a| a.edit != crate::app::Editing::None || a.find_wants_keys()).unwrap_or(false) {
+            if with_app(|a| a.typing()).unwrap_or(false) {
                 if let Some(typed) = self.undoManager()
                     && typed.canUndo()
                 {

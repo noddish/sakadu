@@ -4114,6 +4114,12 @@ impl App {
         true
     }
 
+    /// 글을 치는 입력 상자가 키보드를 가졌는지: 이름·경로·공간 이름 고치기, 검색 칸, 명령 메뉴(⌘K) 칸.
+    /// 그동안 창 쪽 undo:(⌘Z)는 파일 작업이 아니라 친 글자를 되돌린다
+    pub fn typing(&self) -> bool {
+        self.edit != Editing::None || self.find_wants_keys() || self.cmd.is_some()
+    }
+
     /// 누르고 있을 때 되풀이해 받아도 되는 키인지. 단축키 표의 동작(새 탭, 새 폴더, 칸 나누기 …)은 한 번 누름에 한 번만 한다
     pub fn key_repeats(&self, key: Key, m: Mods) -> bool {
         match key.combo(m).and_then(|c| self.keys.find(c)).filter(|a| mac_runs(*a)) {
@@ -5074,6 +5080,32 @@ mod tests {
         a.begin_address(1);
         a.run_action(Action::Commands);
         assert!(a.cmd_seen().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 글을 치는 입력 상자가 키보드를 가진 동안은 창 쪽 ⌘Z(undo:)가 파일 작업이 아니라 친 글자를 되돌린다 (typing으로 가른다):
+    /// 경로 고치기·검색 칸처럼 명령 메뉴(⌘K) 칸도
+    #[test]
+    fn cmd_z_while_typing_in_the_command_menu_is_for_the_text() {
+        let (root, home) = demo();
+        let (mut a, _) = app(&home);
+        assert!(!a.typing(), "with the keys in the list ⌘Z undoes file operations");
+        a.toggle_commands();
+        assert!(a.typing(), "the command menu field");
+        a.cmd_typed("업무");
+        assert!(a.typing());
+        a.close_commands();
+        assert!(!a.typing());
+        a.begin_address(0);
+        assert!(a.typing(), "the path field");
+        a.cancel_address();
+        a.open_find();
+        assert!(a.typing(), "the search field");
+        a.toggle_commands();
+        assert!(a.typing(), "the command menu over the search panel");
+        a.close_commands();
+        a.close_find();
+        assert!(!a.typing());
         std::fs::remove_dir_all(root).unwrap();
     }
 
