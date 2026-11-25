@@ -1,6 +1,6 @@
 //! 설정 창: 앱 메뉴의 '설정…'(⌘,)으로 여는, 본 창과 따로 뜨는 창. 맥 기본 조작(스위치·단추·팝업)을 시스템 설정처럼
 //! 묶음 카드 안에 줄로 놓는다. 줄에는 이름만 쓴다. 내용이 창보다 길면 스크롤한다.
-//! 묶음: 일반(숨김 항목, 자동 미리 보기, 모양), 단축키(동작마다 키 단추, 기본으로), 검색, 도움말(바꾸지 않는 기본 키), 정보.
+//! 묶음: 일반(숨김 항목, 자동 미리 보기, 새 탭, 모양), 단축키(동작마다 키 단추, 기본으로), 검색, 도움말(바꾸지 않는 기본 키), 정보.
 //! 값은 App이 갖고(App::prefs, keymap, set_…), 이 창은 그것을 보이고 바꾼다. 본 창에서 바뀐 값(⌘⇧., 눈 단추, 훑기 상태)은
 //! 입력과 뒷줄 결과를 처리할 때마다 refresh로 따라온다.
 //! 단축키 단추를 누르면 다음에 누르는 키를 그 동작의 키로 받는다 (Esc는 그만두기, ⌫는 비우기)
@@ -25,6 +25,8 @@ const ESC: u16 = 0x35;
 const BACKSPACE: u16 = 0x33;
 /// 모양 팝업의 줄 (보이는 이름, 저장하는 값)
 const THEMES: [(&str, &str); 3] = [("시스템 설정", "system"), ("밝게", "light"), ("어둡게", "dark")];
+/// 새 탭 팝업의 줄 (보이는 이름, 시작 화면인지)
+const NEW_TABS: [(&str, bool); 2] = [("시작 화면", true), ("지금 폴더", false)];
 /// 도움말: 바꾸지 않는 기본 키 (Finder와 같다)
 const HELP: [(&str, &str); 11] = [
     ("뒤로 · 앞으로", "⌘[   ⌘]"),
@@ -50,6 +52,8 @@ thread_local! {
 enum Ctl {
     Hidden,
     Preview,
+    /// 새 탭을 시작 화면으로 열지, 지금 폴더로 열지
+    NewTab,
     Theme,
     /// 단축키 표(ACTIONS)의 i번째 동작의 키 단추
     Key(usize),
@@ -64,7 +68,7 @@ enum Ctl {
 }
 
 impl Ctl {
-    const FIXED: [Ctl; 9] = [Ctl::Hidden, Ctl::Preview, Ctl::Theme, Ctl::KeysReset, Ctl::Search, Ctl::ICloud, Ctl::Allow, Ctl::GitHub, Ctl::Folder];
+    const FIXED: [Ctl; 10] = [Ctl::Hidden, Ctl::Preview, Ctl::NewTab, Ctl::Theme, Ctl::KeysReset, Ctl::Search, Ctl::ICloud, Ctl::Allow, Ctl::GitHub, Ctl::Folder];
 
     fn tag(self) -> NSInteger {
         match self {
@@ -77,6 +81,7 @@ impl Ctl {
             Ctl::Folder => 7,
             Ctl::Theme => 8,
             Ctl::KeysReset => 9,
+            Ctl::NewTab => 10,
             Ctl::Key(i) => 100 + i as NSInteger,
             Ctl::Help(i) => 200 + i as NSInteger,
         }
@@ -112,6 +117,7 @@ struct Parts {
     /// 단축키 단추 (ACTIONS의 번호, 단추)
     keys: Vec<(usize, Retained<NSButton>)>,
     theme: Retained<NSPopUpButton>,
+    new_tab: Retained<NSPopUpButton>,
     /// '이름으로 찾기' 옆의 '훑는 중'
     crawling: Retained<NSTextField>,
     /// 단축키를 바꾼 결과 (다른 동작에서 빼 온 키, 쓸 수 없는 키). '기본으로' 줄의 이름 자리에 보인다
@@ -203,6 +209,14 @@ define_class!(
             after_change();
         }
 
+        /// 새 탭을 열 곳을 골랐다
+        #[unsafe(method(newTab:))]
+        fn new_tab(&self, sender: &NSPopUpButton) {
+            let Some((_, start)) = usize::try_from(sender.indexOfSelectedItem()).ok().and_then(|i| NEW_TABS.get(i)) else { return };
+            with_app(|a| a.set_new_tab_start(*start));
+            after_change();
+        }
+
         /// 단추를 눌렀다
         #[unsafe(method(press:))]
         fn press(&self, sender: &NSButton) {
@@ -286,12 +300,21 @@ impl SettingsPane {
             theme.setAction(Some(sel!(theme:)));
         }
         theme.setAccessibilityLabel(Some(&NSString::from_str("모양")));
+        let new_tab = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
+        new_tab.addItemsWithTitles(&NSArray::from_retained_slice(&NEW_TABS.map(|t| NSString::from_str(t.0))));
+        // SAFETY: 이 뷰가 newTab:을 받는다 (define_class에 있다)
+        unsafe {
+            new_tab.setTarget(Some(target));
+            new_tab.setAction(Some(sel!(newTab:)));
+        }
+        new_tab.setAccessibilityLabel(Some(&NSString::from_str("새 탭")));
         let mut switches = Vec::new();
         let mut keys = Vec::new();
         let mut lines = Vec::new();
         let version = format!("Sakadu {}", env!("CARGO_PKG_VERSION"));
         // (묶음, 조작, 이름). 조작은 아래에서 만든다
-        let mut rows: Vec<(usize, Ctl, String)> = vec![(0, Ctl::Hidden, "숨김 항목 보기".into()), (0, Ctl::Preview, "자동 미리 보기".into()), (0, Ctl::Theme, "모양".into())];
+        let mut rows: Vec<(usize, Ctl, String)> =
+            vec![(0, Ctl::Hidden, "숨김 항목 보기".into()), (0, Ctl::Preview, "자동 미리 보기".into()), (0, Ctl::NewTab, "새 탭".into()), (0, Ctl::Theme, "모양".into())];
         for (i, (a, ..)) in ACTIONS.iter().enumerate().filter(|(_, x)| mac_runs(x.0)) {
             rows.push((1, Ctl::Key(i), name(*a).to_string()));
         }
@@ -321,6 +344,7 @@ impl SettingsPane {
                     s.into_super()
                 }
                 Ctl::Theme => theme.clone().into_super().into_super(),
+                Ctl::NewTab => new_tab.clone().into_super().into_super(),
                 Ctl::Key(i) => {
                     let b = button("");
                     b.setAccessibilityLabel(Some(&NSString::from_str(&format!("{text} 단축키"))));
@@ -346,7 +370,7 @@ impl SettingsPane {
             lines.push(Line { group, ctl, label: name_field, control, divider });
         }
         let keys_note = keys_note.expect("'기본으로' 줄은 늘 있다");
-        let _ = pane.ivars().parts.set(Parts { titles, cards, lines, switches, keys, theme, crawling, keys_note });
+        let _ = pane.ivars().parts.set(Parts { titles, cards, lines, switches, keys, theme, new_tab, crawling, keys_note });
         pane.show_keys();
         pane
     }
@@ -418,6 +442,10 @@ impl SettingsPane {
         let theme = THEMES.iter().position(|t| t.1 == prefs.theme).unwrap_or(0) as NSInteger;
         if p.theme.indexOfSelectedItem() != theme {
             p.theme.selectItemAtIndex(theme);
+        }
+        let new_tab = NEW_TABS.iter().position(|t| t.1 == prefs.new_tab_start).unwrap_or(0) as NSInteger;
+        if p.new_tab.indexOfSelectedItem() != new_tab {
+            p.new_tab.selectItemAtIndex(new_tab);
         }
         p.crawling.setHidden(!prefs.crawling);
         self.show_keys();

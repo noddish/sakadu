@@ -1,200 +1,54 @@
 //! 새 탭 시작 화면 ("어디로 이동할까요?"): 고정한 폴더(이 공간에 고정한 것과 즐겨찾기) 칸, 최근 위치, 드라이브(내 PC 포함).
 //! 칸과 줄에는 이름만 보인다. 경로는 마우스를 올리거나 키보드로 고른 줄에, 남은 용량은 말풍선에 보인다.
 //! 칩 줄·경로 줄은 다른 위치와 같고, 그 아래(머리글·목록 자리)를 이 화면이 쓴다.
-//! 자리는 `start_layout` 한 곳에서 정해 그리기·누르기·키보드·스크롤이 같이 쓴다.
+//! 자리·이웃·그리기는 맥과 함께 쓰는 sakadu::ui::start. 여기는 드라이브·아이콘, 키, 오른쪽 버튼 메뉴, 최근 위치 목록.
 //! 키보드 초점 테두리는 화살표·Enter·필터 글자로 키보드를 쓴 뒤에만 보인다 (탭을 열자마자 첫 카드에 테두리가 생기지 않게)
 
 use super::*;
+pub use sakadu::ui::start::StartItem;
+use sakadu::ui::start::{self as shared, Nav, StartArt, StartData, StartDrive, StartView, neighbor, paint_start, start_area};
 
-/// 세션에 남기는 최근 위치 수와 화면에 보이는 수
-const RECENT_KEEP: usize = 20;
-const RECENT_SHOWN: usize = 8;
-/// 내용 좌우 여백과 가장 넓을 때의 폭 (넓은 칸에서 카드가 한없이 늘어나지 않게)
-const PAD: f32 = 16.0;
-const MAX_W: f32 = 760.0;
-const CARD_MIN_W: f32 = 148.0;
-/// 칸: 아이콘과 이름 한 줄 (드라이브는 아래에 사용량 막대)
-const CARD_H: f32 = 40.0;
-const CARD_GAP: f32 = 12.0;
-const CARD_R: f32 = R_CTRL;
-/// 최근 위치 줄: 파일 목록과 같은 높이
-const LINE_H: f32 = 28.0;
-const TITLE_H: f32 = 20.0;
-/// 시작 화면 영역이 이보다 낮으면 제목을 그리지 않는다
-const TITLE_MIN_AREA_H: f32 = 360.0;
-const SECTION_H: f32 = 16.0;
-const SECTION_GAP: f32 = 24.0;
-const NOTE_H: f32 = 20.0;
 const G_COMPUTER: u16 = 0xEC4E;
 
-/// 시작 화면에서 고를 수 있는 것
-#[derive(Clone, PartialEq, Debug)]
-pub enum StartItem {
-    /// 즐겨찾기 폴더 (보이는 이름, 경로)
-    Fav { name: String, path: String },
-    Recent(String),
-    Computer,
-    /// places.drives의 번호
-    Drive(usize),
+/// 시작 화면 아이콘: 시스템 아이콘 목록의 폴더·드라이브·내 PC 아이콘
+struct WinStartArt<'a> {
+    places: &'a sidebar::Places,
+    folder_icon: i32,
 }
 
-/// 시작 화면 배치. 좌표는 지금 스크롤이 반영된 화면 좌표
-pub(super) struct StartView {
-    title: R,
-    heads: Vec<(&'static str, R)>,
-    items: Vec<(StartItem, R)>,
-    /// 즐겨찾기가 없을 때·찾는 글자와 맞는 게 없을 때의 안내
-    notes: Vec<(String, R)>,
-    /// 스크롤과 상관없는 내용 전체 높이
-    height: f32,
-    scroll: f32,
-    area: R,
-}
-
-/// 칸 안에서 시작 화면이 놓이는 곳 (경로 줄 아래 전부)
-fn start_area(g: &PaneGeom) -> R {
-    R::new(g.list.l, g.header.t, g.list.r, g.list.b)
-}
-
-/// 최근 위치의 보이는 이름 (드라이브 뿌리는 "C:")
-fn recent_label(path: &str) -> &str {
-    let n = util::file_name(path);
-    if n.is_empty() { path } else { n }
-}
-
-/// 카드를 cols개씩 줄지어 놓고 y를 마지막 줄 아래로 옮긴다
-fn place_cards(list: Vec<StartItem>, x0: f32, y: &mut f32, cols: usize, card_w: f32, out: &mut Vec<(StartItem, R)>) {
-    let rows = list.len().div_ceil(cols);
-    for (i, it) in list.into_iter().enumerate() {
-        let l = x0 + (i % cols) as f32 * (card_w + CARD_GAP);
-        let t = *y + (i / cols) as f32 * (CARD_H + CARD_GAP);
-        out.push((it, R::new(l, t, l + card_w, t + CARD_H)));
-    }
-    if rows > 0 {
-        *y += rows as f32 * (CARD_H + CARD_GAP) - CARD_GAP;
-    }
-}
-
-/// 화살표 방향의 다음 항목: ←→는 앞뒤, ↑↓는 바로 위·아래 줄에서 가로 가운데가 가장 가까운 것, Home·End는 처음·끝
-fn neighbor(rects: &[R], from: usize, vk: VIRTUAL_KEY) -> usize {
-    let Some(cur) = rects.get(from) else { return 0 };
-    match vk {
-        VK_LEFT => from.saturating_sub(1),
-        VK_RIGHT => (from + 1).min(rects.len() - 1),
-        VK_HOME => 0,
-        VK_END => rects.len() - 1,
-        VK_UP | VK_DOWN => {
-            let down = vk == VK_DOWN;
-            // 지금 줄과 겹치지 않는 것 중 가장 가까운 줄
-            let row_t = rects
-                .iter()
-                .filter(|r| if down { r.t >= cur.b - 1.0 } else { r.b <= cur.t + 1.0 })
-                .map(|r| r.t)
-                .reduce(|a, b| if down { a.min(b) } else { a.max(b) });
-            let Some(row_t) = row_t else { return from };
-            let cx = (cur.l + cur.r) / 2.0;
-            let off = |r: &R| ((r.l + r.r) / 2.0 - cx).abs();
-            rects
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| (r.t - row_t).abs() < 1.0)
-                .min_by(|(_, a), (_, b)| off(a).total_cmp(&off(b)))
-                .map_or(from, |(i, _)| i)
-        }
-        _ => from,
-    }
-}
-
-impl StartView {
-    /// 그리기. hovered: 마우스가 올라간 항목, focus: 키보드 초점 테두리를 그릴 항목
-    pub(super) fn paint(&self, g: &mut Gfx, t: &Theme, places: &sidebar::Places, folder_icon: i32, hovered: Option<usize>, focus: Option<usize>) {
-        g.clip(self.area);
-        if self.title.h() > 0.0 {
-            g.text("어디로 이동할까요?", self.title, Font::Title, t.text);
-        }
-        for (label, r) in &self.heads {
-            g.text(label, *r, Font::Label, t.faint);
-        }
-        for (s, r) in &self.notes {
-            g.text(s, *r, Font::Small, t.faint);
-        }
-        let focus = focus.map(|f| f.min(self.items.len().saturating_sub(1)));
-        for (i, (it, r)) in self.items.iter().enumerate() {
-            let r = *r;
-            if r.b < self.area.t || r.t > self.area.b {
-                continue;
+impl StartArt<Gfx> for WinStartArt<'_> {
+    fn icon(&mut self, g: &mut Gfx, t: &Theme, item: &StartItem, r: R) {
+        match item {
+            StartItem::Fav { .. } => g.icon(self.folder_icon, r),
+            // 드라이브 자체(C: 등)는 드라이브 아이콘, 나머지는 폴더 아이콘
+            StartItem::Recent(path) => {
+                let drive = self.places.drives.iter().find(|d| d.path.trim_end_matches('\\').eq_ignore_ascii_case(path.trim_end_matches('\\')));
+                g.icon(drive.map_or(self.folder_icon, |d| d.icon), r);
             }
-            let hot = hovered == Some(i);
-            let iy = r.t + (r.h() - 16.0) / 2.0;
-            let ic = R::new(r.l + 12.0, iy, r.l + 28.0, iy + 16.0);
-            let radius = if let StartItem::Recent(path) = it {
-                if hot {
-                    g.fill_round(r, R_ROW, super::sidebar::hover_fill(t));
+            StartItem::Computer => {
+                if self.places.computer_icon >= 0 {
+                    g.icon(self.places.computer_icon, r);
+                } else {
+                    g.glyph(G_COMPUTER, r, false, t.dim);
                 }
-                // 드라이브 자체(C: 등)는 드라이브 아이콘, 나머지는 폴더 아이콘
-                let drive = places.drives.iter().find(|d| d.path.trim_end_matches('\\').eq_ignore_ascii_case(path.trim_end_matches('\\')));
-                g.icon(drive.map_or(folder_icon, |d| d.icon), ic);
-                let name = recent_label(path);
-                let nw = (g.measure(name, Font::Normal) + 4.0).min(r.w() * 0.6);
-                g.text(name, R::new(r.l + 36.0, r.t, r.l + 36.0 + nw, r.b), Font::Normal, t.text);
-                // 어디 있는 폴더인지는 마우스를 올리거나 키보드로 고른 줄에만 (길면 가운데를 줄인다)
-                if (hot || focus == Some(i))
-                    && let Some(parent) = util::parent(path)
-                {
-                    g.text(&parent, R::new(r.l + 36.0 + nw + 12.0, r.t, r.r - 8.0, r.b), Font::Path, t.faint);
+            }
+            StartItem::Drive(di) => {
+                if let Some(d) = self.places.drives.get(*di) {
+                    g.icon(d.icon, r);
                 }
-                R_ROW
-            } else {
-                // 칸: 옅은 면에 아이콘과 이름 한 줄, 올리면 한 단계 진한 면 (고대비에서는 테두리)
-                g.fill_round(r, CARD_R, super::sidebar::seg_track(t));
-                if hot {
-                    g.fill_round(r, CARD_R, super::sidebar::hover_fill(t));
-                }
-                if t.high_contrast {
-                    g.stroke_round(r.inset(0.5, 0.5), CARD_R, t.border, 1.0);
-                }
-                let name_r = R::new(r.l + 36.0, r.t, r.r - 12.0, r.b);
-                match it {
-                    StartItem::Fav { name, .. } => {
-                        g.icon(folder_icon, ic);
-                        g.text(name, name_r, Font::Normal, t.text);
-                    }
-                    StartItem::Computer => {
-                        if places.computer_icon >= 0 {
-                            g.icon(places.computer_icon, ic);
-                        } else {
-                            g.glyph(G_COMPUTER, ic, false, t.dim);
-                        }
-                        g.text("내 PC", name_r, Font::Normal, t.text);
-                    }
-                    StartItem::Drive(di) => {
-                        if let Some(d) = places.drives.get(*di) {
-                            g.icon(d.icon, ic);
-                            g.text(&d.name, name_r, Font::Normal, t.text);
-                            if d.total > 0 {
-                                // 쓴 만큼 채운 막대 (남은 용량 숫자는 말풍선에). 거의 찼으면(90% 넘게) 빨간색
-                                let used = (1.0 - d.free as f32 / d.total as f32).clamp(0.0, 1.0);
-                                let bar = R::new(r.l + 12.0, r.b - 8.0, r.r - 12.0, r.b - 4.0);
-                                g.fill_round(bar, 2.0, alpha(t.text, 0.10));
-                                let fill = if used > 0.9 { Color { r: 0.80, g: 0.20, b: 0.16, a: 1.0 } } else { t.faint };
-                                g.fill_round(R::new(bar.l, bar.t, bar.l + bar.w() * used, bar.b), 2.0, fill);
-                            }
-                        }
-                    }
-                    StartItem::Recent(_) => {}
-                }
-                CARD_R
-            };
-            if focus == Some(i) {
-                g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), radius, t.focus, FOCUS_W);
             }
         }
-        g.unclip();
-        // 넘치면 목록처럼 오른쪽에 스크롤 손잡이 (보이기만 한다. 휠·Page Up/Down으로 움직인다)
-        if let Some((_, thumb)) = scroll_metrics(self.area, self.height, self.scroll) {
-            g.fill_round(thumb, 3.0, t.thumb);
-        }
     }
+}
+
+/// 드라이브 칸에 보일 것 (places.drives와 같은 순서)
+fn start_drives(places: &sidebar::Places) -> Vec<StartDrive<'_>> {
+    places.drives.iter().map(|d| StartDrive { name: &d.name, free: d.free, total: d.total }).collect()
+}
+
+/// 칸 p의 시작 화면을 그린다. hovered: 마우스가 올라간 항목, focus: 키보드 초점 테두리를 그릴 항목
+pub(super) fn paint_start_view(g: &mut Gfx, t: &Theme, places: &sidebar::Places, folder_icon: i32, v: &StartView, hovered: Option<usize>, focus: Option<usize>) {
+    paint_start(g, &mut WinStartArt { places, folder_icon }, t, v, &start_drives(places), hovered, focus);
 }
 
 impl App {
@@ -212,78 +66,10 @@ impl App {
         Some(if tab.scroll > max { self.start_layout(area, &tab.filter, max) } else { v })
     }
 
-    /// 제목 → 즐겨찾기 폴더 카드 → 최근 위치 줄 → 드라이브 카드. 필터 글자가 있으면 이름에 그 글자가 든 것만
+    /// 제목 → 즐겨찾기 폴더 카드 → 최근 위치 줄 → 드라이브 카드 (공통 배치: sakadu::ui::start::start_layout)
     fn start_layout(&self, area: R, filter: &str, scroll: f32) -> StartView {
-        let needle = filter.to_lowercase();
-        let fits = |label: &str| needle.is_empty() || label.to_lowercase().contains(&needle);
-        let w = (area.w() - PAD * 2.0).clamp(0.0, MAX_W);
-        let x0 = area.l + PAD;
-        let top = area.t - scroll;
-        let mut y = top + 16.0;
-        let title = if area.h() >= TITLE_MIN_AREA_H { R::new(x0, y, x0 + w, y + TITLE_H) } else { R::new(x0, y, x0 + w, y) };
-        if title.h() > 0.0 {
-            y += TITLE_H + 12.0;
-        }
-        let cols = (((w + CARD_GAP) / (CARD_MIN_W + CARD_GAP)).floor() as usize).clamp(1, 4);
-        let card_w = ((w - CARD_GAP * (cols - 1) as f32) / cols as f32).max(0.0);
-        let mut heads = Vec::new();
-        let mut items = Vec::new();
-        let mut notes = Vec::new();
-        // 이 공간에 고정한 폴더가 먼저, 그 뒤에 '모든 공간'(즐겨찾기)의 폴더. 둘 다에 있으면 한 번만
-        let pins = self.pins();
-        let fav_dirs = || {
-            let common = self.favs.items.iter().chain(self.favs.groups.iter().flat_map(|g| g.items.iter())).filter(|f| !pins.iter().any(|p| util::eq_path(&p.path, &f.path)));
-            pins.iter().chain(common).filter(|f| f.is_dir)
-        };
-
-        let favs: Vec<StartItem> = fav_dirs().filter(|f| fits(&f.name)).map(|f| StartItem::Fav { name: f.name.clone(), path: f.path.clone() }).collect();
-        if !favs.is_empty() || needle.is_empty() {
-            heads.push(("고정한 곳", R::new(x0, y, x0 + w, y + SECTION_H)));
-            y += SECTION_H + 4.0;
-            if favs.is_empty() {
-                notes.push(("경로 오른쪽 책갈피로 고정한 폴더가 여기에 카드로 보여요".to_string(), R::new(x0, y, x0 + w, y + NOTE_H)));
-                y += NOTE_H;
-            }
-            place_cards(favs, x0, &mut y, cols, card_w, &mut items);
-            y += SECTION_GAP;
-        }
-
-        // 즐겨찾기에 있는 폴더는 위 카드로 이미 보이니 빼고
-        let recent: Vec<StartItem> = self
-            .recent
-            .iter()
-            .filter(|r| !fav_dirs().any(|f| util::eq_path(&f.path, r)))
-            .filter(|r| fits(recent_label(r)))
-            .take(RECENT_SHOWN)
-            .map(|r| StartItem::Recent(r.clone()))
-            .collect();
-        if !recent.is_empty() {
-            heads.push(("최근 위치", R::new(x0, y, x0 + w, y + SECTION_H)));
-            y += SECTION_H + 4.0;
-            for it in recent {
-                items.push((it, R::new(x0, y, x0 + w, y + LINE_H)));
-                y += LINE_H;
-            }
-            y += SECTION_GAP;
-        }
-
-        let mut drives = Vec::new();
-        if fits("내 PC") {
-            drives.push(StartItem::Computer);
-        }
-        drives.extend(self.places.drives.iter().enumerate().filter(|(_, d)| fits(&d.name)).map(|(i, _)| StartItem::Drive(i)));
-        if !drives.is_empty() {
-            heads.push(("드라이브", R::new(x0, y, x0 + w, y + SECTION_H)));
-            y += SECTION_H + 4.0;
-            place_cards(drives, x0, &mut y, cols, card_w, &mut items);
-            y += SECTION_GAP;
-        }
-
-        if items.is_empty() && !needle.is_empty() {
-            notes.push((format!("필터 ‘{filter}’에 맞는 위치가 없어요"), R::new(x0, y, x0 + w, y + NOTE_H)));
-            y += NOTE_H;
-        }
-        StartView { title, heads, items, notes, height: y - top, scroll, area }
+        let drives = start_drives(&self.places);
+        shared::start_layout(area, filter, scroll, &StartData { pins: self.pins(), favs: &self.favs, recent: &self.recent, computer: true, drives: &drives, drives_label: "드라이브" })
     }
 
     /// 시작 화면의 스크롤 끝. 시작 화면이 아니면 None
@@ -360,7 +146,15 @@ impl App {
                 }
                 // 처음 누른 화살표는 테두리만 보인다 (어디에 있는지 먼저 보이게)
                 let rects: Vec<R> = v.items.iter().map(|(_, r)| *r).collect();
-                let next = if self.start_keys { neighbor(&rects, cur, vk) } else { cur };
+                let nav = match vk {
+                    VK_LEFT => Nav::Left,
+                    VK_RIGHT => Nav::Right,
+                    VK_UP => Nav::Up,
+                    VK_DOWN => Nav::Down,
+                    VK_HOME => Nav::Home,
+                    _ => Nav::End,
+                };
+                let next = if self.start_keys { neighbor(&rects, cur, nav) } else { cur };
                 self.start_keys = true;
                 self.panes[p].tab_mut().cursor = next;
                 self.start_reveal(p);
@@ -432,16 +226,14 @@ impl App {
 
     /// 다녀간 폴더를 최근 위치 맨 앞에 둔다 (같은 폴더는 한 번만)
     pub(super) fn note_recent(&mut self, loc: &Location) {
-        let Location::Dir(d) = loc else { return };
-        self.recent.retain(|r| !util::eq_path(r, d));
-        self.recent.insert(0, d.clone());
-        self.recent.truncate(RECENT_KEEP);
-        self.start_changed();
+        if shared::note_recent(&mut self.recent, loc) {
+            self.start_changed();
+        }
     }
 
     /// 최근 위치에서 뺀다 (메뉴·Delete, 또는 지워진 폴더)
     pub(super) fn forget_recent(&mut self, path: &str) {
-        self.recent.retain(|r| !util::eq_path(r, path));
+        shared::forget_recent(&mut self.recent, path);
         self.start_changed();
     }
 
@@ -484,40 +276,5 @@ pub(super) fn show_start_menu(hwnd: HWND, pane: usize, item: StartItem, loc: Loc
             }
         }
         _ => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 카드 세 개짜리 두 줄(마지막 줄은 하나) 아래에 넓은 줄 두 개
-    fn sample() -> Vec<R> {
-        let card = |c: f32, row: f32| R::new(c * 110.0, row * 70.0, c * 110.0 + 100.0, row * 70.0 + 60.0);
-        vec![card(0.0, 0.0), card(1.0, 0.0), card(2.0, 0.0), card(0.0, 1.0), R::new(0.0, 150.0, 320.0, 182.0), R::new(0.0, 182.0, 320.0, 214.0)]
-    }
-
-    #[test]
-    fn arrows_move_between_cards_and_rows() {
-        let r = sample();
-        assert_eq!(neighbor(&r, 1, VK_RIGHT), 2);
-        assert_eq!(neighbor(&r, 5, VK_RIGHT), 5, "stops at the end");
-        assert_eq!(neighbor(&r, 0, VK_LEFT), 0, "stops at the start");
-        assert_eq!(neighbor(&r, 1, VK_DOWN), 3, "the only card below");
-        assert_eq!(neighbor(&r, 2, VK_DOWN), 3);
-        assert_eq!(neighbor(&r, 3, VK_DOWN), 4, "down into the rows");
-        assert_eq!(neighbor(&r, 4, VK_DOWN), 5);
-        assert_eq!(neighbor(&r, 5, VK_DOWN), 5, "nothing below the last row");
-        assert_eq!(neighbor(&r, 4, VK_UP), 3);
-        assert_eq!(neighbor(&r, 3, VK_UP), 0, "the card straight above");
-        assert_eq!(neighbor(&r, 0, VK_UP), 0);
-        assert_eq!(neighbor(&r, 3, VK_END), 5);
-        assert_eq!(neighbor(&r, 4, VK_HOME), 0);
-    }
-
-    #[test]
-    fn recent_label_keeps_drive_roots_readable() {
-        assert_eq!(recent_label("C:\\Users\\a\\문서"), "문서");
-        assert_eq!(recent_label("D:\\"), "D:");
     }
 }

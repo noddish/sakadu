@@ -117,6 +117,7 @@ impl App {
     /// ⌘F·돋보기: 검색을 열고 키보드를 입력 칸에 둔다 (이미 열려 있으면 키보드만). 지난 검색어는 그대로 둔다
     pub fn open_find(&mut self) {
         self.edit = Editing::None;
+        self.close_commands();
         if !self.find.open {
             let f = &mut self.find;
             f.open = true;
@@ -154,9 +155,9 @@ impl App {
         field_parts(&self.toolbar()).map(|p| p.0)
     }
 
-    /// 입력 칸이 키보드를 가져야 하는가 (다른 입력 상자로 경로·이름을 고치는 동안은 아니다)
+    /// 입력 칸이 키보드를 가져야 하는가 (다른 입력 상자로 경로·이름을 고치는 동안과 명령 메뉴가 떠 있는 동안은 아니다)
     pub fn find_wants_keys(&self) -> bool {
-        self.find.open && self.find.focus && self.edit == Editing::None
+        self.find.open && self.find.focus && self.edit == Editing::None && self.cmd.is_none()
     }
 
     /// 입력 칸에 처음 넣을 글 (열 때마다 지난 검색어)
