@@ -6,7 +6,7 @@
 
 ![작업 공간 레일과 두 칸 화면, 썸네일, 고른 사진의 미리 보기 카드](docs/screenshot-main.png)
 
-**[최신 버전 받기](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · 설치 없이 exe 하나 · 무료 오픈소스
+**[최신 버전 받기](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · 설치 없이 exe 하나 · macOS 13+ (미리 보기) · 무료 오픈소스
 
 ## 기능
 
@@ -31,6 +31,11 @@
 3. 디스크 전체 검색은 검색(Ctrl+F)을 열면 보이는 **검색 서비스 설치**를 한 번 누르면 켜져요(관리자 승인 한 번).
 
 설정(왼쪽 아래 톱니)에서 기본 파일 관리자로 쓰기, 트레이에서 대기(창을 닫아도 단축키로 검색), 테마·단축키를 바꿔요. 사용법은 F1.
+
+**맥 (미리 보기)**: 같은 곳에서 `Sakadu-버전-macos.zip`을 받아 풀고 `Sakadu.app`을 열어요. macOS 13 이상, Apple Silicon과 Intel 맥 모두 돼요.
+
+- 처음 열 때는 Apple 서명이 없어서 막혀요. **시스템 설정 → 개인정보 보호 및 보안**에서 **그래도 열기**를 눌러요(새로 받을 때마다 한 번).
+- 아직 미리 보기예요. 파일을 옮기고 지우는 기능은 시험용 폴더에서 먼저 써 보세요.
 
 ## 자주 쓰는 키
 
@@ -97,10 +102,10 @@ cargo test
 - 경로가 길어 링커가 LNK1104로 실패하면 빌드 출력만 짧은 경로로: `$env:CARGO_TARGET_DIR = "$env:TEMP\sakadu-target"`
 - 셸·서비스와 붙는 테스트와 성능 측정: `cargo test --release -- --ignored --nocapture`
 - 시험용 환경 변수: `SAKADU_THEME=dark|light`, `SAKADU_TRAY=0|1`, `SAKADU_ISOLATED=1`(쓰고 있는 Sakadu와 따로 뜨는 시험 창. `APPDATA`·`LOCALAPPDATA`도 다른 폴더로 돌려 두세요)
-- 릴리스: `Cargo.toml`의 `version`을 올리고 `v0.7.0` 같은 태그를 푸시하면 GitHub Actions가 초안 릴리스를 만들어요.
+- 릴리스: `Cargo.toml`의 `version`을 올리고 `v0.7.0` 같은 태그를 푸시하면 GitHub Actions가 Windows zip과 맥 zip을 함께 빌드해 초안 릴리스 하나를 만들어요. Actions에서 Release를 손으로 돌리면(workflow_dispatch) 릴리스 없이 두 zip만 아티팩트로 만들어 미리 확인해요.
 - 코드: `app.rs`(레이아웃·입력·그리기)와 `app/`(패널·검색·미리 보기·명령 메뉴·시작 화면·설정), `index.rs`·`service.rs`(검색 인덱스·서비스), `shell.rs`(셸 메뉴·파일 작업), `archive.rs`(압축 파일 안 읽기), `listing.rs`(폴더 읽기)
 - 공통 코드: `src/lib.rs`에 묶인 모듈(칸·탭 상태, 저장 형식, 이름 검색과 검색어 규칙, 자연 정렬)은 Windows API 없이도 빌드돼요. macOS 버전을 준비하려고 CI가 macOS에서 `cargo test --lib`로 확인해요.
-- 맥 시제품: `src/mac/` (`cargo build --features mac-app --bin sakadu-mac`). 맥 검색은 자체 색인(`src/mac/search.rs`)이에요: 켜면 홈 폴더와 응용 프로그램 폴더의 이름을 훑어 메모리에만 두고, 맥의 변경 기록(FSEvents)으로 최신으로 둬요.
+- 맥 버전: `src/mac/` (`cargo build --features mac-app --bin sakadu-mac`, 앱 묶음은 `scripts/mac-bundle.sh`). 맥 검색은 자체 색인(`src/mac/search.rs`)이에요: 켜면 홈 폴더와 응용 프로그램 폴더의 이름을 훑어 메모리에만 두고, 맥의 변경 기록(FSEvents)으로 최신으로 둬요.
 
 기여는 환영해요. 큰 변경은 이슈로 먼저 이야기해 주세요.
 

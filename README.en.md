@@ -6,7 +6,7 @@ A Windows file manager that keeps several folders open side by side and finds an
 
 ![The workspace rail, two panes, thumbnails and the preview card for the selected photo](docs/screenshot-main.png)
 
-**[Download the latest release](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · a single exe, no installer · free and open source
+**[Download the latest release](https://github.com/noddish/sakadu/releases/latest)** · Windows 11 · a single exe, no installer · macOS 13+ (preview) · free and open source
 
 > The interface is Korean only for now.
 
@@ -33,6 +33,11 @@ A Windows file manager that keeps several folders open side by side and finds an
 3. For whole-disk search, open search (Ctrl+F), press **검색 서비스 설치** (install search service) once and approve the admin prompt.
 
 In Settings (the gear at the bottom left) you can use Sakadu as the default file manager, keep it in the tray so the search hotkey works after closing the window, and change the theme and shortcuts. Press F1 for usage tips.
+
+**Mac (preview)**: grab `Sakadu-<version>-macos.zip` from the same page, unzip it and open `Sakadu.app`. It needs macOS 13 or later and runs on both Apple Silicon and Intel Macs.
+
+- The first open is blocked because the app isn't signed by Apple. Go to **System Settings → Privacy & Security** and click **Open Anyway** (once per download).
+- It's still a preview: try the features that move or delete files in a test folder first.
 
 ## Keys you'll use most
 
@@ -99,10 +104,10 @@ cargo test
 - If the linker fails with LNK1104 because the path is too long, move only the build output: `$env:CARGO_TARGET_DIR = "$env:TEMP\sakadu-target"`
 - Tests that touch the shell or the service, and benchmarks: `cargo test --release -- --ignored --nocapture`
 - Test switches: `SAKADU_THEME=dark|light`, `SAKADU_TRAY=0|1`, `SAKADU_ISOLATED=1` (a test window that runs next to your own Sakadu; also point `APPDATA` and `LOCALAPPDATA` elsewhere)
-- Releases: bump `version` in `Cargo.toml` and push a tag like `v0.7.0`; GitHub Actions builds a draft release.
+- Releases: bump `version` in `Cargo.toml` and push a tag like `v0.7.0`; GitHub Actions builds the Windows zip and the Mac zip into one draft release. Running the Release workflow by hand (workflow_dispatch) builds both zips as artifacts without a release, as a dry run.
 - Code: `app.rs` (layout, input, drawing) and `app/` (panels, search, preview, command menu, start page, settings), `index.rs`·`service.rs` (search index and service), `shell.rs` (shell menus, file operations), `archive.rs` (reading inside archives), `listing.rs` (folder reading)
 - Shared code: the modules in `src/lib.rs` (pane and tab state, saved formats, name search and query rules, natural sort) build without the Windows API. To prepare a macOS version, CI checks them on macOS with `cargo test --lib`.
-- Mac prototype: `src/mac/` (`cargo build --features mac-app --bin sakadu-mac`). Mac search uses its own index (`src/mac/search.rs`): once turned on, it reads the names under the home folder and the app folders into memory only, and keeps them current with the macOS change log (FSEvents).
+- Mac version: `src/mac/` (`cargo build --features mac-app --bin sakadu-mac`; `scripts/mac-bundle.sh` makes the app bundle). Mac search uses its own index (`src/mac/search.rs`): once turned on, it reads the names under the home folder and the app folders into memory only, and keeps them current with the macOS change log (FSEvents).
 
 Contributions are welcome. Please open an issue first for big changes.
 
