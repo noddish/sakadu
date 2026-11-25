@@ -352,13 +352,21 @@ fn extract_into(archive: &str, wants: &[(String, String)], dest: &Path) -> Resul
     let mut made = vec![false; wants.len()];
     let mut written: Vec<PathBuf> = Vec::new();
     let mut places = Places::default();
-    let mut r = Reader::open(archive).map_err(|e| {
+    let unreadable = |e: String| {
         sakadu::diag::log(|| format!("archive: open failed: {e}"));
         UNREADABLE.to_string()
-    })?;
+    };
+    // 목록처럼 폴더가 이긴다: 같은 경로에 파일과 폴더(폴더 항목이나 그 안의 항목)가 함께 적혀 있으면 목록에는 폴더만 보이므로
+    // 그 파일은 꺼내지 않는다 (파일이 먼저 적혀 있어도 그 자리를 폴더에 남긴다). 어느 경로가 폴더인지는 먼저 한 번 훑어 안다
+    let dirs = folder_paths(archive).map_err(unreadable)?;
+    let mut r = Reader::open(archive).map_err(unreadable)?;
     while let Some(h) = r.next()? {
         // 밖을 가리키는 이름은 꺼내지 않는다. 남은 조각에는 ".."도 빈 조각도 없어 dest 밖으로 나가지 않는다
         let Some(path) = h.name.as_deref().and_then(archive_path::entry_path) else { continue };
+        if h.kind != AE_IFDIR && dirs.contains(&*hangul::compose(&path)) {
+            r.skip();
+            continue;
+        }
         let Some((i, rest)) = wants.iter().enumerate().find_map(|(i, (inner, _))| archive_path::rest_under(&path, inner).map(|rest| (i, rest))) else {
             r.skip();
             continue;
@@ -393,6 +401,22 @@ fn extract_into(archive: &str, wants: &[(String, String)], dest: &Path) -> Resul
         }
     }
     Ok(wants.iter().enumerate().map(|(i, (_, name))| dest.join(places.top(i, name)).to_string_lossy().into_owned()).collect())
+}
+
+/// 압축 파일 안에서 폴더인 경로들 (한글은 모아 쓴 꼴): 폴더 항목과 모든 항목의 위 폴더들. 목록(archive_path::children)이
+/// 폴더로 보이는 것과 같다
+fn folder_paths(archive: &str) -> Result<std::collections::HashSet<String>, String> {
+    let mut out = std::collections::HashSet::new();
+    for it in items(archive)? {
+        let path = hangul::compose(&it.path).into_owned();
+        // 폴더 항목은 그 자신부터, 아니면 위 폴더부터
+        let mut p = if it.dir { path.as_str() } else { path.rfind('/').map_or("", |i| &path[..i]) };
+        // 이미 넣은 경로면 그 위 폴더들도 이미 들어 있다
+        while !p.is_empty() && out.insert(p.to_string()) {
+            p = p.rfind('/').map_or("", |i| &p[..i]);
+        }
+    }
+    Ok(out)
 }
 
 /// 꺼낸 폴더 안의 자리 정하기. 압축 파일 안의 경로(한글은 모아 쓴 꼴, 목록에 보이는 그대로)마다 자리를 하나씩 준다.
@@ -682,6 +706,45 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(parent);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// 같은 경로에 파일과 폴더가 함께 적혀 있으면(파일을 폴더로 바꾼 뒤 덧붙인 tar) 목록처럼 폴더가 이긴다: 파일이 먼저 적혀 있어도,
+    /// 폴더 항목이 먼저 적혀 있어도 그 이름은 폴더가 받고, 목록에 보이지 않는 그 파일은 꺼내지 않는다
+    #[test]
+    fn a_folder_wins_over_a_file_with_the_same_path() {
+        let dir = temp("folder-wins");
+        let mut tar = Vec::new();
+        let mut add = |name: &str, kind: u8, body: &[u8]| {
+            tar.extend(tar_header(name, kind, body.len(), ""));
+            tar.extend(body);
+            tar.resize(tar.len().div_ceil(512) * 512, 0);
+        };
+        // foo: 파일이 먼저, 그다음 그 안의 파일. baz: 폴더 항목과 그 안의 파일이 먼저, 그다음 같은 이름의 파일
+        add("폴더/foo", b'0', b"file first");
+        add("폴더/foo/bar.txt", b'0', b"bar");
+        add("폴더/baz/", b'5', b"");
+        add("폴더/baz/qux.txt", b'0', b"qux");
+        add("폴더/baz", b'0', b"file last");
+        tar.resize(tar.len() + 1024, 0);
+        let path = util::join(&dir, "섞임.tar");
+        std::fs::write(&path, tar).unwrap();
+        let top = util::join(&path, "폴더");
+        assert_eq!(names(&list(&top, &path).unwrap()), [("baz".to_string(), true), ("foo".to_string(), true)]);
+        let got = extract(&path, std::slice::from_ref(&top)).unwrap();
+        let out = Path::new(&got[0]);
+        assert_eq!(std::fs::read(out.join("foo").join("bar.txt")).unwrap(), b"bar");
+        assert_eq!(std::fs::read(out.join("baz").join("qux.txt")).unwrap(), b"qux");
+        let mut inside: Vec<String> = std::fs::read_dir(out).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        inside.sort();
+        assert_eq!(inside, ["baz", "foo"], "the shadowed files are not extracted");
+        // 그 폴더 하나만 골라도 폴더다
+        let one = extract(&path, &[util::join(&top, "foo"), util::join(&top, "baz")]).unwrap();
+        assert!(Path::new(&one[0]).is_dir() && Path::new(&one[1]).is_dir(), "{one:?}");
+        assert_eq!(std::fs::read(Path::new(&one[0]).join("bar.txt")).unwrap(), b"bar");
+        for p in got.iter().chain(&one) {
+            let _ = std::fs::remove_dir_all(Path::new(p).parent().unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 대소문자만 다른 항목(README와 readme, Sub와 sub)은 맥 디스크에서 한 자리가 되므로 뒤에 나온 것에 번호를 붙여 모두 꺼낸다
