@@ -74,7 +74,7 @@ fn write_demo_previews(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 열네 가지 × 밝은·어두운 테마를 out에 그린다.
+/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 열여덟 가지 × 밝은·어두운 테마를 out에 그린다.
 /// 작업 공간은 셋: 업무(파랑, 두 칸), 사진 정리(보라, 네 칸), 개인(주황, 세 칸). 공간마다 고정한 것이 다르고,
 /// 아래 '모든 공간'(바로가기와 즐겨찾기)은 어느 공간에서나 같다.
 /// 미리 보기 카드 장면에 쓸 그림과 글 파일은 demo의 사진/제주살이에 직접 만든다
@@ -164,6 +164,15 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         a.navigate(0, Location::Dir(d("다운로드")), None);
         a.settle();
         shots.push(("one", a));
+
+        // 정렬: 왼쪽 칸은 수정한 날짜 최신순(머리글에 화살표), 오른쪽 칸은 아이콘 보기에서 크기 칩으로 정렬하고 이름 칩에 마우스
+        let mut a = base(favs.clone(), true);
+        a.toggle_sort(0, sakadu::pane::SortKey::Modified);
+        a.set_view(1, sakadu::pane::ViewMode::Medium);
+        a.toggle_sort(1, sakadu::pane::SortKey::Size);
+        a.hover = Hit::Header(1, sakadu::pane::SortKey::Name);
+        a.settle();
+        shots.push(("sorted", a));
 
         // 아이콘 보기: 왼쪽은 보통 아이콘(사진 폴더. 그림 파일은 썸네일로 보인다), 오른쪽은 목록.
         // 썸네일은 settle이 바로 읽는다: 그림은 직접, 메모(.md) 같은 그림이 아닌 파일은 Quick Look이 만든다.

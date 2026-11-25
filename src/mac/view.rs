@@ -22,7 +22,7 @@ use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, Sel};
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBitmapImageFileType, NSColor,
-    NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
+    NSColorSpace, NSControl, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSGraphicsContext, NSMenu, NSMenuItem,
     NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo, NSDraggingItem, NSDraggingSession, NSDraggingSource, NSPasteboard, NSPasteboardTypeFileURL,
     NSPasteboardWriting,
     NSTextField, NSTextFieldDelegate, NSTextView, NSTitlebarSeparatorStyle, NSToolbar, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
@@ -110,6 +110,8 @@ pub struct ViewIvars {
     search: OnceCell<Retained<NSTextField>>,
     /// 지난번에 맞출 때 검색 입력 칸이 키보드를 갖고 있었는지. 그 사이 키보드를 가져갔으면 사용자가 그 칸을 누른 것이다
     search_keys: std::cell::Cell<bool>,
+    /// 지금 보이는 마우스 모양 (바뀔 때만 다시 정한다: 입력 상자 위의 글자 커서를 덮지 않게)
+    pointer: std::cell::Cell<crate::app::Pointer>,
 }
 
 define_class!(
@@ -203,6 +205,7 @@ define_class!(
                 pump();
                 self.begin_drag(&paths, e);
             }
+            self.sync_pointer();
             self.setNeedsDisplay(true);
         }
 
@@ -211,6 +214,7 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _e: &NSEvent) {
             with_app(App::mouse_up);
+            self.sync_pointer();
             self.after_input();
         }
 
@@ -220,11 +224,13 @@ define_class!(
             if with_app(|a| a.mouse_moved(&self.ivars().measure, x, y)).unwrap_or(false) {
                 self.setNeedsDisplay(true);
             }
+            self.sync_pointer();
         }
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _e: &NSEvent) {
             with_app(|a| a.hover = crate::app::Hit::None);
+            self.sync_pointer();
             self.setNeedsDisplay(true);
         }
 
@@ -498,6 +504,7 @@ impl SakaduView {
             field_pane: std::cell::Cell::new(None),
             search: OnceCell::new(),
             search_keys: std::cell::Cell::new(false),
+            pointer: std::cell::Cell::new(crate::app::Pointer::Arrow),
         });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         // 입력 상자와 검색 입력 칸: 테두리·바탕 없이 (바탕과 강조 색 테두리는 App이 그린다)
@@ -524,6 +531,22 @@ impl SakaduView {
         let area = unsafe { NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), NSRect::ZERO, opts, Some(&view), None) };
         view.addTrackingArea(&area);
         view
+    }
+
+    /// 마우스 모양을 App이 원하는 것으로 (열·칸 경계 위에서는 끄는 방향의 화살표). 바뀔 때만 정한다
+    fn sync_pointer(&self) {
+        let want = with_app(|a| a.pointer()).unwrap_or(crate::app::Pointer::Arrow);
+        if self.ivars().pointer.replace(want) == want {
+            return;
+        }
+        // 맥 13에도 있는 모양을 쓴다 (새 이름 columnResizeCursor는 15부터)
+        #[allow(deprecated)]
+        let cursor = match want {
+            crate::app::Pointer::Arrow => NSCursor::arrowCursor(),
+            crate::app::Pointer::LeftRight => NSCursor::resizeLeftRightCursor(),
+            crate::app::Pointer::UpDown => NSCursor::resizeUpDownCursor(),
+        };
+        cursor.set();
     }
 
     /// 이벤트 위치 (뷰 좌표, 왼쪽 위가 0)

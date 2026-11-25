@@ -7,6 +7,18 @@ use super::glyph::*;
 use super::*;
 use crate::palette::alpha;
 
+/// 그림으로 읽어 미리 보는 파일의 확장자 (카드와 미리 보기 창, 두 앱이 같이 쓴다)
+pub const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jfif", "png", "gif", "bmp", "dib", "webp", "heic", "heif", "avif", "tif", "tiff", "ico"];
+/// 글로 읽어 미리 보는 파일의 확장자
+pub const TEXT_EXTS: &[&str] = &[
+    "txt", "log", "md", "markdown", "csv", "tsv", "json", "jsonc", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "config", "env",
+    "gitignore", "editorconfig", "properties", "rs", "c", "h", "cpp", "hpp", "cc", "cs", "java", "kt", "kts", "go", "py", "rb", "php",
+    "js", "mjs", "cjs", "ts", "tsx", "jsx", "css", "scss", "less", "html", "htm", "vue", "svelte", "sql", "sh", "bash", "zsh", "ps1",
+    "psm1", "bat", "cmd", "lua", "r", "swift", "dart", "gradle", "cmake", "srt", "vtt", "nfo", "reg", "lock", "jsonl", "ndjson", "cts", "mts",
+    "eslintrc", "prettierrc", "babelrc", "nycrc", "npmrc", "nvmrc", "gitattributes", "gitkeep", "npmignore", "eslintignore", "dockerignore", "patch",
+    "diff", "rst", "tex", "bib", "pyi", "pyx", "proto", "graphql", "gql", "vb", "vbs", "xaml", "plist", "sample", "template", "example",
+];
+
 pub const CARD_W: f32 = 288.0;
 /// 카드와 칸 모서리 사이
 pub const CARD_MARGIN: f32 = 24.0;

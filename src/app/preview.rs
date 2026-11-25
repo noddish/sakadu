@@ -35,15 +35,7 @@ const SNIFF_MAX: u64 = 2 * 1024 * 1024;
 const TEXT_READ: u64 = 64 * 1024;
 const TEXT_LINES: usize = 600;
 
-pub(super) const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jfif", "png", "gif", "bmp", "dib", "webp", "heic", "heif", "avif", "tif", "tiff", "ico"];
-pub(super) const TEXT_EXTS: &[&str] = &[
-    "txt", "log", "md", "markdown", "csv", "tsv", "json", "jsonc", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "config", "env",
-    "gitignore", "editorconfig", "properties", "rs", "c", "h", "cpp", "hpp", "cc", "cs", "java", "kt", "kts", "go", "py", "rb", "php",
-    "js", "mjs", "cjs", "ts", "tsx", "jsx", "css", "scss", "less", "html", "htm", "vue", "svelte", "sql", "sh", "bash", "zsh", "ps1",
-    "psm1", "bat", "cmd", "lua", "r", "swift", "dart", "gradle", "cmake", "srt", "vtt", "nfo", "reg", "lock", "jsonl", "ndjson", "cts", "mts",
-    "eslintrc", "prettierrc", "babelrc", "nycrc", "npmrc", "nvmrc", "gitattributes", "gitkeep", "npmignore", "eslintignore", "dockerignore", "patch",
-    "diff", "rst", "tex", "bib", "pyi", "pyx", "proto", "graphql", "gql", "vb", "vbs", "xaml", "plist", "sample", "template", "example",
-];
+pub(super) use sakadu::ui::preview_card::{IMAGE_EXTS, TEXT_EXTS};
 
 /// 셸이 그리지 못해 사카두가 직접 그리는 그림 형식 (thumbs.rs): SVG, 한글 문서의 미리 보기 그림
 pub(super) const DRAWN_EXTS: &[&str] = &["svg", "hwp"];
