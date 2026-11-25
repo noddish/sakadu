@@ -330,6 +330,9 @@ fn place_copy(temp: &str, dir: &str, name: &str, is_dir: bool) -> Result<(String
 /// 원본(파일 번호 id)을 휴지통으로 보낸다. 견줘 본 것이 다르면 복사본을 휴지통으로 보내고 원본은 그대로 둔다.
 /// 원본을 휴지통으로 보내지 못하면(읽기만 되는 디스크 따위) 복사본은 남기고 그 까닭을 함께 돌려준다
 fn move_across(src: &str, dir: &str, id: u64, is_dir: bool) -> Result<Done, Fail> {
+    // 복사하는 동안 원본이 바뀌면(큰 폴더를 옮기는 사이 이미 복사한 파일을 고쳤다) 원본을 휴지통으로 보내지 않는다:
+    // 복사하기 전과 뒤의 원본 모양(tree_print)을 견준다. same_tree는 크기만 봐서 크기가 같은 고침은 모른다
+    let before = tree_print(src);
     let temp = stage_copy(src, dir, is_dir)?;
     if let Err(why) = same_tree(src, &temp) {
         let _ = to_trash(&temp, is_dir);
@@ -339,7 +342,13 @@ fn move_across(src: &str, dir: &str, id: u64, is_dir: bool) -> Result<Done, Fail
     let (made, file_id, renamed) = place_copy(&temp, dir, name, is_dir)?;
     // 되돌리기 전에 견줄 복사본의 모양 (재지 못하면 None: 그때는 되돌리지 않는다)
     let print = tree_print(&util::join(dir, &made)).ok();
-    let trashed = trash_item(src, id).map(|trash_path| Trashed { name: name.to_string(), file_id: id, trash_path });
+    after_copy(src);
+    // 원본이 바뀌었거나 바뀌었는지 모르면 원본을 휴지통으로 보내지 못한 것과 같다: 복사본은 남고 원본도 그대로다
+    let trashed = match (before, tree_print(src)) {
+        (Ok(was), Ok(now)) if was == now => trash_item(src, id).map(|trash_path| Trashed { name: name.to_string(), file_id: id, trash_path }),
+        (Ok(_), Ok(_)) => Err("옮기는 동안 원본이 바뀌었어요".to_string()),
+        _ => Err("옮기는 동안 원본이 바뀌었는지 알 수 없어요".to_string()),
+    };
     Ok(Done::Crossed { name: made, file_id, renamed, trashed, print })
 }
 
@@ -561,6 +570,19 @@ fn to_trash(path: &str, _is_dir: bool) -> Result<String, String> {
 thread_local! {
     /// 시험: 켜 두면 이 줄에서 휴지통으로 보내기가 실패한다 (원본을 휴지통으로 보내지 못한 경우를 본다. 시험마다 제 줄에서 돈다)
     pub static TRASH_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 시험: 다른 디스크로 옮기기에서 복사를 마친 뒤, 원본을 다시 재기 전에 한 번 부른다 (옮기는 동안 원본이 바뀐 경우를 본다)
+    pub static MID_MOVE: std::cell::RefCell<Option<Box<dyn FnOnce(&str)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 다른 디스크로 옮기기에서 복사를 마친 뒤 (앱에서는 아무것도 하지 않는다. 시험은 그 사이에 원본을 바꿔 본다)
+#[cfg(not(test))]
+fn after_copy(_src: &str) {}
+
+#[cfg(test)]
+fn after_copy(src: &str) {
+    if let Some(f) = MID_MOVE.take() {
+        f(src);
+    }
 }
 
 /// 가짜 휴지통 폴더 (시험 프로세스마다 하나)
@@ -956,6 +978,41 @@ mod tests {
         let Ok(Done::Crossed { name, renamed: false, trashed: Err(why), .. }) = result else { panic!("{result:?}") };
         assert!(why.contains("휴지통"), "{why}");
         assert_eq!((std::fs::read(&memo).unwrap(), std::fs::read(util::join(&to, &name)).unwrap()), (b"memo".to_vec(), b"memo".to_vec()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 다른 디스크로 옮기는 동안 원본이 바뀌면(복사를 마친 뒤, 크기는 같게 고쳤다) 원본을 휴지통으로 보내지 않는다:
+    /// 복사본은 남고 원본도 그대로, 까닭을 함께 돌려준다 (원본을 휴지통으로 보내지 못한 것과 같다). 바뀌지 않았으면 전과 같다
+    #[test]
+    fn moving_across_keeps_the_source_if_it_changed_during_the_copy() {
+        let dir = temp("across-busy");
+        let (from, to) = (util::join(&dir, "원래 곳"), util::join(&dir, "받는 곳"));
+        let folder = util::join(&from, "자료");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir(&to).unwrap();
+        let inner = util::join(&folder, "안.txt");
+        std::fs::write(&inner, b"before").unwrap();
+        let edited = inner.clone();
+        MID_MOVE.set(Some(Box::new(move |_src: &str| {
+            std::fs::write(&edited, b"BEFORE").unwrap();
+            let f = std::fs::File::options().write(true).open(&edited).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000)).unwrap();
+        })));
+        let result = move_across(&folder, &to, id(&folder), true);
+        assert!(MID_MOVE.take().is_none(), "the hook ran");
+        let Ok(Done::Crossed { name, trashed: Err(why), .. }) = result else { panic!("{result:?}") };
+        assert!(why.contains("옮기는 동안 원본이 바뀌었어요"), "{why}");
+        assert_eq!(std::fs::read(&inner).unwrap(), b"BEFORE", "the edited source stays where it was");
+        assert_eq!(std::fs::read(util::join(&util::join(&to, &name), "안.txt")).unwrap(), b"before", "the copy stays too");
+        // 바뀌지 않았으면 전처럼 원본을 휴지통으로 보낸다 (.DS_Store만 생긴 것은 바뀐 것이 아니다)
+        let calm = util::join(&from, "조용한 폴더");
+        std::fs::create_dir(&calm).unwrap();
+        std::fs::write(util::join(&calm, "a.txt"), b"a").unwrap();
+        let ds = util::join(&calm, ".DS_Store");
+        MID_MOVE.set(Some(Box::new(move |_src: &str| std::fs::write(&ds, b"x").unwrap())));
+        let result = move_across(&calm, &to, id(&calm), true);
+        let Ok(Done::Crossed { trashed: Ok(_), .. }) = result else { panic!("{result:?}") };
+        assert!(std::fs::symlink_metadata(&calm).is_err(), "the source went to the Trash");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
