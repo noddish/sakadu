@@ -106,7 +106,7 @@ cargo test
 - Test switches: `SAKADU_THEME=dark|light`, `SAKADU_TRAY=0|1`, `SAKADU_ISOLATED=1` (a test window that runs next to your own Sakadu; also point `APPDATA` and `LOCALAPPDATA` elsewhere)
 - Releases: bump `version` in `Cargo.toml` and push a tag like `v0.7.0`; GitHub Actions builds the Windows zip and the Mac zip into one draft release. Running the Release workflow by hand (workflow_dispatch) builds both zips as artifacts without a release, as a dry run.
 - Code: `app.rs` (layout, input, drawing) and `app/` (panels, search, preview, command menu, start page, settings), `index.rs`·`service.rs` (search index and service), `shell.rs` (shell menus, file operations), `archive.rs` (reading inside archives), `listing.rs` (folder reading)
-- Shared code: the modules in `src/lib.rs` (pane and tab state, saved formats, name search and query rules, natural sort) build without the Windows API. To prepare a macOS version, CI checks them on macOS with `cargo test --lib`.
+- Shared code: the modules in `src/lib.rs` (pane and tab state, saved formats, name search and query rules, natural sort) build without the Windows API. The Mac version uses them too, so CI also checks them on macOS with `cargo test --lib`.
 - Mac version: `src/mac/` (`cargo build --features mac-app --bin sakadu-mac`; `scripts/mac-bundle.sh` makes the app bundle). Mac search uses its own index (`src/mac/search.rs`): once turned on, it reads the names under the home folder and the app folders into memory only, and keeps them current with the macOS change log (FSEvents).
 
 Contributions are welcome. Please open an issue first for big changes.
