@@ -9,6 +9,8 @@
 #[cfg(target_os = "macos")]
 mod app;
 #[cfg(target_os = "macos")]
+mod archive;
+#[cfg(target_os = "macos")]
 mod fileops;
 #[cfg(target_os = "macos")]
 mod gfx;

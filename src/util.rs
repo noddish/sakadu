@@ -17,7 +17,7 @@ fn unix_path(path: &str) -> bool {
 }
 
 /// 경로의 구분자: 맥·리눅스 경로는 '/', 그 밖에는 '\'
-fn sep_of(path: &str) -> char {
+pub fn sep_of(path: &str) -> char {
     if unix_path(path) { '/' } else { '\\' }
 }
 

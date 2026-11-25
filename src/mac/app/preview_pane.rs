@@ -1,7 +1,8 @@
 //! 오른쪽 미리 보기 창 (⌥⌘P. Windows의 Alt+P 창과 같은 일): 칸 영역 오른쪽에 붙어, 지금 칸에서 고른 항목을 보인다.
 //! 그림은 ImageIO, 글은 앞부분(스크롤된다), 한글 문서는 안에 든 미리 보기 그림·글(sakadu::cfb).
 //! PDF·Office·iWork·동영상 같은 그 밖의 파일은 창 쪽이 본문 자리에 띄우는 Quick Look 보기(QLPreviewView)가 그린다
-//! (그 보기를 만들 수 없으면 큰 Quick Look 썸네일). 폴더와 미리 보지 않는 파일(압축 파일 따위)은 큰 아이콘과 종류·크기·수정한 때.
+//! (그 보기를 만들 수 없으면 큰 Quick Look 썸네일). 폴더와 미리 보지 않는 파일은 큰 아이콘과 종류·크기·수정한 때.
+//! 압축 파일은 맨 위 항목의 목록을 글로 보이고(Windows와 같다), 압축 파일 안의 항목은 정보만 (디스크에 없는 파일이다).
 //! 머리의 핀으로 고정하면 다른 항목을 골라도 그 파일을 계속 보인다. 고정한 파일은 (디스크, 파일 번호)로 기억해, 같은 경로에 없으면
 //! 원래 폴더에서 같은 번호를 찾고(이름 바꾸기), 없으면 파일 번호로 지금 자리를 찾는다(다른 폴더로 옮기기).
 //! 지워졌거나 휴지통으로 갔으면 고정을 푼다 (확인은 뒷줄에서. Windows와 같은 규칙).
@@ -32,6 +33,8 @@ struct Target {
     dir: bool,
     size: u64,
     modified: u64,
+    /// 압축 파일 안의 항목 (디스크에 없다: 정보만 보이고 고정하지 않는다)
+    inside: bool,
 }
 
 /// 본문에 보이는 것
@@ -154,10 +157,14 @@ enum Plan {
     Look,
 }
 
-/// 확장자와 크기로 정한다. look이 false면(Quick Look 보기를 만들 수 없다) 문서는 큰 썸네일로
+/// 확장자와 크기로 정한다. look이 false면(Quick Look 보기를 만들 수 없다) 문서는 큰 썸네일로.
+/// 압축 파일은 안의 목록(글), 압축 파일 안의 항목은 정보만
 fn plan(t: &Target, look: bool) -> Plan {
-    if t.dir {
+    if t.dir || t.inside {
         return Plan::Info;
+    }
+    if archive_path::is_archive_name(&t.name) {
+        return Plan::Read(CardKind::Archive);
     }
     let Some(ext) = ext_of(&t.name) else {
         // 확장자 없는 작은 파일은 글인지 읽어 본다 (README, Makefile 따위)
@@ -230,7 +237,7 @@ impl App {
     fn preview_target_now(&self) -> Option<Target> {
         let tab = self.panes[self.active].tab();
         let e = tab.cursor_entry().filter(|e| e.selected)?;
-        Some(Target { path: tab.path_of(e)?, name: e.name_string(), dir: e.kind != Kind::File, size: e.size, modified: e.modified })
+        Some(Target { path: tab.path_of(e)?, name: e.name_string(), dir: e.kind != Kind::File, size: e.size, modified: e.modified, inside: tab.in_archive })
     }
 
     /// 창을 지금 고른 항목에 맞춘다 (고정했으면 그대로): 바뀌었으면 처음부터 보인다. take_previews가 이것을 거친다
@@ -266,7 +273,7 @@ impl App {
             Plan::Read(kind) => {
                 pv.asked = seq;
                 let key = CardKey { path: t.path.clone(), modified: t.modified, size: t.size };
-                let px = if kind == CardKind::Text { 0 } else { px };
+                let px = if matches!(kind, CardKind::Text | CardKind::Archive) { 0 } else { px };
                 self.previews.push(PreviewRequest { seq, key, px, kind, pane: true });
             }
         }
@@ -301,6 +308,11 @@ impl App {
         if pv.target.is_none() {
             return;
         }
+        // 압축 파일 안의 항목은 디스크에서 다시 찾을 수 없어 고정하지 않는다
+        if pv.target.as_ref().is_some_and(|t| t.inside) {
+            self.flash = Some((self.active, "압축 파일 안의 항목은 고정할 수 없어요".to_string()));
+            return;
+        }
         pv.pin = Some(Pin { id: None, round, busy: false, again: false });
         // 파일 번호를 읽어 둔다 (이름이 바뀌거나 옮겨져도 찾을 수 있게)
         self.pin_check();
@@ -320,7 +332,7 @@ impl App {
         let Some(path) = pin.filter(|_| open) else { return };
         let round = self.next_seq();
         if let Some(pv) = self.preview.as_mut() {
-            pv.target = Some(Target { path: path.to_string(), name: util::file_name(path).to_string(), dir: false, size: 0, modified: 0 });
+            pv.target = Some(Target { path: path.to_string(), name: util::file_name(path).to_string(), dir: false, size: 0, modified: 0, inside: false });
             pv.pin = Some(Pin { id, round, busy: false, again: false });
             pv.unchecked = true;
         }
@@ -389,13 +401,13 @@ impl App {
         })
     }
 
-    /// 머리의 열기 단추: 파일은 기본 앱으로, 폴더는 지금 칸에서 연다
+    /// 머리의 열기 단추: 파일은 기본 앱으로 (압축 파일은 지금 칸에서 그 안으로, 압축 파일 안의 파일은 꺼내서), 폴더는 지금 칸에서 연다
     pub(super) fn open_preview_target(&mut self) {
         let Some(t) = self.preview.as_ref().and_then(|pv| pv.target.clone()) else { return };
         if t.dir {
             self.navigate(self.active, Location::Dir(t.path), None);
         } else {
-            self.open_files.push(t.path);
+            self.open_paths(self.active, vec![t.path], false);
         }
     }
 
@@ -502,7 +514,8 @@ impl App {
         };
         // 아이콘, 이름, 그 아래 종류 · 크기 (좁으면 크기만). 되살린 고정 파일은 확인하기 전까지 이름만
         let (name_r, sub_r) = head_text(pr);
-        g.icon_for_path(&target.path, R::new(pr.l + 16.0, pr.t + 20.0, pr.l + 32.0, pr.t + 36.0));
+        let icon = |g: &Gfx, r: R| if target.inside { g.icon_for_kind(&target.name, target.dir, r) } else { g.icon_for_path(&target.path, r) };
+        icon(g, R::new(pr.l + 16.0, pr.t + 20.0, pr.l + 32.0, pr.t + 36.0));
         g.text(&target.name, name_r, Font::Strong, t.text);
         let detail = self.preview_detail(target, pv.unchecked);
         let size = (!target.dir && !pv.unchecked).then(|| listing::format_size(target.size));
@@ -546,7 +559,7 @@ impl App {
             // 큰 아이콘, 그 아래 종류·크기와 수정한 때
             Body::Info => {
                 let (cx, cy) = ((body.l + body.r) / 2.0, (body.t + body.b) / 2.0 - 32.0);
-                g.icon_for_path(&target.path, R::new(cx - INFO_IMG / 2.0, cy - INFO_IMG / 2.0, cx + INFO_IMG / 2.0, cy + INFO_IMG / 2.0));
+                icon(g, R::new(cx - INFO_IMG / 2.0, cy - INFO_IMG / 2.0, cx + INFO_IMG / 2.0, cy + INFO_IMG / 2.0));
                 let modified = listing::format_time(target.modified);
                 let lines = [self.preview_detail(target, false), if modified.is_empty() { String::new() } else { format!("수정한 날짜 {modified}") }];
                 for (i, line) in lines.iter().enumerate() {
@@ -562,7 +575,7 @@ impl App {
         if unchecked {
             return String::new();
         }
-        let kind = finder_kind(&self.kinds, &target.name, target.dir, || Some(target.path.clone()));
+        let kind = finder_kind(&self.kinds, &target.name, target.dir, || (!target.inside).then(|| target.path.clone()));
         if target.dir { kind } else { card_detail(&kind, target.size) }
     }
 }

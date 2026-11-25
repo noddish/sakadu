@@ -6,7 +6,7 @@
 //! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다. 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 복사, 되돌리기)은 뒷줄 하나가 맡긴 순서대로 하나씩 한다.
 //! 클립보드에는 파일 주소로 담고 읽는다 (Finder와 주고받을 수 있다).
 //! 끌어서 놓기도 파일 주소로 한다: 고른 줄을 끌어 내면 맥의 끌기를 시작하고(Finder나 다른 칸에 놓을 수 있다),
-//! 끌려 온 파일은 App에 어디에 놓일지 묻고 놓는다.
+//! 끌려 온 파일은 App에 어디에 놓일지 묻고 놓는다. 압축 파일 안의 것은 App이 임시 폴더에 꺼낸 뒤에 끌고, 받는 쪽에 복사만 허락한다.
 //! 훑어보기(스페이스, ⌘Y)는 맥의 훑어보기 창(QLPreviewPanel)에 고른 파일을 띄운다. 그 창의 내용은 이 뷰가 댄다.
 //! 오른쪽 미리 보기 창(⌥⌘P)에서 문서(PDF·Office 따위)는 그 본문 자리에 Quick Look 보기(QLPreviewView)를 하위 뷰로 둔다.
 //! 고정한 파일이 그대로 있는지도 뒷줄에서 확인한다.
@@ -65,6 +65,8 @@ thread_local! {
     static WATCH: OnceCell<Option<crate::watch::Watcher>> = const { OnceCell::new() };
     /// 사이드바 줄의 움직임 때문에 다음 그림을 부탁해 두었다 (schedule_flow)
     static FLOW_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 지금 끌어 내는 것이 압축 파일에서 꺼낸 임시 복사본이다: 받는 쪽에 복사만 허락한다
+    static DRAG_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// 가장 나중에 낸 미리 보기(카드나 오른쪽 창) 요청의 번호. 뒷줄이 그림을 읽기 직전에 보고, 그 사이 다른 요청이 나왔으면 읽지 않는다
@@ -216,16 +218,20 @@ define_class!(
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, e: &NSEvent) {
             let (x, y) = self.point(e);
-            // 고른 줄을 누른 채 움직였으면 App이 끌어 낼 항목들을 내준다: 맥의 끌기를 시작한다
-            let drag = with_app(|a| {
+            // 고른 줄을 누른 채 움직였으면 App이 끌어 낼 항목들을 내준다: 맥의 끌기를 시작한다.
+            // 압축 파일 안의 것은 App이 먼저 꺼내 달라고 맡긴다 (꺼낸 뒤 계속 누르고 움직이면 그때 꺼낸 것을 끈다)
+            let (drag, queued) = with_app(|a| {
                 a.mouse_dragged(x, y);
-                a.take_drag()
+                (a.take_drag().map(|paths| (paths, a.drag_copy)), a.ops_waiting())
             })
-            .flatten();
-            if let Some(paths) = drag {
-                // 끌기를 시작하면서 App이 누르는 동안 미뤄 둔 읽기 결과를 적용했을 수 있다: 이어서 읽을 것이 있으면 보낸다
+            .unwrap_or((None, false));
+            // 꺼내기를 맡겼으면 그 작업을 보낸다. 끌기를 시작하면서 App이 누르는 동안 미뤄 둔 읽기 결과를 적용했을 수도 있다:
+            // 이어서 읽을 것이 있으면 보낸다
+            if drag.is_some() || queued {
                 pump();
-                self.begin_drag(&paths, e);
+            }
+            if let Some((paths, copy_only)) = drag {
+                self.begin_drag(&paths, e, copy_only);
             }
             self.sync_pointer();
             self.setNeedsDisplay(true);
@@ -467,9 +473,13 @@ define_class!(
     unsafe impl NSTextFieldDelegate for SakaduView {}
 
     unsafe impl NSDraggingSource for SakaduView {
-        /// 끌어 낸 항목을 받는 쪽이 할 수 있는 일: 복사하거나 옮기기. 지우기는 내주지 않는다 (Dock의 휴지통에 놓아도 지워지지 않는다)
+        /// 끌어 낸 항목을 받는 쪽이 할 수 있는 일: 복사하거나 옮기기. 지우기는 내주지 않는다 (Dock의 휴지통에 놓아도 지워지지 않는다).
+        /// 압축 파일에서 꺼낸 것은 복사만 (Windows와 같다)
         #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
         fn source_operations(&self, _session: &NSDraggingSession, _context: NSDraggingContext) -> NSDragOperation {
+            if DRAG_COPY.get() {
+                return NSDragOperation::Copy;
+            }
             NSDragOperation(NSDragOperation::Copy.0 | NSDragOperation::Move.0 | NSDragOperation::Generic.0)
         }
 
@@ -477,6 +487,7 @@ define_class!(
         /// 놓이지 않고 취소됐어도, 끄는 동안 미뤄 둔 읽기 결과와 다시 읽기는 여기서 한다 (창 밖에서 취소되면 다른 알림이 오지 않는다)
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]
         fn drag_ended(&self, _session: &NSDraggingSession, _point: NSPoint, operation: NSDragOperation) {
+            DRAG_COPY.set(false);
             if operation != NSDragOperation::None {
                 with_app(App::refresh_shown);
             }
@@ -600,8 +611,10 @@ impl SakaduView {
     }
 
     /// 고른 항목들을 끌어 낸다: 파일 주소로 내주므로 Finder나 다른 앱, 사카두의 다른 칸에 놓을 수 있다.
-    /// 끌리는 그림은 그 파일의 아이콘이다 (여럿이면 조금씩 어긋나게 겹친다)
-    fn begin_drag(&self, paths: &[String], event: &NSEvent) {
+    /// 끌리는 그림은 그 파일의 아이콘이다 (여럿이면 조금씩 어긋나게 겹친다). copy_only면 받는 쪽에 복사만 허락한다
+    /// (압축 파일에서 꺼낸 임시 복사본)
+    fn begin_drag(&self, paths: &[String], event: &NSEvent, copy_only: bool) {
+        DRAG_COPY.set(copy_only);
         let at = self.convertPoint_fromView(event.locationInWindow(), None);
         let items: Vec<Retained<NSDraggingItem>> = paths
             .iter()
@@ -1306,11 +1319,12 @@ fn pump() {
     for r in reqs {
         let watch = WATCH.with(|cell| cell.get().and_then(|w| w.as_ref()).map(crate::watch::Watcher::handle));
         std::thread::spawn(move || {
-            // 감시가 걸린 뒤에 읽는다: 감시보다 먼저 읽으면 읽은 뒤부터 감시가 걸리기까지의 변화를 놓친다
-            if let Some(watch) = &watch {
+            // 감시가 걸린 뒤에 읽는다: 감시보다 먼저 읽으면 읽은 뒤부터 감시가 걸리기까지의 변화를 놓친다.
+            // 압축 파일 안은 감시하지 않으므로 기다리지 않는다
+            if let Some(watch) = watch.as_ref().filter(|_| r.archive.is_none()) {
                 watch.wait_watched(&r.dir, WATCH_WAIT);
             }
-            let result = sakadu::listing::list_dir(&r.dir);
+            let result = crate::app::list_request(&r);
             DispatchQueue::main().exec_async(move || {
                 with_app(|a| a.on_listed(r.tab, r.generation, result));
                 // 읽기 결과가 새 요청을 낼 수 있다 (세션에서 연 폴더가 없으면 홈을 읽는다)

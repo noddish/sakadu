@@ -24,6 +24,19 @@ pub enum Job {
     Move { src: String, dir: String, file_id: u64, or_copy: bool },
     /// 앞서 한 작업을 되돌린다
     Undo(Undo),
+    /// 압축 파일 archive 안의 항목들(전체 경로)을 새 임시 폴더에 꺼낸다 (압축 파일은 그대로다). then은 꺼낸 뒤 할 일
+    Extract { archive: String, items: Vec<String>, then: Then },
+}
+
+/// 압축 파일 안에서 꺼낸 뒤 할 일
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Then {
+    /// macOS '열기'로 연다
+    Open,
+    /// 클립보드에 담는다 (복사한 것으로)
+    Copy,
+    /// 끌어 낸다 (아직 누르고 있으면 다음 움직임에서 맥의 끌기를 시작한다)
+    Drag,
 }
 
 /// 맡긴 작업: 작업 번호, 그 작업을 낸 탭, 할 일
@@ -49,6 +62,8 @@ pub enum Done {
     Copied { name: String, file_id: u64, renamed: bool },
     /// 옮겼다: 옮긴 곳에서의 이름과 파일 번호(옮겨도 그대로다). renamed는 Copied와 같다
     Moved { name: String, file_id: u64, renamed: bool },
+    /// 꺼냈다: 꺼낸 것들의 전체 경로 (맡긴 항목 차례대로)
+    Extracted { paths: Vec<String> },
 }
 
 /// 하지 못한 까닭. 어느 경우든 파일은 바뀌지 않았다
@@ -121,6 +136,11 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             guard(src);
             guard(dir);
             move_item(src, dir, *file_id, *or_copy)
+        }
+        // 압축 파일은 읽기만 하고, 꺼낸 것은 임시 폴더 안의 새 폴더에만 쓴다 (crate::archive::extract)
+        Job::Extract { archive, items, .. } => {
+            guard(archive);
+            crate::archive::extract(archive, items).map(|paths| Done::Extracted { paths }).map_err(Fail::Other)
         }
         // 옮기기를 되돌린다: 옮긴 곳의 그것이 그때 그 항목일 때만, 원래 자리가 비어 있을 때만 하나씩 되돌린다.
         // 되돌리지 못한 것은 원래 전체 경로로 돌려준다 (서로 다른 폴더에서 온 같은 이름의 항목을 가릴 수 있게)

@@ -489,6 +489,17 @@ impl Gfx {
         self.draw_image(&img, r);
     }
 
+    /// 디스크에 없는 항목(압축 파일 안)의 아이콘: 폴더면 폴더, 파일이면 그 확장자의 아이콘 (확장자가 없으면 문서).
+    /// 경로로 물으면 맥은 없는 경로에 빈 문서 아이콘을 준다 (폴더도)
+    pub fn icon_for_kind(&self, name: &str, dir: bool, r: R) {
+        let ext = name.rsplit_once('.').map(|(_, x)| x).filter(|x| !x.is_empty());
+        let ty = if dir { "public.folder" } else { ext.unwrap_or("public.data") };
+        // 맥 12부터 바뀐 이름(iconForContentType:)은 UTType이 필요하다. 이 호출은 확장자와 UTI 글을 그대로 받는다
+        #[allow(deprecated)]
+        let img = NSWorkspace::sharedWorkspace().iconForFileType(&NSString::from_str(ty));
+        self.draw_image(&img, r);
+    }
+
     /// 지금까지 그린 그림을 PNG로
     pub fn save_png(&self, path: &std::path::Path) -> Result<(), String> {
         self.ns.flushGraphics();
