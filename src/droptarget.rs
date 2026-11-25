@@ -74,7 +74,10 @@ fn own_effect(files: &[String], dest: &str, keys: MODIFIERKEYS_FLAGS, allowed: D
         return DROPEFFECT_NONE;
     }
     let (shift, ctrl) = (keys.0 & MK_SHIFT.0 != 0, keys.0 & MK_CONTROL.0 != 0);
+    // 압축 파일 안에서 꺼내는 것은 늘 복사 (옮기면 압축 파일에서 지워야 한다)
+    let from_archive = files.iter().any(|f| crate::archive::inside(f));
     let want = match (shift, ctrl) {
+        _ if from_archive => DROPEFFECT_COPY,
         (true, false) => DROPEFFECT_MOVE,
         (false, true) => DROPEFFECT_COPY,
         _ if files.iter().all(|f| same_volume(f, dest)) => DROPEFFECT_MOVE,
@@ -183,7 +186,7 @@ fn point(pt: &POINTL) -> POINT {
 impl IDropTarget_Impl for DropTarget_Impl {
     fn DragEnter(&self, pdataobj: Ref<IDataObject>, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let data = pdataobj.ok()?.clone();
-        let files = shell::hdrop_paths(&data).filter(|f| !f.is_empty());
+        let files = shell::dropped_paths(&data).filter(|f| !f.is_empty());
         crate::diag::log(|| format!("drop: DragEnter at {},{} files={:?}", pt.x, pt.y, files.as_ref().map(|f| f.len())));
         {
             let mut st = self.state.borrow_mut();
@@ -298,6 +301,22 @@ mod tests {
         // 다른 드라이브에서 섞여 온 파일은 복사
         let mixed = vec!["C:\\a\\x.txt".to_string(), "D:\\y.txt".to_string()];
         assert_eq!(own_effect(&mixed, "C:\\b", none, ALL), DROPEFFECT_COPY);
+    }
+
+    /// 압축 파일 안에서 꺼내는 것은 복사, 압축 파일 자체는 다른 파일처럼 같은 드라이브면 이동
+    #[test]
+    fn archive_contents_copy_but_archive_files_move() {
+        let dir = std::env::temp_dir().join(format!("sakadu-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip = dir.join("묶음.zip");
+        std::fs::write(&zip, b"PK").unwrap();
+        let z = zip.to_string_lossy().into_owned();
+        let dest = format!("{}\\다른 곳", &z[..2]);
+        let none = MODIFIERKEYS_FLAGS(0);
+        assert_eq!(own_effect(std::slice::from_ref(&z), &dest, none, ALL), DROPEFFECT_MOVE);
+        assert_eq!(own_effect(&[format!("{z}\\a.txt")], &dest, none, ALL), DROPEFFECT_COPY);
+        assert_eq!(own_effect(&[format!("{z}\\a.txt")], &dest, MK_SHIFT, ALL), DROPEFFECT_COPY);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

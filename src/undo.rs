@@ -367,8 +367,14 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
     fn PreCopyItem(&self, _f: u32, _i: Ref<IShellItem>, _d: Ref<IShellItem>, _n: &PCWSTR) -> Result<()> {
         Ok(())
     }
-    fn PostCopyItem(&self, _f: u32, item: Ref<IShellItem>, _d: Ref<IShellItem>, _n: &PCWSTR, hr: HRESULT, created: Ref<IShellItem>) -> Result<()> {
-        self.record(hr, item, created, |_, to| Done::Copied { to });
+    fn PostCopyItem(&self, _f: u32, _item: Ref<IShellItem>, _d: Ref<IShellItem>, _n: &PCWSTR, hr: HRESULT, created: Ref<IShellItem>) -> Result<()> {
+        // 복사는 만든 사본만 알면 되돌릴 수 있다 (압축 파일 안에서 꺼낸 원본에는 파일 경로가 없다)
+        if hr.is_ok()
+            && let Ok(created) = created.ok()
+            && let Some(to) = name_of(created, SIGDN_FILESYSPATH)
+        {
+            self.done.borrow_mut().push(Done::Copied { to });
+        }
         Ok(())
     }
     fn PreDeleteItem(&self, _f: u32, _i: Ref<IShellItem>) -> Result<()> {

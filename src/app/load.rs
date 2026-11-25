@@ -48,11 +48,12 @@ impl App {
             return;
         }
         let waited = tab.loading_since.take().is_some();
+        tab.in_archive = l.archive;
         let ok = l.result.is_ok();
         let mut went_offline = false;
         let restore = match l.result {
             Ok(entries) => {
-                if let Some(dir) = tab.loc.dir() {
+                if let Some(dir) = tab.loc.dir().filter(|_| !l.archive) {
                     self.folders.observe(dir, &entries);
                     // 네트워크 폴더는 마지막으로 본 목록을 기억해 둔다 (연결이 끊기면 흐리게 보여 준다)
                     if !is_local_path(dir) && entries.len() <= 20_000 {
@@ -201,9 +202,11 @@ impl App {
             (p < self.layout.count())
                 .then(|| {
                     let tab = self.panes[p].tab();
+                    // 압축 파일 안은 감시하지 않는다 (바뀌면 F5로 다시 읽는다)
                     tab.loc
                         .dir()
                         .filter(|d| matches!(tab.state, LoadState::Ready) || (matches!(tab.state, LoadState::Loading) && is_local_path(d)))
+                        .filter(|d| crate::archive::archive_of(d).is_none())
                         .map(String::from)
                 })
                 .flatten()

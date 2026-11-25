@@ -5,11 +5,21 @@ use super::*;
 impl App {
     // ---------- 파일 작업 ----------
 
+    /// 칸 p가 압축 파일 안을 보고 있으면 읽기만 한다고 알리고 true (지우기·잘라내기·붙여넣기·새 폴더·이름 바꾸기를 막는다)
+    pub(super) fn archive_read_only(&mut self, p: usize) -> bool {
+        let inside = self.panes[p].tab().loc.dir().is_some_and(|d| crate::archive::archive_of(d).is_some());
+        if inside {
+            self.flash(p, "압축 파일 안은 읽기만 해요 · 꺼내려면 복사해서 다른 폴더에 붙여넣으세요");
+        }
+        inside
+    }
+
     pub(super) fn delete(&mut self, p: usize, permanent: bool) {
         let tab = self.panes[p].tab();
-        if tab.loc == Location::Computer {
+        if tab.loc == Location::Computer || self.archive_read_only(p) {
             return;
         }
+        let tab = self.panes[p].tab();
         // 선택을 풀어 둔 상태에서는 커서 항목으로 대신하지 않는다
         let paths = tab.marked_paths();
         if paths.is_empty() {
@@ -36,6 +46,9 @@ impl App {
     }
 
     pub(super) fn copy(&mut self, p: usize, cut: bool) {
+        if cut && self.archive_read_only(p) {
+            return;
+        }
         let tab = self.panes[p].tab();
         // 고른 것이 없으면(커서만 남은 상태) 아무것도 올리지 않는다 (탐색기와 같음)
         let paths = tab.marked_paths();
@@ -49,12 +62,18 @@ impl App {
     }
 
     pub(super) fn paste(&mut self, p: usize) {
+        if self.archive_read_only(p) {
+            return;
+        }
         if let Some(dest) = self.panes[p].tab().loc.dir().map(String::from) {
             self.pending.push(Deferred::Paste { pane: p, dest });
         }
     }
 
     pub(super) fn new_folder(&mut self, p: usize) {
+        if self.archive_read_only(p) {
+            return;
+        }
         let Some(dir) = self.panes[p].tab().loc.dir().map(String::from) else { return };
         let mut name = "새 폴더".to_string();
         let mut n = 2;

@@ -2,6 +2,7 @@
 //! Sakadu: 가볍고 빠른 Windows 멀티뷰 파일 관리자
 
 mod app;
+mod archive;
 mod defaultfm;
 mod droptarget;
 mod folders;

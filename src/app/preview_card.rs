@@ -112,7 +112,8 @@ impl App {
         let App { panes, types, active, .. } = self;
         let tab = panes[*active].tab();
         let e = tab.entry_at(tab.cursor).filter(|e| e.selected && e.kind == Kind::File)?;
-        if tab.selection_stats().0 != 1 {
+        // 압축 파일 안의 파일은 미리 보지 않는다
+        if tab.selection_stats().0 != 1 || tab.in_archive {
             return None;
         }
         let name = e.name_string();
