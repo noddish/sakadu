@@ -226,6 +226,15 @@ impl SideFlow {
     }
 }
 
+/// 그룹 머리 줄의 움직임 열쇠 (SideFlow의 줄 이름): 그룹 이름에, 그보다 앞에 있는 같은 이름 그룹의 수를 붙인다.
+/// 이름은 고칠 수 있고 겹칠 수도 있다 (새 그룹 둘의 이름 고치기를 둘 다 그만두면 둘 다 '새 그룹'). 이름만 쓰면 두 그룹이 한 자리를
+/// 나눠 써서 앞 그룹이 뒤 그룹의 자리에서 끝없이 다시 미끄러진다. 이름이 겹치지 않으면 그룹 차례가 바뀌어도 열쇠가 그대로다
+pub fn group_flow_key(favs: &Favorites, g: usize) -> String {
+    let Some(name) = favs.groups.get(g).map(|grp| grp.name.as_str()) else { return "g|".to_string() };
+    let twins = favs.groups[..g].iter().filter(|grp| grp.name == name).count();
+    format!("g|{name}|{twins}")
+}
+
 /// 그룹 판: 끌어 온 줄이 들어갈 그룹(strong, 진하게)이나 마우스가 올라간 그룹 머리의 그룹(옅게)을 묶는 둥근 판
 pub fn paint_group_plate(g: &impl Canvas, t: &Theme, r: R, strong: bool) {
     g.fill_round(r, R_ROW + SP_XS, if t.high_contrast { t.hover } else { alpha(t.text, if strong { A_PRESS } else { A_HOVER }) });
@@ -396,5 +405,30 @@ mod tests {
         f.start_at("b".to_string(), 200.0);
         assert_eq!(f.step(&keys, &[Some(28.0), Some(0.0)], now, false), [Some(28.0), Some(0.0)]);
         assert!(!f.moving);
+    }
+
+    /// 그룹의 움직임 열쇠: 이름이 같은 그룹도 따로 움직이고(한 자리를 나눠 쓰면 끝없이 미끄러진다), 이름이 다르면 차례가 바뀌어도 그대로
+    #[test]
+    fn groups_with_the_same_name_move_apart() {
+        let group = |name: &str| Group { name: name.into(), collapsed: false, items: Vec::new() };
+        let mut favs = Favorites { items: Vec::new(), groups: vec![group("새 그룹"), group("업무"), group("새 그룹")] };
+        let keys: Vec<String> = (0..3).map(|g| group_flow_key(&favs, g)).collect();
+        assert_eq!(keys.iter().collect::<std::collections::HashSet<_>>().len(), 3, "{keys:?}");
+        assert_eq!(group_flow_key(&favs, 9), "g|", "no such group");
+        // 이름이 하나뿐인 그룹은 옮겨도 같은 열쇠
+        let work = group_flow_key(&favs, 1);
+        favs.move_group(1, 0);
+        assert_eq!(group_flow_key(&favs, 0), work);
+        // 같은 이름의 두 머리 줄이 각자 제자리로 가서 멈춘다
+        let keys: Vec<String> = (0..3).map(|g| group_flow_key(&favs, g)).collect();
+        let mut f = SideFlow::default();
+        let now = Instant::now();
+        f.step(&keys, &[Some(0.0), Some(28.0), Some(56.0)], now, true);
+        let mut out = Vec::new();
+        for i in 1..200 {
+            out = f.step(&keys, &[Some(0.0), Some(56.0), Some(28.0)], now + std::time::Duration::from_millis(16 * i), true);
+        }
+        assert!(!f.moving, "{out:?}");
+        assert_eq!(out, [Some(0.0), Some(56.0), Some(28.0)]);
     }
 }

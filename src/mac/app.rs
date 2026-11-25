@@ -37,7 +37,7 @@ use sakadu::ui::menu::{MenuIcon, MenuLine, MenuScene, menu_height, menu_hit, men
 use sakadu::ui::paint::{EntryArt, PaneHover, PaneScene, paint_pane_border, paint_pane_head, paint_pane_list};
 use sakadu::ui::preview_card::{CardArt, CardBody, CardGeom, CardHover, CardScene, IMAGE_EXTS, TEXT_EXTS, card_geom, paint_preview_card};
 use sakadu::ui::rail::{RailGeom, RailHover, RailScene, RailSpace, paint_rail, rail_geom};
-use sakadu::ui::side_flow::{DropPlan, DropTo, FlowKind, FlowSlot, SideFlow, drop_plan, group_span, paint_drag_card, paint_drop_area, paint_group_plate};
+use sakadu::ui::side_flow::{DropPlan, DropTo, FlowKind, FlowSlot, SideFlow, drop_plan, group_flow_key, group_span, paint_drag_card, paint_drop_area, paint_group_plate};
 use sakadu::ui::toolbar::{ToolbarGeom, ToolbarHover, ToolbarScene, ToolbarSpec, can_go_up, paint_toolbar, toolbar_geom};
 use sakadu::ui::*;
 use sakadu::util;
@@ -859,6 +859,9 @@ struct SideRow {
     h: f32,
     /// 끌어 옮기기에서 맡는 몫 (공통 ui::side_flow): 고정한 것의 번호, 즐겨찾기 줄, 즐겨찾기 바로 위 줄
     flow: FlowKind,
+    /// 움직임을 이어 가는 열쇠: 같은 줄이면 자리가 바뀌어도 같다 (고정한 것·즐겨찾기 항목·바로가기는 경로,
+    /// 그룹은 공통 group_flow_key: 이름이 겹칠 수 있어 앞에 있는 같은 이름 그룹의 수를 붙인다)
+    key: String,
 }
 
 impl SideRow {
@@ -867,17 +870,8 @@ impl SideRow {
         FlowSlot { t: self.y, b: self.y + self.h, kind: self.flow }
     }
 
-    /// 움직임을 이어 가는 열쇠: 같은 줄이면 자리가 바뀌어도 같다 (고정한 것·즐겨찾기 항목·바로가기는 경로, 그룹은 이름)
     fn key(&self) -> String {
-        let path = self.path.as_deref().unwrap_or_default();
-        match self.kind {
-            SideKind::Pin => pin_key(path),
-            SideKind::Fav => fav_key(path),
-            SideKind::Group(..) => format!("g|{}", self.label),
-            SideKind::Place => format!("s|{path}"),
-            SideKind::Hint => "hint".to_string(),
-            SideKind::Label => "label".to_string(),
-        }
+        self.key.clone()
     }
 }
 
@@ -3667,7 +3661,18 @@ impl App {
     /// 사이드바 목록의 줄. 위에는 이 공간에 고정한 것(없으면 안내), 아래에는 '모든 공간': 구역 이름, 바로가기, 즐겨찾기.
     /// '모든 공간'은 줄이 적으면 목록 아래 끝에 붙고, 많아서 넘치면 고정한 것 바로 아래에 이어져 함께 스크롤된다
     fn side_rows(&self) -> Vec<SideRow> {
-        let row = |kind, label: &str, path: Option<&str>, is_dir, indent, y, h, flow| SideRow { kind, label: label.to_string(), path: path.map(str::to_string), is_dir, indent, y, h, flow };
+        let row = |kind: SideKind, label: &str, path: Option<&str>, is_dir, indent, y, h, flow| {
+            let p = path.unwrap_or_default();
+            let key = match kind {
+                SideKind::Pin => pin_key(p),
+                SideKind::Fav => fav_key(p),
+                SideKind::Group(g, _) => group_flow_key(&self.favs, g),
+                SideKind::Place => format!("s|{p}"),
+                SideKind::Hint => "hint".to_string(),
+                SideKind::Label => "label".to_string(),
+            };
+            SideRow { kind, label: label.to_string(), path: path.map(str::to_string), is_dir, indent, y, h, flow, key }
+        };
         let mut rows = Vec::new();
         let mut y = 0.0;
         let pins = self.pins();
@@ -6389,6 +6394,23 @@ mod tests {
         assert_eq!(pin_names(&a), ["업무", "예산.csv", "다운로드"]);
         drag_side(&mut a, &g, "업무", 2000.0);
         assert_eq!(saved_pins(&a), ["예산.csv", "다운로드", "업무"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 이름이 같은 그룹 둘(새 그룹 둘의 이름 고치기를 그만둔 것)도 줄마다 움직임 열쇠가 따로라, 그리면 제자리에 멈춘다
+    /// (한 열쇠를 나눠 쓰면 앞 그룹이 뒤 그룹의 자리에서 끝없이 다시 미끄러진다)
+    #[test]
+    fn groups_with_the_same_name_settle_in_the_sidebar() {
+        let (root, home) = demo();
+        let (mut a, mut g) = app(&home);
+        for _ in 0..2 {
+            a.favs.groups.push(Group { name: "새 그룹".into(), collapsed: false, items: Vec::new() });
+        }
+        let keys: Vec<String> = a.side_rows().iter().map(SideRow::key).collect();
+        assert_eq!(keys.iter().collect::<HashSet<_>>().len(), keys.len(), "{keys:?}");
+        a.paint(&mut g);
+        a.paint(&mut g);
+        assert!(!a.side_moving(), "nothing moved, so nothing slides");
         std::fs::remove_dir_all(root).unwrap();
     }
 
