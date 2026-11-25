@@ -6,6 +6,7 @@
 //! 메뉴(앱이 그린다)도: 목록의 빈 곳을 오른쪽 단추로 눌러 열고, 실제 키(Esc, ↓, Return)로 닫고 고른다.
 //! 새 탭 시작 화면(⌘T)과 명령 메뉴(⌘K)도: 시작 화면을 키로 열어 보고, 명령 메뉴의 입력 칸에 쳐서 걸러 보고 Esc로 닫는다.
 //! 사이드바 끌기도: 둘을 고정하고 실제 마우스 입력(mouseDown:·mouseDragged:·mouseUp:)으로 첫 줄을 아래로 끌어 순서를 바꾸고, 눌렀다 떼서 연다.
+//! 오른쪽 미리 보기 창(⌥⌘P)도: 열어 글 파일의 글을 보고, PDF를 고르면 본문 자리에 Quick Look 보기가 뜨는지 보고, 닫는다.
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
 //! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
@@ -33,6 +34,7 @@ const PERIOD: u16 = 0x2F;
 const ESC: u16 = 0x35;
 const KEY_J: u16 = 0x26;
 const KEY_K: u16 = 0x28;
+const KEY_P: u16 = 0x23;
 const KEY_T: u16 = 0x11;
 const KEY_W: u16 = 0x0D;
 
@@ -305,6 +307,26 @@ fn script(dir: &str) -> usize {
             key(Y, true);
             run.wait("cmd-Y closes it", 5, || on_main(|| !look_shown()));
         }
+    }
+
+    // 오른쪽 미리 보기 창: ⌥⌘P로 열면 고른 글 파일의 글이 보인다. PDF를 고르면 본문 자리에 Quick Look 보기(QLPreviewView)가 뜬다.
+    // ⌥⌘P로 닫으면 칸들이 다시 넓어지고 그 보기도 감춰진다 (PDF는 시험 폴더에 잠깐 만들었다 지운다)
+    let alt_cmd = NSEventModifierFlags::Command | NSEventModifierFlags::Option;
+    if run.select("가나다.txt") {
+        key_with(KEY_P, alt_cmd);
+        let shown = || on_main(|| with_app(|a| a.preview_seen()).flatten());
+        let text_shown = || shown().is_some_and(|(n, t)| n.as_deref() == Some("가나다.txt") && t.is_some_and(|t| t.starts_with("훑어보기로 보는 글")));
+        if run.wait("alt-cmd-P opens the preview pane with the selected file's text", 5, text_shown) {
+            let pdf = Path::new(dir).join("문서.pdf");
+            run.check("a PDF is made in the test folder", std::fs::write(&pdf, crate::render::tiny_pdf(200, 300)).is_ok(), String::new);
+            if run.select("문서.pdf") {
+                run.wait("a PDF shows in a Quick Look view over the pane body", 10, || on_main(|| look_view_showing().is_some_and(|p| p.ends_with("문서.pdf"))));
+            }
+            let _ = std::fs::remove_file(&pdf);
+            run.wait("the PDF leaves the list", 5, || seen().is_some_and(|s| s.ready && !s.names.iter().any(|n| n == "문서.pdf")));
+        }
+        key_with(KEY_P, alt_cmd);
+        run.wait("alt-cmd-P closes the pane and hides the Quick Look view", 5, || shown().is_none() && on_main(|| look_view_showing().is_none()));
     }
 
     // 경로 입력: ⌘L로 상자를 열고 하위 폴더의 경로를 쳐서 Return. ⌘↑로 돌아오면 그 폴더가 골라져 있다
@@ -774,6 +796,13 @@ fn drop_on_row(path: &str, row: &str) -> (Option<NSDragOperation>, bool) {
         let _: () = msg_send![&*view, draggingEnded: &*drag];
         (Some(hover), dropped)
     }
+}
+
+/// 미리 보기 창의 Quick Look 보기가 보이면 그 보기에 넘긴 파일 (메인 줄에서)
+fn look_view_showing() -> Option<String> {
+    let view = VIEW.with(|v| v.get().cloned())?;
+    let shown = view.ivars().look_view.get().cloned().flatten().is_some_and(|q| !q.isHidden());
+    shown.then(|| view.ivars().look_item.borrow().as_ref().map(|(p, _)| p.clone())).flatten()
 }
 
 /// 이름 상자가 보이면 그 글

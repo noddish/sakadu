@@ -80,7 +80,7 @@ pub const ACTIONS: [(Action, &str, &str, &str); 27] = [
 ];
 
 /// 맥의 기본 키 (ACTIONS와 같은 순서). Finder 관례를 따른다: ⌘로 부르고, 이름 바꾸기는 Return.
-/// 빈 것은 맥에 아직 그 동작이 없다 (사이드바 목록으로 이동, 미리 보기 창)
+/// 빈 것은 맥에 아직 그 동작이 없다 (사이드바 목록으로 이동)
 pub const MAC_DEFAULTS: [&str; 27] = [
     "Cmd+F",
     "Cmd+K",
@@ -91,7 +91,7 @@ pub const MAC_DEFAULTS: [&str; 27] = [
     "Shift+Cmd+T",
     "Shift+Cmd+N",
     "Shift+Cmd+.",
-    "",
+    "Alt+Cmd+P",
     "Cmd+Z",
     "Alt+Cmd+1",
     "Alt+Cmd+2",
