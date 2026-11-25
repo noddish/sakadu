@@ -65,8 +65,9 @@ pub enum Done {
     /// 옮겼다: 옮긴 곳에서의 이름과 파일 번호(옮겨도 그대로다). renamed는 Copied와 같다
     Moved { name: String, file_id: u64, renamed: bool },
     /// 다른 디스크로 옮겼다: 복사본의 이름과 파일 번호(복사본은 다른 파일이다), renamed는 Copied와 같다.
-    /// trashed는 휴지통으로 간 원본. 원본을 휴지통으로 보내지 못했으면 Err(까닭): 그때 복사본은 남고 원본도 그대로다
-    Crossed { name: String, file_id: u64, renamed: bool, trashed: Result<Trashed, String> },
+    /// trashed는 휴지통으로 간 원본. 원본을 휴지통으로 보내지 못했으면 Err(까닭): 그때 복사본은 남고 원본도 그대로다.
+    /// print는 옮길 때 잰 복사본의 모양 지문 (tree_print. 되돌리기 전에 견준다. 재지 못했으면 None)
+    Crossed { name: String, file_id: u64, renamed: bool, trashed: Result<Trashed, String>, print: Option<u64> },
     /// 꺼냈다: 꺼낸 것들의 전체 경로 (맡긴 항목 차례대로)
     Extracted { paths: Vec<String> },
 }
@@ -167,14 +168,17 @@ pub fn run(job: &Job) -> Result<Done, Fail> {
             Ok(Done::Undone { left })
         }
         // 다른 디스크로 옮긴 것을 되돌린다: 원본을 휴지통에서 원래 자리로 꺼내고, 꺼낸 것만 그 복사본을 휴지통으로 보낸다
-        // (원본이 돌아오지 못하면 복사본이 남은 하나다). 되돌리지 못한 것은 옮기기처럼 원래 전체 경로로 돌려준다
+        // (원본이 돌아오지 못하면 복사본이 남은 하나다). 되돌리지 못한 것은 옮기기처럼 원래 전체 경로로 돌려준다.
+        // 옮긴 뒤 옮긴 곳에서 고친 것은 버리지 않는다: 복사본이 옮길 때 모양 그대로가 아니면 원본은 휴지통에, 복사본은 그 자리에 둔다
         Job::Undo(Undo::Across { to, items }) => {
             let mut left = Vec::new();
-            for Crossed { orig, trashed, name, file_id } in items {
+            for Crossed { orig, trashed, name, file_id, print } in items {
                 let copy = util::join(to, name);
                 guard(orig);
                 guard(&copy);
-                if let Err(why) = put_back(&trashed.trash_path, orig, trashed.file_id) {
+                if let Err(why) = copy_unchanged(&copy, *file_id, *print) {
+                    left.push((orig.clone(), why));
+                } else if let Err(why) = put_back(&trashed.trash_path, orig, trashed.file_id) {
                     left.push((orig.clone(), why));
                 } else if let Err(why) = trash_item(&copy, *file_id) {
                     left.push((orig.clone(), format!("원본은 되돌렸지만 복사본이 남았어요 · {why}")));
@@ -333,8 +337,61 @@ fn move_across(src: &str, dir: &str, id: u64, is_dir: bool) -> Result<Done, Fail
     }
     let name = util::file_name(src);
     let (made, file_id, renamed) = place_copy(&temp, dir, name, is_dir)?;
+    // 되돌리기 전에 견줄 복사본의 모양 (재지 못하면 None: 그때는 되돌리지 않는다)
+    let print = tree_print(&util::join(dir, &made)).ok();
     let trashed = trash_item(src, id).map(|trash_path| Trashed { name: name.to_string(), file_id: id, trash_path });
-    Ok(Done::Crossed { name: made, file_id, renamed, trashed })
+    Ok(Done::Crossed { name: made, file_id, renamed, trashed, print })
+}
+
+/// 다른 디스크로 옮긴 복사본의 모양 지문: 속까지의 (상대 경로, 종류, 크기, 수정 시각)을 이름 차례로 엮은 해시 하나.
+/// 옮길 때 재어 두었다가 되돌리기 전에 다시 재어, 옮긴 뒤 고친 것(파일 내용, 폴더 안에 더하거나 빼거나 이름을 바꾼 것)을 알아본다.
+/// 폴더 자체의 수정 시각과 Finder가 만드는 .DS_Store는 보지 않는다 (폴더를 보기만 해도 바뀐다). 크기와 상관없이 숫자 하나라
+/// 아주 큰 폴더여도 되돌리기 기록이 커지지 않는다 (재는 데는 옮길 때의 견줘 보기 same_tree만큼 걸린다). 읽지 못하면 Err
+fn tree_print(path: &str) -> Result<u64, String> {
+    use std::hash::{Hash, Hasher};
+    use std::os::unix::fs::MetadataExt;
+    let unreadable = |p: &str, e: std::io::Error| format!("{} · {}", util::file_name(p), fileops::reason(&e));
+    let mut h = std::hash::DefaultHasher::new();
+    // 꺼낼 상대 경로들 (뒤에서 꺼낸다)
+    let mut todo = vec![String::new()];
+    while let Some(rel) = todo.pop() {
+        let full = if rel.is_empty() { path.to_string() } else { util::join(path, &rel) };
+        let m = std::fs::symlink_metadata(&full).map_err(|e| unreadable(&full, e))?;
+        let t = m.file_type();
+        rel.hash(&mut h);
+        if t.is_dir() {
+            'd'.hash(&mut h);
+            let mut names = Vec::new();
+            for entry in std::fs::read_dir(&full).map_err(|e| unreadable(&full, e))? {
+                let name = entry.map_err(|e| unreadable(&full, e))?.file_name().to_string_lossy().into_owned();
+                if name != ".DS_Store" {
+                    names.push(name);
+                }
+            }
+            names.sort();
+            // 이름 차례로 재도록 거꾸로 넣는다
+            todo.extend(names.into_iter().rev().map(|name| if rel.is_empty() { name } else { format!("{rel}/{name}") }));
+        } else {
+            let kind = if t.is_symlink() { 'l' } else if t.is_file() { 'f' } else { 'o' };
+            (kind, m.len(), m.mtime(), m.mtime_nsec()).hash(&mut h);
+        }
+    }
+    Ok(h.finish())
+}
+
+/// 되돌리기 전에: 다른 디스크로 옮긴 복사본이 옮길 때 모양 그대로인지. 복사본이 없어졌거나 다른 항목으로 바뀌었으면 Ok다
+/// (원본을 꺼내도 잃을 것이 없고, 그 자리의 다른 항목은 trash_item이 파일 번호로 걸러 휴지통으로 보내지 않는다)
+fn copy_unchanged(copy: &str, file_id: u64, print: Option<u64>) -> Result<(), String> {
+    if fileops::inode(copy).ok() != Some(file_id) {
+        return Ok(());
+    }
+    let kept = "원본은 휴지통에 그대로 있어요";
+    match (print, tree_print(copy)) {
+        (Some(was), Ok(now)) if was == now => Ok(()),
+        (Some(_), Ok(_)) => Err(format!("옮긴 뒤 바뀌어서 되돌리지 않았어요 ({kept})")),
+        (None, _) => Err(format!("옮긴 뒤 바뀌었는지 알 수 없어 되돌리지 않았어요 ({kept})")),
+        (_, Err(why)) => Err(format!("옮긴 뒤 바뀌었는지 알 수 없어 되돌리지 않았어요 ({kept}) · {why}")),
+    }
 }
 
 /// 복사본 copy가 원본 src와 같은 모양인지: 같은 종류(파일, 폴더, 링크)이고, 파일은 크기가 같고, 폴더는 원본의 항목이 모두
@@ -840,7 +897,7 @@ mod tests {
         assert!(matches!(move_to(&src, true), Ok(Done::Copied { name, renamed: false, .. }) if name == "보고서.docx"));
         assert_eq!((std::fs::read(&src).unwrap(), std::fs::read(util::join(&far, "보고서.docx")).unwrap()), (b"report".to_vec(), b"report".to_vec()));
         // 옮기기: 같은 이름이 있어 번호가 붙은 복사본이 생기고, 원본은 같은 파일 그대로 휴지통으로 간다
-        let Ok(Done::Crossed { name, file_id, renamed: true, trashed: Ok(t) }) = move_to(&src, false) else { panic!("다른 디스크로 옮기기") };
+        let Ok(Done::Crossed { name, file_id, renamed: true, trashed: Ok(t), print }) = move_to(&src, false) else { panic!("다른 디스크로 옮기기") };
         assert_eq!(name, "보고서 2.docx");
         let made = util::join(&far, &name);
         assert_eq!((id(&made), std::fs::read(&made).unwrap(), xattr(&made, "com.example.note")), (file_id, b"report".to_vec(), Some("사카두".to_string())));
@@ -850,14 +907,14 @@ mod tests {
         let folder = util::join(&dir, "자료");
         std::fs::create_dir_all(util::join(&folder, "안쪽")).unwrap();
         std::fs::write(util::join(&util::join(&folder, "안쪽"), "깊은 파일.txt"), b"deep").unwrap();
-        let Ok(Done::Crossed { name: folder_name, file_id: folder_copy, renamed: false, trashed: Ok(folder_trashed) }) = move_to(&folder, false) else { panic!("폴더") };
+        let Ok(Done::Crossed { name: folder_name, file_id: folder_copy, renamed: false, trashed: Ok(folder_trashed), print: folder_print }) = move_to(&folder, false) else { panic!("폴더") };
         assert_eq!(std::fs::read(util::join(&util::join(&util::join(&far, &folder_name), "안쪽"), "깊은 파일.txt")).unwrap(), b"deep");
         assert!(std::fs::symlink_metadata(&folder).is_err());
         assert!(!names(&far).iter().any(|n| n.contains("sakadu-copying")), "no temporary name is left");
         // 되돌리기: 원본이 같은 파일로 돌아오고, 복사본은 그 디스크의 휴지통으로 간다
         let items = vec![
-            Crossed { orig: src.clone(), trashed: t, name: name.clone(), file_id },
-            Crossed { orig: folder.clone(), trashed: folder_trashed, name: folder_name, file_id: folder_copy },
+            Crossed { orig: src.clone(), trashed: t, name: name.clone(), file_id, print },
+            Crossed { orig: folder.clone(), trashed: folder_trashed, name: folder_name, file_id: folder_copy, print: folder_print },
         ];
         assert_eq!(run(&Job::Undo(Undo::Across { to: far.clone(), items })), Ok(Done::Undone { left: Vec::new() }));
         assert_eq!((id(&src), std::fs::read(&src).unwrap()), (file, b"report".to_vec()));
@@ -879,14 +936,14 @@ mod tests {
         std::fs::write(util::join(&to, "자료"), b"same name").unwrap();
         let folder = util::join(&from, "자료");
         let folder_id = id(&folder);
-        let Ok(Done::Crossed { name, file_id, renamed: true, trashed: Ok(t) }) = move_across(&folder, &to, folder_id, true) else { panic!("옮기기") };
+        let Ok(Done::Crossed { name, file_id, renamed: true, trashed: Ok(t), print }) = move_across(&folder, &to, folder_id, true) else { panic!("옮기기") };
         assert_eq!(name, "자료 2");
         assert_eq!((id(&util::join(&to, &name)), std::fs::read(util::join(&util::join(&to, &name), "안.txt")).unwrap()), (file_id, b"in".to_vec()));
         assert_ne!(file_id, folder_id, "the copy is its own folder");
         assert!(std::fs::symlink_metadata(&folder).is_err() && t.trash_path.starts_with(&fake_trash()) && id(&t.trash_path) == folder_id);
         assert_eq!(std::fs::read(util::join(&to, "자료")).unwrap(), b"same name", "what was there stays");
         // 되돌리면 원본이 같은 폴더로 돌아오고 복사본은 휴지통으로 간다
-        let undo = Undo::Across { to: to.clone(), items: vec![Crossed { orig: folder.clone(), trashed: t, name: name.clone(), file_id }] };
+        let undo = Undo::Across { to: to.clone(), items: vec![Crossed { orig: folder.clone(), trashed: t, name: name.clone(), file_id, print }] };
         assert_eq!(run(&Job::Undo(undo)), Ok(Done::Undone { left: Vec::new() }));
         assert_eq!(id(&folder), folder_id);
         assert_eq!(names(&to), ["자료"]);
@@ -917,7 +974,7 @@ mod tests {
             let copy = util::join(&to, name);
             std::fs::write(&copy, name.as_bytes()).unwrap();
             let trash_path = to_trash(&orig, false).unwrap();
-            Crossed { orig, trashed: Trashed { name: name.into(), file_id: orig_id, trash_path }, name: name.into(), file_id: id(&copy) }
+            Crossed { orig, trashed: Trashed { name: name.into(), file_id: orig_id, trash_path }, name: name.into(), file_id: id(&copy), print: tree_print(&copy).ok() }
         };
         let (a, b, c) = (make("a.txt"), make("b.txt"), make("c.txt"));
         // b는 휴지통에서 이미 비웠다. c의 복사본은 그 사이 다른 파일로 바뀌었다
@@ -936,6 +993,67 @@ mod tests {
         assert_eq!(std::fs::read(util::join(&to, "b.txt")).unwrap(), b"b.txt");
         // c: 원본은 돌아왔고, 바뀐 복사본은 그대로
         assert_eq!((std::fs::read(&c.orig).unwrap(), std::fs::read(&c_copy).unwrap()), (b"c.txt".to_vec(), b"new".to_vec()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 다른 디스크로 옮긴 뒤 옮긴 곳에서 고친 것은 되돌리기가 버리지 않는다: 파일 내용을 고쳤거나(같은 파일 그대로) 폴더 안에
+    /// 더하거나 이름을 바꿨으면 원본은 휴지통에, 고친 것은 그 자리에 두고 까닭을 돌려준다. Finder가 만든 .DS_Store는 고친 것이 아니다
+    #[test]
+    fn undoing_a_move_across_keeps_edits_made_after_the_move() {
+        let dir = temp("across-edit");
+        let (from, to) = (util::join(&dir, "원래 곳"), util::join(&dir, "받는 곳"));
+        for folder in ["자료", "보기만", "이름"] {
+            std::fs::create_dir_all(util::join(&util::join(&from, folder), "안쪽")).unwrap();
+            std::fs::write(util::join(&util::join(&util::join(&from, folder), "안쪽"), "안.txt"), b"in").unwrap();
+        }
+        std::fs::create_dir(&to).unwrap();
+        std::fs::write(util::join(&from, "메모.txt"), b"memo").unwrap();
+        std::fs::write(util::join(&from, "그대로.txt"), b"same").unwrap();
+        let mut items = Vec::new();
+        for name in ["자료", "보기만", "이름", "메모.txt", "그대로.txt"] {
+            let src = util::join(&from, name);
+            let is_dir = !name.ends_with(".txt");
+            let Ok(Done::Crossed { name: made, file_id, trashed: Ok(t), print, .. }) = move_across(&src, &to, id(&src), is_dir) else { panic!("{name}") };
+            assert!(print.is_some(), "{name}");
+            items.push(Crossed { orig: src, trashed: t, name: made, file_id, print });
+        }
+        let moved = |n: &str| util::join(&to, n);
+        // 옮긴 곳에서: 자료에는 파일을 더하고, 이름 안의 파일은 이름을 바꾸고, 메모는 내용을 고친다 (같은 파일 그대로).
+        // 보기만에는 Finder가 .DS_Store만 만들었고, 그대로.txt는 건드리지 않았다
+        std::fs::write(util::join(&moved("자료"), "새 파일.txt"), b"new").unwrap();
+        let inner = util::join(&moved("이름"), "안쪽");
+        std::fs::rename(util::join(&inner, "안.txt"), util::join(&inner, "바꾼 이름.txt")).unwrap();
+        let memo_id = id(&moved("메모.txt"));
+        std::fs::write(moved("메모.txt"), b"memo, edited").unwrap();
+        assert_eq!(id(&moved("메모.txt")), memo_id, "edited in place");
+        std::fs::write(util::join(&moved("보기만"), ".DS_Store"), b"x").unwrap();
+        std::fs::write(util::join(&util::join(&moved("보기만"), "안쪽"), ".DS_Store"), b"x").unwrap();
+        let Ok(Done::Undone { left }) = run(&Job::Undo(Undo::Across { to: to.clone(), items: items.clone() })) else { panic!("되돌리기") };
+        let kept: Vec<&str> = left.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(kept, [items[0].orig.as_str(), items[2].orig.as_str(), items[3].orig.as_str()]);
+        assert!(left.iter().all(|(_, why)| why.contains("옮긴 뒤 바뀌어서") && why.contains("휴지통")), "{left:?}");
+        // 고친 것은 옮긴 곳에 그대로, 그 원본은 휴지통에 그대로
+        assert_eq!(std::fs::read(moved("메모.txt")).unwrap(), b"memo, edited");
+        assert_eq!(std::fs::read(util::join(&moved("자료"), "새 파일.txt")).unwrap(), b"new");
+        assert!(std::fs::symlink_metadata(util::join(&inner, "바꾼 이름.txt")).is_ok());
+        for i in [0, 2, 3] {
+            assert!(std::fs::symlink_metadata(&items[i].orig).is_err(), "{}", items[i].orig);
+            assert_eq!(id(&items[i].trashed.trash_path), items[i].trashed.file_id, "the original is still in the Trash");
+        }
+        // .DS_Store만 생긴 폴더와 그대로인 파일은 되돌렸다: 원본이 같은 항목으로 돌아오고 복사본은 휴지통으로
+        for i in [1, 4] {
+            assert_eq!(id(&items[i].orig), items[i].trashed.file_id);
+            assert!(std::fs::symlink_metadata(moved(&items[i].name)).is_err());
+        }
+        // 지문을 재지 못한 기록은 되돌리지 않는다
+        let mut unknown = items[3].clone();
+        unknown.print = None;
+        let Ok(Done::Undone { left }) = run(&Job::Undo(Undo::Across { to: to.clone(), items: vec![unknown] })) else { panic!("되돌리기") };
+        assert!(left.len() == 1 && left[0].1.contains("알 수 없어"), "{left:?}");
+        assert_eq!(std::fs::read(moved("메모.txt")).unwrap(), b"memo, edited");
+        // 같은 모양이면 같은 지문, 고치면 다른 지문
+        assert_eq!(tree_print(&moved("자료")), tree_print(&moved("자료")));
+        assert!(tree_print(&util::join(&dir, "없는 것")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

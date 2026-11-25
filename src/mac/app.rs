@@ -443,8 +443,8 @@ impl Batch {
 enum Made {
     Copied,
     Moved,
-    /// 다른 디스크로 옮겼다: 복사한 뒤 원본을 휴지통으로 보냈다 (휴지통으로 간 원본)
-    Crossed(sakadu::fileops::Trashed),
+    /// 다른 디스크로 옮겼다: 복사한 뒤 원본을 휴지통으로 보냈다 (휴지통으로 간 원본, 옮길 때 잰 복사본의 모양 지문)
+    Crossed(sakadu::fileops::Trashed, Option<u64>),
     /// 다른 디스크로 옮기려고 복사했지만 원본을 휴지통으로 보내지 못해 그대로 뒀다 (까닭): 복사한 것과 같다
     Kept(String),
 }
@@ -2113,7 +2113,7 @@ impl App {
         for (((name, file_id), src), how) in b.made.iter().zip(&b.sources).zip(&b.how_made) {
             match how {
                 Made::Moved => moved.push((src.clone(), name.clone(), *file_id)),
-                Made::Crossed(t) => crossed.push(sakadu::fileops::Crossed { orig: src.clone(), trashed: t.clone(), name: name.clone(), file_id: *file_id }),
+                Made::Crossed(t, print) => crossed.push(sakadu::fileops::Crossed { orig: src.clone(), trashed: t.clone(), name: name.clone(), file_id: *file_id, print: *print }),
                 Made::Copied => copied.push((name.clone(), *file_id)),
                 Made::Kept(why) => {
                     copied.push((name.clone(), *file_id));
@@ -2451,7 +2451,7 @@ impl App {
                 match result {
                     Ok(Done::Copied { name, file_id, renamed }) => b.add(Made::Copied, src, name, file_id, renamed),
                     Ok(Done::Moved { name, file_id, renamed }) => b.add(Made::Moved, src, name, file_id, renamed),
-                    Ok(Done::Crossed { name, file_id, renamed, trashed }) => b.add(trashed.map_or_else(Made::Kept, Made::Crossed), src, name, file_id, renamed),
+                    Ok(Done::Crossed { name, file_id, renamed, trashed, print }) => b.add(trashed.map_or_else(Made::Kept, |t| Made::Crossed(t, print)), src, name, file_id, renamed),
                     Ok(_) => {}
                     Err(fail) => {
                         let why = match fail {
