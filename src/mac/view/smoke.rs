@@ -4,6 +4,7 @@
 //! 검색(⌘F)도: 시험 폴더만 훑게 하고 켠 뒤, 검색 입력 칸에 쳐서 찾고 그 칸의 키(↓, Return, Esc)로 고르고 연다.
 //! 설정 창도: 앱 메뉴의 '설정…'이 보내는 동작으로 열고, 스위치를 눌러 본 창의 값이 바뀌는지, 본 창에서 바꾼 값을 따라오는지 본다.
 //! 메뉴(앱이 그린다)도: 목록의 빈 곳을 오른쪽 단추로 눌러 열고, 실제 키(Esc, ↓, Return)로 닫고 고른다.
+//! 새 탭 시작 화면(⌘T)과 명령 메뉴(⌘K)도: 시작 화면을 키로 열어 보고, 명령 메뉴의 입력 칸에 쳐서 걸러 보고 Esc로 닫는다.
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
 //! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
@@ -30,6 +31,9 @@ const F: u16 = 0x03;
 const PERIOD: u16 = 0x2F;
 const ESC: u16 = 0x35;
 const KEY_J: u16 = 0x26;
+const KEY_K: u16 = 0x28;
+const KEY_T: u16 = 0x11;
+const KEY_W: u16 = 0x0D;
 
 /// 흉내 낸 끌기 정보: 끌려 온 것을 담은 붙여넣기 판, 창 좌표의 마우스 자리, 끌어 낸 쪽이 허락한 일
 struct DragIvars {
@@ -459,6 +463,9 @@ fn script(dir: &str) -> usize {
         let before = tabs();
         key(KEY_J, true);
         run.wait("cmd-J opens a tab in the main window", 5, || tabs().zip(before).is_some_and(|(now, was)| now == was + 1));
+        // 새 탭은 시작 화면으로 열린다 (설정의 기본): 닫아서 시험 폴더의 탭으로 돌아온다
+        key(KEY_W, true);
+        run.wait("cmd-W closes that tab again", 5, || tabs() == before && seen().is_some_and(|s| s.dir == dir && !s.start));
         on_main(|| with_app(App::reset_keys));
         on_main(settings::refresh);
         run.wait("resetting brings back cmd-T", 5, || title().as_deref() == Some("⌘T"));
@@ -508,7 +515,70 @@ fn script(dir: &str) -> usize {
     run.wait("clicking the name header sorts the list backwards", 5, || sort() == backwards && seen().is_some_and(|s| s.names != before));
     click_header(SortKey::Name);
     run.wait("a second click sorts it forwards again", 5, || seen().is_some_and(|s| s.names == before));
+
+    // 새 탭 시작 화면: ⌘T로 시작 화면 탭이 열린다 (설정의 기본). 처음 Return은 첫 칸에 테두리만, 다음 Return은 그곳을 연다
+    // (시험에서 다녀간 폴더가 최근 위치에 있다). ⌘W로 그 탭을 닫으면 시험 폴더의 탭으로 돌아온다
+    let tabs = || on_main(|| with_app(|a| a.seen().tabs));
+    let before = tabs();
+    key(KEY_T, true);
+    if run.wait("cmd-T opens a start tab", 5, || seen().is_some_and(|s| s.start && s.ready) && tabs().zip(before).is_some_and(|(now, was)| now == was + 1)) {
+        key(RETURN, false);
+        key(RETURN, false);
+        run.wait("Return on the start screen opens the first place", 5, || seen().is_some_and(|s| !s.start && s.ready && !s.dir.is_empty()));
+        key(KEY_W, true);
+        run.wait("cmd-W closes that tab", 5, || tabs() == before && seen().is_some_and(|s| s.dir == dir && !s.start));
+    }
+
+    // 명령 메뉴: ⌘K로 판이 뜨고 입력 칸이 키보드를 갖는다. 치면 그 글이 든 줄만 남고(최근 위치 '폴더', 명령 '새 폴더', 디스크에서 찾기),
+    // 입력 칸의 Esc로 닫힌다
+    key(KEY_K, true);
+    if run.wait("cmd-K opens the command menu with the keyboard in its field", 5, || cmd_state().is_some_and(|s| s.0)) {
+        let all = cmd_state().map_or(0, |s| s.1.len());
+        let typed = type_in_commands("폴더");
+        run.check("typing in the command field", typed.is_ok(), || format!("{typed:?}"));
+        run.wait("typing narrows the list to lines with the word", 5, || cmd_state().is_some_and(|s| s.1.len() >= 2 && s.1.len() < all && s.1.iter().all(|n| n.contains("폴더"))));
+        let closed = commands_command(sel!(cancelOperation:));
+        run.check("Esc in the command field", closed.is_ok(), || format!("{closed:?}"));
+        run.wait("Esc closes the menu and hides its field", 5, || {
+            cmd_state().is_none() && on_main(|| VIEW.with(|v| v.get().and_then(|v| v.ivars().commands.get().cloned())).is_some_and(|f| f.isHidden()))
+        });
+    }
     run.failed
+}
+
+/// 명령 메뉴가 보이는 것: (입력 칸이 키보드를 가졌는지, 줄의 이름). 닫혀 있으면 None
+fn cmd_state() -> Option<(bool, Vec<String>)> {
+    on_main(|| {
+        let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().commands.get().cloned()));
+        let typing = field.is_some_and(|f| !f.isHidden() && f.currentEditor().is_some());
+        with_app(|a| a.cmd_seen()).flatten().map(|(_, names, _)| (typing, names))
+    })
+}
+
+/// 명령 메뉴 입력 칸의 글을 바꾼다: 글을 모두 고르고 그 자리에 친다 (글 상자가 바뀌었다고 알리는 것까지 치는 것과 같다)
+fn type_in_commands(text: &str) -> Result<(), &'static str> {
+    let text = text.to_string();
+    on_main(move || {
+        let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().commands.get().cloned())).ok_or("no command field")?;
+        let editor = field.currentEditor().ok_or("the command field does not have the keyboard")?;
+        // SAFETY: NSText의 selectAll:과 NSResponder의 insertText: (키로 친 글이 가는 길)
+        unsafe {
+            editor.selectAll(None);
+            let _: () = msg_send![&*editor, insertText: &*NSString::from_str(&text)];
+        }
+        Ok(())
+    })
+}
+
+/// 명령 메뉴 입력 칸이 키를 받았을 때 하는 그대로 명령(cancelOperation: 등)을 그 위임에 묻는다
+fn commands_command(command: Sel) -> Result<(), &'static str> {
+    on_main(move || {
+        let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().commands.get().cloned())).ok_or("no command field")?;
+        let editor = field.currentEditor().ok_or("the command field does not have the keyboard")?;
+        // SAFETY: NSResponder의 doCommandBySelector:
+        let _: () = unsafe { msg_send![&*editor, doCommandBySelector: command] };
+        Ok(())
+    })
 }
 
 /// 지금 칸의 key 열 머리글 가운데를 실제 창이 받는 길(mouseDown:·mouseUp:)로 누른다 (창 좌표는 왼쪽 아래가 0)

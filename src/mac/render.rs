@@ -74,7 +74,7 @@ fn write_demo_previews(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 열여덟 가지 × 밝은·어두운 테마를 out에 그린다.
+/// demo 폴더(CI가 만드는 한글 이름 데모)로 상태 스무 가지 × 밝은·어두운 테마를 out에 그린다.
 /// 작업 공간은 셋: 업무(파랑, 두 칸), 사진 정리(보라, 네 칸), 개인(주황, 세 칸). 공간마다 고정한 것이 다르고,
 /// 아래 '모든 공간'(바로가기와 즐겨찾기)은 어느 공간에서나 같다.
 /// 미리 보기 카드 장면에 쓸 그림과 글 파일은 demo의 사진/제주살이에 직접 만든다
@@ -101,6 +101,8 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
             let mut a = App::new(W, H, theme, &root, favs, places.clone());
             a.standalone = true;
             a.scale = SCALE;
+            // 새 탭은 지금 폴더로 (시작 화면은 'start' 장면에서 따로 본다)
+            a.set_new_tab_start(false);
             a.navigate(0, Location::Dir(d("업무/2026 4분기")), None);
             a.navigate(1, Location::Dir(d("다운로드")), None);
             a.settle();
@@ -228,6 +230,23 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
         a.settle();
         a.find_key(Key::Down, false);
         shots.push(("find", a));
+
+        // 새 탭 시작 화면: 왼쪽 칸에 시작 화면 탭을 연 모습. 고정한 폴더 카드, 오른쪽 칸에서 다녀간 최근 위치, 위치 카드
+        let mut a = base(favs.clone(), true);
+        for rel in ["사진", "업무", "다운로드"] {
+            a.navigate(1, Location::Dir(d(rel)), None);
+        }
+        a.set_new_tab_start(true);
+        a.new_tab(0);
+        a.settle();
+        a.hover = Hit::Start(0, 1);
+        shots.push(("start", a));
+
+        // 명령 메뉴(⌘K): 초성 'ㄷㅇ'을 친 모습 (다운로드 탭과 최근 위치, 닫은 탭 다시 열기·도움말 명령, 디스크에서 찾기)
+        let mut a = base(favs.clone(), true);
+        a.toggle_commands();
+        a.cmd_typed("ㄷㅇ");
+        shots.push(("commands", a));
 
         // 메뉴 (앱이 그린다): 보기 방식 단추의 메뉴, 파일 줄을 오른쪽 단추로 누른 메뉴, 작업 공간 아이콘의 색 메뉴. 한 줄을 가리킨 모습
         let measure = Gfx::bitmap(8.0, 8.0, 1.0).ok_or("그림판을 만들지 못함")?;

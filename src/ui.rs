@@ -6,10 +6,12 @@ use crate::pane::{Location, SortKey, ViewMode};
 use crate::palette::{Theme, alpha, mix};
 use crate::util;
 
+pub mod commands;
 pub mod menu;
 pub mod paint;
 pub mod preview_card;
 pub mod rail;
+pub mod start;
 pub mod toolbar;
 
 /// 공통 화면 코드가 쓰는 그리기 (각 OS의 Gfx가 같은 이름의 메서드로 구현한다)

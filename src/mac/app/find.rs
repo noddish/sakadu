@@ -117,6 +117,7 @@ impl App {
     /// ⌘F·돋보기: 검색을 열고 키보드를 입력 칸에 둔다 (이미 열려 있으면 키보드만). 지난 검색어는 그대로 둔다
     pub fn open_find(&mut self) {
         self.edit = Editing::None;
+        self.close_commands();
         if !self.find.open {
             let f = &mut self.find;
             f.open = true;
@@ -129,6 +130,19 @@ impl App {
             f.enter = None;
         }
         self.find.focus = true;
+    }
+
+    /// 디스크 전체에서 q를 찾는다 (명령 메뉴의 '디스크에서 찾기'): 검색을 열고, 검색 패널에서 '지금 폴더'로 좁혀 두었어도
+    /// 전체로 넓힌다. 검색어가 같아도 범위가 바뀌었으면 다시 찾는다
+    pub(super) fn find_on_disk(&mut self, q: &str) {
+        self.open_find();
+        let narrowed = std::mem::replace(&mut self.find.here, false);
+        if narrowed && self.find.text == q {
+            self.find.enter = None;
+            self.find_ask();
+        } else {
+            self.find_typed(q);
+        }
     }
 
     /// 검색을 닫는다 (Esc, 닫기 단추). 사이드바가 돌아온다. 검색어는 다음에 열 때 그대로 있다
@@ -154,9 +168,9 @@ impl App {
         field_parts(&self.toolbar()).map(|p| p.0)
     }
 
-    /// 입력 칸이 키보드를 가져야 하는가 (다른 입력 상자로 경로·이름을 고치는 동안은 아니다)
+    /// 입력 칸이 키보드를 가져야 하는가 (다른 입력 상자로 경로·이름을 고치는 동안과 명령 메뉴가 떠 있는 동안은 아니다)
     pub fn find_wants_keys(&self) -> bool {
-        self.find.open && self.find.focus && self.edit == Editing::None
+        self.find.open && self.find.focus && self.edit == Editing::None && self.cmd.is_none()
     }
 
     /// 입력 칸에 처음 넣을 글 (열 때마다 지난 검색어)
@@ -1023,6 +1037,31 @@ mod tests {
         assert_eq!(sorted(found(&a)), ["보고서.docx", "사진.jpg", "회의록.md"]);
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    /// 명령 메뉴(⌘K)의 '디스크에서 찾기'는 검색 패널에서 '지금 폴더'로 좁혀 두었어도 디스크 전체에서 찾는다 (같은 검색어여도)
+    #[test]
+    fn search_on_disk_from_the_command_menu_widens_the_scope() {
+        let (root, home) = demo("disk");
+        let (mut a, g) = app(&home);
+        a.open_find();
+        a.enable_find();
+        a.navigate(a.active, Location::Dir(util::join(&home, "업무")), None);
+        a.find_typed("docx | md | jpg");
+        let here = a.find_scope_rect(true);
+        click(&mut a, &g, here);
+        a.settle();
+        assert_eq!(sorted(found(&a)), ["보고서.docx", "회의록.md"]);
+        a.close_find();
+        a.toggle_commands();
+        a.cmd_typed("docx | md | jpg");
+        let rows = a.cmd_seen().unwrap().1;
+        let i = rows.iter().position(|r| r.ends_with("디스크에서 찾기")).expect("the search-on-disk row");
+        a.cmd_press(Hit::CmdRow(i), Mods::default());
+        a.settle();
+        assert!(a.find_shown() && a.find_wants_keys());
+        assert_eq!(sorted(found(&a)), ["보고서.docx", "사진.jpg", "회의록.md"], "the whole disk, not the folder");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// 결과를 둔 채 칸에서 일한다: 칸을 누르면 키보드만 떠나고, 돋보기 칸을 누르면 돌아온다. 닫기 단추는 닫는다.

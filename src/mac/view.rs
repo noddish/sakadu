@@ -1,5 +1,6 @@
 //! 맥 창: NSApplication 위임, NSWindow, 직접 그리는 NSView, 앱 메뉴, 입력 상자(NSTextField: 경로, 작업 공간 이름, 항목 이름)와
-//! 검색 입력 칸(NSTextField 하나 더: 검색하는 동안 늘 보이고, 칸에서 일하는 동안에도 검색어를 지킨다).
+//! 검색 입력 칸(NSTextField 하나 더: 검색하는 동안 늘 보이고, 칸에서 일하는 동안에도 검색어를 지킨다),
+//! 명령 메뉴(⌘K)의 입력 칸(또 하나: 판이 떠 있는 동안 키보드를 갖는다).
 //! 검색은 자체 색인(search.rs)을 이 쪽이 띄우고, 입력할 때마다 뒷줄에서 찾는다.
 //! 마우스·스크롤·키를 App으로 넘기고, 폴더 읽기·경로 확인·미리 보기 카드의 그림과 글 읽기·아이콘 보기의 썸네일 읽기는
 //! 뒷줄에서 하고 메인 줄(dispatch)로 돌려받는다. 파일 작업(새 폴더, 이름 바꾸기, 휴지통, 복사, 되돌리기)은 뒷줄 하나가 맡긴 순서대로 하나씩 한다.
@@ -110,6 +111,8 @@ pub struct ViewIvars {
     search: OnceCell<Retained<NSTextField>>,
     /// 지난번에 맞출 때 검색 입력 칸이 키보드를 갖고 있었는지. 그 사이 키보드를 가져갔으면 사용자가 그 칸을 누른 것이다
     search_keys: std::cell::Cell<bool>,
+    /// 명령 메뉴(⌘K)의 입력 칸 (판의 입력 자리. 명령 메뉴가 떠 있는 동안 늘 키보드를 갖는다)
+    commands: OnceCell<Retained<NSTextField>>,
     /// 지금 보이는 마우스 모양 (바뀔 때만 다시 정한다: 입력 상자 위의 글자 커서를 덮지 않게)
     pointer: std::cell::Cell<crate::app::Pointer>,
 }
@@ -334,11 +337,11 @@ define_class!(
         }
 
         /// 편집 메뉴의 실행 취소(⌘Z): 키 입력이 목록에 있을 때 가장 나중에 한 파일 작업(이름 바꾸기, 새 폴더, 휴지통, 복사)을 되돌린다.
-        /// 이름이나 경로, 검색어를 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라 친 글자를 되돌린다:
-        /// 이 뷰가 받지 않았을 때 창이 하던 대로, 창의 되돌리기 관리자에 넘긴다
+        /// 이름이나 경로, 검색어, 명령 메뉴(⌘K)의 글을 치는 중에 여기까지 오면(입력 상자가 직접 받지 않으면) 파일 작업이 아니라
+        /// 친 글자를 되돌린다: 이 뷰가 받지 않았을 때 창이 하던 대로, 창의 되돌리기 관리자에 넘긴다 (App::typing)
         #[unsafe(method(undo:))]
         fn undo(&self, _sender: Option<&objc2::runtime::AnyObject>) {
-            if with_app(|a| a.edit != crate::app::Editing::None || a.find_wants_keys()).unwrap_or(false) {
+            if with_app(|a| a.typing()).unwrap_or(false) {
                 if let Some(typed) = self.undoManager()
                     && typed.canUndo()
                 {
@@ -378,6 +381,9 @@ define_class!(
             if self.is_search(control as *const NSControl as *const AnyObject) {
                 return Bool::new(self.search_command(command));
             }
+            if self.is_commands(control as *const NSControl as *const AnyObject) {
+                return Bool::new(self.commands_command(command));
+            }
             if command == sel!(insertNewline:) {
                 let text = self.ivars().field.get().map(|f| f.stringValue().to_string()).unwrap_or_default();
                 with_app(|a| a.commit_address(&text));
@@ -401,15 +407,28 @@ define_class!(
                 }
                 return;
             }
+            // 명령 메뉴의 입력 칸은 판을 눌러도 메뉴가 그대로다 (맞출 때 키보드를 다시 준다). 닫는 것은 Esc·판 밖 누르기·⌘K
+            if self.is_commands_note(n) {
+                return;
+            }
             // 상자를 맞추는 중(띄우기, 옮기기, 감추기)에 맥이 편집을 끝냈다 다시 시작하는 것은 사용자가 입력을 그만둔 것이 아니다
             if !SYNCING.get() && with_app(App::end_editing).unwrap_or(false) {
                 self.after_input();
             }
         }
 
-        /// 검색 입력 칸의 글이 바뀌었다: 글자마다 찾는다 (한글은 조합 중인 글자까지)
+        /// 검색 입력 칸의 글이 바뀌었다: 글자마다 찾는다 (한글은 조합 중인 글자까지). 명령 메뉴의 입력 칸이면 줄을 다시 고른다
         #[unsafe(method(controlTextDidChange:))]
         fn did_change(&self, n: &NSNotification) {
+            if self.is_commands_note(n) {
+                let Some(field) = self.ivars().commands.get() else { return };
+                let text = field.currentEditor().map_or_else(|| field.stringValue().to_string(), |e| e.string().to_string());
+                with_app(|a| a.cmd_typed(&text));
+                // 줄 수에 따라 판 높이가 바뀌면 창이 낮을 때 판이 옮겨 간다: 입력 칸도 따라 옮긴다
+                self.sync_field();
+                self.setNeedsDisplay(true);
+                return;
+            }
             if !self.is_search_note(n) {
                 return;
             }
@@ -504,6 +523,7 @@ impl SakaduView {
             field_pane: std::cell::Cell::new(None),
             search: OnceCell::new(),
             search_keys: std::cell::Cell::new(false),
+            commands: OnceCell::new(),
             pointer: std::cell::Cell::new(crate::app::Pointer::Arrow),
         });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -523,6 +543,9 @@ impl SakaduView {
         let field = plain_field();
         let search = plain_field();
         let _ = view.ivars().search.set(search);
+        let commands = plain_field();
+        commands.setPlaceholderString(Some(&NSString::from_str(crate::app::CMD_PLACEHOLDER)));
+        let _ = view.ivars().commands.set(commands);
         // 끌려 오는 파일을 받는다 (Finder, 다른 앱, 사카두의 다른 칸)
         view.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
         let _ = view.ivars().field.set(field);
@@ -641,6 +664,47 @@ impl SakaduView {
         n.object().is_some_and(|o| self.is_search(Retained::as_ptr(&o)))
     }
 
+    /// obj가 명령 메뉴의 입력 칸인가
+    fn is_commands(&self, obj: *const AnyObject) -> bool {
+        self.ivars().commands.get().is_some_and(|f| std::ptr::eq(Retained::as_ptr(f) as *const AnyObject, obj))
+    }
+
+    /// 알림이 명령 메뉴의 입력 칸에서 왔는가
+    fn is_commands_note(&self, n: &NSNotification) -> bool {
+        n.object().is_some_and(|o| self.is_commands(Retained::as_ptr(&o)))
+    }
+
+    /// 명령 메뉴 입력 칸에서 누른 키: ↑↓ 줄 고르기, Page Up/Down, Return 열기(⌘Return 새 탭, ⌥Return 옆 칸), Esc 닫기, Tab은 삼킨다.
+    /// 받았으면 true (나머지는 글 상자가 한다)
+    fn commands_command(&self, command: Sel) -> bool {
+        let event = NSApplication::sharedApplication(self.mtm()).currentEvent();
+        // ⌘Return은 글 상자에 정해진 일이 없어 noop:으로 온다: 지금 누른 키가 Return인지 본다
+        let returned = event.as_ref().is_some_and(|e| e.r#type() == NSEventType::KeyDown && matches!(e.keyCode(), 0x24 | 0x4C));
+        let m = event.as_ref().filter(|e| e.r#type() == NSEventType::KeyDown).map(|e| mods(e)).unwrap_or_default();
+        let key = if command == sel!(moveUp:) {
+            Key::Up
+        } else if command == sel!(moveDown:) {
+            Key::Down
+        } else if command == sel!(scrollPageUp:) || command == sel!(pageUp:) {
+            Key::PageUp
+        } else if command == sel!(scrollPageDown:) || command == sel!(pageDown:) {
+            Key::PageDown
+        } else if command == sel!(insertNewline:) || command == sel!(insertNewlineIgnoringFieldEditor:) || (command == sel!(noop:) && returned) {
+            Key::Return
+        } else if command == sel!(cancelOperation:) {
+            Key::Esc
+        } else if command == sel!(insertTab:) || command == sel!(insertBacktab:) {
+            Key::Tab
+        } else {
+            return false;
+        };
+        let handled = with_app(|a| a.cmd_key(key, m)).unwrap_or(false);
+        if handled {
+            self.after_input();
+        }
+        handled
+    }
+
     /// 검색 입력 칸에서 누른 키: ↑↓ 결과 고르기, Return 열기, ⌘Return 칸에서 보기, Esc 닫기. 받았으면 true (나머지는 글 상자가 한다)
     fn search_command(&self, command: Sel) -> bool {
         let event = NSApplication::sharedApplication(self.mtm()).currentEvent();
@@ -698,7 +762,40 @@ impl SakaduView {
         SYNCING.set(true);
         self.place_field();
         self.place_search();
+        // 명령 메뉴의 입력 칸을 마지막에: 떠 있는 동안은 이 칸이 키보드를 갖는다
+        self.place_commands();
         SYNCING.set(false);
+    }
+
+    /// 명령 메뉴의 입력 칸을 App에 맞춘다: 명령 메뉴가 떠 있으면 판의 입력 자리에 보이고 키보드를 받는다. 닫히면 감추고 키보드를 뷰에 돌려준다
+    /// (검색 입력 칸이 키보드를 원하면 다음에 맞출 때 그 칸이 가져간다)
+    fn place_commands(&self) {
+        let Some(field) = self.ivars().commands.get() else { return };
+        let typing = field.currentEditor().is_some();
+        let Some((rect, text, color)) = with_app(|a| (a.cmd_field_rect(), a.cmd_text().to_string(), a.theme.text)) else { return };
+        let window = self.window();
+        match rect {
+            Some(r) => {
+                let h = 18.0;
+                field.setFrame(NSRect::new(NSPoint::new(r.l as f64, (r.t + (r.h() - h) / 2.0) as f64), NSSize::new(r.w().max(0.0) as f64, h as f64)));
+                field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(color.r as f64, color.g as f64, color.b as f64, 1.0)));
+                // 열 때마다 빈 칸으로 (App이 글을 비워 둔다)
+                if field.isHidden() {
+                    field.setStringValue(&NSString::from_str(&text));
+                    field.setHidden(false);
+                }
+                if !typing && let Some(w) = &window {
+                    w.makeFirstResponder(Some(field));
+                }
+            }
+            None if !field.isHidden() => {
+                field.setHidden(true);
+                if typing && let Some(w) = &window {
+                    w.makeFirstResponder(Some(self));
+                }
+            }
+            None => {}
+        }
     }
 
     /// 검색 입력 칸을 App에 맞춘다: 검색이 열려 있으면 도구 막대의 늘어난 칸에 보이고, 검색이 키보드를 원하면 키보드를 준다.
@@ -720,6 +817,9 @@ impl SakaduView {
                 if field.isHidden() {
                     field.setStringValue(&NSString::from_str(&text));
                     field.setHidden(false);
+                } else if !typing && field.stringValue().to_string() != text {
+                    // 앱이 검색어를 바꿨다 (명령 메뉴의 '디스크에서 찾기')
+                    field.setStringValue(&NSString::from_str(&text));
                 }
                 // 키보드를 주면 글 전체가 골라진다: 새로 치면 바뀌고, 이어 쓰려면 →
                 if wants && !typing {
@@ -1000,6 +1100,18 @@ fn sync_look() {
 /// ('열기'로 여는 앱은 사카두의 권한을 물려받지 않는다). 미리 보기 카드의 그림과 글도 뒷줄에서 읽는다
 fn pump() {
     pump_find();
+    // 시작 화면 위치 칸의 디스크 용량: 뒷줄에서 읽는다 (/Volumes의 바로가기를 따라갈 때 디스크를 볼 수 있다)
+    if let Some(Some(paths)) = with_app(App::take_volume_ask)
+        && !paths.is_empty()
+    {
+        std::thread::spawn(move || {
+            let space = crate::app::volume_space(&paths);
+            DispatchQueue::main().exec_async(move || {
+                with_app(|a| a.set_volumes(space));
+                redraw();
+            });
+        });
+    }
     // 설정·도움말 단축키: 설정 창을 연다 (단축키와 도움말이 거기 있다)
     if with_app(|a| std::mem::take(&mut a.open_settings)) == Some(true)
         && let Some(mtm) = MainThreadMarker::new()
@@ -1577,6 +1689,7 @@ pub(super) fn main_menu(mtm: MainThreadMarker, app: &NSApplication) {
     act(&v, Action::Refresh);
     let g = submenu(&bar, "이동");
     act(&g, Action::Address);
+    act(&g, Action::Commands);
     sep(&g);
     go(&g, "뒤로", 0, "[", cmd);
     go(&g, "앞으로", 1, "]", cmd);

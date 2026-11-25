@@ -370,7 +370,7 @@ impl App {
         paint_pane_head(gfx, &t, &scene);
         // 시작 화면: 머리글·목록 자리에 카드와 줄
         if let Some(sv) = &start {
-            sv.paint(gfx, &t, places, folder_icon, start_hover, start_focus);
+            start::paint_start_view(gfx, &t, places, folder_icon, sv, start_hover, start_focus);
             paint_pane_border(gfx, &t, &scene);
             return;
         }

@@ -9,9 +9,15 @@
 //! 클립보드도 창 쪽이 다룬다: 앱은 담아 달라는 경로(clip_out)와 붙여넣어 달라는 표시(clip_in)만 남긴다.
 //! 끌어서 놓기도 그렇다: 앱은 끌어 낼 항목(take_drag)을 내주고, 끌려 온 것이 어디에 놓일지(drag_over)와 놓기(drop_paths)를 맡는다.
 //! 검색(⌘F)은 find.rs: 도구 막대에서 입력 칸이 늘어나고, 결과는 사이드바 자리에 보인다.
+//! 명령 메뉴(⌘K)는 commands.rs, 새 탭 시작 화면과 최근 위치는 start.rs (둘 다 Windows와 같은 공통 코드를 쓴다).
 //! 창(NSView)과 상관없이 돌아가서, 시험과 그림(--render)은 창 없이 같은 코드를 쓴다
 
+mod commands;
 mod find;
+mod start;
+
+pub use commands::CMD_PLACEHOLDER;
+pub use start::volume_space;
 
 use crate::fileops::{self, Done, Fail, Job, Op};
 use crate::gfx::{Gfx, MONO_LINE_H, Picture};
@@ -118,6 +124,12 @@ pub enum Hit {
     SplitXY,
     /// 열린 메뉴 안 (고를 수 있는 줄이면 그 번호). 메뉴가 열려 있으면 메뉴 밖은 Hit::None이다
     Menu(Option<usize>),
+    /// 시작 화면의 항목 (칸, 항목 번호)
+    Start(usize, usize),
+    /// 명령 메뉴의 줄, 판의 그 밖의 곳, 판 밖 (누르면 닫힌다). 명령 메뉴가 열려 있으면 모든 것 위에 있다
+    CmdRow(usize),
+    CmdPanel,
+    CmdScrim,
 }
 
 /// 마우스 모양: 경계를 끌 수 있는 곳(열 경계, 칸 나눔선)에서는 끄는 방향의 화살표.
@@ -295,6 +307,8 @@ pub struct Seen {
     pub busy: bool,
     /// 지금 칸의 탭 수
     pub tabs: usize,
+    /// 그 탭이 새 탭 시작 화면이다
+    pub start: bool,
 }
 
 /// 설정 창에 보이는 값. 창 쪽이 이것으로 스위치와 글을 맞춘다 (입력과 뒷줄 결과를 처리할 때마다)
@@ -311,6 +325,8 @@ pub struct Prefs {
     pub denied: bool,
     /// 모양: "system", "light", "dark"
     pub theme: String,
+    /// 새 탭(⌘T)을 시작 화면으로 연다 (아니면 지금 폴더)
+    pub new_tab_start: bool,
 }
 
 /// 진행 중인 복사·옮기기 묶음 (붙여넣기, 복제). 항목을 하나씩 맡기고, 하나가 끝나면 다음 것을 맡긴다:
@@ -397,7 +413,7 @@ impl Key {
 
 /// 맥에서 도는 동작 (단축키 표와 메뉴 막대, 설정의 단축키에 보인다). 나머지는 맥에 아직 없다
 pub fn mac_runs(a: Action) -> bool {
-    !matches!(a, Action::Favorites | Action::Commands | Action::Preview)
+    !matches!(a, Action::Favorites | Action::Preview)
 }
 
 /// 바꾸지 않는 기본 조작의 키 (App::key가 단축키 표 다음에 받는 것, 편집 메뉴의 실행 복귀). 단축키로 정하지 않는다:
@@ -478,6 +494,8 @@ pub struct Probe {
     /// 그 칸의 경로 확인 요청 번호 (나중에 낸 요청이 이긴다)
     pub seq: u64,
     pub text: String,
+    /// 확인한 폴더를 새 탭에서 연다 (명령 메뉴의 ⌘Return)
+    pub new_tab: bool,
 }
 
 /// 주소 입력 해석 (app.rs resolve_input과 같은 규칙): 앞의 ~는 홈, 폴더면 그 폴더, 파일이면 그 폴더에서 그 파일을 고른다
@@ -935,7 +953,8 @@ pub struct App {
     /// 자동 미리 보기: 그림·글 파일을 고르면 카드가 저절로 뜬다 (도구 막대의 눈으로 끄고 켠다. 숨김 항목 보기처럼 작업 공간과 상관없다)
     auto_preview: bool,
     card: Card,
-    /// 마지막 누름(두 번 누르기의 첫 누름)이 미리 보기 카드 위였는가. 그랬으면 이어지는 둘째 누름은 버리고, 아니었으면 카드 아래 것이 받는다
+    /// 마지막 누름(두 번 누르기의 첫 누름)이 미리 보기 카드 위였는가. 그랬으면 이어지는 둘째 누름은 버리고, 아니었으면 카드 아래 것이 받는다.
+    /// 시작 화면의 칸이나 명령 메뉴를 눌러 다른 곳으로 옮겨 간 누름도 그렇다 (둘째 누름이 새 목록의 항목을 열지 않게)
     press_on_card: bool,
     /// 방금 한 번 누른 줄의 항목 (두 번 누르기의 첫 번째)
     clicked: Option<Clicked>,
@@ -960,6 +979,18 @@ pub struct App {
     pub open_settings: bool,
     /// 모양: "system"(맥 설정을 따른다), "light", "dark". 창 쪽이 앱의 모양으로 정하고, 세션에 남긴다
     theme_pref: String,
+    /// 새 탭(⌘T, +)을 열 곳: session::NEW_TAB_START(시작 화면, 기본) 또는 NEW_TAB_SAME(지금 폴더). 세션에 남긴다 (작업 공간과 상관없다)
+    new_tab_pref: String,
+    /// 다녀간 폴더 (최근 것이 앞): 시작 화면과 명령 메뉴에 보인다. 세션에 남긴다 (작업 공간과 상관없다)
+    recent: Vec<String>,
+    /// 시작 화면에서 키보드(화살표·Return)를 썼다: 초점 테두리가 보이고 Return이 연다
+    start_keys: bool,
+    /// 시작 화면 위치 칸의 디스크 용량 (경로 → 남은·전체 바이트)과, 다시 읽어 달라는 표시 (시작 화면을 열 때)
+    volumes: HashMap<String, (u64, u64)>,
+    volumes_wanted: bool,
+    /// 명령 메뉴(⌘K)와 그 입력 칸의 글
+    cmd: Option<sakadu::ui::commands::CmdMenu>,
+    cmd_text: String,
 }
 
 impl App {
@@ -1037,6 +1068,13 @@ impl App {
             closed: Vec::new(),
             open_settings: false,
             theme_pref: "system".to_string(),
+            new_tab_pref: session::NEW_TAB_START.to_string(),
+            recent: Vec::new(),
+            start_keys: false,
+            volumes: HashMap::new(),
+            volumes_wanted: false,
+            cmd: None,
+            cmd_text: String::new(),
         };
         for _ in 0..4 {
             let tab = app.new_tab_at(Location::Dir(home.to_string()));
@@ -1072,6 +1110,7 @@ impl App {
             flash: self.flash.as_ref().map(|(_, note)| note.clone()),
             busy: self.ops_running > 0 || self.batch.is_some(),
             tabs: self.panes[self.active].tabs.len(),
+            start: tab.loc == Location::Start,
         }
     }
 
@@ -1145,6 +1184,12 @@ impl App {
             // 이제 읽는 것이 지금까지의 변화를 모두 담는다. 읽는 사이 또 바뀌면 다 읽은 뒤 한 번 더 읽는다 (reload_stale)
             self.stale.remove(&tab.id);
             self.reading.insert(tab.id);
+        } else if tab.loc == Location::Start {
+            // 시작 화면은 읽을 목록이 없다. 볼 때마다 위치 칸의 디스크 용량을 새로 읽는다
+            tab.entries.clear();
+            tab.view.clear();
+            tab.state = LoadState::Ready;
+            self.volumes_wanted = true;
         }
     }
 
@@ -1200,17 +1245,27 @@ impl App {
                 }
             }
             // 세션에서 연 폴더가 없어졌거나 닿지 않으면 home을 연다 (기록은 남기지 않는다)
-            Err(_) if restored && tab.loc != Location::Dir(home.clone()) => {
-                tab.loc = Location::Dir(home.clone());
+            Err(msg) if restored && tab.loc != Location::Dir(home.clone()) => {
+                let old = std::mem::replace(&mut tab.loc, Location::Dir(home.clone()));
                 tab.generation += 1;
                 tab.state = LoadState::Loading;
                 self.requests.push(Request { tab: tab.id, generation: tab.generation, dir: home });
                 self.reading.insert(tab_id);
+                // 지워진 폴더만 최근 위치에서 뺀다 (시작 화면·명령 메뉴에 남지 않게). 꺼진 NAS처럼 잠깐 닿지 않는 곳은
+                // 다시 시작해도 남긴다: 다시 켜지면 그 줄로 바로 간다
+                if let Some(d) = old.dir().filter(|_| dir_gone(&msg)) {
+                    self.forget_recent(d);
+                }
             }
             Err(msg) => {
+                // 지워졌거나 폴더가 아닌 것만 최근 위치에서 뺀다 (Windows와 같다). 잠깐 닿지 않는 NAS·권한 없음은 그대로 둔다
+                let gone = dir_gone(&msg);
                 tab.entries.clear();
                 tab.view.clear();
                 tab.state = LoadState::Error(msg);
+                if let Some(d) = tab.loc.dir().map(str::to_string).filter(|_| gone) {
+                    self.forget_recent(&d);
+                }
             }
         }
         self.name_listed(tab_id);
@@ -1240,6 +1295,9 @@ impl App {
     pub fn settle(&mut self) {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         self.settle_find();
+        if let Some(paths) = self.take_volume_ask() {
+            self.set_volumes(volume_space(&paths));
+        }
         loop {
             let (reqs, probes, previews, thumbs, ops) = (self.take_requests(), self.take_probes(), self.take_previews(), self.take_thumbs(), self.take_ops());
             if reqs.is_empty() && probes.is_empty() && previews.is_empty() && thumbs.is_empty() && ops.is_empty() {
@@ -1438,9 +1496,11 @@ impl App {
 
     // ---------- 경로 입력 ----------
 
-    /// 칸 p에서 경로 입력을 시작한다 (폴더를 보고 있을 때만)
+    /// 칸 p에서 경로 입력을 시작한다 (폴더나 시작 화면을 보고 있을 때. 시작 화면이면 빈 상자로)
     pub fn begin_address(&mut self, p: usize) {
-        if self.panes[p].tab().loc.dir().is_some() {
+        let loc = &self.panes[p].tab().loc;
+        if loc.dir().is_some() || *loc == Location::Start {
+            self.close_commands();
             self.activate_pane(p);
             self.edit = Editing::Address(p);
         }
@@ -1459,14 +1519,18 @@ impl App {
         }
         match std::mem::replace(&mut self.edit, Editing::None) {
             Editing::Space => self.commit_rename(text),
-            Editing::Address(p) => {
-                let (tab, generation) = (self.panes[p].tab().id, self.panes[p].tab().generation);
-                self.probe_seq[p] += 1;
-                self.probe_at[p] = (tab, generation);
-                self.probes.push(Probe { pane: p, tab, seq: self.probe_seq[p], text: text.to_string() });
-            }
+            Editing::Address(p) => self.probe_path(p, text.to_string(), false),
             Editing::None | Editing::Item(_) => {}
         }
+    }
+
+    /// 칸 p에서 친 경로를 확인해 달라고 한다 (경로 입력, 명령 메뉴). 확인은 뒷줄에서 하고 결과는 on_probed로 받는다:
+    /// 꺼진 네트워크 경로를 확인하는 동안 멈추지 않는다. new_tab이면 확인한 폴더를 새 탭에서 연다
+    fn probe_path(&mut self, p: usize, text: String, new_tab: bool) {
+        let (tab, generation) = (self.panes[p].tab().id, self.panes[p].tab().generation);
+        self.probe_seq[p] += 1;
+        self.probe_at[p] = (tab, generation);
+        self.probes.push(Probe { pane: p, tab, seq: self.probe_seq[p], text, new_tab });
     }
 
     /// 그림 시험용: 칸 p에서 text를 입력해 확정한 결과까지 바로 반영한다
@@ -1490,6 +1554,7 @@ impl App {
             return;
         }
         match result {
+            Ok((dir, select)) if probe.new_tab => self.open_tab(p, Location::Dir(dir), select),
             Ok((dir, select)) => {
                 // 대소문자를 가리는 볼륨에서는 Work와 work가 다른 폴더라 글자 그대로 비교한다
                 let here = self.panes[p].tab().loc.dir() == Some(dir.as_str());
@@ -2334,8 +2399,8 @@ impl App {
             show_hidden: self.show_hidden,
             preview: false,
             auto_preview: self.auto_preview,
-            new_tab: session::NEW_TAB_SAME.to_string(),
-            recent: Vec::new(),
+            new_tab: self.new_tab_pref.clone(),
+            recent: self.recent.clone(),
             side: "main".to_string(),
             side_w: session::SIDE_W_DEFAULT,
             pin: None,
@@ -2360,7 +2425,7 @@ impl App {
         }
     }
 
-    /// 저장한 화면 상태로 연다. 없어진 폴더(와 맥에서 쓰지 않는 '내 PC'·시작 화면)는 home으로 바꾼다
+    /// 저장한 화면 상태로 연다. 없어진 폴더(와 맥에서 쓰지 않는 '내 PC')는 home으로 바꾼다. 시작 화면 탭은 그대로 연다
     pub fn restore(&mut self, s: &Session, home: &str) {
         self.requests.clear();
         // 탭을 새로 만든다: 옛 탭에 걸어 둔 표시는 버린다
@@ -2380,8 +2445,12 @@ impl App {
                 // 폴더가 아직 있는지는 여기서 보지 않는다 (꺼진 네트워크 폴더면 창이 뜨기 전에 멈춘다).
                 // 처음 읽기가 실패하면 on_listed가 home으로 바꾼다
                 let dir = match Location::from_session(t) {
+                    Location::Start => {
+                        tabs.push(self.new_tab_at(Location::Start));
+                        continue;
+                    }
                     Location::Dir(d) => d,
-                    _ => home.to_string(),
+                    Location::Computer => home.to_string(),
                 };
                 let tab = self.new_tab_at(Location::Dir(dir.clone()));
                 self.restored.insert(tab.id, dir);
@@ -2426,9 +2495,11 @@ impl App {
     /// 세션이 지금 공간의 화면이면 그 화면(마지막으로 본 모습)으로, 아니면 그 공간에 저장된 화면으로 연다.
     /// 작업 공간이 없으면(처음 실행했거나 작업 공간이 없던 시제품을 쓰던 경우) 지난번 화면이 '기본' 공간이 된다
     pub fn open_saved(&mut self, ws: Workspaces, session: Option<&Session>, home: &str) {
-        // 모양은 앱 전체의 것이라 작업 공간을 오갈 때가 아니라 여기서만 읽는다
+        // 모양·새 탭 설정·최근 위치는 앱 전체의 것이라 작업 공간을 오갈 때가 아니라 여기서만 읽는다
         if let Some(s) = session {
             self.set_theme_pref(&s.look.theme);
+            self.set_new_tab_start(s.new_tab != session::NEW_TAB_SAME);
+            self.recent = s.recent.iter().take(sakadu::ui::start::RECENT_KEEP).cloned().collect();
         }
         if ws.list.is_empty() {
             if let Some(s) = session {
@@ -2508,6 +2579,8 @@ impl App {
         self.edit = Editing::None;
         self.flash = None;
         self.menu = None;
+        self.cmd = None;
+        self.start_keys = false;
         self.drag = None;
         self.col_drag = None;
         self.side_scroll = 0.0;
@@ -2587,8 +2660,10 @@ impl App {
 
     // ---------- 이동 ----------
 
-    /// 칸 p를 loc으로 옮긴다 (기록을 남긴다). select가 있으면 읽은 뒤 그 이름을 고른다
+    /// 칸 p를 loc으로 옮긴다 (기록을 남기고, 폴더면 최근 위치에 둔다). select가 있으면 읽은 뒤 그 이름을 고른다
     pub fn navigate(&mut self, p: usize, loc: Location, select: Option<String>) {
+        self.note_recent(&loc);
+        self.start_keys = false;
         let tab = self.panes[p].tab_mut();
         tab.nav_push(loc);
         tab.reset_view_state();
@@ -2618,8 +2693,11 @@ impl App {
         }
     }
 
-    /// 뒤로·앞으로 뒤: 상위 폴더로 돌아왔으면 원래 있던 하위 폴더를 고른다
+    /// 뒤로·앞으로 뒤: 상위 폴더로 돌아왔으면 원래 있던 하위 폴더를 고른다. 돌아온 폴더는 최근 위치에 둔다
     fn after_history(&mut self, p: usize, from: Location) {
+        let loc = self.panes[p].tab().loc.clone();
+        self.note_recent(&loc);
+        self.start_keys = false;
         let tab = self.panes[p].tab_mut();
         let select = child_toward(&tab.loc, &from);
         tab.reset_view_state();
@@ -2666,10 +2744,18 @@ impl App {
 
     // ---------- 탭·칸 ----------
 
-    /// 지금 폴더를 새 탭으로 (지금 탭 바로 뒤)
+    /// 새 탭 (지금 탭 바로 뒤): 설정에 따라 시작 화면 또는 지금 폴더
     pub fn new_tab(&mut self, p: usize) {
-        let loc = self.panes[p].tab().loc.clone();
-        let tab = self.new_tab_at(loc);
+        let loc = if self.new_tab_starts() { Location::Start } else { self.panes[p].tab().loc.clone() };
+        self.open_tab(p, loc, None);
+    }
+
+    /// loc을 새 탭으로 연다 (칸 p의 지금 탭 바로 뒤, 그 탭으로 옮겨 간다). 폴더면 최근 위치에 둔다. select가 있으면 읽은 뒤 그 이름을 고른다
+    pub(super) fn open_tab(&mut self, p: usize, loc: Location, select: Option<String>) {
+        self.note_recent(&loc);
+        self.start_keys = false;
+        let mut tab = self.new_tab_at(loc);
+        tab.restore = select.as_deref().map(Restore::select);
         let pane = &mut self.panes[p];
         pane.active += 1;
         pane.tabs.insert(pane.active, tab);
@@ -2713,6 +2799,7 @@ impl App {
     pub fn activate_tab(&mut self, p: usize, i: usize) {
         if i < self.panes[p].tabs.len() {
             self.panes[p].active = i;
+            self.start_keys = false;
             self.load_if_new(p);
         }
     }
@@ -2755,7 +2842,7 @@ impl App {
     /// 설정 창에 보이는 값
     pub fn prefs(&self) -> Prefs {
         let (search_on, icloud, crawling, denied) = self.find_prefs();
-        Prefs { hidden: self.show_hidden, auto_preview: self.auto_preview, search_on, icloud, crawling, denied, theme: self.theme_pref.clone() }
+        Prefs { hidden: self.show_hidden, auto_preview: self.auto_preview, search_on, icloud, crawling, denied, theme: self.theme_pref.clone(), new_tab_start: self.new_tab_starts() }
     }
 
     /// 설정 창의 '숨김 항목 보기' (⌘⇧.와 같은 값)
@@ -3395,16 +3482,26 @@ impl App {
         self.pane_rects().into_iter().find(|(i, _)| *i == p).map(|(_, r)| geom(r).list)
     }
 
+    /// 칸 p의 탭들의 스크롤을 내용 안으로. 시작 화면은 그 배치의 높이로 (보이는 탭만. 숨은 시작 화면 탭은 보일 때 배치가 맞춘다)
     fn clamp_scroll(&mut self, p: usize) {
         let Some(list) = self.list_rect(p) else { return };
         let view = self.panes[p].view;
-        for tab in &mut self.panes[p].tabs {
-            clamp_tab(tab, list, view);
+        let start_max = self.start_max_scroll(p);
+        let pane = &mut self.panes[p];
+        for (i, tab) in pane.tabs.iter_mut().enumerate() {
+            match (tab.loc == Location::Start, start_max) {
+                (true, Some(max)) if i == pane.active => tab.scroll = tab.scroll.clamp(0.0, max),
+                (true, _) => {}
+                (false, _) => clamp_tab(tab, list, view),
+            }
         }
     }
 
     fn ensure_visible(&mut self, p: usize) {
         let Some(list) = self.list_rect(p) else { return };
+        if self.panes[p].tab().loc == Location::Start {
+            return self.clamp_scroll(p);
+        }
         let view = self.panes[p].view;
         reveal(self.panes[p].tab_mut(), list, view);
     }
@@ -3501,6 +3598,10 @@ impl App {
         if let (Some(m), Some(r)) = (self.menu.as_ref(), self.menu_rect()) {
             return if r.contains(x, y) { Hit::Menu(menu_hit(r, &m.lines, m.scroll, x, y)) } else { Hit::None };
         }
+        // 명령 메뉴는 모든 것 위에 떠 있다 (판 밖을 누르면 닫힌다)
+        if let Some(h) = self.cmd_hit(x, y) {
+            return h;
+        }
         if x < BAR_W {
             let rail = self.rail();
             if let Some((i, _)) = rail.spaces.iter().find(|(_, r)| r.contains(x, y)) {
@@ -3575,10 +3676,12 @@ impl App {
                 }
                 return if add.contains(x, y) { Hit::TabAdd(p) } else { Hit::Pane(p) };
             }
-            if gm.star.contains(x, y) {
+            // 책갈피와 보기 방식 단추는 폴더에만 있다 (시작 화면에는 없다)
+            let start = tab.loc == Location::Start;
+            if gm.star.contains(x, y) && !start {
                 return Hit::Star(p);
             }
-            if gm.view.contains(x, y) && self.edit != Editing::Address(p) {
+            if gm.view.contains(x, y) && self.edit != Editing::Address(p) && !start {
                 return Hit::ViewPick(p);
             }
             if gm.crumb.contains(x, y) {
@@ -3588,6 +3691,10 @@ impl App {
                     return Hit::Crumb(p, i);
                 }
                 return Hit::CrumbEmpty(p);
+            }
+            // 시작 화면: 머리글·목록 자리에 카드와 줄
+            if start {
+                return self.start_hit(p, x, y);
             }
             if gm.header.contains(x, y) {
                 return self.header_hit(g, p, &gm, x, y);
@@ -3664,13 +3771,22 @@ impl App {
             }
             return;
         }
+        // 명령 메뉴가 열려 있으면: 줄을 누르면 열고, 판 밖을 누르면 닫기만 한다. 이어지는 두 번째 누름(두 번 누르기)은 버린다:
+        // 방금 연 목록의 항목을 열지 않게
+        if self.cmd.is_some() {
+            let hit = self.hit(g, x, y);
+            self.press_on_card = true;
+            self.cmd_press(hit, mods);
+            return;
+        }
         let mut hit = self.hit(g, x, y);
         // 두 번 누르기는 첫 누름이 닿은 쪽의 것이다 (미리 보기 카드는 누름 한 번에 뜨고, 작아지고, 닫혀서 둘째 누름 때는 그 자리에 다른 것이 있다).
         // - 첫 누름이 카드였으면 둘째 누름은 버린다: 카드가 작아지거나 닫혀 드러난 줄을 열지 않는다
         // - 첫 누름이 카드가 아니었으면 둘째 누름은 카드 아래 것이 받는다: 그 누름으로 뜬 카드가 가로채면 파일이 열리지 않는다
+        // 시작 화면의 칸·줄도 누름 한 번에 옮겨 가므로, 그 둘째 누름은 버린다 (새로 연 목록의 항목을 열지 않게. Windows와 같다)
         let on_card = matches!(hit, Hit::Card | Hit::CardExpand | Hit::CardClose);
         if clicks < 2 {
-            self.press_on_card = on_card;
+            self.press_on_card = on_card || matches!(hit, Hit::Start(..));
         } else if self.press_on_card {
             return;
         } else if on_card {
@@ -3680,6 +3796,8 @@ impl App {
         self.edit = Editing::None;
         self.flash = None;
         self.press = None;
+        // 마우스를 쓰면 시작 화면의 키보드 초점 테두리는 감춘다
+        self.start_keys = false;
         // 검색(돋보기, 입력 칸, 검색 패널)은 검색이 받는다. 다른 곳을 누르면 키보드만 검색 입력 칸에서 떠난다
         if self.find_press(hit, clicks) {
             return;
@@ -3704,6 +3822,7 @@ impl App {
             | Hit::HeaderResize(p, _)
             | Hit::Row(p, _)
             | Hit::List(p)
+            | Hit::Start(p, _)
             | Hit::Pane(p) => self.activate_pane(p),
             _ => {}
         }
@@ -3797,8 +3916,16 @@ impl App {
                 let prev = (0..col).rev().find(|&i| shown[i].is_some());
                 self.col_drag = Some(ColDrag { pane: p, col, prev, start_x: x, start });
             }
+            // 시작 화면의 칸·줄: 그곳으로 (⌘-누르기는 새 탭에서)
+            Hit::Start(p, i) => {
+                if let Some(loc) = self.start_target(p, i) {
+                    self.start_go(p, loc, mods.cmd);
+                }
+            }
             // 검색은 위에서 받았다
             Hit::FindOpen | Hit::FindField | Hit::FindClose | Hit::Find(_) => {}
+            // 명령 메뉴도 위에서 받았다
+            Hit::CmdRow(_) | Hit::CmdPanel | Hit::CmdScrim => {}
             Hit::None | Hit::Pane(_) | Hit::Menu(_) => {}
         }
     }
@@ -3874,6 +4001,14 @@ impl App {
             m.sel = Some(i);
             changed = true;
         }
+        // 명령 메뉴: 마우스 아래 줄을 고른다 (키보드로 고른 줄과 같은 표시. Windows와 같다)
+        if let Some(c) = self.cmd.as_mut()
+            && let Hit::CmdRow(i) = h
+            && c.sel != i
+        {
+            c.sel = i;
+            changed = true;
+        }
         changed
     }
 
@@ -3888,6 +4023,13 @@ impl App {
             }
             return;
         }
+        // 명령 메뉴가 열려 있으면 판 위에서만 줄 목록을 스크롤한다
+        if self.cmd.is_some() {
+            if self.hit(g, x, y) != Hit::CmdScrim {
+                self.cmd_wheel(dy);
+            }
+            return;
+        }
         if self.find_scroll(x, dy) {
             return;
         }
@@ -3896,7 +4038,7 @@ impl App {
             return self.clamp_side_scroll();
         }
         let p = match self.hit(g, x, y) {
-            Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) => p,
+            Hit::Row(p, _) | Hit::List(p) | Hit::Pane(p) | Hit::Start(p, _) => p,
             _ => return,
         };
         // 이름을 고치는 칸은 스크롤하지 않는다 (트랙패드에 손이 스쳐 그 줄이 밀려나면 치던 이름을 잃는다)
@@ -3925,6 +4067,19 @@ impl App {
         }
         let p = self.active;
         self.flash = None;
+        // 명령 메뉴가 열려 있으면 키는 명령 메뉴가 받는다 (보통은 입력 칸이 받아 넘긴다). 명령 메뉴 키를 다시 누르면 닫는다
+        if self.cmd.is_some() {
+            if key.combo(m).and_then(|c| self.keys.find(c)) == Some(Action::Commands) {
+                self.close_commands();
+            } else {
+                self.cmd_key(key, m);
+            }
+            return true;
+        }
+        // 시작 화면의 키 (화살표, Return, ⌫): 단축키 표보다 먼저 받는다 (Return은 이름 바꾸기의 키다)
+        if self.panes[p].tab().loc == Location::Start && self.start_key(p, key, m) {
+            return true;
+        }
         // 바꿀 수 있는 단축키 (keys.txt): 새 탭, 새 폴더, 보기 방식, 칸 나누기, 이름 바꾸기(Return) 같은 것
         if let Some(a) = key.combo(m).and_then(|c| self.keys.find(c)).filter(|a| mac_runs(*a)) {
             return self.run_action(a);
@@ -3959,6 +4114,12 @@ impl App {
         true
     }
 
+    /// 글을 치는 입력 상자가 키보드를 가졌는지: 이름·경로·공간 이름 고치기, 검색 칸, 명령 메뉴(⌘K) 칸.
+    /// 그동안 창 쪽 undo:(⌘Z)는 파일 작업이 아니라 친 글자를 되돌린다
+    pub fn typing(&self) -> bool {
+        self.edit != Editing::None || self.find_wants_keys() || self.cmd.is_some()
+    }
+
     /// 누르고 있을 때 되풀이해 받아도 되는 키인지. 단축키 표의 동작(새 탭, 새 폴더, 칸 나누기 …)은 한 번 누름에 한 번만 한다
     pub fn key_repeats(&self, key: Key, m: Mods) -> bool {
         match key.combo(m).and_then(|c| self.keys.find(c)).filter(|a| mac_runs(*a)) {
@@ -3971,7 +4132,12 @@ impl App {
     pub fn run_action(&mut self, a: Action) -> bool {
         let p = self.active;
         self.flash = None;
+        // 명령 메뉴가 떠 있는 동안 메뉴 막대로 다른 동작을 하면 명령 메뉴는 닫는다 (그 동작의 입력이 키보드를 받게)
+        if a != Action::Commands {
+            self.close_commands();
+        }
         match a {
+            Action::Commands => self.toggle_commands(),
             Action::Search => self.open_find(),
             Action::AddFavorite => self.toggle_pin_selected(),
             Action::NewTab => self.new_tab(p),
@@ -3998,7 +4164,7 @@ impl App {
             Action::Refresh => self.refresh(p),
             // 설정 창에 단축키와 도움말이 있다
             Action::Settings | Action::Help => self.open_settings = true,
-            Action::Favorites | Action::Commands | Action::Preview => return false,
+            Action::Favorites | Action::Preview => return false,
         }
         true
     }
@@ -4100,6 +4266,8 @@ impl App {
         if let (Some(m), Some(r)) = (self.menu.as_ref(), self.menu_rect()) {
             paint_menu(g, t, &MenuScene { rect: r, lines: &m.lines, sel: m.sel, scroll: m.scroll, card: true });
         }
+        // 명령 메뉴는 창 전체를 덮는다 (메뉴와 함께 떠 있지 않는다)
+        self.paint_cmd(g, t);
     }
 
     /// 미리 보기 카드: 칸들 위에 그린다. 자리와 그리기는 공통 코드, 그림과 글은 이 앱이 읽어 둔 것
@@ -4266,6 +4434,7 @@ impl App {
         // 이 칸에서 이름을 고치는 항목 (커서 줄에 이름 상자가 뜬다)
         let naming = self.item_edit().filter(|(e, _)| e.pane == p);
         let dir = tab.loc.dir();
+        let start = tab.loc == Location::Start;
         // 날짜 열 폭을 아직 재지 않았으면 여기서 잰다 (cols가 쓴다)
         self.date_col_w(g);
         let scene = PaneScene {
@@ -4286,8 +4455,8 @@ impl App {
             count_hot,
             filter: None,
             starred: dir.map(|d| self.is_marked(d)),
-            // 보기 메뉴는 지금 칸에 대해 열린다
-            view_button: Some(active && self.menu_shown().is_some_and(|(k, _)| k == MenuKind::View)),
+            // 보기 메뉴는 지금 칸에 대해 열린다. 시작 화면에는 보기 방식 단추가 없다
+            view_button: (!start).then(|| active && self.menu_shown().is_some_and(|(k, _)| k == MenuKind::View)),
             root: None,
             address: editing,
             // 창에서는 입력 상자가 글자를 그린다. 그림 시험에서만 직접 그린다
@@ -4309,6 +4478,10 @@ impl App {
             now: listing::now_filetime(),
         };
         paint_pane_head(g, t, &scene);
+        // 시작 화면: 머리글·목록 자리에 카드와 줄
+        if self.paint_start_view(g, t, p) {
+            return paint_pane_border(g, t, &scene);
+        }
         paint_pane_list(g, &mut self.art(), t, &scene);
         // 창에서는 입력 상자가 고치는 이름을 그린다. 그림 시험에서만 직접 그린다: 이름과, 미리 골라 둔 앞부분의 바탕
         if let (true, Some((e, r))) = (self.standalone, naming) {
@@ -4404,8 +4577,11 @@ impl CardArt<Gfx> for CardPic<'_> {
     }
 }
 
-/// 칩 줄 오른쪽 글: 항목 수, 고른 것이 있으면 고른 개수·크기
+/// 칩 줄 오른쪽 글: 항목 수, 고른 것이 있으면 고른 개수·크기. 시작 화면은 비워 둔다 (Windows와 같다)
 fn count_text(tab: &Tab) -> String {
+    if tab.loc == Location::Start {
+        return String::new();
+    }
     let (n, size) = tab.selection_stats();
     if n > 0 {
         let s = if size > 0 { format!(" · {}", listing::format_size(size)) } else { String::new() };
@@ -4413,6 +4589,12 @@ fn count_text(tab: &Tab) -> String {
     } else {
         format!("{}개", tab.view.len())
     }
+}
+
+/// 폴더 읽기 오류가 그 폴더가 지워졌거나 폴더가 아니라는 것인지 (그때만 최근 위치에서 뺀다).
+/// 읽기 오류는 io::Error의 글이라 끝에 OS 오류 번호가 붙는다 (ENOENT 2, ENOTDIR 20)
+fn dir_gone(msg: &str) -> bool {
+    msg.ends_with("(os error 2)") || msg.ends_with("(os error 20)")
 }
 
 /// 탭의 스크롤을 내용 길이 안으로 (보기 방식의 칸 배치에 맞춰)
@@ -4468,6 +4650,8 @@ mod tests {
 
     fn app(home: &str) -> (App, Gfx) {
         let mut a = App::new(1280.0, 800.0, Theme::LIGHT, home, Favorites::default(), Vec::new());
+        // 새 탭은 지금 폴더로 (시작 화면은 따로 시험한다)
+        a.set_new_tab_start(false);
         a.settle();
         (a, Gfx::bitmap(8.0, 8.0, 1.0).unwrap())
     }
@@ -4692,6 +4876,236 @@ mod tests {
         assert_eq!(b.theme_pref(), "light", "switching workspaces keeps the app's look");
         b.set_theme_pref("sepia");
         assert_eq!(b.theme_pref(), "system", "an unknown value means follow the Mac");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 최근 위치: 다녀간 폴더가 맨 앞에(뒤로 가기도), 같은 폴더는 한 번만. 열지 못한 폴더는 빠진다.
+    /// 세션에 남아 다음에 열 때 돌아오고, 작업 공간을 오가도 그대로다 (앱 전체의 것)
+    #[test]
+    fn recent_places_are_recorded_saved_and_restored() {
+        let (root, home) = demo();
+        let (mut a, _) = app(&home);
+        assert!(a.recent.is_empty(), "opening the window records nothing");
+        let work = util::join(&home, "업무");
+        let down = util::join(&home, "다운로드");
+        a.navigate(0, Location::Dir(work.clone()), None);
+        a.navigate(0, Location::Dir(down.clone()), None);
+        a.settle();
+        assert_eq!(a.recent, [down.clone(), work.clone()]);
+        a.go_back(0);
+        a.settle();
+        assert_eq!(a.recent, [work.clone(), down.clone()], "going back puts that folder first again, once");
+        let gone = util::join(&home, "없는 곳");
+        a.navigate(1, Location::Dir(gone.clone()), None);
+        assert_eq!(a.recent[0], gone);
+        a.settle();
+        assert!(!a.recent.contains(&gone), "a folder that is not there is dropped");
+        let s = session::parse(&session::serialize(&a.to_session())).expect("session");
+        assert_eq!(s.recent, [work.clone(), down.clone()]);
+        let (mut b, _) = app(&home);
+        b.open_saved(Workspaces::default(), Some(&s), &home);
+        assert_eq!(b.recent, [work.clone(), down.clone()]);
+        b.new_workspace();
+        b.edit = Editing::None;
+        b.switch_workspace(0);
+        assert_eq!(b.recent, [work, down], "switching workspaces keeps the list");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 세션에서 다시 연 탭의 폴더를 읽지 못하면 home을 연다. 최근 위치에서는 지워진 폴더만 빼고,
+    /// 잠깐 닿지 않는 곳(꺼진 NAS)은 남긴다: 다시 켜지면 시작 화면·명령 메뉴에서 바로 간다
+    #[test]
+    fn restored_tab_that_cannot_be_read_keeps_offline_places_recent() {
+        let (root, home) = demo();
+        let (a, _) = app(&home);
+        let mut s = session::parse(&session::serialize(&a.to_session())).expect("session");
+        let nas = "/Volumes/꺼진 NAS/공유".to_string();
+        let gone = util::join(&home, "없는 곳");
+        let work = util::join(&home, "업무");
+        s.panes[0].tabs = vec![nas.clone(), gone.clone()];
+        s.panes[0].active = 0;
+        s.recent = vec![nas.clone(), gone.clone(), work.clone()];
+        let (mut b, _) = app(&home);
+        b.open_saved(Workspaces::default(), Some(&s), &home);
+        let tabs: Vec<(u64, u64)> = b.pane(0).tabs.iter().map(|t| (t.id, t.generation)).collect();
+        assert_eq!(tabs.len(), 2);
+        b.on_listed(tabs[0].0, tabs[0].1, Err("Operation timed out (os error 60)".to_string()));
+        b.on_listed(tabs[1].0, tabs[1].1, Err("No such file or directory (os error 2)".to_string()));
+        assert_eq!(b.recent, [nas, work], "only the folder that is gone leaves the list");
+        b.settle();
+        assert!(b.pane(0).tabs.iter().all(|t| t.loc == Location::Dir(home.clone())), "both tabs open home");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// ⌘T는 '새 탭' 설정이 시작 화면이면(기본) 시작 화면 탭을 연다: 고정한 폴더 카드, 최근 위치(고정한 것은 빼고), 위치.
+    /// 칸을 누르면 그 폴더로 가고 뒤로 가면 시작 화면이다. 화살표는 처음에 테두리만 보이고, 다음부터 옮기며, Return으로 연다.
+    /// 설정과 시작 화면 탭은 세션에 남는다. '지금 폴더'로 바꾸면 ⌘T가 지금 폴더를 연다
+    #[test]
+    fn cmd_t_opens_the_start_screen_and_its_cards_navigate() {
+        use sakadu::ui::start::StartItem;
+        let (root, home) = demo();
+        let work = util::join(&home, "업무");
+        let down = util::join(&home, "다운로드");
+        let mut a = App::new(1280.0, 800.0, Theme::LIGHT, &home, Favorites::default(), vec![("다운로드".to_string(), down.clone())]);
+        let g = Gfx::bitmap(8.0, 8.0, 1.0).unwrap();
+        a.settle();
+        assert!(a.prefs().new_tab_start, "the start screen is the default");
+        a.navigate(1, Location::Dir(down.clone()), None);
+        a.navigate(0, Location::Dir(work.clone()), None);
+        a.settle();
+        a.toggle_star(0);
+        let cmd = Mods { cmd: true, ..Default::default() };
+        assert!(a.key(Key::Char('t'), cmd));
+        a.settle();
+        assert_eq!((a.pane(0).tabs.len(), a.pane(0).tab().loc.clone()), (2, Location::Start));
+        assert!(a.seen().start);
+        assert_eq!(a.title(), "새 탭 - Sakadu");
+        let v = a.start_view(0).expect("the start tab is laid out");
+        let items: Vec<StartItem> = v.items.iter().map(|(it, _)| it.clone()).collect();
+        assert_eq!(items, [StartItem::Fav { name: "업무".into(), path: work.clone() }, StartItem::Recent(down.clone()), StartItem::Drive(0)]);
+        // 세션: 새 탭 설정과 시작 화면 탭
+        let s = session::parse(&session::serialize(&a.to_session())).expect("session");
+        assert_eq!((s.new_tab.as_str(), s.panes[0].tabs[1].as_str()), (session::NEW_TAB_START, "::start"));
+        let (mut b, _) = app(&home);
+        b.open_saved(Workspaces::default(), Some(&s), &home);
+        b.settle();
+        assert_eq!(b.pane(0).tab().loc, Location::Start, "the start tab comes back as a start tab");
+        assert!(b.prefs().new_tab_start && b.pane(0).tab().state == LoadState::Ready);
+        // 고정한 폴더 칸을 누르면 그리로, 뒤로 가면 시작 화면
+        let (x, y) = mid(v.items[0].1);
+        assert_eq!(a.hit(&g, x, y), Hit::Start(0, 0));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(work.clone()));
+        // 둘째 누름(두 번 누르기)은 새로 연 목록의 항목을 열지 않는다
+        a.mouse_down(&g, x, y, Mods::default(), 2);
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(work.clone()));
+        a.go_back(0);
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Start);
+        // 화살표: 처음 ↓는 첫 칸에 테두리만, 다음 ↓는 아래 줄(최근 위치), Return은 그 폴더로. Return은 이름 바꾸기가 아니다
+        assert!(a.key(Key::Down, Mods::default()));
+        assert_eq!((a.start_keys, a.pane(0).tab().cursor), (true, 0));
+        assert!(a.key(Key::Down, Mods::default()));
+        assert_eq!(a.pane(0).tab().cursor, 1);
+        assert!(a.key(Key::Return, Mods::default()));
+        a.settle();
+        assert_eq!(a.pane(0).tab().loc, Location::Dir(down.clone()));
+        assert_eq!(a.edit, Editing::None);
+        // ⌫는 테두리가 있는 최근 위치 줄을 목록에서 뺀다
+        a.go_back(0);
+        a.settle();
+        a.key(Key::Down, Mods::default());
+        a.key(Key::Down, Mods::default());
+        assert!(a.key(Key::Delete, Mods::default()));
+        assert!(!a.recent.contains(&down), "{:?}", a.recent);
+        // '지금 폴더'면 ⌘T가 지금 폴더를 연다
+        a.set_new_tab_start(false);
+        a.activate_pane(1);
+        a.key(Key::Char('t'), cmd);
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(down));
+        assert_eq!(a.to_session().new_tab, session::NEW_TAB_SAME);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// ⌘K 명령 메뉴: 치기 전에는 열린 탭·최근 위치·명령(명령 메뉴 자신은 빼고). 이름 앞부분이 맞는 것이 먼저이고 초성으로도 찾으며,
+    /// 자모로 나뉜(맥이 만든 NFD) 폴더 이름도 찾는다. ↓와 Return으로 고른 명령을 하고, 줄을 누르면 그것을 열고, 판 밖을 누르면 닫는다.
+    /// 경로를 치면 맨 위 줄로 그 경로에 간다 (⌘Return은 새 탭)
+    #[test]
+    fn command_menu_ranks_runs_and_goes_to_paths() {
+        let (root, home) = demo();
+        // '보고서'를 자모로 나눈 이름 (ᄇ ᅩ ᄀ ᅩ ᄉ ᅥ)
+        let nfd = "\u{1107}\u{1169}\u{1100}\u{1169}\u{1109}\u{1165}";
+        std::fs::create_dir_all(std::path::Path::new(&home).join(nfd)).unwrap();
+        let (mut a, g) = app(&home);
+        let report = util::join(&home, nfd);
+        a.navigate(1, Location::Dir(report.clone()), None);
+        a.settle();
+        let cmd = Mods { cmd: true, ..Default::default() };
+        assert!(a.key(Key::Char('k'), cmd));
+        let (text, names, sel) = a.cmd_seen().expect("cmd-K opens the command menu");
+        assert_eq!((text.as_str(), sel), ("", 0));
+        assert!(names.contains(&"새 탭".to_string()) && names.contains(&nfd.to_string()));
+        assert!(!names.contains(&"명령 메뉴".to_string()) && !names.contains(&"미리 보기 창".to_string()), "only actions the Mac runs");
+        // 완성된 글자로도, 초성으로도 나뉜 이름을 찾는다 (탭이 먼저, 그다음 최근 위치, 마지막에 디스크에서 찾기)
+        a.cmd_typed("보고");
+        assert_eq!(a.cmd_seen().unwrap().1, [nfd, nfd, "‘보고’ 디스크에서 찾기"]);
+        a.cmd_typed("ㅂㄱㅅ");
+        assert_eq!(a.cmd_seen().unwrap().1, [nfd, nfd, "‘ㅂㄱㅅ’ 디스크에서 찾기"]);
+        // 줄을 누르면 그 탭으로 (오른쪽 칸)
+        a.activate_pane(0);
+        let list = sakadu::ui::commands::cmd_list(a.cmd_rect().unwrap());
+        let (x, y) = (list.l + 60.0, list.t + sakadu::ui::commands::CMD_ROW_H / 2.0);
+        assert_eq!(a.hit(&g, x, y), Hit::CmdRow(0));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        assert!(a.cmd_seen().is_none(), "opening a line closes the menu");
+        assert_eq!(a.active(), 1);
+        // 앞부분이 맞는 것이 먼저: '보기'는 모두 가운데가 맞아 표의 순서대로. ↓ 두 번과 Return은 '큰 아이콘 보기'
+        a.run_action(Action::Commands);
+        a.cmd_typed("보기");
+        let names = a.cmd_seen().unwrap().1;
+        assert_eq!(names[..3], ["숨김 항목 보기", "아주 큰 아이콘 보기", "큰 아이콘 보기"]);
+        a.key(Key::Down, Mods::default());
+        a.cmd_key(Key::Down, Mods::default());
+        assert_eq!(a.cmd_seen().unwrap().2, 2);
+        assert!(a.cmd_key(Key::Return, Mods::default()));
+        assert_eq!((a.pane(1).view, a.cmd_seen().is_none()), (ViewMode::Large, true));
+        // ↑는 맨 위에서 맨 아래로, Esc와 판 밖 누르기는 닫는다
+        a.toggle_commands();
+        a.cmd_key(Key::Up, Mods::default());
+        let (_, names, sel) = a.cmd_seen().unwrap();
+        assert_eq!(sel, names.len() - 1);
+        a.cmd_key(Key::Esc, Mods::default());
+        assert!(a.cmd_seen().is_none());
+        a.toggle_commands();
+        a.mouse_down(&g, 2.0, 2.0, Mods::default(), 1);
+        assert!(a.cmd_seen().is_none(), "a press outside the panel closes it");
+        // 경로: 맨 위 줄이 그 경로로 가는 줄이다. Return은 이 탭에서, ⌘Return은 새 탭에서 (경로 입력과 같이 뒷줄에서 확인한다)
+        let work = util::join(&home, "업무");
+        a.toggle_commands();
+        a.cmd_typed(&work);
+        assert_eq!(a.cmd_seen().unwrap().1[0], work);
+        a.cmd_key(Key::Return, Mods::default());
+        a.settle();
+        assert_eq!(a.pane(1).tab().loc, Location::Dir(work.clone()));
+        let tabs = a.pane(1).tabs.len();
+        let down = util::join(&home, "다운로드");
+        a.toggle_commands();
+        a.cmd_typed(&down);
+        a.cmd_key(Key::Return, cmd);
+        a.settle();
+        assert_eq!((a.pane(1).tabs.len(), a.pane(1).tab().loc.clone()), (tabs + 1, Location::Dir(down)));
+        // 경로·이름을 고치는 중에는 열지 않는다
+        a.begin_address(1);
+        a.run_action(Action::Commands);
+        assert!(a.cmd_seen().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 글을 치는 입력 상자가 키보드를 가진 동안은 창 쪽 ⌘Z(undo:)가 파일 작업이 아니라 친 글자를 되돌린다 (typing으로 가른다):
+    /// 경로 고치기·검색 칸처럼 명령 메뉴(⌘K) 칸도
+    #[test]
+    fn cmd_z_while_typing_in_the_command_menu_is_for_the_text() {
+        let (root, home) = demo();
+        let (mut a, _) = app(&home);
+        assert!(!a.typing(), "with the keys in the list ⌘Z undoes file operations");
+        a.toggle_commands();
+        assert!(a.typing(), "the command menu field");
+        a.cmd_typed("업무");
+        assert!(a.typing());
+        a.close_commands();
+        assert!(!a.typing());
+        a.begin_address(0);
+        assert!(a.typing(), "the path field");
+        a.cancel_address();
+        a.open_find();
+        assert!(a.typing(), "the search field");
+        a.toggle_commands();
+        assert!(a.typing(), "the command menu over the search panel");
+        a.close_commands();
+        a.close_find();
+        assert!(!a.typing());
         std::fs::remove_dir_all(root).unwrap();
     }
 
