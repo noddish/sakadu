@@ -351,6 +351,7 @@ fn extract_into(archive: &str, wants: &[(String, String)], dest: &Path) -> Resul
     let quarantine = quarantine_of(archive);
     let mut made = vec![false; wants.len()];
     let mut written: Vec<PathBuf> = Vec::new();
+    let mut places = Places::default();
     let mut r = Reader::open(archive).map_err(|e| {
         sakadu::diag::log(|| format!("archive: open failed: {e}"));
         UNREADABLE.to_string()
@@ -362,15 +363,16 @@ fn extract_into(archive: &str, wants: &[(String, String)], dest: &Path) -> Resul
             r.skip();
             continue;
         };
-        let mut out = dest.join(&wants[i].1);
-        out.extend(rest.split('/').filter(|s| !s.is_empty()));
+        // 자리는 만드는 것만 받는다 (만들지 않는 링크가 이름을 차지하지 않게)
+        let mut place = |dir: bool| dest.join(places.place(i, &wants[i].1, &rest, dir));
         match h.kind {
             AE_IFDIR => {
-                create_dirs(&out, &mut written)?;
+                create_dirs(&place(true), &mut written)?;
                 made[i] = true;
             }
             // 보통 파일 (종류를 적지 않는 형식은 0). 하드 링크 항목은 내용이 없다 (가리키는 항목의 내용을 쓴다): 만들지 않는다
             0 | AE_IFREG if !h.hardlink => {
+                let out = place(false);
                 if let Some(parent) = out.parent() {
                     create_dirs(parent, &mut written)?;
                 }
@@ -390,7 +392,60 @@ fn extract_into(archive: &str, wants: &[(String, String)], dest: &Path) -> Resul
             set_quarantine(p, q);
         }
     }
-    Ok(wants.iter().map(|(_, name)| dest.join(name).to_string_lossy().into_owned()).collect())
+    Ok(wants.iter().enumerate().map(|(i, (_, name))| dest.join(places.top(i, name)).to_string_lossy().into_owned()).collect())
+}
+
+/// 꺼낸 폴더 안의 자리 정하기. 압축 파일 안의 경로(한글은 모아 쓴 꼴, 목록에 보이는 그대로)마다 자리를 하나씩 준다.
+/// 맥 디스크는 보통 대소문자를 가리지 않아 README와 readme가 한 파일이 된다: 목록에는 둘 다 보이니, 뒤에 나온 것에
+/// 복사본처럼 번호를 붙여("readme 2") 둘 다 꺼낸다 (꺼낸 것을 옮겨 놓을 디스크도 그럴 수 있어 늘 대소문자를 접어 본다).
+/// 같은 경로가 다시 나오면(tar에 덧붙인 새 판) 같은 자리에 덮어쓴다: 목록에도 하나로 보인다
+#[derive(Default)]
+struct Places {
+    /// (꺼낼 것의 번호, 그 꺼낸 이름부터의 안쪽 경로) → 꺼낸 폴더 안의 상대 경로
+    at: std::collections::HashMap<(usize, String), PathBuf>,
+    /// 이미 준 자리 (상대 경로를 소문자로 접은 것)
+    taken: std::collections::HashSet<String>,
+}
+
+impl Places {
+    /// 꺼낼 것 i(꺼낸 이름 top) 아래 rest("" 이면 그 자신)의 자리. 위 폴더들도 차례로 자리를 받는다. dir: 그 항목이 폴더인지
+    fn place(&mut self, i: usize, top: &str, rest: &str, dir: bool) -> PathBuf {
+        let parts: Vec<&str> = std::iter::once(top).chain(rest.split('/').filter(|s| !s.is_empty())).collect();
+        let mut key = String::new();
+        let mut placed = PathBuf::new();
+        for (k, part) in parts.iter().enumerate() {
+            if k > 0 {
+                key.push('/');
+            }
+            key.push_str(part);
+            placed = match self.at.get(&(i, key.clone())) {
+                Some(p) => p.clone(),
+                None => {
+                    let p = self.free(&placed, part, dir || k + 1 < parts.len());
+                    self.at.insert((i, key.clone()), p.clone());
+                    p
+                }
+            };
+        }
+        placed
+    }
+
+    /// 꺼낼 것 i의 꺼낸 자리 (그 이름이 다른 꺼낼 것과 겹쳐 번호를 붙였으면 그 이름)
+    fn top(&self, i: usize, name: &str) -> PathBuf {
+        self.at.get(&(i, name.to_string())).cloned().unwrap_or_else(|| PathBuf::from(name))
+    }
+
+    /// parent 안에서 아직 주지 않은 이름: name, 대소문자만 달라도 겹치면 "name 2", "name 3"… (파일은 확장자 앞에)
+    fn free(&mut self, parent: &Path, name: &str, dir: bool) -> PathBuf {
+        let mut n = 1;
+        loop {
+            let p = parent.join(sakadu::fileops::numbered_name(name, n, dir));
+            if self.taken.insert(p.to_string_lossy().to_lowercase()) {
+                return p;
+            }
+            n += 1;
+        }
+    }
 }
 
 /// 폴더를 (위 폴더까지) 만들고, 새로 만든 폴더들을 적어 둔다 (격리 표시를 붙일 것. 꺼내는 폴더 dest는 이미 있다)
@@ -627,5 +682,42 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(parent);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// 대소문자만 다른 항목(README와 readme, Sub와 sub)은 맥 디스크에서 한 자리가 되므로 뒤에 나온 것에 번호를 붙여 모두 꺼낸다
+    /// (목록에도 모두 보인다). 고른 것끼리 겹쳐도 그렇다. 같은 경로가 다시 나오면(tar에 덧붙인 새 판) 뒤의 것으로 덮어쓴다
+    #[test]
+    fn names_that_differ_only_in_case_are_all_extracted() {
+        let dir = temp("case");
+        let entries: [(&str, &[u8]); 6] =
+            [("폴더/README", b"upper"), ("폴더/readme", b"lower"), ("폴더/메모.txt", b"old"), ("폴더/메모.txt", b"new"), ("폴더/Sub/a.txt", b"a"), ("폴더/sub/b.txt", b"b")];
+        let mut tar = Vec::new();
+        for (name, body) in entries {
+            tar.extend(tar_header(name, b'0', body.len(), ""));
+            tar.extend(body);
+            tar.resize(tar.len().div_ceil(512) * 512, 0);
+        }
+        tar.resize(tar.len() + 1024, 0);
+        let path = util::join(&dir, "겹침.tar");
+        std::fs::write(&path, tar).unwrap();
+        let top = util::join(&path, "폴더");
+        let shown = names(&list(&top, &path).unwrap());
+        assert_eq!(shown.len(), 5, "README, readme, Sub, sub, 메모.txt: {shown:?}");
+        let got = extract(&path, std::slice::from_ref(&top)).unwrap();
+        let out = Path::new(&got[0]);
+        let read = |p: &str| std::fs::read(out.join(p)).unwrap();
+        assert_eq!(read("README"), b"upper");
+        assert_eq!(read("readme 2"), b"lower");
+        assert_eq!(read("메모.txt"), b"new", "the later copy of the same path wins");
+        assert_eq!(read("Sub/a.txt"), b"a");
+        assert_eq!(read("sub 2/b.txt"), b"b");
+        let two = extract(&path, &[util::join(&top, "README"), util::join(&top, "readme")]).unwrap();
+        assert!(two[0].ends_with("/README") && two[1].ends_with("/readme 2"), "{two:?}");
+        assert_eq!(std::fs::read(&two[0]).unwrap(), b"upper");
+        assert_eq!(std::fs::read(&two[1]).unwrap(), b"lower");
+        for p in got.iter().chain(&two) {
+            let _ = std::fs::remove_dir_all(Path::new(p).parent().unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

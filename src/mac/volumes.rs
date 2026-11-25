@@ -134,25 +134,54 @@ fn mount_reason(code: c_int) -> String {
     }
 }
 
-/// 이미 붙어 있는 그 공유의 자리: 붙은 디스크 가운데 출처에 그 서버 이름이 들어 있고 그 공유 폴더 이름으로 끝나는 것
+/// 이미 붙어 있는 그 공유의 자리: 붙은 디스크 가운데 출처의 서버 이름과 공유 경로가 주소의 것과 같은 것
 fn find_share(url: &str) -> Option<String> {
     let (server, share) = share_parts(url)?;
     mounts().into_iter().find(|m| share_matches(&m.from, &server, &share)).map(|m| m.on)
 }
 
-/// 주소의 서버 이름과 마지막 폴더 이름 (소문자, %를 푼 것). 공유 폴더가 없으면 None
+/// 주소("smb://이름@서버:포트/공유/")의 서버 이름과 공유 경로 (host_of, share_path). 공유 폴더가 없으면 None
 fn share_parts(url: &str) -> Option<(String, String)> {
     let rest = url.split_once("://")?.1;
     let (server, path) = rest.split_once('/')?;
-    let host = server.rsplit('@').next()?.split(':').next()?.to_lowercase();
-    let share = path.trim_end_matches('/').rsplit('/').next().filter(|s| !s.is_empty())?;
-    Some((host, decode(share).to_lowercase()))
+    Some((host_of(server)?, share_path(path)?))
 }
 
-/// 붙은 디스크의 출처(from)가 그 서버의 그 공유인가 ("//hong@nas.local/사진", "nas.local:/volume1/사진")
+/// 붙은 디스크의 출처(from)가 그 서버의 그 공유인가. 서버 이름과 공유 경로를 통째로 견준다
+/// (nas.local이 othernas.local이나 nas.local.example에 맞지 않게, 사진이 사진 폴더에 맞지 않게)
 fn share_matches(from: &str, server: &str, share: &str) -> bool {
-    let from = decode(from).to_lowercase();
-    from.contains(server) && from.trim_end_matches('/').ends_with(&format!("/{share}"))
+    source_parts(from).is_some_and(|(h, p)| h == server && p == share)
+}
+
+/// 붙은 디스크 출처의 서버 이름과 공유 경로. smbfs·afpfs는 "//[이름[;도메인][:암호]@]서버[:포트]/공유",
+/// NFS는 "서버:/내보낸/경로", ftp는 주소 꼴("ftp://서버/경로")이다. 디스크 장치("/dev/disk4s1") 따위는 None
+fn source_parts(from: &str) -> Option<(String, String)> {
+    let (server, path) = match from.strip_prefix("//").or_else(|| from.split_once("://").map(|(_, rest)| rest)) {
+        Some(rest) => rest.split_once('/')?,
+        // NFS: 서버 뒤 ':' 다음이 '/'로 시작하는 경로 (IPv6 서버는 [ ] 안이라 그 뒤의 ':'에서 자른다)
+        None => {
+            let at = if from.starts_with('[') { from.find("]:")? + 1 } else { from.find(':')? };
+            let (server, path) = (&from[..at], &from[at + 1..]);
+            if server.contains('/') || !path.starts_with('/') {
+                return None;
+            }
+            (server, path)
+        }
+    };
+    Some((host_of(server)?, share_path(path)?))
+}
+
+/// 서버 칸("이름;도메인:암호@서버:포트", "[IPv6]:포트")의 서버 이름: 소문자로, %를 푼 것. 비었으면 None
+fn host_of(server: &str) -> Option<String> {
+    let s = server.rsplit('@').next()?;
+    let host = if s.starts_with('[') { s.find(']').map_or(s, |i| &s[..=i]) } else { s.split(':').next()? };
+    (!host.is_empty()).then(|| decode(host).to_lowercase())
+}
+
+/// 공유 경로: 앞뒤 '/'를 떼고 %를 풀어 소문자로 (SMB 공유 이름은 대소문자를 가리지 않는다). 비었으면 None
+fn share_path(path: &str) -> Option<String> {
+    let p = path.trim_matches('/');
+    (!p.is_empty()).then(|| decode(p).to_lowercase())
 }
 
 /// 주소의 %XX를 푼다 (UTF-8이 아니면 그대로 둔다)
@@ -189,18 +218,40 @@ mod tests {
         assert!(!on_network(&std::env::temp_dir().to_string_lossy()));
     }
 
-    /// 이미 붙어 있는 공유를 찾을 때: 서버 이름과 공유 폴더 이름(%를 풀고 대소문자 없이)으로 견준다
+    /// 이미 붙어 있는 공유를 찾을 때: 서버 이름과 공유 경로(%를 풀고 대소문자 없이)를 통째로 견준다.
+    /// 출처의 이름·도메인·암호·포트는 보지 않고, 다른 서버 이름 안에 든 이름이나 다른 공유 안의 폴더는 맞지 않는다
     #[test]
     fn a_mounted_share_is_found_by_server_and_share_name() {
         let url = sakadu::util::share_url("smb://hong@NAS.local/사진 폴더/").unwrap();
         let (server, share) = share_parts(&url).unwrap();
         assert_eq!((server.as_str(), share.as_str()), ("nas.local", "사진 폴더"));
-        assert!(share_matches("//hong@nas.local/%EC%82%AC%EC%A7%84%20%ED%8F%B4%EB%8D%94", &server, &share));
-        assert!(share_matches("//GUEST:@NAS.local/사진 폴더", &server, &share));
-        assert!(!share_matches("//hong@nas.local/사진", &server, &share), "another share");
-        assert!(!share_matches("//hong@other.local/사진 폴더", &server, &share), "another server");
+        let matches = |from: &str| share_matches(from, &server, &share);
+        assert!(matches("//hong@nas.local/%EC%82%AC%EC%A7%84%20%ED%8F%B4%EB%8D%94"));
+        assert!(matches("//GUEST:@NAS.local/사진 폴더"));
+        assert!(matches("//WORK;hong@nas.local:445/사진 폴더/"), "domain and port");
+        assert!(matches("//nas.local/사진 폴더"), "no user");
+        assert!(!matches("//hong@nas.local/사진"), "another share");
+        assert!(!matches("//hong@nas.local/사진 폴더/하위"), "a folder inside");
+        assert!(!matches("//hong@other.local/사진 폴더"), "another server");
+        assert!(!matches("//user@othernas.local/사진 폴더"), "a server whose name ends with it");
+        assert!(!matches("//user@nas.local.example/사진 폴더"), "a server whose name starts with it");
+        assert!(!matches("//nas.local@other.local/사진 폴더"), "the server is after the last @");
+        assert!(!matches("/dev/disk4s1") && !matches("map auto_home"), "not a share");
         assert_eq!(share_parts("smb://nas.local"), None, "no share in the address");
-        assert_eq!(share_parts("nfs://nas:2049/volume1/data").map(|p| p.1), Some("data".to_string()));
+        // NFS: "서버:/경로"의 경로 전체, IPv6 서버, ftp의 주소 꼴
+        let nfs = share_parts("nfs://nas:2049/volume1/data").unwrap();
+        assert_eq!(nfs, ("nas".to_string(), "volume1/data".to_string()));
+        assert!(share_matches("NAS:/volume1/data", &nfs.0, &nfs.1));
+        assert!(!share_matches("othernas:/volume1/data", &nfs.0, &nfs.1));
+        assert!(!share_matches("nas:/volume2/data", &nfs.0, &nfs.1));
+        let v6 = share_parts("smb://[FE80::1]:445/공유").unwrap();
+        assert_eq!(v6.0, "[fe80::1]");
+        assert!(share_matches("//hong@[fe80::1]/공유", &v6.0, &v6.1));
+        assert!(share_matches("[fe80::1]:/공유", &v6.0, &v6.1));
+        assert!(!share_matches("//hong@[fe80::2]/공유", &v6.0, &v6.1));
+        let ftp = share_parts("ftp://ftp.example.com/pub/").unwrap();
+        assert!(share_matches("ftp://ftp.example.com/pub", &ftp.0, &ftp.1));
+        assert!(!share_matches("ftp://myftp.example.com/pub", &ftp.0, &ftp.1));
         assert_eq!(decode("a%20b%ZZ%"), "a b%ZZ%");
     }
 
