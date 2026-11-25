@@ -3938,9 +3938,24 @@ impl App {
 
     /// 그 줄이 지금 보이는 자리 (스크롤한 만큼 옮긴다)
     fn side_rect(&self, row: &SideRow) -> R {
+        self.side_rect_at(row, row.y)
+    }
+
+    /// 그 줄을 목록 좌표 y(스크롤 전)에 둔 자리
+    fn side_rect_at(&self, row: &SideRow, y: f32) -> R {
         let list = self.side_list();
-        let t = list.t + row.y - self.side_scroll;
+        let t = list.t + y - self.side_scroll;
         R::new(list.l + 8.0, t, list.r - 8.0, t + row.h)
+    }
+
+    /// 그 줄이 눈에 보이는 자리: 줄이 미끄러지는 중이면 마지막으로 그린 자리 (그룹을 접거나 줄을 옮긴 직후에 누르거나
+    /// 오른쪽 단추를 눌러도 보이는 그 줄에 닿게), 아니면 제자리 (side_rect)
+    fn side_rect_shown(&self, row: &SideRow) -> R {
+        let flow = self.side_flow.borrow();
+        match flow.drawn(&row.key).filter(|_| flow.moving) {
+            Some(y) => self.side_rect_at(row, y),
+            None => self.side_rect(row),
+        }
     }
 
     /// 사이드바 줄을 끄는 중에 마우스가 목록 위·아래 끝 가까이(SIDE_EDGE 안)에 있으면 그쪽 (위 -1, 아래 1), 아니면 0
@@ -4064,7 +4079,9 @@ impl App {
             if self.new_group_rect(&rows).is_some_and(|r| r.contains(x, y)) {
                 return Hit::NewGroup;
             }
-            return rows.iter().position(|r| !matches!(r.kind, SideKind::Hint | SideKind::Label) && self.side_rect(r).contains(x, y)).map_or(Hit::None, Hit::SideRow);
+            // 줄이 미끄러지는 중이면 그린 자리로 본다 (누른 것이 눈에 보이는 그 줄이 되게). 그 사이 줄이 겹치면 나중에 그린 줄이
+            // 위에 보이므로 뒤에서부터 찾는다 (제자리끼리는 겹치지 않는다)
+            return rows.iter().rposition(|r| !matches!(r.kind, SideKind::Hint | SideKind::Label) && self.side_rect_shown(r).contains(x, y)).map_or(Hit::None, Hit::SideRow);
         }
         if y < WORKBAR_H {
             // 도구 막대: 뒤로·앞으로는 지금 칸에 대해 움직인다
@@ -6541,6 +6558,43 @@ mod tests {
         // 떼면 멈춘다
         a.mouse_up();
         assert!(!a.side_edge_step(ms(t + 32)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 줄이 미끄러지는 동안(고정한 줄의 차례를 바꾼 직후) 누르면 눈에 보이는 그 줄이 열린다: 제자리가 아니라 그린 자리로 보고,
+    /// 겹치면 나중에 그린 줄이다. 다 미끄러지면 제자리로 본다
+    #[test]
+    fn clicks_during_the_sidebar_slide_hit_the_row_drawn_there() {
+        let (root, home) = demo();
+        let (mut a, mut g) = app(&home);
+        let work = util::join(&home, "업무");
+        for (path, is_dir) in [(work.clone(), true), (util::join(&home, "다운로드"), true), (util::join(&work, "예산.csv"), false)] {
+            a.toggle_pin(&path, is_dir);
+        }
+        a.paint(&mut g);
+        assert!(!a.side_moving());
+        // 업무를 맨 끝으로: 다음 그림부터 업무는 맨 위에서 아래로, 나머지는 위로 미끄러진다
+        a.pin_move(0, 3);
+        a.paint(&mut g);
+        assert!(a.side_moving());
+        let rows = a.side_rows();
+        let i = rows.iter().position(|r| r.label == "업무").unwrap();
+        let shown = a.side_rect_shown(&rows[i]);
+        assert!(shown.t < a.side_rect(&rows[i]).t - SIDE_ROW_H, "still near the top: {shown:?}");
+        let (x, y) = mid(shown);
+        assert_ne!(rows.iter().position(|r| a.side_rect(r).contains(x, y)), Some(i), "its resting place is elsewhere");
+        assert_eq!(a.hit(&g, x, y), Hit::SideRow(i));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_up();
+        a.settle();
+        assert_eq!(a.pane(a.active).tab().loc, Location::Dir(work.clone()), "the row under the pointer opens");
+        // 다 미끄러지면 제자리로 본다
+        a.motion = false;
+        a.paint(&mut g);
+        assert!(!a.side_moving());
+        let rows = a.side_rows();
+        let (x, y) = mid(a.side_rect(&rows[i]));
+        assert_eq!(a.hit(&g, x, y), Hit::SideRow(i));
         std::fs::remove_dir_all(root).unwrap();
     }
 
