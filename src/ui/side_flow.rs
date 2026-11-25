@@ -190,6 +190,11 @@ pub struct SideFlow {
 }
 
 impl SideFlow {
+    /// 줄 key를 마지막 걸음에서 그린 위쪽 (그리지 않은 줄이면 None). 미끄러지는 동안 누르기를 눈에 보이는 줄에 맞추려고 앱이 본다
+    pub fn drawn(&self, key: &str) -> Option<f32> {
+        self.y.get(key).copied()
+    }
+
     /// 놓은 줄이 카드 자리(y)에서 새 자리로 미끄러져 들어가게 한다
     pub fn start_at(&mut self, key: String, y: f32) {
         self.y.insert(key, y);
@@ -401,6 +406,8 @@ mod tests {
         // 자리가 바뀌면 지난 자리에서 다가간다. 목표가 없는 줄은 그리지 않는다
         let out = f.step(&keys, &[Some(28.0), None], now, true);
         assert!(f.moving && out[1].is_none() && out[0].is_some_and(|y| y > 0.0 && y < 28.0), "{out:?}");
+        // 앱이 누르기를 맞추는 그린 자리: 이번에 그린 그대로, 그리지 않은 줄은 없다
+        assert_eq!((f.drawn("a"), f.drawn("b")), (out[0], None));
         // 놓은 줄은 카드 자리에서 들어온다. 움직임을 끄면 바로 목표
         f.start_at("b".to_string(), 200.0);
         assert_eq!(f.step(&keys, &[Some(28.0), Some(0.0)], now, false), [Some(28.0), Some(0.0)]);
