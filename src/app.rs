@@ -459,6 +459,8 @@ pub struct App {
     hotkey: Option<String>,
     /// 화면 설정 (테마·강조 색·글꼴·크기)
     look: session::Look,
+    /// 날짜 열 내용 폭과 그것을 잴 때의 (배율, 짧은 꼴, 글자 그리기 방식, 글꼴). 같으면 다시 재지 않는다
+    date_w: RefCell<Option<((u32, bool, String, String), f32)>>,
     /// 바꿀 수 있는 단축키
     keys: crate::keys::Keymap,
     /// 요청했지만 아직 오지 않은 썸네일 키
@@ -965,6 +967,7 @@ impl App {
             moving: Moving::default(),
             hotkey: None,
             look,
+            date_w: RefCell::new(None),
             keys: crate::keys::Keymap::load(),
             thumb_wanted: HashSet::new(),
             thumb_failed: HashSet::new(),

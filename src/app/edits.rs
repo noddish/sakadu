@@ -26,7 +26,7 @@ impl App {
         let list = self.list_rect(p)?;
         let pane = &self.panes[p];
         let tab = pane.tab();
-        name_edit_rect(list, pane.view, pane.cols, tab.cursor, tab.scroll)
+        name_edit_rect(list, pane.view, self.cols(p), tab.cursor, tab.scroll)
     }
 
     /// 실제 Win32 입력 상자(한글 IME 지원)를 그려 둔 자리 위에 맞춘다.

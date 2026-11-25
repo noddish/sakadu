@@ -80,12 +80,30 @@ impl App {
     }
 
     /// 칩 줄 오른쪽 자리: 필터 칩, 아니면 항목 수 글자. 좁은 칸에서 탭 칩과 겹치면 이쪽이 위에 그려지고 먼저 눌린다
+    /// 날짜 열 내용 폭 (ui::date_col_width). 배율·날짜 꼴·글자 그리기 방식·글꼴이 같으면 기억해 둔 값
+    pub(super) fn date_col_w(&self) -> f32 {
+        let key = (self.gfx.dpi.to_bits(), self.look.dates != "full", self.look.text.clone(), self.look.font.clone());
+        if let Some((k, w)) = &*self.date_w.borrow()
+            && *k == key
+        {
+            return *w;
+        }
+        let w = date_col_width(&self.gfx, key.1);
+        *self.date_w.borrow_mut() = Some((key, w));
+        w
+    }
+
+    /// 칸 p의 열 폭: '자동' 날짜 열(pane::DATE_AUTO)은 내용 폭으로. 그리기·누르기·열 끌기가 모두 이것을 쓴다
+    pub(super) fn cols(&self, p: usize) -> [f32; 3] {
+        resolve_cols(self.panes[p].cols, self.date_col_w())
+    }
+
     pub(super) fn head_right_rect(&self, p: usize, g: &PaneGeom) -> R {
         if !self.panes[p].tab().filter.is_empty() {
             return filter_chip(g);
         }
         let w = self.head_right_w(p, g);
-        R::new(g.head.r - 8.0 - w, g.head.t + 8.0, g.head.r - 8.0, g.head.t + 36.0)
+        R::new(g.head.r - SP_S - w, g.head.t + SP_S, g.head.r - SP_S, g.head.b - SP_S)
     }
 
     /// 칸 p의 탭 칩 자리와 새 탭(+) 자리
@@ -272,7 +290,7 @@ impl App {
                         None => Hit::Pane(p),
                     };
                 }
-                let cols = columns(g.list, pane.cols);
+                let cols = columns(g.list, self.cols(p));
                 for (ci, c) in cols.resizable().iter().enumerate() {
                     if let Some((l, _)) = c {
                         if (x - l).abs() <= 4.0 {

@@ -16,15 +16,20 @@ use sakadu::ui::{SIDE_HEADER_H, SIDE_LABEL_H, side_common_top, side_row_bg};
 pub(super) use sakadu::ui::{BAR_W, SIDE_ROW_H, draw_pin, hover_fill, seg_on, seg_track, well};
 /// 레일 첫 아이콘의 위쪽: 도구 막대 높이 아래 (맥과 같다). 그 위는 앱 아이콘 자리다
 const RAIL_TOP: f32 = WORKBAR_H;
-const ROW_L: f32 = 8.0;
+const ROW_L: f32 = SP_S;
+/// 줄 안: 왼쪽 여백 → 16px 아이콘 → 간격 → 이름
+const ROW_PAD: f32 = SP_S;
+const LABEL_L: f32 = SIDE_LABEL_L;
+/// 이름 바꾸기 상자: 줄(28)보다 위아래로 3씩 작다. 4면 13px 글자가 입력 상자 안에서 위아래가 빠듯하다 (단계 밖 값)
+const EDIT_INSET_Y: f32 = 3.0;
 /// 작은 단추 (머리 줄의 핀, '모든 공간' 줄의 추가·정렬·새 그룹)
 const MINI: f32 = 24.0;
 /// 패널 머리에서 작업 공간 이름이 놓이는 줄의 높이
 const TITLE_H: f32 = 28.0;
 /// 고정한 것이 없을 때의 안내 자리
-const HINT_H: f32 = 44.0;
+const HINT_H: f32 = 40.0;
 /// 고정 목록과 '모든 공간' 구역 사이
-const COMMON_GAP: f32 = 12.0;
+const COMMON_GAP: f32 = SP_L;
 /// 아이콘에 머무른 뒤 패널이 떠서 열리기까지
 const HOVER_OPEN_MS: u32 = 300;
 /// 떠 있는 패널 밖으로 나간 뒤 닫히기까지
@@ -208,13 +213,13 @@ impl App {
     pub(super) fn side_pin_rect(&self) -> Option<R> {
         let h = self.side_header()?;
         let t = h.t + (TITLE_H - MINI) / 2.0;
-        Some(R::new(h.r - 8.0 - MINI, t, h.r - 8.0, t + MINI))
+        Some(R::new(h.r - SP_S - MINI, t, h.r - SP_S, t + MINI))
     }
 
     /// 패널 머리의 작업 공간 이름 자리 (핀 왼쪽까지)
     pub(super) fn side_title_rect(&self) -> Option<R> {
         let (h, pin) = (self.side_header()?, self.side_pin_rect()?);
-        Some(R::new(h.l + ROW_L + 10.0, h.t, pin.l - 6.0, h.t + TITLE_H))
+        Some(R::new(h.l + ROW_L + ROW_PAD, h.t, pin.l - SP_S, h.t + TITLE_H))
     }
 
     /// '모든 공간' 줄의 작은 단추들 (오른쪽 끝부터)
@@ -229,7 +234,7 @@ impl App {
     fn side_mini_rect(&self, i: usize) -> Option<R> {
         let (slots, _) = self.side_slots();
         let head = slots.into_iter().find(|(_, s)| matches!(s, Slot::Item(Side::CommonHead))).map(|(r, _)| self.side_at(r))?;
-        let r = head.r - 2.0 - i as f32 * (MINI + 2.0);
+        let r = head.r - SP_HAIR - i as f32 * (MINI + SP_HAIR);
         let t = head.t + (SIDE_LABEL_H - MINI) / 2.0;
         Some(R::new(r - MINI, t, r, t + MINI))
     }
@@ -237,7 +242,7 @@ impl App {
     /// 가운데 목록이 보이는 곳 (머리 줄 아래부터 패널 아래쪽까지). 패널이 없으면 빈 사각형
     pub(super) fn side_list(&self) -> R {
         match self.side_panel_rect() {
-            Some(r) => R::new(r.l, r.t + SIDE_HEADER_H, r.r, (r.b - 6.0).max(r.t + SIDE_HEADER_H)),
+            Some(r) => R::new(r.l, r.t + SIDE_HEADER_H, r.r, (r.b - SP_S).max(r.t + SIDE_HEADER_H)),
             None => R::new(0.0, 0.0, 0.0, 0.0),
         }
     }
@@ -330,8 +335,7 @@ impl App {
         if r.t < list.t - 1.0 || r.b > list.b + 1.0 {
             return None;
         }
-        let l = r.l + label_x(row);
-        Some(R::new(l - 4.0, r.t + 3.0, r.r - 6.0, r.b - 3.0))
+        Some(rename_box(r, r.l + label_x(row)))
     }
 
     /// 고정한 줄의 이름 바꾸기 입력 상자 자리 (그 줄의 이름 칸). 줄이 목록 밖이면 None
@@ -341,7 +345,7 @@ impl App {
         if r.t < list.t - 1.0 || r.b > list.b + 1.0 {
             return None;
         }
-        Some(R::new(r.l + 32.0, r.t + 3.0, r.r - 6.0, r.b - 3.0))
+        Some(rename_box(r, r.l + LABEL_L))
     }
 
     /// 끄는 위치 y가 이 공간에 고정한 쪽(true, '모든 공간' 이름 줄보다 위)인지 '모든 공간' 쪽(false)인지. 목록 밖이면 None
@@ -947,19 +951,19 @@ impl App {
 
         // 패널 바탕: 떠 있으면 그림자 달린 카드, 고정이면 창 바탕 그대로
         if floating {
-            let card = R::new(pr.l - 12.0, pr.t, pr.r, pr.b);
+            let card = R::new(pr.l - SP_M, pr.t, pr.r, pr.b);
             g.clip(R::new(BAR_W, pr.t - 40.0, pr.r + 40.0, pr.b + 40.0));
             if !t.high_contrast {
-                super::soft_shadow(g, card, 12.0, 16.0, 0.16, t.dark);
+                super::soft_shadow(g, card, RADIUS, SHADOW_M.0, SHADOW_M.1, t.dark);
             }
-            g.fill_round(card, 12.0, t.pane);
-            g.stroke_round(card.inset(0.5, 0.5), 12.0, t.border, 1.0);
+            g.fill_round(card, RADIUS, t.pane);
+            g.stroke_round(card.inset(0.5, 0.5), RADIUS, t.border, 1.0);
             g.unclip();
         }
         // 머리 줄: 작업 공간 이름 (고치는 중이면 입력 상자 테두리만), 핀
         if let Some(tr) = title {
             if renaming_space {
-                let er = R::new(tr.l - 4.0, tr.t + 3.0, tr.r, tr.b - 3.0);
+                let er = R::new(tr.l - SP_XS, tr.t + EDIT_INSET_Y, tr.r, tr.b - EDIT_INSET_Y);
                 g.fill_round(er, R_ROW, t.pane);
                 g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
             } else {
@@ -983,7 +987,7 @@ impl App {
         // 가운데 목록
         g.clip(list);
         // 줄 안의 16px 아이콘 자리
-        let icon_at = |r: R, l: f32| R::new(l, r.t + (SIDE_ROW_H - 16.0) / 2.0, l + 16.0, r.t + (SIDE_ROW_H + 16.0) / 2.0);
+        let icon_at = |r: R, l: f32| R::new(l, r.t + (SIDE_ROW_H - ICON) / 2.0, l + ICON, r.t + (SIDE_ROW_H + ICON) / 2.0);
         // 그룹 판: 머리 줄부터 안의 마지막 줄(끌어 온 빈자리 포함)까지 둥근 판으로 묶는다
         if let Some((gi, strong)) = group_box {
             let (mut top, mut bot) = (f32::MAX, f32::MIN);
@@ -999,8 +1003,8 @@ impl App {
                 bot = bot.max(gap_t + h);
             }
             if top < bot {
-                let box_r = R::new(dx + ROW_L - 3.0, top + dy - 3.0, dx + rr + 3.0, bot + dy + 3.0);
-                g.fill_round(box_r, R_ROW + 3.0, if t.high_contrast { t.hover } else { alpha(t.text, if strong { 0.075 } else { 0.045 }) });
+                let box_r = R::new(dx + ROW_L - SP_XS, top + dy - SP_XS, dx + rr + SP_XS, bot + dy + SP_XS);
+                g.fill_round(box_r, R_ROW + SP_XS, if t.high_contrast { t.hover } else { alpha(t.text, if strong { A_PRESS } else { A_HOVER }) });
             }
         }
         for (k, (r, slot)) in slots.iter().enumerate() {
@@ -1023,14 +1027,14 @@ impl App {
                 Side::Pin(i) => {
                     let Some(f) = pins.get(i) else { continue };
                     side_row_bg(g, &t, r, f.is_dir && is_current(&f.path), hover == Hit::Side(s));
-                    g.icon(pin_icons[i], icon_at(r, r.l + 10.0));
+                    g.icon(pin_icons[i], icon_at(r, r.l + ROW_PAD));
                     if editing_pin == Some(i) {
                         // 이름을 바꾸는 중: 입력 상자 테두리만 (글자는 입력 상자가 그린다)
-                        let er = R::new(r.l + 32.0, r.t + 3.0, r.r - 6.0, r.b - 3.0);
+                        let er = rename_box(r, r.l + LABEL_L);
                         g.fill_round(er, R_ROW, t.pane);
                         g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                     } else {
-                        g.text(&f.name, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                        g.text(&f.name, R::new(r.l + LABEL_L, r.t, r.r - SP_S, r.b), Font::Normal, t.text);
                         if sel_top == Some(fav_ui::TopSel::Pin(i)) {
                             g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
                         }
@@ -1038,14 +1042,15 @@ impl App {
                 }
                 Side::PinEmpty => {
                     let how = "책갈피로 고정해 보세요".to_string();
-                    g.text("이 공간에 고정한 곳이 없어요", R::new(r.l + 10.0, r.t + 4.0, r.r - 6.0, r.t + 22.0), Font::Small, t.faint);
-                    g.text(&how, R::new(r.l + 10.0, r.t + 22.0, r.r - 6.0, r.t + 40.0), Font::Small, t.faint);
+                    let (l, w) = (r.l + ROW_PAD, r.r - SP_S);
+                    g.text("이 공간에 고정한 곳이 없어요", R::new(l, r.t + SP_XS, w, r.t + SP_XS + 16.0), Font::Small, t.faint);
+                    g.text(&how, R::new(l, r.t + SP_XS + 16.0, w, r.t + SP_XS + 32.0), Font::Small, t.faint);
                 }
                 // '모든 공간': 위쪽과 가르는 가는 선과 구역 이름. 작은 단추는 마우스가 패널 위에 있을 때만
                 Side::CommonHead => {
                     let ly = r.t - COMMON_GAP / 2.0;
-                    g.fill(R::new(r.l + 10.0, ly - 0.5, r.r - 2.0, ly + 0.5), if t.high_contrast { t.border } else { alpha(t.text, 0.08) });
-                    g.text("모든 공간", R::new(r.l + 10.0, r.t, r.r - 8.0, r.b), Font::Label, t.faint);
+                    g.fill(R::new(r.l + ROW_PAD, ly - 0.5, r.r - SP_HAIR, ly + 0.5), t.border);
+                    g.text("모든 공간", R::new(r.l + ROW_PAD, r.t, r.r - SP_S, r.b), Font::Label, t.faint);
                     for (m, mr) in &minis {
                         let glyph = match m {
                             Side::FavSort => G_SORT,
@@ -1064,10 +1069,11 @@ impl App {
                         Row::Group(gi) => {
                             let Some(group) = favs.groups.get(gi) else { continue };
                             side_row_bg(g, &t, r, false, hover == Hit::Side(s));
-                            let tw = R::new(r.l + 8.0, r.t, r.l + 24.0, r.b);
+                            let tw = R::new(r.l + ROW_PAD, r.t, r.l + ROW_PAD + ICON, r.b);
                             g.glyph(if group.collapsed { G_TWIST_CLOSED } else { G_TWIST_OPEN }, tw, true, t.faint);
                             if editing != Some(row) {
-                                g.text(&group.name, R::new(lx, r.t, r.r - 8.0, r.b), Font::Normal, fg);
+                                // 그룹 머리는 굵게 (안의 항목과 구분). 올리거나 고를 때 굵기는 바뀌지 않는다
+                                g.text(&group.name, R::new(lx, r.t, r.r - SP_S, r.b), Font::Strong, fg);
                             }
                         }
                         Row::Item { group, index } => {
@@ -1079,9 +1085,9 @@ impl App {
                                 g.fill_round(r, R_ROW, t.accent_soft);
                                 g.stroke_round(r.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                             }
-                            g.icon(icon, icon_at(r, lx - 26.0));
+                            g.icon(icon, icon_at(r, lx - SP_S - ICON));
                             if editing != Some(row) {
-                                g.text(&f.name, R::new(lx, r.t, r.r - 8.0, r.b), Font::Normal, fg);
+                                g.text(&f.name, R::new(lx, r.t, r.r - SP_S, r.b), Font::Normal, fg);
                             }
                         }
                     }
@@ -1090,20 +1096,20 @@ impl App {
                         g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
                     }
                     if editing == Some(row) {
-                        let er = R::new(lx - 4.0, r.t + 3.0, r.r - 6.0, r.b - 3.0);
+                        let er = rename_box(r, lx);
                         g.fill_round(er, R_ROW, t.pane);
                         g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
                     }
                 }
                 Side::Computer => {
                     side_row_bg(g, &t, r, at_computer, hover == Hit::Side(s));
-                    let ir = icon_at(r, r.l + 10.0);
+                    let ir = icon_at(r, r.l + ROW_PAD);
                     if places.computer_icon >= 0 {
                         g.icon(places.computer_icon, ir);
                     } else {
                         g.glyph(0xEC4E, R::new(ir.l, r.t, ir.r, r.b), false, t.dim);
                     }
-                    g.text("내 PC", R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                    g.text("내 PC", R::new(r.l + LABEL_L, r.t, r.r - SP_S, r.b), Font::Normal, t.text);
                     if sel_top == Some(fav_ui::TopSel::Computer) {
                         g.stroke_round(r.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
                     }
@@ -1115,7 +1121,7 @@ impl App {
             let mut rows = slots.iter().filter(|(_, Slot::Item(s))| want(*s)).map(|(r, _)| *r);
             let first = rows.next()?;
             let last = rows.next_back().unwrap_or(first);
-            Some(R::new(dx + ROW_L - 2.0, first.t + dy - 2.0, dx + rr + 2.0, last.b + dy + 2.0))
+            Some(R::new(dx + ROW_L - SP_HAIR, first.t + dy - SP_HAIR, dx + rr + SP_HAIR, last.b + dy + SP_HAIR))
         };
         let drop_area = match side_drop {
             Some(Side::PinEmpty) => area_of(|s| matches!(s, Side::Pin(_) | Side::PinEmpty)),
@@ -1123,23 +1129,24 @@ impl App {
             _ => None,
         };
         if let Some(area) = drop_area {
-            g.fill_round(area, 8.0, alpha(t.accent, 0.08));
-            g.stroke_round(area.inset(0.75, 0.75), 8.0, t.accent, 1.5);
+            g.fill_round(area, R_ROW + SP_HAIR, alpha(t.accent, A_PRESS));
+            g.stroke_round(area.inset(0.75, 0.75), R_ROW + SP_HAIR, t.accent, 1.5);
         }
         // 끄는 줄: 흰 카드로 떠서 마우스를 따라온다
         if let Some((s, card_t, card_h, _)) = dragging {
             let cr = R::new(dx + ROW_L, card_t + dy, dx + rr, card_t + card_h + dy);
             if !t.high_contrast {
-                super::soft_shadow(g, cr, R_ROW, 10.0, 0.14, t.dark);
+                super::soft_shadow(g, cr, R_ROW, SHADOW_M.0, SHADOW_M.1, t.dark);
             }
             g.fill_round(cr, R_ROW, t.pane);
             g.stroke_round(cr.inset(0.5, 0.5), R_ROW, if t.high_contrast { t.focus } else { t.border }, 1.0);
             if let Side::Fav(Row::Group(_)) = s {
-                g.glyph(G_TWIST_CLOSED, R::new(cr.l + 8.0, cr.t, cr.l + 24.0, cr.b), true, t.faint);
+                g.glyph(G_TWIST_CLOSED, R::new(cr.l + ROW_PAD, cr.t, cr.l + ROW_PAD + ICON, cr.b), true, t.faint);
             } else if let Some(ic) = card_icon {
-                g.icon(ic, icon_at(cr, cr.l + 10.0));
+                g.icon(ic, icon_at(cr, cr.l + ROW_PAD));
             }
-            g.text(&card_name, R::new(cr.l + 36.0, cr.t, cr.r - 8.0, cr.b), Font::Normal, t.text);
+            let card_font = if matches!(s, Side::Fav(Row::Group(_))) { Font::Strong } else { Font::Normal };
+            g.text(&card_name, R::new(cr.l + LABEL_L, cr.t, cr.r - SP_S, cr.b), card_font, t.text);
         }
         g.unclip();
     }
@@ -1165,8 +1172,13 @@ pub(super) fn show_side_menu(hwnd: HWND, side: Side, pt: POINT) {
 /// 줄 안에서 이름이 시작하는 x (아이콘·접기 표시 다음). 그룹 안 항목은 들여 쓴다
 fn label_x(row: Row) -> f32 {
     match row {
-        Row::Item { group: Some(_), .. } => 36.0 + INDENT,
-        _ => 36.0,
+        Row::Item { group: Some(_), .. } => LABEL_L + INDENT,
+        _ => LABEL_L,
     }
+}
+
+/// 줄의 이름 바꾸기 입력 상자 자리: 이름 시작(lx)보다 조금 왼쪽부터 (그리기와 입력 상자 놓기가 같은 자리를 쓴다)
+fn rename_box(r: R, lx: f32) -> R {
+    R::new(lx - SP_XS, r.t + EDIT_INSET_Y, r.r - SP_S, r.b - EDIT_INSET_Y)
 }
 

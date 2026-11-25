@@ -386,7 +386,7 @@ impl App {
 
     /// 자세히 보기에서 이름 칸 밖(날짜·유형·크기)은 끌면 네모 상자로 고른다. 이름 칸은 파일 끌기
     pub(super) fn marquee_column(&self, p: usize, x: f32) -> bool {
-        self.panes[p].view == ViewMode::Details && self.list_rect(p).is_some_and(|l| x >= columns(l, self.panes[p].cols).name.1)
+        self.panes[p].view == ViewMode::Details && self.list_rect(p).is_some_and(|l| x >= columns(l, self.cols(p)).name.1)
     }
 
     pub(super) fn update_marquee(&mut self, p: usize, x0: f32, y0: f32, x: f32, y: f32) {
@@ -570,9 +570,10 @@ impl App {
             Hit::HeaderResize(p, col) => {
                 // 선 왼쪽에 보이는 열 (좁은 칸에서는 숨은 열이 있다). 없으면 이름 칸
                 let Some(r) = self.pane_rect(p) else { return };
-                let shown = columns(geom(r).list, self.panes[p].cols).resizable();
+                let shown = columns(geom(r).list, self.cols(p)).resizable();
                 let prev = (0..col).rev().find(|&i| shown[i].is_some());
-                capture(self, Drag::Col { pane: p, col, prev, start_x: x, start: self.panes[p].cols });
+                // 끌기 시작은 보이는 폭에서 ('자동' 날짜 열은 내용 폭). 끌고 나면 그 폭으로 정해진다
+                capture(self, Drag::Col { pane: p, col, prev, start_x: x, start: self.cols(p) });
             }
             Hit::Thumb(p) => {
                 let Some((list, grid)) = self.grid(p) else { return };
