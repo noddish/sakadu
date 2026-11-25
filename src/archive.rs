@@ -47,6 +47,12 @@ pub fn inside(path: &str) -> bool {
     archive_of(path).is_some_and(|a| !util::eq_path(&a, path))
 }
 
+/// 열 때 폴더처럼 들어갈 압축 파일인지: 압축 파일 이름이고, 다른 압축 파일 안에 있지 않고, 셸이 그 형식을 읽는다.
+/// 압축 파일 안의 압축 파일은 파일처럼 셸의 '열기'로 (풀어서 기본 프로그램으로 연다)
+pub fn enterable(path: &str) -> bool {
+    is_archive_name(util::file_name(path)) && !inside(path) && opens_as_folder(path)
+}
+
 fn message(e: windows::core::Error) -> String {
     let m = e.message();
     if m.trim().is_empty() { format!("오류 {:#010x}", e.code().0) } else { m.trim().to_string() }
@@ -197,6 +203,9 @@ mod tests {
         assert!(!inside(&format!("{d}\\묶음.zip")));
         assert!(inside(&format!("{d}\\묶음.zip\\사진")));
         assert!(!inside(&format!("{d}\\폴더.zip\\안")));
+        // 압축 파일 안의 압축 파일은 들어가지 않고 연다 (셸에 묻기 전에 가린다)
+        assert!(!enterable(&format!("{d}\\묶음.zip\\안.zip")));
+        assert!(!enterable(&format!("{d}\\묶음.zip\\사진")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

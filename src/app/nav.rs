@@ -104,7 +104,7 @@ impl App {
         }
         let dir = tab.loc.dir().map(String::from);
         // 압축 파일 하나를 새 탭에서 열면 그 안으로. 셸이 읽지 못하는 형식은 같은 탭에서처럼 기본 프로그램으로 (open_one)
-        if new_tab && paths.len() == 1 && crate::archive::is_archive_name(util::file_name(&paths[0])) && crate::archive::opens_as_folder(&paths[0]) {
+        if new_tab && paths.len() == 1 && crate::archive::enterable(&paths[0]) {
             self.new_tab(p, Some(Location::Dir(paths.remove(0))), false);
             return;
         }

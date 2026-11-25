@@ -85,7 +85,7 @@ pub fn execute(hwnd: HWND, act: Deferred) {
 }
 
 /// 파일 하나 열기. 폴더를 가리키는 바로 가기(.lnk)는 Sakadu 안에서 그 폴더로 간다.
-/// enter_archive면 셸이 폴더로 읽는 압축 파일(zip·7z 등)은 같은 탭에서 들어간다 (못 읽는 형식은 기본 프로그램으로)
+/// enter_archive면 셸이 폴더로 읽는 압축 파일(zip·7z 등)은 같은 탭에서 들어간다 (못 읽는 형식과 압축 파일 안의 압축 파일은 연다)
 pub(super) fn open_one(hwnd: HWND, pane: usize, path: &str, dir: Option<&str>, enter_archive: bool) {
     if path.to_lowercase().ends_with(".lnk") {
         if let Some(target) = shell::shortcut_target_dir(path) {
@@ -93,7 +93,7 @@ pub(super) fn open_one(hwnd: HWND, pane: usize, path: &str, dir: Option<&str>, e
             return;
         }
     }
-    if enter_archive && crate::archive::is_archive_name(util::file_name(path)) && crate::archive::opens_as_folder(path) {
+    if enter_archive && crate::archive::enterable(path) {
         with_app(|a| a.navigate(pane, Location::Dir(path.to_string()), None));
         return;
     }
