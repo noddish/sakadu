@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::app::{MenuKind, Seen};
+use sakadu::keys::Action;
 use sakadu::pane::{Sort, SortKey};
 use std::path::Path;
 use std::sync::mpsc;
@@ -28,6 +29,7 @@ const N: u16 = 0x2D;
 const F: u16 = 0x03;
 const PERIOD: u16 = 0x2F;
 const ESC: u16 = 0x35;
+const KEY_J: u16 = 0x26;
 
 /// 흉내 낸 끌기 정보: 끌려 온 것을 담은 붙여넣기 판, 창 좌표의 마우스 자리, 끌어 낸 쪽이 허락한 일
 struct DragIvars {
@@ -423,6 +425,43 @@ fn script(dir: &str) -> usize {
         run.wait("the search switch turns search off and drops the index", 5, || on_main(|| with_app(|a| (a.prefs().search_on, a.find_seen().4))) == Some((false, false)));
         click_switch("search");
         run.wait("turning it on again indexes the test folder", 10, || on_main(|| with_app(|a| a.prefs().search_on && a.find_seen().4)) == Some(true));
+        // 단축키: '새 탭' 단추를 누르고 ⌘J를 누르면 새 탭이 ⌘J가 된다. 본 창에서 ⌘J로 탭이 늘고, 기본으로 되돌리면 ⌘T로 돌아온다
+        let title = || on_main(|| settings::key_button(Action::NewTab).map(|b| b.title().to_string()));
+        run.check("the new-tab button shows its key", title().as_deref() == Some("⌘T"), || format!("{:?}", title()));
+        on_main(|| {
+            if let Some(b) = settings::key_button(Action::NewTab) {
+                // SAFETY: NSControl의 performClick:
+                unsafe { b.performClick(None) };
+            }
+        });
+        run.wait("pressing it waits for a key", 5, || title().as_deref() == Some("키를 누르세요"));
+        on_main(|| {
+            let Some(w) = settings::shown() else { return };
+            let j = NSString::from_str("j");
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                NSEventType::KeyDown,
+                NSPoint::new(0.0, 0.0),
+                NSEventModifierFlags::Command,
+                0.0,
+                w.windowNumber(),
+                None,
+                &j,
+                &j,
+                false,
+                KEY_J,
+            );
+            if let Some(e) = event {
+                w.sendEvent(&e);
+            }
+        });
+        run.wait("cmd-J becomes the new-tab key", 5, || title().as_deref() == Some("⌘J"));
+        let tabs = || on_main(|| with_app(|a| a.seen().tabs));
+        let before = tabs();
+        key(KEY_J, true);
+        run.wait("cmd-J opens a tab in the main window", 5, || tabs().zip(before).is_some_and(|(now, was)| now == was + 1));
+        on_main(|| with_app(App::reset_keys));
+        on_main(settings::refresh);
+        run.wait("resetting brings back cmd-T", 5, || title().as_deref() == Some("⌘T"));
         on_main(|| {
             let Some(w) = settings::shown() else { return };
             let none = NSString::from_str("");
