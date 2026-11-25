@@ -312,6 +312,11 @@ struct Clicked {
 /// 누른 채 이만큼 넘게 움직여야 끌기로 본다 (누르다가 손이 조금 떨린 것은 끌기가 아니다)
 const DRAG_START: f32 = 4.0;
 
+/// 사이드바 줄을 끌 때 목록 위·아래 끝에서 이만큼 안이면 그쪽으로 자동 스크롤한다
+const SIDE_EDGE: f32 = 12.0;
+/// 그 자동 스크롤의 빠르기 (초당 점. 끌기 이벤트마다 8점씩 가던 것과 비슷하게)
+const SIDE_EDGE_SPEED: f32 = 480.0;
+
 /// 누른 사이드바 줄 (Windows의 FavPress·PinPress, 끌기 시작하면 FavMove·PinMove): 그대로 떼면 그 줄을 열고,
 /// 위아래로 조금 넘게 움직이면 그 줄을 카드로 띄워 끌어 옮긴다
 #[derive(Clone, Copy, Debug)]
@@ -1008,6 +1013,8 @@ pub struct App {
     home: String,
     /// 사이드바 목록 스크롤 (줄이 창 아래로 넘칠 때)
     side_scroll: f32,
+    /// 사이드바 끌기의 자동 스크롤이 지난번에 한 걸음의 때 (끝 자리 밖이면 None. side_edge_step)
+    side_edge_at: Option<Instant>,
     /// 열어 달라는 파일 (창 쪽이 macOS '열기'로 연다)
     pub open_files: Vec<String>,
     /// 즐겨찾기를 파일에 저장할지 (시험·그림에서는 저장하지 않는다)
@@ -1126,6 +1133,7 @@ impl App {
             restored: std::collections::HashMap::new(),
             home: home.to_string(),
             side_scroll: 0.0,
+            side_edge_at: None,
             open_files: Vec::new(),
             persist: false,
             menu: None,
@@ -3934,6 +3942,37 @@ impl App {
         R::new(list.l + 8.0, t, list.r - 8.0, t + row.h)
     }
 
+    /// 사이드바 줄을 끄는 중에 마우스가 목록 위·아래 끝 가까이(SIDE_EDGE 안)에 있으면 그쪽 (위 -1, 아래 1), 아니면 0
+    fn side_edge_dir(&self) -> f32 {
+        let Some((y, _)) = self.side_press.and_then(|sp| sp.moving) else { return 0.0 };
+        let list = self.side_list();
+        if y < list.t + SIDE_EDGE {
+            -1.0
+        } else if y > list.b - SIDE_EDGE {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// 사이드바 끌기의 자동 스크롤 한 걸음: 끄는 줄을 목록 끝 가까이에 대고 있으면 지난 걸음 뒤로 지난 때만큼 그쪽으로 스크롤한다.
+    /// 창 쪽이 그릴 때마다 부른다: 마우스가 멈춰 있어도 이어진다. 더 스크롤할 수 있으면 true (창 쪽이 곧 다시 그린다).
+    /// 끝 자리를 벗어나거나, 떼거나, 목록 끝까지 가면 false
+    pub fn side_edge_step(&mut self, now: Instant) -> bool {
+        let dir = self.side_edge_dir();
+        if dir == 0.0 {
+            self.side_edge_at = None;
+            return false;
+        }
+        // 첫 걸음은 한 틀(1/60초)만큼, 오래 쉬었다 온 걸음도 몇 틀까지만 (한 번에 멀리 뛰지 않게)
+        let dt = self.side_edge_at.map_or(1.0 / 60.0, |at| now.saturating_duration_since(at).as_secs_f32().min(0.05));
+        self.side_edge_at = Some(now);
+        let before = self.side_scroll;
+        self.side_scroll += dir * SIDE_EDGE_SPEED * dt;
+        self.clamp_side_scroll();
+        self.side_scroll != before
+    }
+
     /// 사이드바 스크롤을 줄 수 안으로 (줄이 바뀌거나 창 크기가 바뀐 뒤)
     fn clamp_side_scroll(&mut self) {
         let content = self.side_rows().last().map_or(0.0, |r| r.y + r.h);
@@ -4353,14 +4392,7 @@ impl App {
             let grab = sp.moving.map_or_else(|| self.side_grab(sp.row, sp.y0), |(_, grab)| grab);
             sp.moving = Some((y, grab));
             self.side_press = Some(sp);
-            // 목록 끝에 가까이 끌면 자동 스크롤
-            let list = self.side_list();
-            if y < list.t + 12.0 {
-                self.side_scroll -= 8.0;
-            } else if y > list.b - 12.0 {
-                self.side_scroll += 8.0;
-            }
-            self.clamp_side_scroll();
+            // 목록 끝에 가까이 끌면 자동 스크롤: 마우스가 멈춰 있어도 이어지게 그림마다 지난 때만큼 한다 (side_edge_step)
             return;
         }
         // 고른 줄을 누른 채 조금 넘게 움직였다: 고른 항목들을 끌어 내 달라고 한다 (맥의 끌기는 창 쪽이 시작한다)
@@ -6411,6 +6443,61 @@ mod tests {
         a.paint(&mut g);
         a.paint(&mut g);
         assert!(!a.side_moving(), "nothing moved, so nothing slides");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 사이드바 줄을 끌며 목록 끝에 대고 있으면 마우스가 멈춰 있어도 그림마다(side_edge_step) 지난 때만큼 스크롤된다.
+    /// 끝 자리를 벗어나거나 떼면 멈추고, 목록 끝까지 가면 더 부탁하지 않는다
+    #[test]
+    fn holding_a_dragged_row_at_the_edge_keeps_scrolling() {
+        let (root, home) = demo();
+        let (mut a, g) = app(&home);
+        for i in 0..40 {
+            a.workspaces.current_mut().unwrap().pin(&util::join(&home, &format!("폴더 {i}")), true);
+        }
+        a.resize(1280.0, 420.0);
+        let list = a.side_list();
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+        let (x, y) = mid(side_row(&a, "폴더 0"));
+        a.mouse_down(&g, x, y, Mods::default(), 1);
+        a.mouse_dragged(x, y + 20.0);
+        assert!(!a.side_edge_step(t0), "not near the edge yet");
+        a.mouse_dragged(x, list.b - 4.0);
+        assert_eq!(a.side_scroll, 0.0, "the drag event itself does not scroll");
+        // 첫 걸음은 한 틀만큼, 다음부터는 마우스가 그대로여도 지난 때만큼
+        assert!(a.side_edge_step(t0));
+        let first = a.side_scroll;
+        assert!((first - SIDE_EDGE_SPEED / 60.0).abs() < 0.01, "{first}");
+        assert!(a.side_edge_step(ms(30)));
+        assert!((a.side_scroll - first - SIDE_EDGE_SPEED * 0.03).abs() < 0.01, "{}", a.side_scroll);
+        assert!(a.side_edge_step(ms(60)));
+        let held = a.side_scroll;
+        // 끝 자리를 벗어나면 멈춘다
+        a.mouse_dragged(x, (list.t + list.b) / 2.0);
+        assert!(!a.side_edge_step(ms(90)));
+        assert_eq!(a.side_scroll, held);
+        // 다시 대면 처음처럼 한 틀만큼부터 (쉬는 동안의 때를 몰아서 가지 않는다)
+        a.mouse_dragged(x, list.b - 4.0);
+        assert!(a.side_edge_step(ms(5_000)));
+        assert!((a.side_scroll - held - SIDE_EDGE_SPEED / 60.0).abs() < 0.01, "{}", a.side_scroll);
+        // 목록 끝까지 가면 더 스크롤하지 않는다 (창 쪽이 다시 그려 달라고 하지 않는다)
+        let mut t = 5_000;
+        while a.side_edge_step(ms(t)) {
+            t += 16;
+            assert!(t < 100_000, "it reaches the end");
+        }
+        let rows = a.side_rows();
+        let last = a.side_rect(rows.last().expect("sidebar rows"));
+        assert!((last.b - list.b).abs() < 0.5, "the last row sits at the bottom: {last:?} {list:?}");
+        // 위 끝에 대면 거꾸로
+        let bottom = a.side_scroll;
+        a.mouse_dragged(x, list.t + 4.0);
+        assert!(a.side_edge_step(ms(t + 16)));
+        assert!(a.side_scroll < bottom);
+        // 떼면 멈춘다
+        a.mouse_up();
+        assert!(!a.side_edge_step(ms(t + 32)));
         std::fs::remove_dir_all(root).unwrap();
     }
 
