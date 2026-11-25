@@ -23,6 +23,13 @@ pub trait Canvas {
         self.text(&String::from_utf16_lossy(s), r, f, c)
     }
     fn measure(&self, s: &str, f: Font) -> f32;
+    /// 파일 이름을 폭 max_w에 맞춘 글자와 줄였는지: 자모로 나뉜 한글은 합쳐 보이고(typo::display_name),
+    /// 넘치면 가운데를 줄여 확장자를 남긴다(typo::middle_ellipsis). 그리는 쪽이 결과를 캐시해도 된다
+    fn fit_name(&self, name: &[u16], max_w: f32) -> (String, bool) {
+        let raw = String::from_utf16_lossy(name);
+        let shown = crate::typo::display_name(&raw);
+        crate::typo::fit_name(&shown, max_w, |s| self.measure(s, Font::Name))
+    }
     /// 아이콘 글자 (Segoe 번호, 맥은 SF Symbols로 바꿔 그린다). small은 10px, 아니면 16px
     fn glyph(&self, code: u16, r: R, small: bool, c: Color);
     fn glyph_font(&self, code: u16, r: R, f: Font, c: Color);
@@ -76,6 +83,35 @@ pub mod glyph {
 }
 use glyph::*;
 
+// ---------- 디자인 단계 (docs/design-rules.md 2장). 그리기 코드는 숫자 대신 이 이름을 쓴다 ----------
+
+/// 간격: 붙어 있는 것 사이 (선택 줄 틈, 둥근 판의 바깥 띠)
+pub const SP_HAIR: f32 = 2.0;
+/// 간격: 한 덩어리 안
+pub const SP_XS: f32 = 4.0;
+/// 간격: 같은 묶음의 이웃 (아이콘과 글자, 줄 안쪽 여백)
+pub const SP_S: f32 = 8.0;
+/// 간격: 줄·카드 안 글 시작
+pub const SP_M: f32 = 12.0;
+/// 간격: 서로 다른 묶음 사이
+pub const SP_L: f32 = 16.0;
+/// 간격: 큰 묶음 사이 (구역 이름 위)
+pub const SP_XL: f32 = 24.0;
+/// 기본 아이콘 크기
+pub const ICON: f32 = 16.0;
+/// 투명도: 마우스를 올린 겹침
+pub const A_HOVER: f32 = 0.06;
+/// 투명도: 누르는 중·끌어 놓을 자리
+pub const A_PRESS: f32 = 0.10;
+/// 투명도: 꺼진 것, 연결이 끊긴 목록 덮개
+pub const A_DISABLED: f32 = 0.40;
+/// 칸 안 목록의 오른쪽 여백: 스크롤 막대(10)와 틈 6. 줄 바탕·구분선·열이 여기서 끝난다
+pub const LIST_R_INSET: f32 = SP_L;
+/// 그림자: 칸·카드 (깊이, 세기)
+pub const SHADOW_S: (f32, f32) = (6.0, 0.06);
+/// 그림자: 떠 있는 판 (메뉴, 끄는 카드, 떠 있는 사이드바)
+pub const SHADOW_M: (f32, f32) = (16.0, 0.12);
+
 /// 칸 영역 위 작업 줄 (칸 나누기·숨김·미리 보기·창 단추). 빈 곳은 창을 끄는 제목 줄 역할도 한다
 /// 창 위쪽 도구 막대 높이 (ui::toolbar)
 pub const WORKBAR_H: f32 = 52.0;
@@ -97,8 +133,10 @@ pub const CRUMB_PAD: f32 = 8.0;
 /// 작업 공간 레일 너비. 패널이나 칸 영역은 그 오른쪽부터
 pub const BAR_W: f32 = 44.0;
 pub const SIDE_ROW_H: f32 = 28.0;
+/// 사이드바 줄: 줄 왼쪽에서 이름이 시작하는 x (여백 8 + 아이콘 16 + 간격 8)
+pub const SIDE_LABEL_L: f32 = SP_S + ICON + SP_S;
 /// 사이드바 줄의 모서리
-pub const R_SIDE_ROW: f32 = 8.0;
+pub const R_SIDE_ROW: f32 = crate::palette::R_ROW;
 /// 그룹 안 항목의 들여쓰기
 pub const INDENT: f32 = 20.0;
 /// 사이드바 패널 머리 줄 (작업 공간 이름, 핀). 이름 줄 28에 아래 여백 4
@@ -217,26 +255,26 @@ pub struct PaneGeom {
 pub fn geom(r: R) -> PaneGeom {
     let head = R::new(r.l, r.t, r.r, r.t + HEAD_H);
     let path = R::new(r.l, head.b, r.r, head.b + PATH_H);
-    let (t, b) = (path.t + 2.0, path.b - 2.0);
-    // 경로 글자는 목록의 아이콘과 같은 선(16)에서 시작한다: 조각 안쪽 여백(CRUMB_PAD)만큼 앞에서
-    let l = path.l + 16.0 - CRUMB_PAD;
+    let (t, b) = (path.t + SP_HAIR, path.b - SP_HAIR);
+    // 경로 글자는 목록의 아이콘과 같은 선(16)에서 시작한다: 조각 바탕은 줄 바탕과 같은 선(8), 글자는 그 안쪽 여백(CRUMB_PAD)만큼 뒤
+    let l = path.l + SP_L - CRUMB_PAD;
     // 책갈피: 24×24 단추. 그림의 오른쪽 끝이 목록의 오른쪽 여백(16)과 맞는다
-    let mut star = R::new(path.r - 12.0 - 24.0, t, path.r - 12.0, b);
-    let mut view = R::new(star.l - 4.0 - VIEW_W, t, star.l - 4.0, b);
+    let mut star = R::new(path.r - SP_M - SP_XL, t, path.r - SP_M, b);
+    let mut view = R::new(star.l - SP_XS - VIEW_W, t, star.l - SP_XS, b);
     // 좁은 칸: 경로가 PATH_MIN_W보다 좁아지면 보기 방식 단추, 그다음 책갈피를 뺀다 (폭 0이면 그리지도 누르지도 않는다. 단축키로는 된다)
-    if view.l - 4.0 - l < PATH_MIN_W {
+    if view.l - SP_XS - l < PATH_MIN_W {
         view = R::new(star.l, t, star.l, b);
     }
-    if star.l - 4.0 - l < PATH_MIN_W {
-        star = R::new(path.r - 12.0, t, path.r - 12.0, b);
+    if star.l - SP_XS - l < PATH_MIN_W {
+        star = R::new(path.r - SP_M, t, path.r - SP_M, b);
         view = R::new(star.l, t, star.l, b);
     }
     let right = if view.w() > 0.0 { view.l } else { star.l };
-    let crumb = R::new(l, t, (right - 4.0).max(l), b);
+    let crumb = R::new(l, t, (right - SP_XS).max(l), b);
     let crumbs = crumb;
     let header = R::new(r.l, path.b, r.r, path.b + HEADER_H);
     // 아래쪽은 둥근 모서리에 항목이 닿지 않게 조금 띄운다
-    let list = R::new(r.l, header.b, r.r, (r.b - 6.0).max(header.b));
+    let list = R::new(r.l, header.b, r.r, (r.b - SP_S).max(header.b));
     PaneGeom { head, crumb, crumbs, star, view, header, list }
 }
 
@@ -257,13 +295,13 @@ pub const PATH_MIN_W: f32 = 96.0;
 /// 필터 칩 자리 (칩 줄 오른쪽 끝)
 pub fn filter_chip(g: &PaneGeom) -> R {
     let w = (g.head.w() * 0.4).clamp(150.0, 240.0).min((g.head.w() - 22.0).max(0.0));
-    R::new(g.head.r - 8.0 - w, g.head.t + 8.0, g.head.r - 8.0, g.head.t + 36.0)
+    R::new(g.head.r - SP_S - w, g.head.t + SP_S, g.head.r - SP_S, g.head.b - SP_S)
 }
 
 /// 칩 줄에서 탭 칩과 새 탭(+)이 놓일 곳: 왼쪽 여백 8, 오른쪽은 항목 수·필터 칩 자리(right)를 뺀 곳
 pub fn chip_strip(g: &PaneGeom, right: f32) -> R {
-    let l = g.head.l + 8.0;
-    R::new(l, g.head.t + 8.0, (g.head.r - 8.0 - right - 8.0).max(l + 100.0), g.head.t + 36.0)
+    let l = g.head.l + SP_S;
+    R::new(l, g.head.t + SP_S, (g.head.r - SP_S - right - SP_S).max(l + 100.0), g.head.b - SP_S)
 }
 
 pub struct Cols {
@@ -282,7 +320,7 @@ impl Cols {
 
 /// 좁은 칸에서는 유형 → 크기 → 날짜 순으로 열을 숨긴다 (보고서는 날짜로 찾으니 날짜를 가장 오래 남긴다)
 pub fn columns(list: R, w: [f32; 3]) -> Cols {
-    let mut x = list.r - SCROLL_W - 6.0;
+    let mut x = list.r - LIST_R_INSET;
     let width = list.w();
     let size = if width >= 460.0 {
         let c = (x - w[2], x);
@@ -305,23 +343,24 @@ pub fn columns(list: R, w: [f32; 3]) -> Cols {
     } else {
         None
     };
-    Cols { name: (list.l + 12.0, x.max(list.l + 124.0)), modified, kind, size }
+    // 이름 열: 아이콘(줄 바탕 8 + 안쪽 여백 8 = 16)보다 4 앞. 머리글 '이름'은 이 열의 8 안쪽, 곧 아이콘과 같은 16에서 시작한다
+    Cols { name: (list.l + SP_M, x.max(list.l + 124.0)), modified, kind, size }
 }
 
 /// 자세히 보기가 아닌 보기의 정렬 버튼 (기준, 이름, 자리). 머리글 줄 왼쪽부터 나란히 둔다.
 /// 열이 없는 격자 위에 자세히 보기의 열 머리글이 떠 있지 않게 한다. 지금 기준에만 화살표 자리가 붙는다
 pub fn sort_chips(gfx: &impl Canvas, header: R, current: SortKey) -> Vec<(SortKey, &'static str, R)> {
     const KEYS: [(SortKey, &str); 4] = [(SortKey::Name, "이름"), (SortKey::Modified, "수정한 날짜"), (SortKey::Type, "유형"), (SortKey::Size, "크기")];
-    let mut x = header.l + 8.0;
+    let mut x = header.l + SP_S;
     KEYS.iter()
         .map(|&(key, label)| {
-            let w = gfx.measure(label, Font::Normal) + if key == current { 40.0 } else { 24.0 };
-            let r = R::new(x, header.t + 4.0, x + w, header.b - 4.0);
-            x = r.r + 4.0;
+            let w = gfx.measure(label, Font::Normal) + if key == current { SP_M * 2.0 + ICON } else { SP_M * 2.0 };
+            let r = R::new(x, header.t + SP_XS, x + w, header.b - SP_XS);
+            x = r.r + SP_XS;
             (key, label, r)
         })
         // 좁은 칸에서는 다 들어가는 칩만 (끝에서 잘린 칩은 무엇인지 읽히지 않는다)
-        .take_while(|(_, _, r)| r.r <= header.r - 8.0)
+        .take_while(|(_, _, r)| r.r <= header.r - SP_S)
         .collect()
 }
 
@@ -380,18 +419,31 @@ pub fn drop_index(trs: &[R], x: f32) -> usize {
     }
 }
 
+/// 탭 칩의 이름에 맞춘 폭: 글자 + 양쪽 안쪽 여백 12 (+ 탭이 여럿이면 닫기 단추 자리 20). 그리기(paint_pane_head)의 글자 자리와 같다
+pub fn tab_natural_w(text_w: f32, tabs: usize) -> f32 {
+    (text_w + SP_M * 2.0 + if tabs > 1 { 20.0 } else { 0.0 }).clamp(52.0, 180.0)
+}
+
 /// 탭 칩 안 오른쪽 끝의 닫기 단추
 pub fn close_rect(tr: R) -> R {
-    R::new(tr.r - 24.0, tr.t + 4.0, tr.r - 4.0, tr.b - 4.0)
+    R::new(tr.r - SP_XL, tr.t + SP_XS, tr.r - SP_XS, tr.b - SP_XS)
 }
 
 pub fn add_rect(strip: R, tabs: &[R]) -> R {
-    let l = tabs.iter().map(|r| r.r + 4.0).fold(strip.l, f32::max);
+    let l = tabs.iter().map(|r| r.r + SP_XS).fold(strip.l, f32::max);
     R::new(l, strip.t, l + 28.0, strip.b)
 }
 
 /// 큰 아이콘 보기의 그림 영역(DIP). 보통·아주 큰 아이콘은 VIEW_THUMBS
 pub const THUMB: f32 = 96.0;
+/// 타일 높이에서 그림을 뺀 나머지: 위 8 + 그림 아래 8 + 이름 두 줄(16×2) + 아래 4
+pub const TILE_EXTRA: f32 = SP_S + SP_S + 32.0 + SP_XS;
+/// 자세히 보기 줄: 이름 열 왼쪽에서 아이콘(4)·이름(4 + 16 + 8)까지. 줄 바탕(8)에서 보면 아이콘 8, 이름 32
+pub const ROW_ICON_L: f32 = SP_XS;
+pub const ROW_LABEL_L: f32 = SP_XS + ICON + SP_S;
+/// 작은 아이콘·목록 칸: 칸 왼쪽(=줄 바탕)에서 아이콘 8, 이름 32 (자세히 보기와 같은 선)
+pub const ICON_ICON_L: f32 = SP_S;
+pub const ICON_LABEL_L: f32 = SP_S + ICON + SP_S;
 /// 작은 아이콘 보기 칸 너비(남는 폭은 칸에 나눈다), 목록 보기 열 너비
 pub const SMALL_W: f32 = 240.0;
 pub const LIST_W: f32 = 260.0;
@@ -426,26 +478,28 @@ pub struct Grid {
 impl Grid {
     pub fn of(list: R, view: ViewMode) -> Grid {
         let tile = |thumb: f32, min_w: f32| {
-            let usable = (list.w() - SCROLL_W - 14.0).max(min_w);
+            let usable = (list.w() - SP_S - LIST_R_INSET + SP_XS * 2.0).max(min_w);
             let cols = ((usable / min_w).floor() as usize).max(1);
             // 남는 폭을 칸에 고르게 나눠 오른쪽이 비지 않게
-            Grid { ox: list.l + 4.0, oy: list.t + 4.0, cols, rows: 0, cell_w: usable / cols as f32, cell_h: thumb + 52.0, cell: CellKind::Tile(thumb), horiz: false }
+            // 타일 바탕은 칸 안쪽 4에서 시작해 줄 바탕과 같은 선(8)에 놓인다. 높이: 위 8 + 그림 + 8 + 이름 두 줄(16×2) + 4
+            Grid { ox: list.l + SP_XS, oy: list.t + SP_XS, cols, rows: 0, cell_w: usable / cols as f32, cell_h: thumb + TILE_EXTRA, cell: CellKind::Tile(thumb), horiz: false }
         };
         match view {
             // 줄 바탕은 머리글 구분선과 같은 8px 안쪽에서 시작한다 (칸 테두리에 붙어 보이지 않게)
-            ViewMode::Details => Grid { ox: list.l + 8.0, oy: list.t, cols: 1, rows: 0, cell_w: list.w() - SCROLL_W - 14.0, cell_h: ROW_H, cell: CellKind::Row, horiz: false },
+            ViewMode::Details => Grid { ox: list.l + SP_S, oy: list.t, cols: 1, rows: 0, cell_w: list.w() - SP_S - LIST_R_INSET, cell_h: ROW_H, cell: CellKind::Row, horiz: false },
             ViewMode::Huge => tile(256.0, 280.0),
             ViewMode::Large => tile(THUMB, 124.0),
             ViewMode::Medium => tile(48.0, 88.0),
             ViewMode::Small => {
-                let usable = (list.w() - SCROLL_W - 14.0).max(SMALL_W);
+                // 칸 사이 틈(4)까지 칸 폭에 넣는다: 마지막 칸의 바탕이 줄 바탕과 같은 오른쪽 끝(16)에서 끝난다
+                let usable = (list.w() - SP_S - LIST_R_INSET + SP_XS).max(SMALL_W);
                 let cols = ((usable / SMALL_W).floor() as usize).max(1);
-                Grid { ox: list.l + 8.0, oy: list.t + 2.0, cols, rows: 0, cell_w: usable / cols as f32, cell_h: ROW_H, cell: CellKind::Icon, horiz: false }
+                Grid { ox: list.l + SP_S, oy: list.t + SP_HAIR, cols, rows: 0, cell_w: usable / cols as f32, cell_h: ROW_H, cell: CellKind::Icon, horiz: false }
             }
             ViewMode::List => {
                 // 아래에 가로 스크롤 막대 자리를 남긴다
                 let rows = (((list.h() - 6.0 - SCROLL_W - 4.0) / ROW_H).floor() as usize).max(1);
-                Grid { ox: list.l + 8.0, oy: list.t + 2.0, cols: 0, rows, cell_w: LIST_W, cell_h: ROW_H, cell: CellKind::Icon, horiz: true }
+                Grid { ox: list.l + SP_S, oy: list.t + SP_HAIR, cols: 0, rows, cell_w: LIST_W, cell_h: ROW_H, cell: CellKind::Icon, horiz: true }
             }
         }
     }
@@ -534,6 +588,53 @@ impl Grid {
     }
 }
 
+/// 날짜 열 머리글
+pub const DATE_HEADER: &str = "수정한 날짜";
+
+/// 날짜 열의 내용 폭: 글자(날짜 단계 Meta, 고정폭 숫자) + 양쪽 여백. 숫자 폭이 모두 같아 0으로 채운 꼴만 재면 된다.
+/// 짧은 꼴(short)은 그 후보 가운데 가장 넓은 것으로 ('오늘 00:00', '00월 00일', '0000-00-00' 등).
+/// 머리글(정렬 화살표 자리 포함)보다 좁게 하지는 않는다 (탐색기의 열 자동 맞춤과 같다)
+pub fn date_col_width(g: &impl Canvas, short: bool) -> f32 {
+    let measure = |s: &str| g.measure(s, Font::Meta);
+    let pad = SP_S * 2.0;
+    let content = if short {
+        (["방금", "오늘 00:00", "어제 00:00", "00월 00일", "0000-00-00"].iter().map(|s| measure(s)).fold(0.0, f32::max) + pad).ceil()
+    } else {
+        crate::typo::date_col_width(measure, pad)
+    };
+    let header = (g.measure(DATE_HEADER, Font::Normal) + SP_XS + ICON + pad).ceil();
+    content.max(header).clamp(COL_MIN, COL_MAX)
+}
+
+/// 저장된 열 폭에서 '자동' 날짜 열(pane::DATE_AUTO)을 내용 폭(date_w)으로 바꾼다
+pub fn resolve_cols(cols: [f32; 3], date_w: f32) -> [f32; 3] {
+    if cols[0] == crate::pane::DATE_AUTO { [date_w, cols[1], cols[2]] } else { cols }
+}
+
+/// 자세히 보기 줄에서 파일 이름 글자의 자리 (이름 열, 줄 it)
+pub fn row_name_rect(name_col: (f32, f32), it: R) -> R {
+    R::new(name_col.0 + ROW_LABEL_L, it.t, name_col.1 - SP_S, it.b)
+}
+
+/// 작은 아이콘·목록 보기 칸에서 파일 이름 글자의 자리
+pub fn icon_name_rect(it: R) -> R {
+    R::new(it.l + ICON_LABEL_L, it.t, it.r - SP_S - SP_XS, it.b)
+}
+
+/// 목록의 줄 vi에서 파일 이름 글자의 자리 (그리기와 같은 자리). 큰 아이콘 보기(그림 아래 두 줄)는 None
+pub fn name_rect(list: R, view: ViewMode, cols: [f32; 3], vi: usize, scroll: f32) -> Option<R> {
+    let grid = Grid::of(list, view);
+    let it = grid.item(vi, scroll);
+    match grid.cell {
+        CellKind::Row => Some(row_name_rect(columns(list, cols).name, it)),
+        CellKind::Icon => Some(icon_name_rect(it)),
+        CellKind::Tile(_) => None,
+    }
+}
+
+/// GDI식 글자 그리기는 글자 상자의 양 끝을 픽셀에 맞추며 1px까지 좁아질 수 있다: 이름은 그만큼 덜 넓다고 보고 맞춘다
+pub const NAME_FIT_SLACK: f32 = 1.0;
+
 /// 목록의 줄 vi에서 이름을 고치는 상자의 자리 (paint_pane_list가 이름 상자를 그리는 자리와 같다).
 /// 그 줄이 목록 안에 다 보이지 않으면 None
 pub fn name_edit_rect(list: R, view: ViewMode, cols: [f32; 3], vi: usize, scroll: f32) -> Option<R> {
@@ -545,13 +646,13 @@ pub fn name_edit_rect(list: R, view: ViewMode, cols: [f32; 3], vi: usize, scroll
     Some(match grid.cell {
         // 그림 아래 이름 자리
         CellKind::Tile(thumb) => {
-            let y = it.t + 8.0 + thumb + 6.0;
-            R::new(it.l + 4.0, y, it.r - 8.0, y + 24.0)
+            let y = it.t + SP_S + thumb + SP_S;
+            R::new(it.l + SP_XS, y, it.r - SP_S, y + SP_XL)
         }
-        CellKind::Icon => R::new(it.l + 24.0, it.t + 2.0, it.r - 6.0, it.b - 2.0),
+        CellKind::Icon => R::new(it.l + ICON_LABEL_L - SP_XS, it.t + SP_HAIR, it.r - SP_S, it.b - SP_HAIR),
         CellKind::Row => {
             let name = columns(list, cols).name;
-            R::new(name.0 + 24.0, it.t + 2.0, name.1 - 4.0, it.b - 2.0)
+            R::new(name.0 + ROW_LABEL_L - SP_XS, it.t + SP_HAIR, name.1 - SP_XS, it.b - SP_HAIR)
         }
     })
 }
@@ -591,7 +692,7 @@ pub fn crumbs(gfx: &impl Canvas, area: R, loc: &Location, root: Option<&str>) ->
         return Vec::new();
     }
     let widths: Vec<f32> = items.iter().map(|(l, _)| gfx.measure(l, Font::Normal) + CRUMB_PAD * 2.0).collect();
-    let avail = area.w() - 8.0;
+    let avail = area.w() - SP_XS;
     let mut start = items.len() - 1;
     let mut total = widths[start];
     // "…"까지 넣으면 지금 폴더 이름이 60보다 좁아지는 칸이면 "…" 없이 지금 폴더만 (잘려도 이름이 보이게)
@@ -599,7 +700,7 @@ pub fn crumbs(gfx: &impl Canvas, area: R, loc: &Location, root: Option<&str>) ->
     if start > 0 && room_with_ellipsis < widths[start].min(60.0) {
         let w = widths[start].min(avail.max(0.0));
         let (label, target) = items.swap_remove(start);
-        return vec![Crumb { x0: area.l + 4.0, x1: area.l + 4.0 + w, label, target }];
+        return vec![Crumb { x0: area.l, x1: area.l + w, label, target }];
     }
     while start > 0 {
         let ellipsis = if start - 1 > 0 { 24.0 + CHEV_W } else { 0.0 };
@@ -610,13 +711,13 @@ pub fn crumbs(gfx: &impl Canvas, area: R, loc: &Location, root: Option<&str>) ->
         total += CHEV_W + widths[start];
     }
     let mut out = Vec::new();
-    let mut x = area.l + 4.0;
+    let mut x = area.l;
     if start > 0 {
         out.push(Crumb { x0: x, x1: x + 24.0, label: "…".into(), target: items[start - 1].1.clone() });
         x += 24.0 + CHEV_W;
     }
     for (i, (label, target)) in items.into_iter().enumerate().skip(start) {
-        let w = widths[i].min((area.r - 4.0 - x).max(0.0));
+        let w = widths[i].min((area.r - SP_XS - x).max(0.0));
         out.push(Crumb { x0: x, x1: x + w, label, target });
         x += w + CHEV_W;
     }
@@ -723,6 +824,13 @@ pub fn draw_pin(g: &impl Canvas, r: R, pinned: bool, c: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// '자동' 날짜 열(예전 기본값)만 내용 폭으로 바뀌고, 사용자가 끌어 정한 폭은 그대로
+    #[test]
+    fn auto_date_column_takes_the_content_width() {
+        assert_eq!(resolve_cols(crate::pane::DEFAULT_COLS, 118.0), [118.0, 180.0, 84.0]);
+        assert_eq!(resolve_cols([150.0, 180.0, 84.0], 118.0), [150.0, 180.0, 84.0]);
+    }
 
     /// 이름 상자 자리: 자세히 보기에서는 그 줄의 이름 열 안, 아이콘 보기에서는 칸 안의 그림 아래. 줄이 다 보이지 않으면 없다
     #[test]

@@ -5,7 +5,7 @@
 use super::glyph::*;
 use super::toolbar::draw_view_icon;
 use super::*;
-use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time, format_time_short};
+use crate::listing::{Entry, Kind, drive_type_label, format_size, format_time_short};
 use crate::palette::{FOCUS_W, R_CTRL, R_ROW, alpha};
 use crate::pane::{Sort, Tab};
 
@@ -137,16 +137,16 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
     // 칸이 하나뿐이면 옅은 그림자만. 고대비는 테두리로 구분한다 (paint_pane_border)
     let sunk = multi && !active && !t.high_contrast;
     if active && multi && !t.high_contrast {
-        soft_shadow(gfx, r, RADIUS, 12.0, 0.10, t.dark);
+        soft_shadow(gfx, r, RADIUS, SHADOW_M.0, SHADOW_M.1, t.dark);
     } else if !multi && !t.high_contrast && !t.dark {
-        soft_shadow(gfx, r, RADIUS, 6.0, 0.06, false);
+        soft_shadow(gfx, r, RADIUS, SHADOW_S.0, SHADOW_S.1, false);
     }
     gfx.fill_round(r, RADIUS, if sunk { mix(t.pane, t.window, 0.5) } else { t.pane });
 
     // 칩 줄: 탭 칩. 지금 탭은 바탕이 있는 칩(지금 칸이면 옅은 강조 색 바탕에 강조 색 글자), 나머지는 글자만이고 올리면 옅은 바탕.
     // 오른쪽 자리(필터 칩·개수) 앞까지만 그린다 (좁은 칸에서 겹치면 누르기도 오른쪽 자리가 먼저)
     let right = s.filter.as_ref().map_or(s.count_rect, |f| f.chip);
-    gfx.clip(R::new(r.l + 1.0, g.head.t, (right.l - 4.0).max(r.l + 1.0), g.head.b));
+    gfx.clip(R::new(r.l + 1.0, g.head.t, (right.l - SP_XS).max(r.l + 1.0), g.head.b));
     let hovered_tab = match p_hover {
         PaneHover::Tab(ht) | PaneHover::TabClose(ht) => Some(ht),
         _ => None,
@@ -168,14 +168,14 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
             gfx.fill_round(*tr, tr.h() / 2.0, t.hover);
         }
         let closable = s.tabs.len() > 1 && (current || hovered);
-        let label = R::new(tr.l + 12.0, tr.t, tr.r - if closable { 26.0 } else { 10.0 }, tr.b);
+        let label = R::new(tr.l + SP_M, tr.t, if closable { close_rect(*tr).l - SP_HAIR } else { tr.r - SP_M }, tr.b);
         let fg = if current && active { t.chip_text } else { t.text };
         let color = if s.dragged_tab == Some(i) { alpha(fg, 0.5) } else { fg };
         gfx.text(&s.tabs[i].loc.title(), label, Font::Normal, color);
         if closable {
             let cr = close_rect(*tr);
             if p_hover == PaneHover::TabClose(i) {
-                gfx.fill_round(cr, cr.h() / 2.0, alpha(t.text, 0.12));
+                gfx.fill_round(cr, cr.h() / 2.0, alpha(t.text, A_PRESS));
             }
             gfx.glyph(G_CLOSE, cr, true, if p_hover == PaneHover::TabClose(i) { t.text } else { t.dim });
         }
@@ -187,7 +187,7 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
     gfx.glyph_font(G_ADD, add, Font::GlyphMid, if p_hover == PaneHover::TabAdd { t.text } else { t.dim });
     // 끌어 놓을 자리
     if let Some(at) = s.tab_drop {
-        let x = trs.get(at).map(|tr| tr.l - 2.0).or(trs.last().map(|tr| tr.r + 2.0)).unwrap_or(g.head.l + 8.0);
+        let x = trs.get(at).map(|tr| tr.l - SP_HAIR).or(trs.last().map(|tr| tr.r + SP_HAIR)).unwrap_or(g.head.l + SP_S);
         gfx.fill_round(R::new(x - 1.5, add.t, x + 1.5, add.b), 1.5, t.accent);
     }
     gfx.unclip();
@@ -201,7 +201,7 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
             if t.high_contrast {
                 gfx.stroke_round(fchip.inset(0.5, 0.5), fchip.h() / 2.0, t.border, 1.0);
             }
-            gfx.glyph(G_FILTER, R::new(fchip.l + 8.0, fchip.t, fchip.l + 26.0, fchip.b), true, t.chip_text);
+            gfx.glyph(G_FILTER, R::new(fchip.l + SP_S, fchip.t, fchip.l + SP_S + ICON, fchip.b), true, t.chip_text);
             // 지금 칸에서는 입력 상자(자식 창)가 이 자리에 글자를 그린다
             if f.draw_text {
                 gfx.text(&tab.filter, f.edit, Font::Normal, t.text);
@@ -209,7 +209,7 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
             let cw = gfx.measure(&f.count_text, Font::Small);
             gfx.text(&f.count_text, R::new(f.count.r - cw - 1.0, f.count.t, f.count.r, f.count.b), Font::Small, t.dim);
             if p_hover == PaneHover::FilterClear {
-                gfx.fill_round(f.clear, f.clear.h() / 2.0, alpha(t.text, 0.12));
+                gfx.fill_round(f.clear, f.clear.h() / 2.0, alpha(t.text, A_PRESS));
             }
             gfx.glyph(G_CLOSE, f.clear, true, t.dim);
         }
@@ -221,7 +221,7 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
         gfx.fill_round(ar, R_CTRL, t.field);
         gfx.stroke_round(ar.inset(0.75, 0.75), R_CTRL, t.accent, 1.5);
         if let Some(text) = s.address_text {
-            gfx.text(text, R::new(ar.l + 8.0, ar.t, ar.r - 8.0, ar.b), Font::Path, t.text);
+            gfx.text(text, R::new(ar.l + SP_S, ar.t, ar.r - SP_S, ar.b), Font::Path, t.text);
         }
     } else {
         let over_path = matches!(p_hover, PaneHover::CrumbEmpty | PaneHover::Crumb(_));
@@ -254,14 +254,15 @@ pub fn paint_pane_head(gfx: &impl Canvas, t: &Theme, s: &PaneScene) {
                 gfx.fill_round(g.view, R_CTRL, t.hover);
             }
             let c = if open { t.chip_text } else if hot { t.text } else { t.dim };
-            draw_view_icon(gfx, R::new(g.view.l + 4.0, g.view.t, g.view.l + 26.0, g.view.b), s.view, c);
-            gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - 18.0, g.view.t + 1.0, g.view.r - 4.0, g.view.b + 1.0), true, if open { c } else { t.faint });
+            // 모양 그림 22 + 화살표 14가 단추(44) 안 양쪽 4 사이에 들어간다. 아래 화살표는 무게가 위에 있어 1 내린다 (눈 보정)
+            draw_view_icon(gfx, R::new(g.view.l + SP_XS, g.view.t, g.view.l + SP_XS + 22.0, g.view.b), s.view, c);
+            gfx.glyph(G_CHEVRON_DOWN, R::new(g.view.r - SP_XS - 14.0, g.view.t + 1.0, g.view.r - SP_XS, g.view.b + 1.0), true, if open { c } else { t.faint });
         }
         gfx.clip(g.crumbs);
         for (i, c) in cs.iter().enumerate() {
             let last = i + 1 == n;
             if p_hover == PaneHover::Crumb(i) {
-                gfx.fill_round(R::new(c.x0, g.crumb.t + 2.0, c.x1, g.crumb.b - 2.0), R_ROW, t.sel_inactive);
+                gfx.fill_round(R::new(c.x0, g.crumb.t + SP_HAIR, c.x1, g.crumb.b - SP_HAIR), R_ROW, t.sel_inactive);
             }
             if c.label == "…" && !last {
                 gfx.glyph(G_MORE, R::new(c.x0, g.crumb.t, c.x1, g.crumb.b), true, t.dim);
@@ -293,25 +294,25 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
     let (short_dates, now) = (s.short_dates, s.now);
 
     // 경로 줄과 열 머리글 사이 가는 선 (열 머리글 아래 선과 같은 폭)
-    gfx.fill(R::new(g.list.l + 8.0, g.header.t, g.list.r - SCROLL_W - 6.0, g.header.t + 1.0), t.border);
+    gfx.fill(R::new(g.list.l + SP_S, g.header.t, g.list.r - LIST_R_INSET, g.header.t + 1.0), t.border);
 
     // 열 머리글
     let cols = columns(g.list, s.cols);
     let header = |gfx: &G, (l, rr): (f32, f32), label: &str, key: SortKey, right: bool| {
         let sorted = s.sort.key == key;
         let color = if sorted || p_hover == PaneHover::Header(key) { t.text } else { t.dim };
-        let tr = R::new(l + 8.0, g.header.t, rr - 8.0, g.header.b);
+        let tr = R::new(l + SP_S, g.header.t, rr - SP_S, g.header.b);
         gfx.text(label, tr, if right { Font::Right } else { Font::Normal }, color);
         if sorted {
             let glyph = if s.sort.desc { G_SORT_DOWN } else { G_SORT_UP };
-            let gx = if right { l } else { (tr.l + gfx.measure(label, Font::Normal) + 4.0).min(rr - 18.0) };
-            gfx.glyph(glyph, R::new(gx, g.header.t, gx + 16.0, g.header.b), true, t.dim);
+            let gx = if right { l } else { (tr.l + gfx.measure(label, Font::Normal) + SP_XS).min(rr - ICON - SP_HAIR) };
+            gfx.glyph(glyph, R::new(gx, g.header.t, gx + ICON, g.header.b), true, t.dim);
         }
     };
     if s.view == ViewMode::Details {
-        header(gfx, (cols.name.0 - 4.0, cols.name.1), "이름", SortKey::Name, false);
+        header(gfx, (cols.name.0 - SP_XS, cols.name.1), "이름", SortKey::Name, false);
         if let Some(c) = cols.modified {
-            header(gfx, c, "수정한 날짜", SortKey::Modified, false);
+            header(gfx, c, DATE_HEADER, SortKey::Modified, false);
         }
         if let Some(c) = cols.kind {
             header(gfx, c, "유형", SortKey::Type, false);
@@ -319,7 +320,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
         if let Some(c) = cols.size {
             header(gfx, c, "크기", SortKey::Size, true);
         }
-        gfx.fill(R::new(g.list.l + 8.0, g.header.b - 1.0, g.list.r - SCROLL_W - 6.0, g.header.b), t.border);
+        gfx.fill(R::new(g.list.l + SP_S, g.header.b - 1.0, g.list.r - LIST_R_INSET, g.header.b), t.border);
     } else {
         // 아이콘·목록 보기: 열 대신 정렬 버튼. 지금 기준은 바탕이 있는 버튼으로 보인다
         for (key, label, cr) in sort_chips(gfx, g.header, s.sort.key) {
@@ -333,11 +334,11 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
             } else if hot {
                 gfx.fill_round(cr, cr.h() / 2.0, t.hover);
             }
-            let tr = R::new(cr.l + 12.0, cr.t, cr.r - if sorted { 28.0 } else { 12.0 }, cr.b);
+            let tr = R::new(cr.l + SP_M, cr.t, cr.r - if sorted { SP_M + ICON } else { SP_M }, cr.b);
             gfx.text(label, tr, Font::Normal, if sorted || hot { t.text } else { t.dim });
             if sorted {
                 let glyph = if s.sort.desc { G_SORT_DOWN } else { G_SORT_UP };
-                gfx.glyph(glyph, R::new(cr.r - 26.0, cr.t, cr.r - 10.0, cr.b), true, t.dim);
+                gfx.glyph(glyph, R::new(cr.r - SP_M - ICON, cr.t, cr.r - SP_M, cr.b), true, t.dim);
             }
         }
     }
@@ -356,7 +357,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
         let renaming_here = s.renaming && vi == tab.cursor;
         if grid.cell == CellKind::Icon {
             // 작은 아이콘·목록: 칸 하나에 작은 아이콘과 이름
-            let cell = R::new(it.l + 1.0, it.t + 1.0, it.r - 3.0, it.b - 1.0);
+            let cell = R::new(it.l, it.t + 1.0, it.r - SP_XS, it.b - 1.0);
             if e.selected {
                 gfx.fill_round(cell, R_ROW, if active { t.sel } else { t.sel_inactive });
             } else if p_hover == PaneHover::Row(vi) {
@@ -367,20 +368,21 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
             } else if focused {
                 gfx.stroke_round(cell.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
             }
-            let iy = it.t + (ROW_H - 16.0) / 2.0;
-            art.icon(gfx, tab, e, R::new(it.l + 4.0, iy, it.l + 20.0, iy + 16.0));
+            let iy = it.t + (ROW_H - ICON) / 2.0;
+            art.icon(gfx, tab, e, R::new(it.l + ICON_ICON_L, iy, it.l + ICON_ICON_L + ICON, iy + ICON));
             if renaming_here {
-                let er = R::new(it.l + 24.0, it.t + 2.0, it.r - 6.0, it.b - 2.0);
+                let er = R::new(it.l + ICON_LABEL_L - SP_XS, it.t + SP_HAIR, it.r - SP_S, it.b - SP_HAIR);
                 gfx.fill_round(er, R_ROW, t.pane);
                 gfx.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
             } else {
                 let fg = if e.is_hidden() && !(e.selected && active) { t.faint } else { fg };
-                gfx.text_w(e.name(), R::new(it.l + 28.0, it.t, it.r - 8.0, it.b), Font::Normal, fg);
+                let nr = icon_name_rect(it);
+                gfx.text(&gfx.fit_name(e.name(), nr.w() - NAME_FIT_SLACK).0, nr, Font::Name, fg);
             }
             continue;
         }
         if let CellKind::Tile(thumb) = grid.cell {
-            let tile = R::new(it.l + 4.0, it.t + 4.0, it.r - 4.0, it.b - 4.0);
+            let tile = R::new(it.l + SP_XS, it.t + SP_XS, it.r - SP_XS, it.b - SP_XS);
             if e.selected {
                 gfx.fill_round(tile, R_ROW, if active { t.sel } else { t.sel_inactive });
             } else if p_hover == PaneHover::Row(vi) {
@@ -392,25 +394,27 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
                 gfx.stroke_round(tile.inset(FOCUS_W / 2.0, FOCUS_W / 2.0), R_ROW, t.focus, FOCUS_W);
             }
             let cx = (it.l + it.r) / 2.0;
-            let bx = R::new(cx - thumb / 2.0, it.t + 8.0, cx + thumb / 2.0, it.t + 8.0 + thumb);
+            let bx = R::new(cx - thumb / 2.0, it.t + SP_S, cx + thumb / 2.0, it.t + SP_S + thumb);
             let opacity = if e.is_hidden() { 0.55 } else { 1.0 };
             if !art.thumbnail(gfx, tab, e, bx, thumb, opacity) {
                 // 썸네일이 오기 전까지는 작은 아이콘
                 let my = (bx.t + bx.b) / 2.0;
-                art.icon(gfx, tab, e, R::new(cx - 16.0, my - 16.0, cx + 16.0, my + 16.0));
+                art.icon(gfx, tab, e, R::new(cx - ICON, my - ICON, cx + ICON, my + ICON));
             }
-            let cap = R::new(tile.l + 4.0, bx.b + 6.0, tile.r - 4.0, tile.b - 2.0);
+            let cap = R::new(tile.l + SP_XS, bx.b + SP_S, tile.r - SP_XS, tile.b);
             if renaming_here {
-                let er = R::new(it.l + 4.0, bx.b + 6.0, it.r - 8.0, bx.b + 30.0);
+                let er = R::new(it.l + SP_XS, bx.b + SP_S, it.r - SP_S, bx.b + SP_S + SP_XL);
                 gfx.fill_round(er, R_ROW, t.pane);
                 gfx.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
             } else {
-                gfx.text_w(e.name(), cap, Font::Caption, if e.is_hidden() { t.faint } else { fg });
+                // 그림 아래 두 줄은 글꼴이 글자 덩어리 단위로 끊는다. 자모로 나뉜 한글만 합쳐 보인다
+                let name = String::from_utf16_lossy(e.name());
+                gfx.text(&crate::typo::display_name(&name), cap, Font::Caption, if e.is_hidden() { t.faint } else { fg });
             }
             continue;
         }
         let y = it.t;
-        let row = R::new(g.list.l + 8.0, y + 1.0, g.list.r - SCROLL_W - 6.0, y + ROW_H - 1.0);
+        let row = R::new(g.list.l + SP_S, y + 1.0, g.list.r - LIST_R_INSET, y + ROW_H - 1.0);
         if e.selected {
             gfx.fill_round(row, R_ROW, if active { t.sel } else { t.sel_inactive });
         } else if p_hover == PaneHover::Row(vi) {
@@ -423,21 +427,29 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
         }
         // 고대비에서는 선택 바탕(Highlight) 위 글자를 모두 HighlightText로
         let dim = if e.selected && active && t.high_contrast { t.sel_text } else { t.dim };
-        art.icon(gfx, tab, e, R::new(cols.name.0 + 4.0, y + (ROW_H - 16.0) / 2.0, cols.name.0 + 20.0, y + (ROW_H + 16.0) / 2.0));
+        art.icon(gfx, tab, e, R::new(cols.name.0 + ROW_ICON_L, y + (ROW_H - ICON) / 2.0, cols.name.0 + ROW_ICON_L + ICON, y + (ROW_H + ICON) / 2.0));
         let fg = if e.is_hidden() && !(e.selected && active) { t.faint } else { fg };
-        gfx.text_w(e.name(), R::new(cols.name.0 + 28.0, y, cols.name.1 - 8.0, y + ROW_H), Font::Normal, fg);
+        let nr = row_name_rect(cols.name, it);
+        gfx.text(&gfx.fit_name(e.name(), nr.w() - NAME_FIT_SLACK).0, nr, Font::Name, fg);
         if let Some((l, rr)) = cols.modified {
+            let avail = rr - l - SP_S * 2.0;
+            let fit = |gfx: &G| crate::listing::format_time_fit(e.modified, now, avail, |s| gfx.measure(s, Font::Meta));
             let s = match e.kind {
                 Kind::Drive if e.size > 0 => format!("{} 사용 가능", format_size(e.free)),
-                Kind::File | Kind::Dir if short_dates => format_time_short(e.modified, now),
-                Kind::File | Kind::Dir => format_time(e.modified),
+                // 짧은 꼴도 열보다 넓으면 (앞날짜는 짧은 꼴에서도 긴 꼴로 나온다, 사용자가 열을 좁혔을 때도) 열에 맞춘 짧은 꼴로
+                Kind::File | Kind::Dir if short_dates => {
+                    let s = format_time_short(e.modified, now);
+                    if gfx.measure(&s, Font::Meta) > avail { fit(gfx) } else { s }
+                }
+                // 긴 꼴은 열이 좁으면 말줄임 대신 더 짧은 꼴로
+                Kind::File | Kind::Dir => fit(gfx),
                 _ => String::new(),
             };
-            gfx.text(&s, R::new(l + 8.0, y, rr - 8.0, y + ROW_H), Font::Normal, dim);
+            gfx.text(&s, R::new(l + SP_S, y, rr - SP_S, y + ROW_H), Font::Meta, dim);
         }
         if let Some((l, rr)) = cols.kind {
             let s = if e.kind == Kind::Drive { drive_type_label(e.drive_type).to_string() } else { art.type_name(tab, e) };
-            gfx.text(&s, R::new(l + 8.0, y, rr - 8.0, y + ROW_H), Font::Normal, dim);
+            gfx.text(&s, R::new(l + SP_S, y, rr - SP_S, y + ROW_H), Font::Normal, dim);
         }
         if let Some((l, rr)) = cols.size {
             let s = match e.kind {
@@ -445,10 +457,10 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
                 Kind::Drive if e.size > 0 => format_size(e.size),
                 _ => String::new(),
             };
-            gfx.text(&s, R::new(l + 8.0, y, rr - 8.0, y + ROW_H), Font::Right, dim);
+            gfx.text(&s, R::new(l + SP_S, y, rr - SP_S, y + ROW_H), Font::MetaRight, dim);
         }
         if renaming_here {
-            let er = R::new(cols.name.0 + 24.0, y + 2.0, cols.name.1 - 4.0, y + ROW_H - 2.0);
+            let er = R::new(cols.name.0 + ROW_LABEL_L - SP_XS, y + SP_HAIR, cols.name.1 - SP_XS, y + ROW_H - SP_HAIR);
             gfx.fill_round(er, R_ROW, t.pane);
             gfx.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
         }
@@ -456,7 +468,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
     gfx.unclip();
 
     if let Some(h) = &s.hint {
-        gfx.text(h, R::new(g.list.l + 24.0, g.list.t + 24.0, g.list.r - 24.0, g.list.t + 110.0), Font::Hint, t.faint);
+        gfx.text(h, R::new(g.list.l + SP_XL, g.list.t + SP_XL, g.list.r - SP_XL, g.list.t + 110.0), Font::Hint, t.faint);
     }
     // 로그인·다시 연결: 이 칸의 할 일 하나뿐이라 강조 색 단추
     if let Some((b, label)) = s.net_button {
@@ -467,7 +479,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
     }
     // 연결이 끊겨 기억한 목록을 보이는 중이면 흐리게
     if tab.offline {
-        gfx.fill(g.list, alpha(t.pane, 0.45));
+        gfx.fill(g.list, alpha(t.pane, A_DISABLED));
     }
 
     if let Some((_, thumb)) = grid.bar(g.list, tab.view.len(), tab.scroll) {
@@ -478,14 +490,14 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
 
     if let Some(m) = s.marquee {
         gfx.clip(g.list);
-        gfx.fill(m, alpha(t.accent, 0.15));
+        gfx.fill(m, alpha(t.accent, A_PRESS));
         gfx.stroke_round(m.inset(0.5, 0.5), 1.0, t.accent, 1.0);
         gfx.unclip();
     }
 
     // 늦게 읽히는 폴더: 머리글 아래를 오가는 가는 막대 (0.3초 안에 끝나면 보이지 않는다, 애니메이션을 끄면 글자만)
     if let Some(phase) = s.loading {
-        let track = R::new(g.list.l + 8.0, g.header.b - 2.0, g.list.r - SCROLL_W - 6.0, g.header.b);
+        let track = R::new(g.list.l + SP_S, g.header.b - SP_HAIR, g.list.r - LIST_R_INSET, g.header.b);
         let seg = track.w() * 0.3;
         let x = track.l - seg + (track.w() + seg) * phase;
         gfx.clip(track);
@@ -610,6 +622,25 @@ mod tests {
         let texts = g.texts.borrow();
         assert!(texts.contains(&p[0].loc.title()));
         assert!(!texts.contains(&p[1].loc.title()));
+    }
+
+    /// 짧은 날짜 꼴에서도 앞날짜는 긴 꼴로 나온다: 열이 좁으면 말줄임 대신 열에 맞춘 짧은 꼴로
+    #[test]
+    fn future_dates_shrink_to_the_column_in_short_mode() {
+        let mut p = tabs(1);
+        let now = crate::listing::now_filetime();
+        p[0].entries[0].modified = now + 400 * 864_000_000_000;
+        let r = R::new(0.0, 0.0, 800.0, 400.0);
+        let mut g = Rec::default();
+        let mut s = scene(&p, r, Vec::new());
+        s.now = now;
+        // 날짜 글자 자리 100 - 16 = 84: 긴 꼴(16자 × 7 = 112)도 '26-11-03 15:18'(98)도 넘치고 '26-11-03'(56)은 들어간다
+        s.cols = [100.0, 180.0, 84.0];
+        paint_pane_list(&mut g, &mut Art::default(), &Theme::LIGHT, &s);
+        let texts = g.texts.borrow();
+        let short = |t: &&String| t.len() == 8 && t.as_bytes()[2] == b'-' && t.as_bytes()[5] == b'-';
+        assert!(texts.iter().any(|t| short(&t)), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains('…')), "{texts:?}");
     }
 
     #[test]

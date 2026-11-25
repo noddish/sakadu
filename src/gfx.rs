@@ -39,6 +39,11 @@ impl sakadu::ui::Canvas for Gfx {
     fn measure(&self, s: &str, f: Font) -> f32 {
         Gfx::measure(self, s, f)
     }
+    fn fit_name(&self, name: &[u16], max_w: f32) -> (String, bool) {
+        let raw = String::from_utf16_lossy(name);
+        let shown = sakadu::typo::display_name(&raw);
+        self.names.borrow_mut().fit(&shown, max_w, |s| Gfx::measure(self, s, Font::Name))
+    }
     fn glyph(&self, code: u16, r: R, small: bool, c: Color) {
         Gfx::glyph(self, code, r, small, c)
     }
@@ -90,6 +95,10 @@ pub struct Gfx {
     soft_params: Option<IDWriteRenderingParams>,
     /// 페이드에 쓰는 레이어 (렌더 타깃마다 한 번 만든다)
     layer: RefCell<Option<ID2D1Layer>>,
+    /// 고정폭 숫자(tnum). 글자 형식에는 붙일 수 없어 그 단계(Font::tabular)의 글자를 배치할 때마다 붙인다
+    tabular: Option<IDWriteTypography>,
+    /// 파일 이름 줄임 결과. 글꼴·배율·글자 그리기 방식이 바뀌면 비운다
+    names: RefCell<sakadu::typo::NameCache>,
 }
 
 /// 글자 그리기 방식 (설정 → 화면 → 글자 표시)
@@ -126,6 +135,25 @@ fn family_exists(dw: &IDWriteFactory, name: PCWSTR) -> bool {
     }
 }
 
+/// 한글 대체 글꼴. Segoe UI(Variable)에는 한글이 없어 한글은 늘 대체 글꼴로 그린다:
+/// 시스템에 맡기지 않고 정해 둔다 (sakadu::typo::dwrite::hangul_fallback). 없는 PC에서는 시스템 대체 그대로
+const HANGUL_FAMILY: PCWSTR = w!("Malgun Gothic");
+/// 한글 크기 보정: 맑은 고딕 한글이 Segoe 라틴보다 커 보이지 않게 살짝 줄인다 (눈으로 맞춘 값, 0.96~0.98 사이에서 정한다)
+const HANGUL_SCALE: f32 = 0.97;
+
+/// 한글 대체 규칙. SAKADU_HANGUL_SCALE(0.9~1.0, 스크린샷·시험용)이 있으면 그 보정값, "system"이면 앱이 정하지 않는다
+fn hangul_fallback(dwrite: &IDWriteFactory) -> Option<IDWriteFontFallback> {
+    let scale = match std::env::var("SAKADU_HANGUL_SCALE").ok().as_deref() {
+        Some("system") => return None,
+        Some(v) => v.parse::<f32>().ok().filter(|k| (0.9..=1.0).contains(k)).unwrap_or(HANGUL_SCALE),
+        None => HANGUL_SCALE,
+    };
+    if !family_exists(dwrite, HANGUL_FAMILY) {
+        return None;
+    }
+    sakadu::typo::dwrite::hangul_fallback(dwrite, HANGUL_FAMILY, scale).inspect_err(|e| crate::diag::log(|| format!("font: hangul fallback failed: {e}"))).ok()
+}
+
 /// 설정에서 고른 글꼴이 있으면 그것, 없으면 Windows 11 글꼴(없으면 Windows 10 글꼴)
 fn ui_family(dw: &IDWriteFactory, chosen: &str) -> HSTRING {
     let name = HSTRING::from(chosen);
@@ -143,6 +171,7 @@ impl Gfx {
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
             let fonts = build_fonts(&dwrite, &ui_family(&dwrite, font))?;
+            let tabular = sakadu::typo::dwrite::tabular_typography(&dwrite).ok();
             // 감마·대비·ClearType 정도는 시스템(ClearType 텍스트 조정) 값을 그대로 쓰고, 그리기 방식만 GDI식으로 바꾼다
             let soft_params = dwrite.CreateRenderingParams().ok();
             let sharp_params = soft_params.as_ref().and_then(|p| {
@@ -167,6 +196,8 @@ impl Gfx {
                 sharp_params,
                 soft_params,
                 layer: RefCell::new(None),
+                tabular,
+                names: RefCell::new(sakadu::typo::NameCache::default()),
             })
         }
     }
@@ -174,6 +205,7 @@ impl Gfx {
     /// 화면 글꼴을 바꾼다 (빈 문자열이면 기본). 없는 글꼴이면 기본으로
     pub fn set_font(&mut self, font: &str) -> Result<()> {
         self.fonts = build_fonts(&self.dwrite, &ui_family(&self.dwrite, font))?;
+        self.names.borrow_mut().clear();
         Ok(())
     }
 
@@ -212,6 +244,42 @@ impl Gfx {
     }
 }
 
+/// 글꼴의 ascent·descent (em 비율). 시스템 글꼴 모음에서 그 굵기의 글꼴을 찾아 읽는다.
+/// 읽지 못하면 None (그 형식은 줄 높이를 고정하지 않고 글꼴 기본값으로 둔다)
+fn em_metrics(dwrite: &IDWriteFactory, family: PCWSTR, weight: DWRITE_FONT_WEIGHT) -> Option<(f32, f32)> {
+    unsafe {
+        let mut coll = None;
+        dwrite.GetSystemFontCollection(&mut coll, false).ok()?;
+        let coll = coll?;
+        let (mut idx, mut exists) = (0u32, BOOL(0));
+        coll.FindFamilyName(family, &mut idx, &mut exists).ok()?;
+        if !exists.as_bool() {
+            return None;
+        }
+        let font = coll.GetFontFamily(idx).ok()?.GetFirstMatchingFont(weight, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL).ok()?;
+        let face = font.CreateFontFace().ok()?;
+        Some(sakadu::typo::dwrite::font_em_metrics(&face))
+    }
+}
+
+/// 줄 높이와 기준선을 주 글꼴 지표로 고정한다 (DWRITE_LINE_SPACING_METHOD_UNIFORM).
+/// 한글처럼 대체 글꼴이 끼어도 그 글꼴 지표가 줄 높이에 섞이지 않아, 한글 줄과 영문 줄의 기준선이 같다.
+/// min_line: 여러 줄 글처럼 줄 간격을 넉넉히 둘 때의 줄 높이 (늘어난 만큼 위아래로 나눠 기준선을 내린다). 0이면 지표 그대로
+fn fix_line(dwrite: &IDWriteFactory, f: &IDWriteTextFormat, family: PCWSTR, size: f32, weight: DWRITE_FONT_WEIGHT, min_line: f32) {
+    let Some((ascent, descent)) = em_metrics(dwrite, family, weight) else { return };
+    let (mut line, mut base) = sakadu::typo::uniform_line(size, ascent, descent);
+    if min_line > line {
+        base += ((min_line - line) / 2.0).round();
+        line = min_line;
+    }
+    crate::diag::log(|| format!("font: {size}px weight {} -> line {line} baseline {base} (ascent {ascent:.3}, descent {descent:.3})", weight.0));
+    let _ = sakadu::typo::dwrite::fix_line(f, line, base);
+}
+
+/// 여러 줄로 쓰는 안내 글(Hint)과 글 파일 미리 보기(Mono)의 줄 높이
+const HINT_LINE: f32 = 20.0;
+const MONO_LINE: f32 = 18.0;
+
 fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextFormat>> {
     unsafe {
         {
@@ -221,6 +289,7 @@ fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextF
             if GetUserDefaultLocaleName(&mut locale) == 0 {
                 locale[0] = 0;
             }
+            let fallback = hangul_fallback(dwrite);
 
             let make = |family: PCWSTR, size: f32, weight: DWRITE_FONT_WEIGHT, align: DWRITE_TEXT_ALIGNMENT, wrap: bool| -> Result<IDWriteTextFormat> {
                 let f = dwrite.CreateTextFormat(
@@ -232,6 +301,10 @@ fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextF
                     size,
                     PCWSTR(locale.as_ptr()),
                 )?;
+                // 모든 글자 형식에 한글 대체 규칙을 붙인다 (Windows 8.1 이전처럼 IDWriteTextFormat1이 없으면 시스템 대체 그대로)
+                if let Some(fb) = &fallback {
+                    let _ = sakadu::typo::dwrite::use_fallback(&f, fb);
+                }
                 f.SetTextAlignment(align)?;
                 f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
                 if wrap {
@@ -244,11 +317,17 @@ fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextF
                 }
                 Ok(f)
             };
-            let path = make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?;
+            // 글자 형식(아이콘 글꼴 말고): 줄 높이·기준선을 주 글꼴 지표로 고정한다
+            let text = |size: f32, weight: DWRITE_FONT_WEIGHT, align: DWRITE_TEXT_ALIGNMENT, wrap: bool, min_line: f32| -> Result<IDWriteTextFormat> {
+                let f = make(ui, size, weight, align, wrap)?;
+                fix_line(dwrite, &f, ui, size, weight, min_line);
+                Ok(f)
+            };
+            let path = text(13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false, 0.0)?;
             let sign = dwrite.CreateEllipsisTrimmingSign(&path)?;
             let keep_last = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: '\\' as u32, delimiterCount: 1 };
             path.SetTrimming(&keep_last, &sign)?;
-            let caption = make(ui, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true)?;
+            let caption = text(12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true, 0.0)?;
             caption.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
             // 긴 파일 이름은 공백이 없어도 글자 단위로 끊는다
             caption.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK)?;
@@ -257,23 +336,28 @@ fn build_fonts(dwrite: &IDWriteFactory, ui: &HSTRING) -> Result<Vec<IDWriteTextF
             caption.SetTrimming(&trim, &sign)?;
             let mono_family = if family_exists(dwrite, w!("Cascadia Mono")) { w!("Cascadia Mono") } else { w!("Consolas") };
             let mono = make(mono_family, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true)?;
+            fix_line(dwrite, &mono, mono_family, 12.0, DWRITE_FONT_WEIGHT_NORMAL, MONO_LINE);
             mono.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
             mono.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK)?;
             // Font 순서와 같게
             let fonts = vec![
-                make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
-                make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false)?,
-                make(ui, 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
+                text(13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false, 0.0)?,
+                text(13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false, 0.0)?,
+                text(13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false, 0.0)?,
                 make(icons, 16.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false)?,
                 make(icons, 10.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false)?,
-                make(ui, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true)?,
+                text(13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true, HINT_LINE)?,
                 path,
                 caption,
                 mono,
-                make(ui, 15.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
-                make(ui, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
+                text(15.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false, 0.0)?,
+                text(12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false, 0.0)?,
                 make(icons, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false)?,
-                make(ui, 11.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false)?,
+                text(12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false, 0.0)?,
+                // Name·Meta·MetaRight
+                text(13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false, 0.0)?,
+                text(13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false, 0.0)?,
+                text(13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false, 0.0)?,
             ];
             debug_assert_eq!(fonts.len(), Font::COUNT);
             Ok(fonts)
@@ -346,6 +430,8 @@ impl Gfx {
         self.icons.clear();
         self.app_icon = None;
         self.thumbs.clear();
+        // GDI식 글자 폭은 배율에 따라 픽셀 단위로 달라진다
+        self.names.borrow_mut().clear();
         if let Some(rt) = &self.rt {
             unsafe { rt.SetDpi(dpi, dpi) };
         }
@@ -398,6 +484,7 @@ impl Gfx {
     /// 글자 그리기 방식을 바꾼다. 렌더 타깃이 있으면 바로 적용
     pub fn set_text_look(&mut self, look: TextLook) {
         self.text_look = look;
+        self.names.borrow_mut().clear();
         self.apply_text_look();
     }
 
@@ -415,6 +502,14 @@ impl Gfx {
 
     fn draw(&self, s: &[u16], r: R, f: Font, c: Color, mode: DWRITE_MEASURING_MODE) {
         if s.is_empty() || r.w() <= 0.0 {
+            return;
+        }
+        // 고정폭 숫자 단계는 배치를 만들어 그린다 (그리기 방식은 text_layout이 measure와 같게 고른다)
+        if f.tabular()
+            && let Some(layout) = self.text_layout(s, f, r.w(), r.h())
+        {
+            let pt = windows_numerics::Vector2 { X: r.l, Y: r.t };
+            unsafe { self.rt().DrawTextLayout(pt, &layout, self.brush(c), D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT) };
             return;
         }
         unsafe {
@@ -480,14 +575,20 @@ impl Gfx {
     /// 그릴 때와 같은 방식으로 배치한다. 너비 재기와 그리기가 어긋나지 않게
     fn text_layout(&self, s: &[u16], f: Font, w: f32, h: f32) -> Option<IDWriteTextLayout> {
         let format = &self.fonts[f as usize];
-        unsafe {
+        let layout = unsafe {
             if self.text_look == TextLook::Soft {
                 self.dwrite.CreateTextLayout(s, format, w, h).ok()
             } else {
                 // GDI식: 글자 간격을 픽셀 단위로
                 self.dwrite.CreateGdiCompatibleTextLayout(s, format, w, h, self.dpi / 96.0, None, false).ok()
             }
+        }?;
+        if f.tabular()
+            && let Some(t) = &self.tabular
+        {
+            let _ = sakadu::typo::dwrite::apply_tabular(&layout, t, s.len() as u32);
         }
+        Some(layout)
     }
 
     pub fn measure(&self, s: &str, f: Font) -> f32 {

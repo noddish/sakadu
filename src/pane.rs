@@ -550,7 +550,10 @@ pub struct Pane {
 }
 
 /// 유형 열은 "Microsoft Excel 워크시트"가 잘리지 않는 너비
-pub const DEFAULT_COLS: [f32; 3] = [140.0, 180.0, 84.0];
+pub const DEFAULT_COLS: [f32; 3] = [DATE_AUTO, 180.0, 84.0];
+/// 날짜 열 폭이 이 값(예전 기본값)이면 '자동': 그리는 쪽이 내용으로 잰 폭을 쓴다 (ui::resolve_cols).
+/// 사용자가 끌어 바꾼 폭은 그대로 둔다
+pub const DATE_AUTO: f32 = 140.0;
 
 impl Pane {
     pub fn tab(&self) -> &Tab {

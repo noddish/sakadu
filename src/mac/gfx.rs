@@ -206,9 +206,14 @@ impl Gfx {
             font(12.0, false),
             mono_font(12.0, || font(12.0, false)),
             font(15.0, true),
+            // Small: 고정폭 숫자 (개수·진행 수치)
+            digit_font(12.0, || font(12.0, false)),
             font(12.0, false),
-            font(12.0, false),
-            font(11.0, false),
+            font(12.0, true),
+            // Name, Meta·MetaRight (날짜·크기 열: 고정폭 숫자)
+            font(13.0, false),
+            digit_font(13.0, || font(13.0, false)),
+            digit_font(13.0, || font(13.0, false)),
         ];
         debug_assert_eq!(fonts.len(), Font::COUNT);
         Gfx { ctx, ns, fonts }
@@ -299,12 +304,21 @@ impl Gfx {
             }
         }
         let x = match f {
-            Font::Right => r.r - w,
+            Font::Right | Font::MetaRight => r.r - w,
             Font::Hint | Font::Caption | Font::Glyph | Font::GlyphSmall | Font::GlyphMid => r.l + (r.w() - w) / 2.0,
             _ => r.l,
         };
-        // 위아래 뒤집힌 좌표: 기준선은 글자 덩어리를 세로 가운데에 둔 곳
-        let base = r.t + (r.h() + (ascent - descent) as f32) / 2.0;
+        // 위아래 뒤집힌 좌표. 기준선은 주 글꼴(시스템 글꼴) 지표로 고정한다: 한글(Apple SD Gothic Neo)처럼 대체 글꼴이 끼어도
+        // 그 지표가 섞이지 않아 한글 줄과 영문 줄의 기준선이 같다 (sakadu::typo::uniform_line, Windows의 UNIFORM 줄 간격과 같은 생각).
+        // 글자 상자는 r 안에서 세로 가운데
+        let font = &self.fonts[f as usize];
+        let size = font.pointSize() as f32;
+        let base = if size > 0.0 {
+            let (line_h, baseline) = sakadu::typo::uniform_line(size, font.ascender() as f32 / size, -font.descender() as f32 / size);
+            r.t + sakadu::typo::text_top_in_row(r.h(), line_h) + baseline
+        } else {
+            r.t + (r.h() + (ascent - descent) as f32) / 2.0
+        };
         self.set_fill(c);
         CGContext::save_g_state(self.c());
         CGContext::clip_to_rect(self.c(), rect(R::new(r.l - 1.0, r.t - 4.0, r.r + 1.0, r.b + 4.0)));
@@ -475,6 +489,14 @@ fn quick_look_classes() -> Option<(&'static AnyClass, &'static AnyClass)> {
         return None;
     }
     Some((AnyClass::get(c"QLThumbnailGenerator")?, AnyClass::get(c"QLThumbnailGenerationRequest")?))
+}
+
+/// 숫자만 고정폭인 시스템 글꼴 (날짜·크기·개수). 맥 시스템 글꼴도 기본 숫자는 비례폭이다.
+/// 고정폭 글꼴처럼 빈 값을 받을 수 있어 직접 묻고, 없으면 fallback(보통 글꼴)
+fn digit_font(size: CGFloat, fallback: impl Fn() -> Retained<NSFont>) -> Retained<NSFont> {
+    // SAFETY: +[NSFont monospacedDigitSystemFontOfSize:weight:] (macOS 10.11부터). 빈 값일 수 있어 Option으로 받는다
+    let font: Option<Retained<NSFont>> = unsafe { msg_send![NSFont::class(), monospacedDigitSystemFontOfSize: size, weight: NSFontWeightRegular] };
+    font.unwrap_or_else(fallback)
 }
 
 /// 고정폭 시스템 글꼴. 맥이 가끔 빈 값을 돌려줘서(CI의 시험에서 두 번, 글꼴을 한 줄에서만 만들게 한 뒤에도 한 번)

@@ -5,6 +5,11 @@ edition = "2024"
 description = "가볍고 빠른 Windows 멀티뷰 파일 관리자"
 license = "GPL-3.0-or-later"
 
+# 파일 이름을 글자 덩어리(grapheme) 단위로 줄인다: 맥에서 온 NFD 한글 이름이 자모로 쪼개지지 않게 (src/typo.rs).
+# 순수 Rust, 다른 의존성 없음
+[dependencies]
+unicode-segmentation = "1"
+
 # Windows API는 Windows에서만 받는다. 공통 코드(src/lib.rs)는 다른 OS에서도 빌드·테스트된다 (macOS 버전 준비)
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [

@@ -188,8 +188,19 @@ impl App {
             Hit::Start(p, i) => return self.start_tip(p, i),
             Hit::PreviewPin | Hit::PreviewOpen | Hit::PreviewHead => return self.preview_tip(),
             Hit::CardExpand | Hit::CardClose => return self.card_tip(),
+            Hit::Row(p, vi) => return self.name_tip(p, vi),
             _ => return None,
         })
+    }
+
+    /// 가운데를 줄여 보인 파일 이름 위에 올리면 전체 이름 (자모로 나뉜 한글은 합쳐서). 다 보이는 이름에는 말풍선이 없다
+    fn name_tip(&self, p: usize, vi: usize) -> Option<(R, String)> {
+        let pane = &self.panes[p];
+        let tab = pane.tab();
+        let e = tab.entry_at(vi)?;
+        let nr = name_rect(geom(self.pane_rect(p)?).list, pane.view, self.cols(p), vi, tab.scroll)?;
+        let (_, cut) = self.gfx.fit_name(e.name(), nr.w() - NAME_FIT_SLACK);
+        cut.then(|| (nr, sakadu::typo::display_name(&e.name_string()).into_owned()))
     }
 
     /// 버튼 위에 마우스가 바뀌면 말풍선을 숨기고, 잠시 머무르면 보이게 한다
@@ -318,6 +329,7 @@ impl App {
         let view_open = self.view_menu.filter(|m| m.kind == view_menu::MenuKind::View).map(|m| m.pane);
         // 목록의 수정한 날짜를 짧게(오늘·어제) 쓸지와 그 기준 시각
         let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
+        let cols = self.cols(p);
         let App { gfx, panes, types, thumb_failed, places, .. } = self;
         let pane = &panes[p];
         let scene = PaneScene {
@@ -325,7 +337,7 @@ impl App {
             tabs: &pane.tabs,
             current: pane.active,
             sort: pane.sort,
-            cols: pane.cols,
+            cols,
             view: pane.view,
             active,
             multi,

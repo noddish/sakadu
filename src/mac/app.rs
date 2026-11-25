@@ -3321,7 +3321,7 @@ impl App {
         let pane = &self.panes[p];
         let n = pane.tabs.len();
         let strip = chip_strip(gm, g.measure(&count_text(pane.tab()), Font::Small));
-        let natural: Vec<f32> = pane.tabs.iter().map(|t| (g.measure(&t.loc.title(), Font::Normal) + 22.0 + if n > 1 { 20.0 } else { 0.0 }).clamp(52.0, 180.0)).collect();
+        let natural: Vec<f32> = pane.tabs.iter().map(|t| tab_natural_w(g.measure(&t.loc.title(), Font::Normal), n)).collect();
         let trs = tab_rects(strip, &natural, pane.active);
         let add = add_rect(strip, &trs);
         (trs, add)
@@ -3859,7 +3859,8 @@ impl App {
             g.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
         } else if let Some(name) = self.workspaces.current_name() {
             let title = self.side_title();
-            g.text(name, R::new(title.l + 10.0, title.t, title.r - 8.0, title.b), Font::Title, t.text);
+            // 이름은 아래 줄의 아이콘과 같은 세로선에서 시작한다 (Windows 사이드바와 같은 줄 규칙: 여백 8, 아이콘 16, 간격 8)
+            g.text(name, R::new(title.l + SP_S, title.t, title.r - SP_S, title.b), Font::Title, t.text);
         }
 
         let dir = self.panes[self.active].tab().loc.dir();
@@ -3870,28 +3871,31 @@ impl App {
             let hovered = self.hover == Hit::SideRow(i) || self.drop == Some(DropAt::Side(i));
             match row.kind {
                 SideKind::Hint => {
-                    g.text("이 공간에 고정한 곳이 없어요", R::new(r.l + 10.0, r.t + 4.0, r.r - 6.0, r.t + 22.0), Font::Small, t.faint);
-                    g.text("책갈피나 ⌃⌘T로 고정해 보세요", R::new(r.l + 10.0, r.t + 22.0, r.r - 6.0, r.t + 40.0), Font::Small, t.faint);
+                    let (l, w) = (r.l + SP_S, r.r - SP_S);
+                    g.text("이 공간에 고정한 곳이 없어요", R::new(l, r.t + SP_XS, w, r.t + SP_XS + 16.0), Font::Small, t.faint);
+                    g.text("책갈피나 ⌃⌘T로 고정해 보세요", R::new(l, r.t + SP_XS + 16.0, w, r.t + SP_XS + 32.0), Font::Small, t.faint);
                 }
                 // 구역 이름: 위에 얇은 선, 그 아래 작은 글자
                 SideKind::Label => {
-                    g.fill(R::new(r.l + 10.0, r.t, r.r - 10.0, r.t + 1.0), alpha(t.text, 0.08));
-                    g.text(&row.label, R::new(r.l + 10.0, r.t + 4.0, r.r - 8.0, r.b), Font::Label, t.faint);
+                    g.fill(R::new(r.l + SP_S, r.t, r.r - SP_S, r.t + 1.0), t.border);
+                    g.text(&row.label, R::new(r.l + SP_S, r.t + SP_XS, r.r - SP_S, r.b), Font::Label, t.faint);
                 }
                 SideKind::Group(_, collapsed) => {
                     side_row_bg(g, t, r, false, hovered);
-                    g.glyph(if collapsed { G_CHEVRON } else { G_CHEVRON_DOWN }, R::new(r.l + 8.0, r.t, r.l + 24.0, r.b), true, t.faint);
-                    g.text(&row.label, R::new(r.l + 36.0, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                    g.glyph(if collapsed { G_CHEVRON } else { G_CHEVRON_DOWN }, R::new(r.l + SP_S, r.t, r.l + SP_S + ICON, r.b), true, t.faint);
+                    // 그룹 머리는 굵게 (안의 항목과 구분)
+                    g.text(&row.label, R::new(r.l + SIDE_LABEL_L, r.t, r.r - SP_S, r.b), Font::Strong, t.text);
                 }
                 // 고정한 것, 바로가기, 즐겨찾기 항목: 지금 칸의 폴더면 떠 있는 카드
                 SideKind::Pin | SideKind::Place | SideKind::Fav => {
                     let here = row.is_dir && row.path.as_deref().zip(dir).is_some_and(|(a, b)| util::eq_path(a, b));
                     side_row_bg(g, t, r, here, hovered);
-                    let lx = r.l + 36.0 + if row.indent { INDENT } else { 0.0 };
+                    let lx = r.l + SIDE_LABEL_L + if row.indent { INDENT } else { 0.0 };
                     if let Some(path) = &row.path {
-                        g.icon_for_path(path, R::new(lx - 26.0, r.t + 6.0, lx - 10.0, r.t + 22.0));
+                        let it = r.t + (r.h() - ICON) / 2.0;
+                        g.icon_for_path(path, R::new(lx - SP_S - ICON, it, lx - SP_S, it + ICON));
                     }
-                    g.text(&row.label, R::new(lx, r.t, r.r - 8.0, r.b), Font::Normal, t.text);
+                    g.text(&row.label, R::new(lx, r.t, r.r - SP_S, r.b), Font::Normal, t.text);
                 }
             }
         }
@@ -3950,7 +3954,7 @@ impl App {
         let count_hot = flash.is_some();
         let count_text = flash.unwrap_or_else(|| count_text(tab));
         let cw = g.measure(&count_text, Font::Small).min(gm.head.w() * 0.6);
-        let count_rect = R::new(gm.head.r - 8.0 - cw, gm.head.t + 8.0, gm.head.r - 8.0, gm.head.t + 36.0);
+        let count_rect = R::new(gm.head.r - SP_S - cw, gm.head.t + SP_S, gm.head.r - SP_S, gm.head.b - SP_S);
         let editing = self.edit == Editing::Address(p);
         // 이 칸에서 이름을 고치는 항목 (커서 줄에 이름 상자가 뜬다)
         let naming = self.item_edit().filter(|(e, _)| e.pane == p);

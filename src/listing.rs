@@ -474,6 +474,20 @@ pub fn relative_label(t: LocalTime, now: LocalTime, secs: i64) -> String {
     }
 }
 
+/// 긴 꼴 날짜("2026-11-03 15:18")를 폭 avail에 맞춘다: 넘치면 말줄임 대신 더 짧은 꼴로 (sakadu::typo::fit_date)
+pub fn format_time_fit(ft: u64, now: u64, avail: f32, measure: impl Fn(&str) -> f32) -> String {
+    if ft == 0 {
+        return String::new();
+    }
+    match (local_time(ft), local_time(now)) {
+        (Some(t), Some(n)) => {
+            let dt = crate::typo::DateParts { y: t.year as i32, mo: t.month as u32, d: t.day as u32, h: t.hour as u32, mi: t.minute as u32 };
+            crate::typo::fit_date(dt, (n.year as i32, n.month as u32, n.day as u32), avail, measure)
+        }
+        _ => String::new(),
+    }
+}
+
 /// 목록의 수정한 날짜를 짧게 (now는 now_filetime). 읽을 수 없으면 빈 글자
 pub fn format_time_short(ft: u64, now: u64) -> String {
     if ft == 0 {

@@ -16,6 +16,7 @@ pub mod palette;
 pub mod pane;
 pub mod query;
 pub mod session;
+pub mod typo;
 pub mod ui;
 pub mod util;
 pub mod workspaces;
