@@ -99,10 +99,23 @@ pub fn recent_label(path: &str) -> &str {
     if n.is_empty() { path } else { n }
 }
 
+/// 최근 위치·시작 화면에서 두 경로를 같은 폴더로 볼 때 대소문자를 가리지 않을지: Windows는 가리지 않는다.
+/// 맥은 글자 그대로 본다. 대소문자를 가리는 볼륨에서는 Work와 work가 다른 폴더다 (맥 앱의 다른 경로 비교와 같다)
+const FOLD_CASE: bool = cfg!(windows);
+
+/// 두 경로가 같은 폴더인지 (fold_case: 대소문자를 가리지 않는다. 시험이 두 규칙을 다 보려고 따로 받는다)
+fn same_dir(fold_case: bool, a: &str, b: &str) -> bool {
+    if fold_case { util::eq_path(a, b) } else { a == b }
+}
+
 /// 다녀간 폴더를 최근 위치 맨 앞에 둔다 (같은 폴더는 한 번만, RECENT_KEEP개까지). 폴더가 아니면 그대로 두고 false
 pub fn note_recent(list: &mut Vec<String>, loc: &Location) -> bool {
+    note_recent_in(FOLD_CASE, list, loc)
+}
+
+fn note_recent_in(fold_case: bool, list: &mut Vec<String>, loc: &Location) -> bool {
     let Location::Dir(d) = loc else { return false };
-    list.retain(|r| !util::eq_path(r, d));
+    list.retain(|r| !same_dir(fold_case, r, d));
     list.insert(0, d.clone());
     list.truncate(RECENT_KEEP);
     true
@@ -110,7 +123,11 @@ pub fn note_recent(list: &mut Vec<String>, loc: &Location) -> bool {
 
 /// 최근 위치에서 뺀다 (메뉴·지우기 키, 또는 지워진 폴더)
 pub fn forget_recent(list: &mut Vec<String>, path: &str) {
-    list.retain(|r| !util::eq_path(r, path));
+    forget_recent_in(FOLD_CASE, list, path);
+}
+
+fn forget_recent_in(fold_case: bool, list: &mut Vec<String>, path: &str) {
+    list.retain(|r| !same_dir(fold_case, r, path));
 }
 
 /// 카드를 cols개씩 줄지어 놓고 y를 마지막 줄 아래로 옮긴다
@@ -176,7 +193,7 @@ pub fn start_layout(area: R, filter: &str, scroll: f32, d: &StartData) -> StartV
     // 이 공간에 고정한 폴더가 먼저, 그 뒤에 '모든 공간'(즐겨찾기)의 폴더. 둘 다에 있으면 한 번만
     let pins = d.pins;
     let fav_dirs = || {
-        let common = d.favs.items.iter().chain(d.favs.groups.iter().flat_map(|g| g.items.iter())).filter(|f| !pins.iter().any(|p| util::eq_path(&p.path, &f.path)));
+        let common = d.favs.items.iter().chain(d.favs.groups.iter().flat_map(|g| g.items.iter())).filter(|f| !pins.iter().any(|p| same_dir(FOLD_CASE, &p.path, &f.path)));
         pins.iter().chain(common).filter(|f| f.is_dir)
     };
 
@@ -196,7 +213,7 @@ pub fn start_layout(area: R, filter: &str, scroll: f32, d: &StartData) -> StartV
     let recent: Vec<StartItem> = d
         .recent
         .iter()
-        .filter(|r| !fav_dirs().any(|f| util::eq_path(&f.path, r)))
+        .filter(|r| !fav_dirs().any(|f| same_dir(FOLD_CASE, &f.path, r)))
         .filter(|r| fits(recent_label(r)))
         .take(RECENT_SHOWN)
         .map(|r| StartItem::Recent(r.clone()))
@@ -360,22 +377,46 @@ mod tests {
         }
     }
 
-    /// 최근 위치: 다녀간 폴더가 맨 앞, 같은 폴더(대소문자만 달라도)는 한 번만, RECENT_KEEP개까지. 폴더가 아니면 남기지 않는다
+    /// 최근 위치: 다녀간 폴더가 맨 앞, 같은 폴더는 한 번만, RECENT_KEEP개까지. 폴더가 아니면 남기지 않는다.
+    /// Windows 규칙(대소문자만 다르면 같은 폴더)으로 본다
     #[test]
     fn recent_list_keeps_the_latest_once() {
         let mut list = Vec::new();
         for i in 0..RECENT_KEEP + 3 {
-            assert!(note_recent(&mut list, &Location::Dir(format!("/r/{i}"))));
+            assert!(note_recent_in(true, &mut list, &Location::Dir(format!("/r/{i}"))));
         }
         assert_eq!(list.len(), RECENT_KEEP);
         assert_eq!(list[0], format!("/r/{}", RECENT_KEEP + 2));
-        assert!(note_recent(&mut list, &Location::Dir("/R/5".into())));
+        assert!(note_recent_in(true, &mut list, &Location::Dir("/R/5".into())));
         assert_eq!(list[0], "/R/5");
         assert_eq!(list.iter().filter(|p| p.eq_ignore_ascii_case("/r/5")).count(), 1);
-        assert!(!note_recent(&mut list, &Location::Start));
+        assert!(!note_recent_in(true, &mut list, &Location::Start));
         assert_eq!(list[0], "/R/5");
-        forget_recent(&mut list, "/r/5");
+        forget_recent_in(true, &mut list, "/r/5");
         assert!(!list.iter().any(|p| p.eq_ignore_ascii_case("/r/5")));
+    }
+
+    /// 맥 규칙: 대소문자를 가리는 볼륨에서는 Work와 work가 다른 폴더라 둘 다 남고, 빼기도 글자 그대로 맞는 것만 뺀다.
+    /// 앱이 쓰는 note_recent·forget_recent는 Windows에서 Windows 규칙, 맥에서 맥 규칙을 따른다
+    #[test]
+    fn recent_list_case_rule_follows_the_platform() {
+        let mut list = Vec::new();
+        note_recent_in(false, &mut list, &Location::Dir("/x/Work".into()));
+        note_recent_in(false, &mut list, &Location::Dir("/x/work".into()));
+        assert_eq!(list, ["/x/work", "/x/Work"]);
+        note_recent_in(false, &mut list, &Location::Dir("/x/Work".into()));
+        assert_eq!(list, ["/x/Work", "/x/work"], "the same spelling still moves to the front once");
+        forget_recent_in(false, &mut list, "/x/WORK");
+        assert_eq!(list.len(), 2, "no folder spelled that way");
+        forget_recent_in(false, &mut list, "/x/work");
+        assert_eq!(list, ["/x/Work"]);
+
+        let mut list = Vec::new();
+        note_recent(&mut list, &Location::Dir("/x/Work".into()));
+        note_recent(&mut list, &Location::Dir("/x/work".into()));
+        assert_eq!(list.len(), if cfg!(windows) { 1 } else { 2 });
+        forget_recent(&mut list, "/x/WORK");
+        assert_eq!(list.len(), if cfg!(windows) { 0 } else { 2 });
     }
 
     /// 고정한 폴더는 카드로 한 번만, 최근 위치는 고정한 폴더를 빼고, 드라이브 구역 이름은 앱이 정한다. 필터에 맞는 것만
@@ -411,5 +452,24 @@ mod tests {
         let a = start_layout(area, "", 0.0, &d);
         let b = start_layout(area, "", 30.0, &d);
         assert_eq!(a.items[2].1.t - 30.0, b.items[2].1.t);
+    }
+
+    /// 고정한 폴더와 최근 위치에서 겹친 것 빼기도 같은 폴더 규칙을 따른다: Windows는 대소문자만 다르면 하나로,
+    /// 맥은 Work와 work를 다른 폴더로 둘 다 보인다
+    #[test]
+    fn layout_dedup_follows_the_case_rule() {
+        let f = |name: &str, path: &str| Favorite { name: name.into(), path: path.into(), is_dir: true };
+        let pins = [f("Work", "/w/Work")];
+        let favs = Favorites { items: vec![f("work", "/w/work")], groups: Vec::new() };
+        let recent = ["/w/WORK".to_string()];
+        let d = StartData { pins: &pins, favs: &favs, recent: &recent, computer: false, drives: &[], drives_label: "위치" };
+        let v = start_layout(R::new(0.0, 0.0, 700.0, 600.0), "", 0.0, &d);
+        let kinds: Vec<StartItem> = v.items.into_iter().map(|(it, _)| it).collect();
+        let work = StartItem::Fav { name: "Work".into(), path: "/w/Work".into() };
+        if cfg!(windows) {
+            assert_eq!(kinds, [work]);
+        } else {
+            assert_eq!(kinds, [work, StartItem::Fav { name: "work".into(), path: "/w/work".into() }, StartItem::Recent("/w/WORK".into())]);
+        }
     }
 }

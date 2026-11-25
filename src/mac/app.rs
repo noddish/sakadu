@@ -1335,21 +1335,21 @@ impl App {
                 }
             }
             // 세션에서 연 폴더가 없어졌거나 닿지 않으면 home을 연다 (기록은 남기지 않는다)
-            Err(_) if restored && tab.loc != Location::Dir(home.clone()) => {
-                let gone = std::mem::replace(&mut tab.loc, Location::Dir(home.clone()));
+            Err(msg) if restored && tab.loc != Location::Dir(home.clone()) => {
+                let old = std::mem::replace(&mut tab.loc, Location::Dir(home.clone()));
                 tab.generation += 1;
                 tab.state = LoadState::Loading;
                 self.requests.push(Request { tab: tab.id, generation: tab.generation, dir: home });
                 self.reading.insert(tab_id);
-                // 열지 못한 폴더는 최근 위치에서 뺀다 (시작 화면·명령 메뉴에 남지 않게)
-                if let Some(d) = gone.dir() {
+                // 지워진 폴더만 최근 위치에서 뺀다 (시작 화면·명령 메뉴에 남지 않게). 꺼진 NAS처럼 잠깐 닿지 않는 곳은
+                // 다시 시작해도 남긴다: 다시 켜지면 그 줄로 바로 간다
+                if let Some(d) = old.dir().filter(|_| dir_gone(&msg)) {
                     self.forget_recent(d);
                 }
             }
             Err(msg) => {
-                // 지워졌거나 폴더가 아닌 것만 최근 위치에서 뺀다 (Windows와 같다). 잠깐 닿지 않는 NAS·권한 없음은 그대로 둔다.
-                // 읽기 오류는 io::Error의 글이라 끝에 OS 오류 번호가 붙는다 (ENOENT 2, ENOTDIR 20)
-                let gone = msg.ends_with("(os error 2)") || msg.ends_with("(os error 20)");
+                // 지워졌거나 폴더가 아닌 것만 최근 위치에서 뺀다 (Windows와 같다). 잠깐 닿지 않는 NAS·권한 없음은 그대로 둔다
+                let gone = dir_gone(&msg);
                 tab.entries.clear();
                 tab.view.clear();
                 tab.state = LoadState::Error(msg);
@@ -5122,6 +5122,12 @@ fn count_text(tab: &Tab) -> String {
     }
 }
 
+/// 폴더 읽기 오류가 그 폴더가 지워졌거나 폴더가 아니라는 것인지 (그때만 최근 위치에서 뺀다).
+/// 읽기 오류는 io::Error의 글이라 끝에 OS 오류 번호가 붙는다 (ENOENT 2, ENOTDIR 20)
+fn dir_gone(msg: &str) -> bool {
+    msg.ends_with("(os error 2)") || msg.ends_with("(os error 20)")
+}
+
 /// 탭의 스크롤을 내용 길이 안으로 (보기 방식의 칸 배치에 맞춰)
 fn clamp_tab(tab: &mut Tab, list: R, view: ViewMode) {
     let grid = Grid::of(list, view);
@@ -5435,6 +5441,31 @@ mod tests {
         b.edit = Editing::None;
         b.switch_workspace(0);
         assert_eq!(b.recent, [work, down], "switching workspaces keeps the list");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 세션에서 다시 연 탭의 폴더를 읽지 못하면 home을 연다. 최근 위치에서는 지워진 폴더만 빼고,
+    /// 잠깐 닿지 않는 곳(꺼진 NAS)은 남긴다: 다시 켜지면 시작 화면·명령 메뉴에서 바로 간다
+    #[test]
+    fn restored_tab_that_cannot_be_read_keeps_offline_places_recent() {
+        let (root, home) = demo();
+        let (a, _) = app(&home);
+        let mut s = session::parse(&session::serialize(&a.to_session())).expect("session");
+        let nas = "/Volumes/꺼진 NAS/공유".to_string();
+        let gone = util::join(&home, "없는 곳");
+        let work = util::join(&home, "업무");
+        s.panes[0].tabs = vec![nas.clone(), gone.clone()];
+        s.panes[0].active = 0;
+        s.recent = vec![nas.clone(), gone.clone(), work.clone()];
+        let (mut b, _) = app(&home);
+        b.open_saved(Workspaces::default(), Some(&s), &home);
+        let tabs: Vec<(u64, u64)> = b.pane(0).tabs.iter().map(|t| (t.id, t.generation)).collect();
+        assert_eq!(tabs.len(), 2);
+        b.on_listed(tabs[0].0, tabs[0].1, Err("Operation timed out (os error 60)".to_string()));
+        b.on_listed(tabs[1].0, tabs[1].1, Err("No such file or directory (os error 2)".to_string()));
+        assert_eq!(b.recent, [nas, work], "only the folder that is gone leaves the list");
+        b.settle();
+        assert!(b.pane(0).tabs.iter().all(|t| t.loc == Location::Dir(home.clone())), "both tabs open home");
         std::fs::remove_dir_all(root).unwrap();
     }
 

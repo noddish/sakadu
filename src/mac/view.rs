@@ -1547,9 +1547,13 @@ define_class!(
             settings::open(self.mtm());
         }
 
-        /// 메뉴 막대의 동작 줄 (파일·보기·이동·도움말): 줄의 tag가 단축키 표(ACTIONS)의 번호다
+        /// 메뉴 막대의 동작 줄 (파일·보기·이동·도움말): 줄의 tag가 단축키 표(ACTIONS)의 번호다.
+        /// 메뉴 단축키(⌘T, ⌘W, ⇧⌘N…)는 뷰의 handle_key를 거치지 않으므로, 단축키 표의 동작은 누르고 있어도 한 번만 한다는 규칙을 여기서도 지킨다
         #[unsafe(method(sakaduAction:))]
         fn sakadu_action(&self, sender: &NSMenuItem) {
+            if held_key(self.mtm()) {
+                return;
+            }
             let Some(&(a, ..)) = usize::try_from(sender.tag()).ok().and_then(|i| sakadu::keys::ACTIONS.get(i)) else { return };
             with_app(|app| app.run_action(a));
             after_menu();
