@@ -17,6 +17,7 @@ A Windows file manager that keeps several folders open side by side and finds an
 - **Ctrl+K command menu**: jump to an open tab, pinned place or recent location, or find and run a command by name (Korean initial consonants work too).
 - **Works like Explorer**: right-click menus, the copy progress dialog and drag and drop behave as they do in Explorer. Moved something by mistake? Use the **되돌리기** (undo) button on the notice, or Ctrl+Z.
 - **Look before you open**: select a file and a preview card appears at the bottom of the neighbouring pane: pictures and text, and also the first page of PDFs and PowerPoint files, a frame of a video, Hangul (hwp) documents and SVG. Excel and Word files open in the preview pane (Alt+P), where you can pin a reference file to keep it in view.
+- **Archives open like folders**: double-click a zip, 7z or tar file to browse inside it. Open files straight from it or drag them out; the inside is read-only.
 - **Workspaces**: switch workspaces from the rail on the left. Each one remembers its own layout (panes and tabs), pinned places and color. Drag pinned places and the favorites under '모든 공간' (all spaces) to reorder them, put them into groups or move them between the two. A new tab opens on your pinned places and recent locations.
 - **NAS**: shares that need a sign-in open through the Windows sign-in dialog, and a dropped connection shows the last list you saw.
 - **Light**: no runtime or web view; it's Rust drawing with Direct2D. Dark mode follows your Windows setting.
@@ -99,7 +100,7 @@ cargo test
 - Tests that touch the shell or the service, and benchmarks: `cargo test --release -- --ignored --nocapture`
 - Test switches: `SAKADU_THEME=dark|light`, `SAKADU_TRAY=0|1`, `SAKADU_ISOLATED=1` (a test window that runs next to your own Sakadu; also point `APPDATA` and `LOCALAPPDATA` elsewhere)
 - Releases: bump `version` in `Cargo.toml` and push a tag like `v0.7.0`; GitHub Actions builds a draft release.
-- Code: `app.rs` (layout, input, drawing) and `app/` (panels, search, preview, command menu, start page, settings), `index.rs`·`service.rs` (search index and service), `shell.rs` (shell menus, file operations), `listing.rs` (folder reading)
+- Code: `app.rs` (layout, input, drawing) and `app/` (panels, search, preview, command menu, start page, settings), `index.rs`·`service.rs` (search index and service), `shell.rs` (shell menus, file operations), `archive.rs` (reading inside archives), `listing.rs` (folder reading)
 - Shared code: the modules in `src/lib.rs` (pane and tab state, saved formats, name search and query rules, natural sort) build without the Windows API. To prepare a macOS version, CI checks them on macOS with `cargo test --lib`.
 - Mac prototype: `src/mac/` (`cargo build --features mac-app --bin sakadu-mac`). Mac search uses its own index (`src/mac/search.rs`): once turned on, it reads the names under the home folder and the app folders into memory only, and keeps them current with the macOS change log (FSEvents).
 
