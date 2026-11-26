@@ -855,8 +855,9 @@ fn drop_on_row(path: &str, row: &str) -> (Option<NSDragOperation>, bool) {
 }
 
 /// 오른쪽 미리 보기 창(열려 있다)의 웹 페이지와 움직이는 gif. 시험 파일은 시험 폴더에 만들었다 지운다.
-/// 웹 페이지는 Quick Look 보기가 그리고, 받은 표시가 있으면 코드를 보인다. gif는 창이 key이고 '동작 줄이기'가 꺼져 있으면
-/// 장이 저절로 넘어가고, 아니면 그 장에 머문다 (러너의 창이 key가 아닐 수 있다)
+/// 웹 페이지는 Quick Look 보기가 그리고, 받은 표시가 있으면 코드를 보인다. gif는 창을 key로 만든 뒤 장들을 읽었는지 보고,
+/// 창이 key이고 보이면 장이 저절로 넘어가는지, 아니면 그 장에 머무는지 본다 (러너의 창이 key가 되지 않을 수 있다).
+/// '동작 줄이기'가 켜져 있으면 장들을 읽지 않고 첫 장만 그림으로 보이는지 본다
 fn preview_kinds(run: &mut Run, dir: &str, shown: &impl Fn() -> Option<(Option<String>, Option<String>)>) {
     let html = "<!doctype html>\n<body style=\"background:#1e6fd9\"><h1>사카두</h1></body>\n";
     let (page, got, gif) = (Path::new(dir).join("쪽.html"), Path::new(dir).join("받은 쪽.html"), Path::new(dir).join("움직임.gif"));
@@ -873,21 +874,39 @@ fn preview_kinds(run: &mut Run, dir: &str, shown: &impl Fn() -> Option<(Option<S
     }
     if run.select("움직임.gif") {
         let frame = || on_main(|| with_app(|a| a.moving_frame()).flatten());
-        let live = on_main(|| {
-            let key = VIEW.with(|v| v.get().and_then(|v| v.window()).is_some_and(|w| w.isKeyWindow()));
-            key && !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+        let body = || on_main(|| with_app(|a| a.preview_body_seen().map(|s| s.0)).flatten());
+        // 앞 걸음(훑어보기 패널 등)에서 창이 key를 잃었을 수 있다: 앱이 뜰 때처럼 창을 앞으로 가져와 key로 만든다
+        on_main(|| {
+            if let Some(w) = VIEW.with(|v| v.get().and_then(|v| v.window())) {
+                w.makeKeyAndOrderFront(None);
+            }
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(MainThreadMarker::new().expect("main")).activateIgnoringOtherApps(true);
         });
-        if live {
-            if run.wait("a gif shows its frames in the pane", 5, || frame().is_some()) {
+        std::thread::sleep(Duration::from_millis(300));
+        // gif가 움직이는 세 조건을 따로 남긴다 (어느 것 때문에 머무는지 알게)
+        let (key, visible, reduced) = on_main(|| {
+            let w = VIEW.with(|v| v.get().and_then(|v| v.window()));
+            let key = w.as_ref().is_some_and(|w| w.isKeyWindow());
+            let visible = w.as_ref().is_some_and(|w| w.occlusionState().contains(NSWindowOcclusionState::Visible));
+            (key, visible, NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+        });
+        println!("note gif: window is key {key}, visible {visible}, reduce motion {reduced}");
+        if reduced {
+            // 동작 줄이기: 장들을 읽지 않고 첫 장만 그림으로 보인다
+            if run.wait("with reduce motion the gif shows as a still picture", 5, || body() == Some("picture")) {
+                run.check("and its frames are not read", frame().is_none(), || format!("{:?}", frame()));
+            }
+        } else if run.wait("the gif's frames are read in the pane", 5, || frame().is_some()) {
+            if key && visible {
                 let first = frame();
                 run.wait("the gif moves on by itself", 3, || frame() != first);
+            } else {
+                std::thread::sleep(Duration::from_millis(400));
+                let first = frame();
+                std::thread::sleep(Duration::from_millis(300));
+                run.check("the gif stays on its frame while the window is not key or not visible", frame() == first, || format!("{first:?} → {:?}", frame()));
             }
-        } else {
-            println!("note the window is not key or motion is reduced: the gif should stay on its frame");
-            std::thread::sleep(Duration::from_millis(400));
-            let first = frame();
-            std::thread::sleep(Duration::from_millis(300));
-            run.check("the gif stays on its frame", frame() == first, || format!("{first:?} → {:?}", frame()));
         }
     }
     for f in [&page, &got, &gif] {

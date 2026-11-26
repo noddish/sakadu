@@ -486,9 +486,8 @@ impl App {
         Some((pv.target.as_ref().map(|t| t.name.clone()), text))
     }
 
-    /// 시험: 본문에 보이는 것의 종류와 (그림이면) 크기
-    #[cfg(test)]
-    pub(super) fn preview_body_seen(&self) -> Option<(&'static str, Option<(usize, usize)>)> {
+    /// 시험과 창 시험: 본문에 보이는 것의 종류와 (그림이면) 크기
+    pub fn preview_body_seen(&self) -> Option<(&'static str, Option<(usize, usize)>)> {
         Some(match &self.preview.as_ref()?.body {
             Body::Waiting => ("waiting", None),
             Body::Picture(pic, _) => ("picture", Some(pic.size())),
