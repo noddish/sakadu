@@ -978,6 +978,18 @@ fn mem() -> Mem {
     Mem { rss: info.map_or(0, |i| i.ri_resident_size), footprint: info.map_or(0, |i| i.ri_phys_footprint), fds }
 }
 
+/// 이 프로세스가 지금까지 가장 많이 쓴 메모리 (RSS의 최고값, 바이트. 맥의 ru_maxrss는 바이트다).
+/// 잠깐 치솟았다 내려온 것(큰 그림을 줄여 읽는 동안)도 여기에 남는다
+fn peak() -> u64 {
+    // SAFETY: rusage는 숫자만 든 구조체라 0으로 채워도 된다. 이 프로세스의 값을 읽기만 한다
+    let usage = unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        libc::getrusage(libc::RUSAGE_SELF, &mut usage);
+        usage
+    };
+    usage.ru_maxrss.max(0) as u64
+}
+
 /// 메인 줄이 쌓인 일을 마치게 조금 기다린 뒤의 메모리 (잠깐 쓰고 놓는 것은 메인 줄이 한 바퀴 돌 때 풀린다)
 fn settled() -> Mem {
     std::thread::sleep(Duration::from_millis(400));
@@ -1029,6 +1041,36 @@ fn pick(name: &str) -> bool {
     quiet(5, || seen().is_some_and(|s| s.cursor == name))
 }
 
+/// 시험용 gif를 쓴다. 이 줄(뒷줄)에는 자동 해제 풀이 없어서, 풀 없이 만들면 그림판이 시험이 끝날 때까지 남아 메모리 숫자를 흐린다
+fn write_gif(path: &Path, w: usize, h: usize, frames: &[([u8; 3], f64)]) -> Result<(), String> {
+    objc2::rc::autoreleasepool(|_| Gfx::write_gif(path, w, h, frames))
+}
+
+/// 미리 보기 창(열려 있다)에서 그 그림을 골라 본문에 뜰 때까지 기다리고, 그동안 메모리가 얼마나 치솟았는지 찍는다.
+/// 그 뒤 글 파일로 돌아가 남은 메모리도 찍는다. 본문에 뜬 것의 종류를 돌려준다 (뜨지 않았으면 None)
+fn show_picture(name: &str, what: &str, body: &impl Fn() -> Option<(&'static str, Option<(usize, usize)>)>) -> Option<&'static str> {
+    let (before, top) = (settled(), peak());
+    if !pick(name) {
+        return None;
+    }
+    let shown = quiet(60, || body().is_some_and(|b| b.0 != "waiting" && b.0 != "text"));
+    let now = body();
+    let top_now = peak();
+    println!(
+        "mem  {what}: the pane shows {:?}, peak rss {:.1} MB → {:.1} MB ({:+.1} MB while reading)",
+        now,
+        mb(top),
+        mb(top_now),
+        mb(top_now) - mb(top)
+    );
+    note_mem(&format!("{what}, while it shows"), settled(), before, 0);
+    if pick("가나다.txt") {
+        quiet(5, || body().is_some_and(|b| b.0 == "text"));
+    }
+    note_mem(&format!("{what}, after going back to a text file"), settled(), before, 0);
+    shown.then(|| now.map(|b| b.0)).flatten()
+}
+
 /// 메모리 재기. 같은 일을 여러 번 되풀이하고 그 앞뒤의 메모리와 열린 파일 수를 `mem` 줄로 찍는다 (새는 것이 있으면 한 번마다 는다).
 /// 숫자는 참고용이라 실패로 세지 않고, 되풀이가 끝까지 됐는지만 센다. start는 창이 처음 떴을 때 잰 값
 fn memory(run: &mut Run, dir: &str, start: Mem) {
@@ -1074,19 +1116,24 @@ fn memory(run: &mut Run, dir: &str, start: Mem) {
         note_mem(&format!("opening and closing a tab {done} times"), settled(), before, done);
     }
 
-    // 미리 보기 창에서 큰 gif(480×360, 24장)와 글 파일을 번갈아 고른다: gif를 떠나면 읽어 둔 장들이 풀려야 한다.
-    // 러너는 '동작 줄이기'가 켜져 있어 장들을 읽지 않으므로, 이 걸음 동안만 그 설정을 무시한다 (preview_kinds와 같다)
+    // 미리 보기 창을 열고 그 안에서 잰다
     let gif = Path::new(dir).join("큰 움직임.gif");
+    let small = Path::new(dir).join("작은 그림.gif");
+    let big = Path::new(dir).join("큰 그림.png");
+    let fake = Path::new(dir).join("큰 판.gif");
     let frames: Vec<([u8; 3], f64)> = (0..24u8).map(|i| ([i * 10, 200 - i * 5, 90], 0.05)).collect();
-    let made = Gfx::write_gif(&gif, 480, 360, &frames);
+    let made = write_gif(&gif, 480, 360, &frames);
     run.check("a larger moving gif is made in the test folder", made.is_ok(), || format!("{made:?}"));
     let alt_cmd = NSEventModifierFlags::Command | NSEventModifierFlags::Option;
     if made.is_ok() && pick("가나다.txt") {
         key_with(KEY_P, alt_cmd);
         let shown = || on_main(|| with_app(|a| a.preview_seen()).flatten());
         let frame = || on_main(|| with_app(|a| a.moving_frame()).flatten());
+        let body = || on_main(|| with_app(|a| a.preview_body_seen()).flatten());
         let text = || shown().is_some_and(|(n, t)| n.as_deref() == Some("가나다.txt") && t.is_some());
         if quiet(5, text) {
+            // 큰 gif(480×360, 24장)와 글 파일을 번갈아 고른다: gif를 떠나면 읽어 둔 장들이 풀려야 한다.
+            // 러너는 '동작 줄이기'가 켜져 있어 장들을 읽지 않으므로, 이 걸음 동안만 그 설정을 무시한다 (preview_kinds와 같다)
             on_main(|| {
                 SMOKE_MOTION.set(true);
                 with_app(|a| a.motion = true);
@@ -1112,11 +1159,37 @@ fn memory(run: &mut Run, dir: &str, start: Mem) {
             }
             note_mem(&format!("picking the gif and a text file in turn {done} times (the text file shows)"), settled(), before, done);
             on_main(|| SMOKE_MOTION.set(false));
+
+            // 아주 큰 그림: 12000×12000 PNG (그대로 풀면 576MB). 미리 보기는 줄여 읽지만, 읽는 동안 메모리가 얼마나 치솟는지 본다.
+            // 파일은 맥의 sips가 다른 프로세스에서 만든다 (이 프로세스의 최고값을 건드리지 않게)
+            let made = write_gif(&small, 64, 64, &[([40, 120, 220], 0.0)]).is_ok()
+                && std::process::Command::new("/usr/bin/sips").args(["-s", "format", "png", "-z", "12000", "12000"]).arg(&small).arg("--out").arg(&big).output().is_ok_and(|o| o.status.success());
+            let size = std::fs::metadata(&big).map_or(0, |m| m.len());
+            run.check("sips makes a 12000×12000 picture in the test folder", made && size > 0, || format!("made {made}, {size} bytes"));
+            if made && size > 0 {
+                println!("note the 12000×12000 picture is {size} bytes on disk");
+                let kind = show_picture("큰 그림.png", "a 12000×12000 picture in the preview pane", &body);
+                run.check("the very large picture shows as a picture", kind == Some("picture"), || format!("{kind:?}"));
+            }
+
+            // 꾸며 낸 gif: 파일은 35바이트인데 판(전체 크기)을 20000×20000으로 적었다 (그대로 풀면 1.6GB). 앱이 버티는지와 최고값을 본다
+            let mut bytes = b"GIF89a".to_vec();
+            bytes.extend_from_slice(&20000u16.to_le_bytes());
+            bytes.extend_from_slice(&20000u16.to_le_bytes());
+            bytes.extend_from_slice(&[0x80, 0, 0, 0xff, 0xff, 0xff, 0, 0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b]);
+            if std::fs::write(&fake, &bytes).is_ok() {
+                println!("note the next step picks a {}-byte gif that declares a 20000×20000 canvas (if no mem line follows, the app died there)", bytes.len());
+                let kind = show_picture("큰 판.gif", "a tiny gif declaring a 20000×20000 canvas", &body);
+                run.check("the app is still running after that gif", true, String::new);
+                println!("note that gif showed as {kind:?}");
+            }
         }
         key_with(KEY_P, alt_cmd);
         quiet(5, || shown().is_none());
     }
-    let _ = std::fs::remove_file(&gif);
+    for f in [&gif, &small, &big, &fake] {
+        let _ = std::fs::remove_file(f);
+    }
 
     // 아이콘 보기의 썸네일: 그림 480장(320×320)이 든 폴더를 큰 아이콘으로 끝까지 넘겨 본다. 읽어 둔 썸네일은 한도(400장, 64MB)를
     // 넘지 않아야 한다. 그 폴더를 떠난 뒤에도 재서, 읽어 둔 것이 남는지 본다
@@ -1124,7 +1197,7 @@ fn memory(run: &mut Run, dir: &str, start: Mem) {
     let made = std::fs::create_dir_all(&pics).is_ok()
         && (0..PICTURES).all(|i| {
             let color = [(i * 7 % 256) as u8, (i * 13 % 256) as u8, (i * 29 % 256) as u8];
-            Gfx::write_gif(&pics.join(format!("그림 {i:03}.gif")), 320, 320, &[(color, 0.0)]).is_ok()
+            write_gif(&pics.join(format!("그림 {i:03}.gif")), 320, 320, &[(color, 0.0)]).is_ok()
         });
     run.check(&format!("{PICTURES} pictures are made in a folder"), made, String::new);
     let at_pics = sakadu::util::join(dir, "그림들");
@@ -1182,4 +1255,5 @@ fn memory(run: &mut Run, dir: &str, start: Mem) {
     quiet(5, || seen().is_some_and(|s| s.ready && !s.names.iter().any(|n| n == "그림들" || n == "큰 움직임.gif")));
 
     note_mem("at the end (since the window came up)", settled(), start, 0);
+    println!("mem  peak rss over the whole run: {:.1} MB", mb(peak()));
 }
