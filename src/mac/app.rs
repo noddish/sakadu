@@ -1814,8 +1814,10 @@ impl App {
                 self.keep_card_pic(req, pic);
             }
             Some(Preview::Moving(frames)) => {
-                // 같은 gif를 더 크게 읽은 것이 이미 움직이고 있으면 그대로 둔다
-                if self.card.moving.as_ref().is_some_and(|m| m.have() >= req.px) {
+                // 같은 gif를 더 크게 읽은 것이 이미 움직이고 있으면 그대로 둔다. 그 사이 크게 보기로 더 크게 읽은 것(한도를 넘어 첫 장만 온 것)이
+                // 먼저 왔으면 늦게 온 작은 장들은 버린다 (뒷줄들이 따로 돌아 차례가 바뀔 수 있다)
+                let stale = req.px < self.card.asked && self.pic(&req.key).is_some_and(|c| c.px > req.px);
+                if stale || self.card.moving.as_ref().is_some_and(|m| m.have() >= req.px) {
                     return;
                 }
                 // 첫 장은 읽어 둔 그림에도 둔다: 다시 고르면 장들을 읽는 동안 그것이 먼저 보인다
@@ -9982,6 +9984,38 @@ mod tests {
         assert_eq!(a.pics.last().map(|c| c.pic.size()), Some((2048, 2048)));
         let mut canvas = Gfx::bitmap(1280.0, 800.0, 1.0).unwrap();
         a.paint(&mut canvas);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 차례가 바뀐 경우: 작게 읽는 중에 크게 보아 크게 읽은 첫 장(한도를 넘었다)이 먼저 오면, 늦게 온 작은 장들은 버린다.
+    /// 다시 골라 작게 볼 때는 크게 읽어 둔 첫 장이 있어도 작게 읽은 장들로 움직인다
+    #[test]
+    fn late_small_gif_frames_do_not_replace_a_large_still() {
+        let (root, dir) = preview_demo();
+        std::fs::write(root.join("미리 보기").join("큰 움직임.gif"), b"x").unwrap();
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        let blank = |px: usize| Picture::blank(px, px).unwrap();
+        let frames = || Frames { pics: vec![blank(1024), blank(1024)], delays: vec![std::time::Duration::from_millis(100); 2] };
+        click_name(&mut a, &g, 0, "큰 움직임.gif", none);
+        let small = a.take_previews();
+        a.key(Key::Char(' '), none);
+        let large = a.take_previews();
+        assert_eq!([small.len(), large.len()], [1, 1]);
+        assert_eq!((small[0].px, large[0].px), (PX_SMALL, PX_LARGE));
+        a.on_previewed(&large[0], Some(Preview::Image(blank(2048))));
+        a.on_previewed(&small[0], Some(Preview::Moving(frames())));
+        assert!(a.card.moving.is_none() && a.moving_frame().is_none(), "the late small frames are dropped");
+        assert_eq!(a.pics.last().map(|c| c.pic.size()), Some((2048, 2048)));
+        // 작게 보기로 돌아가 다른 파일을 골랐다가 다시 고르면 작게 읽은 장들로 움직인다
+        a.key(Key::Char(' '), none);
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.take_previews();
+        click_name(&mut a, &g, 0, "큰 움직임.gif", none);
+        let again = a.take_previews();
+        assert_eq!(again.iter().map(|r| (r.px, r.frames)).collect::<Vec<_>>(), [(PX_SMALL, true)]);
+        a.on_previewed(&again[0], Some(Preview::Moving(frames())));
+        assert_eq!(a.moving_frame(), Some(0));
         std::fs::remove_dir_all(root).unwrap();
     }
 
