@@ -98,7 +98,7 @@ cargo test
 - 셸·서비스와 붙는 테스트와 성능 측정: `cargo test --release -- --ignored --nocapture`
 - 시험용 환경 변수: `SAKADU_THEME=dark|light`, `SAKADU_TRAY=0|1`, `SAKADU_ISOLATED=1`(쓰고 있는 Sakadu와 따로 뜨는 시험 창. `APPDATA`·`LOCALAPPDATA`도 다른 폴더로 돌려 두세요)
 - 릴리스: `Cargo.toml`의 `version`을 올리고 `v0.7.0` 같은 태그를 푸시하면 GitHub Actions가 초안 릴리스를 만들어요.
-- 코드: `app.rs`(레이아웃·입력·그리기)와 `app/`(패널·검색·미리 보기·명령 메뉴·시작 화면·설정), `index.rs`·`service.rs`(검색 인덱스·서비스), `shell.rs`(셸 메뉴·파일 작업), `archive.rs`(압축 파일 안 읽기), `listing.rs`(폴더 읽기)
+- 코드: `app.rs`(레이아웃·입력·그리기)와 `app/`(패널·검색·미리 보기·명령 메뉴·시작 화면·설정), `index.rs`·`service.rs`(검색 인덱스·서비스), `shell.rs`(셸 메뉴·파일 작업), `archive.rs`(압축 파일 안 읽기), `thumbs.rs`·`page.rs`(미리 보기 그림·html 화면 찍기), `listing.rs`(폴더 읽기)
 - 공통 코드: `src/lib.rs`에 묶인 모듈(칸·탭 상태, 저장 형식, 이름 검색과 검색어 규칙, 자연 정렬)은 Windows API 없이도 빌드돼요. macOS 버전을 준비하려고 CI가 macOS에서 `cargo test --lib`로 확인해요.
 - 맥 시제품: `src/mac/` (`cargo build --features mac-app --bin sakadu-mac`). 맥 검색은 자체 색인(`src/mac/search.rs`)이에요: 켜면 홈 폴더와 응용 프로그램 폴더의 이름을 훑어 메모리에만 두고, 맥의 변경 기록(FSEvents)으로 최신으로 둬요.
 
