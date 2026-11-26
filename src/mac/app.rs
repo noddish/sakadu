@@ -1806,7 +1806,13 @@ impl App {
             return;
         }
         match result {
-            Some(Preview::Image(pic)) => self.keep_card_pic(req, pic),
+            Some(Preview::Image(pic)) => {
+                // 크게 읽었더니 한도를 넘어 첫 장만 왔으면 작게 읽은 장들을 버린다: 한도를 넘는 크기에서는 움직이지 않는다
+                if self.card.moving.as_ref().is_some_and(|m| m.have() < req.px) {
+                    self.card.moving = None;
+                }
+                self.keep_card_pic(req, pic);
+            }
             Some(Preview::Moving(frames)) => {
                 // 같은 gif를 더 크게 읽은 것이 이미 움직이고 있으면 그대로 둔다
                 if self.card.moving.as_ref().is_some_and(|m| m.have() >= req.px) {
@@ -9949,6 +9955,33 @@ mod tests {
         assert_eq!(a.moving_frame(), Some(0));
         a.run_action(Action::Preview);
         assert!(a.preview.is_none() && a.moving_frame().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 작게는 움직이던 gif를 크게 보았더니 한도를 넘어 첫 장만 왔으면, 크게 읽은 첫 장을 보인다 (작게 읽은 장들을 버린다).
+    /// 늦게 온 더 작은 그림은 움직이는 장들을 버리지 않는다 (읽은 결과를 직접 넣어 본다)
+    #[test]
+    fn enlarged_gif_over_the_limit_shows_the_large_still() {
+        let (root, dir) = preview_demo();
+        std::fs::write(root.join("미리 보기").join("큰 움직임.gif"), b"x").unwrap();
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        let blank = |px: usize| Picture::blank(px, px).unwrap();
+        click_name(&mut a, &g, 0, "큰 움직임.gif", none);
+        let small = a.take_previews();
+        assert_eq!(small.iter().map(|r| (r.px, r.frames)).collect::<Vec<_>>(), [(PX_SMALL, true)]);
+        let frames = Frames { pics: vec![blank(1024), blank(1024)], delays: vec![std::time::Duration::from_millis(100); 2] };
+        a.on_previewed(&small[0], Some(Preview::Moving(frames)));
+        a.on_previewed(&small[0], Some(Preview::Image(blank(64))));
+        assert_eq!(a.moving_frame(), Some(0), "a smaller late picture keeps the frames");
+        a.key(Key::Char(' '), none);
+        let large = a.take_previews();
+        assert_eq!(large.iter().map(|r| (r.px, r.frames)).collect::<Vec<_>>(), [(PX_LARGE, true)]);
+        a.on_previewed(&large[0], Some(Preview::Image(blank(2048))));
+        assert!(a.card.moving.is_none() && a.moving_frame().is_none());
+        assert_eq!(a.pics.last().map(|c| c.pic.size()), Some((2048, 2048)));
+        let mut canvas = Gfx::bitmap(1280.0, 800.0, 1.0).unwrap();
+        a.paint(&mut canvas);
         std::fs::remove_dir_all(root).unwrap();
     }
 

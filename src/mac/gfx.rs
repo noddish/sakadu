@@ -6,7 +6,9 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::{NSCompositingOperation, NSFont, NSFontWeightRegular, NSFontWeightSemibold, NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSWorkspace};
-use objc2_core_foundation::{CFAttributedString, CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
+use objc2_core_foundation::{
+    CFAttributedString, CFData, CFDictionary, CFMutableData, CFNumber, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue,
+};
 use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGInterpolationQuality, CGPath, kCGColorSpaceSRGB};
 use objc2_core_text::{CTFont, CTLine, CTLineTruncationType, kCTFontAttributeName, kCTForegroundColorFromContextAttributeName};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL, NSURLLocalizedTypeDescriptionKey};
@@ -558,11 +560,12 @@ impl Gfx {
         if unsafe { dest.finalize() } { Ok(()) } else { Err("PNG를 쓰지 못함".into()) }
     }
 
-    /// 끝없이 되풀이하는 gif를 쓴다: w×h, 장마다 한 가지 색([빨강, 초록, 파랑])과 머무는 초. 시험과 창 시험의 파일이다
+    /// 끝없이 되풀이하는 gif를 쓴다: w×h, 장마다 한 가지 색([빨강, 초록, 파랑])과 머무는 초. 시험과 창 시험의 파일이다.
+    /// 메모리에 만든 뒤 Rust로 쓴다: URL로 쓰면 맥이 한글 이름을 풀어 쓴 꼴(NFD)로 바꿔, 목록의 이름이 준 이름과 달라진다
     pub fn write_gif(path: &std::path::Path, w: usize, h: usize, frames: &[([u8; 3], f64)]) -> Result<(), String> {
-        let url = CFURL::from_file_path(path).ok_or("경로를 URL로 바꾸지 못함")?;
+        let data = CFMutableData::new(None, 0).ok_or("gif를 담을 자리를 만들지 못함")?;
         let gif = CFString::from_static_str("com.compuserve.gif");
-        let dest = unsafe { CGImageDestination::with_url(&url, &gif, frames.len(), None) }.ok_or("gif 파일을 만들지 못함")?;
+        let dest = unsafe { CGImageDestination::with_data(&data, &gif, frames.len(), None) }.ok_or("gif를 만들지 못함")?;
         let forever = CFNumber::new_i32(0);
         unsafe { dest.set_properties(Some(gif_properties(kCGImagePropertyGIFLoopCount, &forever).as_opaque())) };
         for &([r, g, b], secs) in frames {
@@ -572,7 +575,10 @@ impl Gfx {
             let delay = CFNumber::new_f64(secs);
             unsafe { dest.add_image(&img, Some(gif_properties(kCGImagePropertyGIFDelayTime, &delay).as_opaque())) };
         }
-        if unsafe { dest.finalize() } { Ok(()) } else { Err("gif를 쓰지 못함".into()) }
+        if !unsafe { dest.finalize() } {
+            return Err("gif를 만들지 못함".into());
+        }
+        std::fs::write(path, data.to_vec()).map_err(|e| format!("gif를 쓰지 못함: {e}"))
     }
 }
 
