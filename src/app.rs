@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Ole::{IDropTarget, RegisterDragDrop, RevokeDragDrop};
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
-use windows::Win32::UI::Controls::{EM_GETSEL, EM_REPLACESEL, EM_SETCUEBANNER, EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE};
+use windows::Win32::UI::Controls::{EM_CHARFROMPOS, EM_GETSEL, EM_REPLACESEL, EM_SETCUEBANNER, EM_SETMARGINS, EM_SETSEL, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::{

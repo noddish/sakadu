@@ -5541,7 +5541,7 @@ impl App {
             address: editing,
             // 창에서는 입력 상자가 글자를 그린다. 그림 시험에서만 직접 그린다
             address_text: dir.filter(|_| editing && self.standalone),
-            renaming: naming.is_some(),
+            rename_box: naming.map(|(_, r)| r),
             dragged_tab: None,
             tab_drop: None,
             drop_on_pane: matches!(self.drop, Some(DropAt::Pane(q) | DropAt::Tab(q, _)) if q == p),
