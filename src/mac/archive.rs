@@ -357,7 +357,8 @@ fn extract_into(archive: &str, wants: &[(String, String)], dest: &Path) -> Resul
         UNREADABLE.to_string()
     };
     // 목록처럼 폴더가 이긴다: 같은 경로에 파일과 폴더(폴더 항목이나 그 안의 항목)가 함께 적혀 있으면 목록에는 폴더만 보이므로
-    // 그 파일은 꺼내지 않는다 (파일이 먼저 적혀 있어도 그 자리를 폴더에 남긴다). 어느 경로가 폴더인지는 먼저 한 번 훑어 안다
+    // 그 파일은 꺼내지 않는다 (파일이 먼저 적혀 있어도 그 자리를 폴더에 남긴다). 어느 경로가 폴더인지는 먼저 한 번 훑어 안다.
+    // 대소문자나 정규화만 다른 파일과 폴더는 목록에 따로 보이니 여기서 빼지 않는다: Places가 번호를 붙여 둘 다 꺼낸다
     let dirs = folder_paths(archive).map_err(unreadable)?;
     let mut r = Reader::open(archive).map_err(unreadable)?;
     while let Some(h) = r.next()? {
@@ -422,12 +423,13 @@ fn folder_paths(archive: &str) -> Result<std::collections::HashSet<String>, Stri
 /// 꺼낸 폴더 안의 자리 정하기. 압축 파일 안의 경로(한글은 모아 쓴 꼴, 목록에 보이는 그대로)마다 자리를 하나씩 준다.
 /// 맥 디스크는 보통 대소문자를 가리지 않아 README와 readme가 한 파일이 된다: 목록에는 둘 다 보이니, 뒤에 나온 것에
 /// 복사본처럼 번호를 붙여("readme 2") 둘 다 꺼낸다 (꺼낸 것을 옮겨 놓을 디스크도 그럴 수 있어 늘 대소문자를 접어 본다).
+/// 맥 디스크는 정규화만 다른 이름(é 한 글자와 e+◌́)도 한 이름으로 보므로 그것도 같이 접는다 (목록에는 둘 다 보인다).
 /// 같은 경로가 다시 나오면(tar에 덧붙인 새 판) 같은 자리에 덮어쓴다: 목록에도 하나로 보인다
 #[derive(Default)]
 struct Places {
     /// (꺼낼 것의 번호, 그 꺼낸 이름부터의 안쪽 경로) → 꺼낸 폴더 안의 상대 경로
     at: std::collections::HashMap<(usize, String), PathBuf>,
-    /// 이미 준 자리 (상대 경로를 소문자로 접은 것)
+    /// 이미 준 자리 (상대 경로를 fold로 접은 것)
     taken: std::collections::HashSet<String>,
 }
 
@@ -459,17 +461,25 @@ impl Places {
         self.at.get(&(i, name.to_string())).cloned().unwrap_or_else(|| PathBuf::from(name))
     }
 
-    /// parent 안에서 아직 주지 않은 이름: name, 대소문자만 달라도 겹치면 "name 2", "name 3"… (파일은 확장자 앞에)
+    /// parent 안에서 아직 주지 않은 이름: name, 대소문자나 정규화만 달라도 겹치면 "name 2", "name 3"… (파일은 확장자 앞에)
     fn free(&mut self, parent: &Path, name: &str, dir: bool) -> PathBuf {
         let mut n = 1;
         loop {
             let p = parent.join(sakadu::fileops::numbered_name(name, n, dir));
-            if self.taken.insert(p.to_string_lossy().to_lowercase()) {
+            if self.taken.insert(fold(&p.to_string_lossy())) {
                 return p;
             }
             n += 1;
         }
     }
+}
+
+/// 맥 디스크가 같은 이름으로 보는 것끼리 같아지게 접는다: 모아 쓴 꼴(NFC)로 맞춘 뒤 소문자로.
+/// hangul::compose는 한글만 모아서, é(U+00E9)와 e+◌́(U+0065 U+0301)는 맥이 주는 정규화로 맞춘다
+fn fold(s: &str) -> String {
+    use objc2_foundation::NSString;
+    // 뒷줄에서 부르므로 여기서 만든 맥 객체는 이 안에서 정리한다
+    objc2::rc::autoreleasepool(|_| NSString::from_str(s).precomposedStringWithCanonicalMapping().to_string()).to_lowercase()
 }
 
 /// 폴더를 (위 폴더까지) 만들고, 새로 만든 폴더들을 적어 둔다 (격리 표시를 붙일 것. 꺼내는 폴더 dest는 이미 있다)
@@ -778,6 +788,46 @@ pub(crate) mod tests {
         assert!(two[0].ends_with("/README") && two[1].ends_with("/readme 2"), "{two:?}");
         assert_eq!(std::fs::read(&two[0]).unwrap(), b"upper");
         assert_eq!(std::fs::read(&two[1]).unwrap(), b"lower");
+        for p in got.iter().chain(&two) {
+            let _ = std::fs::remove_dir_all(Path::new(p).parent().unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 정규화만 다른 항목(é 한 글자로 쓴 café.txt와 e+◌́로 쓴 café.txt)도 맥 디스크에서 한 자리가 되므로, 대소문자처럼 뒤에 나온 것에
+    /// 번호를 붙여 모두 꺼낸다 (앞의 것을 덮어쓰지 않는다). 정규화만 다른 파일과 폴더도 그렇다
+    #[test]
+    fn names_that_differ_only_in_normalization_are_all_extracted() {
+        let dir = temp("nfc");
+        let (nfc, nfd) = ("caf\u{e9}.txt", "cafe\u{301}.txt");
+        // naïve: 파일은 풀어 쓴 꼴(i+◌̈), 폴더는 모아 쓴 꼴(ï)
+        let (file, folder) = ("nai\u{308}ve", "na\u{ef}ve");
+        let entries: [(String, &[u8]); 4] =
+            [(format!("폴더/{nfc}"), b"nfc"), (format!("폴더/{nfd}"), b"nfd"), (format!("폴더/{file}"), b"file"), (format!("폴더/{folder}/a.txt"), b"a")];
+        let mut tar = Vec::new();
+        for (name, body) in entries {
+            tar.extend(tar_header(&name, b'0', body.len(), ""));
+            tar.extend(body);
+            tar.resize(tar.len().div_ceil(512) * 512, 0);
+        }
+        tar.resize(tar.len() + 1024, 0);
+        let path = util::join(&dir, "정규화.tar");
+        std::fs::write(&path, tar).unwrap();
+        let top = util::join(&path, "폴더");
+        let shown = names(&list(&top, &path).unwrap());
+        assert_eq!(shown.len(), 4, "both café.txt, the naïve file and the naïve folder: {shown:?}");
+        let got = extract(&path, std::slice::from_ref(&top)).unwrap();
+        let out = Path::new(&got[0]);
+        let read = |p: &str| std::fs::read(out.join(p)).unwrap();
+        assert_eq!(read(nfc), b"nfc", "the first one is not overwritten");
+        assert_eq!(read("cafe\u{301} 2.txt"), b"nfd");
+        assert_eq!(read(file), b"file");
+        assert_eq!(read(&format!("{folder} 2/a.txt")), b"a");
+        assert_eq!(std::fs::read_dir(out).unwrap().count(), 4);
+        let two = extract(&path, &[util::join(&top, nfc), util::join(&top, nfd)]).unwrap();
+        assert!(two[1].ends_with("/cafe\u{301} 2.txt"), "{two:?}");
+        assert_eq!(std::fs::read(&two[0]).unwrap(), b"nfc");
+        assert_eq!(std::fs::read(&two[1]).unwrap(), b"nfd");
         for p in got.iter().chain(&two) {
             let _ = std::fs::remove_dir_all(Path::new(p).parent().unwrap());
         }
