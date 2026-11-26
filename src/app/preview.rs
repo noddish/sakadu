@@ -487,6 +487,8 @@ impl App {
             let _ = KillTimer(Some(self.hwnd), TIMER_PREVIEW);
         }
         let hwnd = self.hwnd;
+        // html 화면을 이 크기로 이미 찍지 못했는지 보려고 그림 크기를 미리 잰다 (그리기와 같은 키)
+        let page_px = self.preview_body().map(|b| image_px(b.w().max(b.h()), self.scale()));
         let Some(pv) = self.preview.as_mut() else { return };
         let Some(t) = pv.target.clone() else { return };
         // 바로 가기는 가리키는 파일을 본다 (링크에 적힌 대상만 읽고, 대상에 다시 묻지 않는다)
@@ -514,7 +516,11 @@ impl App {
             Content::Waiting
         } else if DRAWN_EXTS.contains(&e) {
             Content::Image
-        } else if crate::page::is_page_ext(e) && crate::page::available() {
+        } else if crate::page::is_page_ext(e)
+            && crate::page::available()
+            // 앞서 찍지 못한 html(인터넷에서 받은 파일 등)은 실패가 다시 오지 않으니 처음부터 코드로
+            && !page_px.is_some_and(|px| self.thumb_failed.contains(&thumb_key(&path, t.modified, px)))
+        {
             Content::Page
         } else if TEXT_EXTS.contains(&e) {
             spawn_text(hwnd, pv.seq, path);

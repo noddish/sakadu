@@ -441,6 +441,10 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 /// 움직이는 gif: 프레임마다 (가로, 세로, 미리 곱한 BGRA)와 머무는 시간(ms)
 pub type GifFrames = (Vec<(u32, u32, Vec<u8>)>, Vec<u32>);
 
+/// gif를 겹칠 때 원래 크기로 쓰는 판(그리고 프레임 조각) 하나의 한도. 처리 방식 3은 판을 하나 더 복사해 두니 합쳐도 64MB 안.
+/// 판 크기는 파일 머리에 적힌 값이라, 작은 파일이 큰 판을 적어 메모리를 크게 잡지 못하게 만들기 전에 본다
+const GIF_CANVAS_MAX: usize = 32 << 20;
+
 /// 움직이는 gif의 프레임: 한 장씩 처리 방식대로 겹친 그림을 긴 변 px 안으로 줄인 것과, 프레임마다 머무는 시간(ms).
 /// 한 장뿐이거나, max_frames장을 넘거나, 줄인 그림이 모두 max_bytes를 넘으면 None (첫 장만 보인다)
 pub(crate) fn gif_frames(path: &str, px: u32, max_frames: usize, max_bytes: usize) -> Option<GifFrames> {
@@ -463,7 +467,7 @@ pub(crate) fn gif_frames(path: &str, px: u32, max_frames: usize, max_bytes: usiz
         }
         let meta = dec.GetMetadataQueryReader().ok()?;
         let (cw, ch) = (read(&meta, w!("/logscrdesc/Width"))? as usize, read(&meta, w!("/logscrdesc/Height"))? as usize);
-        if cw == 0 || ch == 0 {
+        if cw == 0 || ch == 0 || cw * ch * 4 > GIF_CANVAS_MAX {
             return None;
         }
         let mut canvas = vec![0u8; cw * ch * 4];
@@ -476,6 +480,9 @@ pub(crate) fn gif_frames(path: &str, px: u32, max_frames: usize, max_bytes: usiz
             let disposal = read(&fm, w!("/grctlext/Disposal")).unwrap_or(0);
             let (mut fw, mut fh) = (0u32, 0u32);
             frame.GetSize(&mut fw, &mut fh).ok()?;
+            if fw as usize * fh as usize * 4 > GIF_CANVAS_MAX {
+                return None;
+            }
             let conv = wic.CreateFormatConverter().ok()?;
             conv.Initialize(&frame, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeMedianCut).ok()?;
             let mut piece = vec![0u8; (fw * fh * 4) as usize];
@@ -812,6 +819,10 @@ mod tests {
         assert_eq!((got[2].2[3], got[2].2[15]), (255, 0), "white opaque, disposed cell transparent");
         assert!(gif_frames(&f.to_string_lossy(), 64, 2, 1 << 20).is_none(), "too many frames");
         assert!(gif_frames(&f.to_string_lossy(), 64, 400, 20).is_none(), "too many bytes");
+        // 머리에 아주 큰 판(60000×60000)을 적은 작은 gif: 판을 잡기 전에 멈춘다 (첫 장만)
+        let huge = d.join("큰 판.gif");
+        std::fs::write(&huge, tiny_gif(60000, 60000, &frames)).unwrap();
+        assert!(gif_frames(&huge.to_string_lossy(), 64, 400, 1 << 20).is_none());
         let one = d.join("한 장.gif");
         std::fs::write(&one, tiny_gif(2, 2, &frames[..1])).unwrap();
         assert!(gif_frames(&one.to_string_lossy(), 64, 400, 1 << 20).is_none());
