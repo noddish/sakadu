@@ -1071,137 +1071,136 @@ fn show_picture(name: &str, what: &str, body: &impl Fn() -> Option<(&'static str
     shown.then(|| now.map(|b| b.0)).flatten()
 }
 
-/// 메모리 재기. 같은 일을 여러 번 되풀이하고 그 앞뒤의 메모리와 열린 파일 수를 `mem` 줄로 찍는다 (새는 것이 있으면 한 번마다 는다).
+/// 같은 일(round)을 rounds번씩 세 묶음 되풀이하고 묶음마다 메모리를 찍는다. 새는 것이 있으면 묶음마다 비슷하게 늘고,
+/// 첫 묶음에서만 늘면 맥이 그리기 버퍼 따위를 처음 마련하는 몫이다. 끝까지 했는지 돌려준다
+fn rounds(run: &mut Run, what: &str, times: usize, round: impl Fn() -> bool) -> bool {
+    let mut before = settled();
+    for set in 1..=3 {
+        let done = (0..times).take_while(|_| round()).count();
+        let now = settled();
+        note_mem(&format!("{what}, set {set} of 3 ({done} times)"), now, before, done);
+        if done < times {
+            return run.check(&format!("{what} {} times", times * 3), false, || format!("stopped in set {set} after {done}"));
+        }
+        before = now;
+    }
+    run.check(&format!("{what} {} times", times * 3), true, String::new)
+}
+
+/// 메모리 재기. 같은 일을 여러 번 되풀이하고 그 앞뒤의 메모리와 열린 파일 수를 `mem` 줄로 찍는다 (새는 것이 있으면 묶음마다 는다).
 /// 숫자는 참고용이라 실패로 세지 않고, 되풀이가 끝까지 됐는지만 센다. start는 창이 처음 떴을 때 잰 값
 fn memory(run: &mut Run, dir: &str, start: Mem) {
     note_mem("after the steps above (since the window came up)", settled(), start, 0);
 
+    // 시험 파일은 먼저 다 만들어 둔다 (만드는 동안 잠깐 쓰는 메모리가 뒤의 숫자에 섞이지 않게):
+    // - 큰 움직임.gif: 480×360, 24장
+    // - 큰 그림.png: 12000×12000 (그대로 풀면 576MB). 맥의 sips가 다른 프로세스에서 만든다. sips는 한글 이름을 풀어 쓴 꼴로
+    //   만들므로 영문 이름으로 만든 뒤 이름을 바꾼다
+    // - 큰 판.gif: 35바이트인데 판(전체 크기)을 20000×20000으로 적었다 (그대로 풀면 1.6GB)
+    // - 그림들: 320×320 그림 480장 (하나를 만들어 복사한다)
+    let gif = Path::new(dir).join("큰 움직임.gif");
+    let small = Path::new(dir).join("작은 그림.gif");
+    let big = Path::new(dir).join("큰 그림.png");
+    let fake = Path::new(dir).join("큰 판.gif");
+    let pics = Path::new(dir).join("그림들");
+    let frames: Vec<([u8; 3], f64)> = (0..24u8).map(|i| ([i * 10, 200 - i * 5, 90], 0.05)).collect();
+    let made_gif = write_gif(&gif, 480, 360, &frames).is_ok();
+    let tmp = Path::new(dir).join("big-tmp.png");
+    let made_big = write_gif(&small, 64, 64, &[([40, 120, 220], 0.0)]).is_ok()
+        && std::process::Command::new("/usr/bin/sips").args(["-s", "format", "png", "-z", "12000", "12000"]).arg(&small).arg("--out").arg(&tmp).output().is_ok_and(|o| o.status.success())
+        && std::fs::rename(&tmp, &big).is_ok();
+    let mut bytes = b"GIF89a".to_vec();
+    bytes.extend_from_slice(&20000u16.to_le_bytes());
+    bytes.extend_from_slice(&20000u16.to_le_bytes());
+    bytes.extend_from_slice(&[0x80, 0, 0, 0xff, 0xff, 0xff, 0, 0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b]);
+    let made_fake = std::fs::write(&fake, &bytes).is_ok();
+    let first = pics.join("그림 000.gif");
+    let made_pics = std::fs::create_dir_all(&pics).is_ok()
+        && write_gif(&first, 320, 320, &[([200, 90, 60], 0.0)]).is_ok()
+        && (1..PICTURES).all(|i| std::fs::copy(&first, pics.join(format!("그림 {i:03}.gif"))).is_ok());
+    let size = std::fs::metadata(&big).map_or(0, |m| m.len());
+    run.check("the test files for the memory steps are made", made_gif && made_big && made_fake && made_pics, || {
+        format!("gif {made_gif}, 12000×12000 picture {made_big} ({size} bytes), fake gif {made_fake}, {PICTURES} pictures {made_pics}")
+    });
+    let listed = |s: &Seen| s.ready && ["큰 움직임.gif", "큰 그림.png", "큰 판.gif", "그림들"].iter().all(|f| s.names.iter().any(|n| n == f));
+    run.wait("the test files are in the list", 10, || seen().is_some_and(|s| listed(&s)));
+    let base = settled();
+    note_mem("with the test files made (the numbers below start here)", base, start, 0);
+
     // 폴더 드나들기: ⌘↓로 들어갔다 ⌘↑로 나온다 (폴더 읽기와 폴더 감시가 번마다 새로 생기고 없어진다)
     let sub = sakadu::util::join(dir, "폴더");
     if run.select("폴더") {
-        let before = settled();
-        let mut done = 0;
-        while done < FOLDER_ROUNDS {
+        rounds(run, "a folder is entered and left", FOLDER_ROUNDS, || {
             key(DOWN, true);
             if !quiet(5, || seen().is_some_and(|s| s.ready && s.dir == sub)) {
-                break;
+                return false;
             }
             key(UP, true);
-            if !quiet(5, || seen().is_some_and(|s| s.ready && s.dir == dir && s.cursor == "폴더")) {
-                break;
-            }
-            done += 1;
-        }
-        run.check(&format!("a folder is entered and left {FOLDER_ROUNDS} times"), done == FOLDER_ROUNDS, || format!("stopped after {done}"));
-        note_mem(&format!("entering and leaving a folder {done} times"), settled(), before, done);
+            quiet(5, || seen().is_some_and(|s| s.ready && s.dir == dir && s.cursor == "폴더"))
+        });
     }
 
     // 탭 열고 닫기: ⌘T(시작 화면 탭)와 ⌘W
     let tabs = || on_main(|| with_app(|a| a.seen().tabs));
     if let Some(was) = tabs() {
-        let before = settled();
-        let mut done = 0;
-        while done < TAB_ROUNDS {
+        rounds(run, "a tab is opened and closed", TAB_ROUNDS, || {
             key(KEY_T, true);
             if !quiet(5, || tabs() == Some(was + 1) && seen().is_some_and(|s| s.ready)) {
-                break;
+                return false;
             }
             key(KEY_W, true);
-            if !quiet(5, || tabs() == Some(was) && seen().is_some_and(|s| s.ready && s.dir == dir)) {
-                break;
-            }
-            done += 1;
-        }
-        run.check(&format!("a tab is opened and closed {TAB_ROUNDS} times"), done == TAB_ROUNDS, || format!("stopped after {done}"));
-        note_mem(&format!("opening and closing a tab {done} times"), settled(), before, done);
+            quiet(5, || tabs() == Some(was) && seen().is_some_and(|s| s.ready && s.dir == dir))
+        });
     }
 
     // 미리 보기 창을 열고 그 안에서 잰다
-    let gif = Path::new(dir).join("큰 움직임.gif");
-    let small = Path::new(dir).join("작은 그림.gif");
-    let big = Path::new(dir).join("큰 그림.png");
-    let fake = Path::new(dir).join("큰 판.gif");
-    let frames: Vec<([u8; 3], f64)> = (0..24u8).map(|i| ([i * 10, 200 - i * 5, 90], 0.05)).collect();
-    let made = write_gif(&gif, 480, 360, &frames);
-    run.check("a larger moving gif is made in the test folder", made.is_ok(), || format!("{made:?}"));
     let alt_cmd = NSEventModifierFlags::Command | NSEventModifierFlags::Option;
-    if made.is_ok() && pick("가나다.txt") {
+    if pick("가나다.txt") {
         key_with(KEY_P, alt_cmd);
         let shown = || on_main(|| with_app(|a| a.preview_seen()).flatten());
         let frame = || on_main(|| with_app(|a| a.moving_frame()).flatten());
         let body = || on_main(|| with_app(|a| a.preview_body_seen()).flatten());
         let text = || shown().is_some_and(|(n, t)| n.as_deref() == Some("가나다.txt") && t.is_some());
         if quiet(5, text) {
-            // 큰 gif(480×360, 24장)와 글 파일을 번갈아 고른다: gif를 떠나면 읽어 둔 장들이 풀려야 한다.
+            // 큰 gif와 글 파일을 번갈아 고른다: gif를 떠나면 읽어 둔 장들이 풀려야 한다.
             // 러너는 '동작 줄이기'가 켜져 있어 장들을 읽지 않으므로, 이 걸음 동안만 그 설정을 무시한다 (preview_kinds와 같다)
             on_main(|| {
                 SMOKE_MOTION.set(true);
                 with_app(|a| a.motion = true);
             });
             let before = settled();
-            let mut held = None;
-            let mut done = 0;
-            while done < GIF_ROUNDS {
-                if !(pick("큰 움직임.gif") && quiet(5, || frame().is_some())) {
-                    break;
-                }
-                if done == 0 {
-                    held = Some(settled());
-                }
-                if !(pick("가나다.txt") && quiet(5, || frame().is_none() && text())) {
-                    break;
-                }
-                done += 1;
+            if pick("큰 움직임.gif") && quiet(5, || frame().is_some()) {
+                note_mem("while the gif shows in the preview pane (its frames are held)", settled(), before, 0);
             }
-            run.check(&format!("the gif and a text file are picked in turn {GIF_ROUNDS} times"), done == GIF_ROUNDS, || format!("stopped after {done}"));
-            if let Some(held) = held {
-                note_mem("while the gif shows in the preview pane (its frames are held)", held, before, 0);
+            if pick("가나다.txt") {
+                quiet(5, || frame().is_none() && text());
             }
-            note_mem(&format!("picking the gif and a text file in turn {done} times (the text file shows)"), settled(), before, done);
+            rounds(run, "the gif and a text file are picked in turn", GIF_ROUNDS, || {
+                pick("큰 움직임.gif") && quiet(5, || frame().is_some()) && pick("가나다.txt") && quiet(5, || frame().is_none() && text())
+            });
             on_main(|| SMOKE_MOTION.set(false));
 
-            // 아주 큰 그림: 12000×12000 PNG (그대로 풀면 576MB). 미리 보기는 줄여 읽지만, 읽는 동안 메모리가 얼마나 치솟는지 본다.
-            // 파일은 맥의 sips가 다른 프로세스에서 만든다 (이 프로세스의 최고값을 건드리지 않게)
-            let made = write_gif(&small, 64, 64, &[([40, 120, 220], 0.0)]).is_ok()
-                && std::process::Command::new("/usr/bin/sips").args(["-s", "format", "png", "-z", "12000", "12000"]).arg(&small).arg("--out").arg(&big).output().is_ok_and(|o| o.status.success());
-            let size = std::fs::metadata(&big).map_or(0, |m| m.len());
-            run.check("sips makes a 12000×12000 picture in the test folder", made && size > 0, || format!("made {made}, {size} bytes"));
-            if made && size > 0 {
+            // 아주 큰 그림: 미리 보기는 줄여 읽지만, 읽는 동안 메모리가 얼마나 치솟는지 본다
+            if made_big {
                 println!("note the 12000×12000 picture is {size} bytes on disk");
                 let kind = show_picture("큰 그림.png", "a 12000×12000 picture in the preview pane", &body);
                 run.check("the very large picture shows as a picture", kind == Some("picture"), || format!("{kind:?}"));
             }
-
-            // 꾸며 낸 gif: 파일은 35바이트인데 판(전체 크기)을 20000×20000으로 적었다 (그대로 풀면 1.6GB). 앱이 버티는지와 최고값을 본다
-            let mut bytes = b"GIF89a".to_vec();
-            bytes.extend_from_slice(&20000u16.to_le_bytes());
-            bytes.extend_from_slice(&20000u16.to_le_bytes());
-            bytes.extend_from_slice(&[0x80, 0, 0, 0xff, 0xff, 0xff, 0, 0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b]);
-            if std::fs::write(&fake, &bytes).is_ok() {
+            // 꾸며 낸 gif: 앱이 버티는지와 최고값을 본다
+            if made_fake {
                 println!("note the next step picks a {}-byte gif that declares a 20000×20000 canvas (if no mem line follows, the app died there)", bytes.len());
                 let kind = show_picture("큰 판.gif", "a tiny gif declaring a 20000×20000 canvas", &body);
-                run.check("the app is still running after that gif", true, String::new);
                 println!("note that gif showed as {kind:?}");
             }
         }
         key_with(KEY_P, alt_cmd);
         quiet(5, || shown().is_none());
     }
-    for f in [&gif, &small, &big, &fake] {
-        let _ = std::fs::remove_file(f);
-    }
 
-    // 아이콘 보기의 썸네일: 그림 480장(320×320)이 든 폴더를 큰 아이콘으로 끝까지 넘겨 본다. 읽어 둔 썸네일은 한도(400장, 64MB)를
+    // 아이콘 보기의 썸네일: 그림 480장이 든 폴더를 큰 아이콘으로 끝까지 넘겨 본다. 읽어 둔 썸네일은 한도(400장, 64MB)를
     // 넘지 않아야 한다. 그 폴더를 떠난 뒤에도 재서, 읽어 둔 것이 남는지 본다
-    let pics = Path::new(dir).join("그림들");
-    let made = std::fs::create_dir_all(&pics).is_ok()
-        && (0..PICTURES).all(|i| {
-            let color = [(i * 7 % 256) as u8, (i * 13 % 256) as u8, (i * 29 % 256) as u8];
-            write_gif(&pics.join(format!("그림 {i:03}.gif")), 320, 320, &[(color, 0.0)]).is_ok()
-        });
-    run.check(&format!("{PICTURES} pictures are made in a folder"), made, String::new);
     let at_pics = sakadu::util::join(dir, "그림들");
-    if made && pick("그림들") {
+    if made_pics && pick("그림들") {
         let before = settled();
         key(DOWN, true);
         if quiet(10, || seen().is_some_and(|s| s.ready && s.dir == at_pics && s.names.len() == PICTURES)) {
@@ -1237,23 +1236,28 @@ fn memory(run: &mut Run, dir: &str, start: Mem) {
                 }
             }
             loaded();
-            let (count, bytes, _) = thumbs();
-            println!("mem  thumbnails after paging through {PICTURES} pictures ({pages} pages): {count} kept, {:.1} MB by the app's own count", mb(bytes as u64));
-            run.check("the thumbnails kept stay within the limit (400 pictures, 64 MB)", count <= 400 && bytes <= 64 * 1024 * 1024, || format!("{count} pictures, {bytes} bytes"));
+            let (count, kept, _) = thumbs();
+            println!("mem  thumbnails after paging through {PICTURES} pictures ({pages} pages): {count} kept, {:.1} MB by the app's own count", mb(kept as u64));
+            run.check("the thumbnails kept stay within the limit (400 pictures, 64 MB)", count <= 400 && kept <= 64 * 1024 * 1024, || format!("{count} pictures, {kept} bytes"));
             note_mem("with the thumbnails read", settled(), before, 0);
             view(ViewMode::Details);
             key(UP, true);
             quiet(5, || seen().is_some_and(|s| s.ready && s.dir == dir));
-            let (count, bytes, _) = thumbs();
-            println!("mem  thumbnails after leaving that folder: {count} kept, {:.1} MB by the app's own count", mb(bytes as u64));
+            let (count, kept, _) = thumbs();
+            println!("mem  thumbnails after leaving that folder: {count} kept, {:.1} MB by the app's own count", mb(kept as u64));
             note_mem("after leaving the picture folder", settled(), before, 0);
         } else {
             run.check("the picture folder opens", false, || format!("{:?}", seen().map(|s| (s.dir, s.names.len()))));
         }
     }
+    for f in [&gif, &small, &big, &fake] {
+        let _ = std::fs::remove_file(f);
+    }
     let _ = std::fs::remove_dir_all(&pics);
     quiet(5, || seen().is_some_and(|s| s.ready && !s.names.iter().any(|n| n == "그림들" || n == "큰 움직임.gif")));
 
-    note_mem("at the end (since the window came up)", settled(), start, 0);
+    let end = settled();
+    note_mem("at the end (since the test files were made)", end, base, 0);
+    note_mem("at the end (since the window came up)", end, start, 0);
     println!("mem  peak rss over the whole run: {:.1} MB", mb(peak()));
 }
