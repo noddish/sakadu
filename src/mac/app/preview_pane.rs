@@ -1,7 +1,8 @@
 //! 오른쪽 미리 보기 창 (⌥⌘P. Windows의 Alt+P 창과 같은 일): 칸 영역 오른쪽에 붙어, 지금 칸에서 고른 항목을 보인다.
-//! 그림은 ImageIO, 글은 앞부분(스크롤된다), 한글 문서는 안에 든 미리 보기 그림·글(sakadu::cfb).
-//! PDF·Office·iWork·동영상 같은 그 밖의 파일은 창 쪽이 본문 자리에 띄우는 Quick Look 보기(QLPreviewView)가 그린다
-//! (그 보기를 만들 수 없으면 큰 Quick Look 썸네일). 폴더와 미리 보지 않는 파일은 큰 아이콘과 종류·크기·수정한 때.
+//! 그림은 ImageIO(gif는 움직인다: moving.rs), 글은 앞부분(스크롤된다), 한글 문서는 안에 든 미리 보기 그림·글(sakadu::cfb).
+//! PDF·Office·iWork·동영상·psd·ai 같은 그 밖의 파일은 창 쪽이 본문 자리에 띄우는 Quick Look 보기(QLPreviewView)가 그린다
+//! (그 보기를 만들 수 없으면 큰 Quick Look 썸네일). 웹 페이지도 그 보기가 그리되, 인터넷에서 받은 것이면 코드를 보인다 (load_page).
+//! 폴더와 미리 보지 않는 파일은 큰 아이콘과 종류·크기·수정한 때.
 //! 압축 파일은 맨 위 항목의 목록을 글로 보이고(Windows와 같다), 압축 파일 안의 항목은 정보만 (디스크에 없는 파일이다).
 //! 머리의 핀으로 고정하면 다른 항목을 골라도 그 파일을 계속 보인다. 고정한 파일은 (디스크, 파일 번호)로 기억해, 같은 경로에 없으면
 //! 원래 폴더에서 같은 번호를 찾고(이름 바꾸기), 없으면 파일 번호로 지금 자리를 찾는다(다른 폴더로 옮기기).
@@ -43,6 +44,8 @@ enum Body {
     Waiting,
     /// 그림. true면 문서의 썸네일(한글 문서의 미리 보기 그림 포함)이라 가는 테두리를 두른다
     Picture(Picture, bool),
+    /// 움직이는 gif (moving.rs가 장을 넘긴다)
+    Moving(Moving),
     Text(String),
     /// 창 쪽의 Quick Look 보기가 본문을 덮는다
     Look,
@@ -155,9 +158,11 @@ enum Plan {
     /// 뒷줄에서 읽는다 (그림, 글, 문서: 한글 문서의 미리 보기나 Quick Look 썸네일)
     Read(CardKind),
     Look,
+    /// 웹 페이지: 받은 표시가 있는지 뒷줄에서 본 뒤 Quick Look 보기로 (받은 것이면 코드)
+    Page,
 }
 
-/// 확장자와 크기로 정한다. look이 false면(Quick Look 보기를 만들 수 없다) 문서는 큰 썸네일로.
+/// 확장자와 크기로 정한다. look이 false면(Quick Look 보기를 만들 수 없다) 문서는 큰 썸네일로 (웹 페이지는 그 썸네일이나 코드).
 /// 압축 파일은 안의 목록(글), 압축 파일 안의 항목은 정보만
 fn plan(t: &Target, look: bool) -> Plan {
     if t.dir || t.inside {
@@ -171,6 +176,7 @@ fn plan(t: &Target, look: bool) -> Plan {
         return if t.size <= SNIFF_MAX { Plan::Read(CardKind::Text) } else { Plan::Info };
     };
     match card_kind(&t.name) {
+        Some(CardKind::Doc) if look && is_page(&t.name) => Plan::Page,
         Some(CardKind::Doc) if look && ext != "hwp" => Plan::Look,
         Some(kind) => Plan::Read(kind),
         None => Plan::Info,
@@ -258,7 +264,7 @@ impl App {
 
     /// 지금 대상을 처음부터 보인다: 무엇으로 보일지 정하고, 읽을 것이 있으면 요청을 쌓는다
     fn start_preview_body(&mut self) {
-        let look = self.look_view_ok;
+        let (look, motion) = (self.look_view_ok, self.motion);
         let px = self.preview_body().map_or(PX_SMALL, |b| image_px(b.w().max(b.h()), self.scale));
         let seq = self.next_seq();
         let Some(pv) = self.preview.as_mut() else { return };
@@ -267,16 +273,24 @@ impl App {
         pv.body = Body::Waiting;
         pv.asked = 0;
         let Some(t) = pv.target.as_ref().filter(|_| !pv.unchecked) else { return };
-        match plan(t, look) {
-            Plan::Info => pv.body = Body::Info,
-            Plan::Look => pv.body = Body::Look,
-            Plan::Read(kind) => {
-                pv.asked = seq;
-                let key = CardKey { path: t.path.clone(), modified: t.modified, size: t.size };
-                let px = if matches!(kind, CardKind::Text | CardKind::Archive) { 0 } else { px };
-                self.previews.push(PreviewRequest { seq, key, px, kind, pane: true });
+        // 웹 페이지는 받은 표시만 본다 (Quick Look 보기가 그린다)
+        let (kind, page) = match plan(t, look) {
+            Plan::Info => {
+                pv.body = Body::Info;
+                return;
             }
-        }
+            Plan::Look => {
+                pv.body = Body::Look;
+                return;
+            }
+            Plan::Page => (CardKind::Doc, true),
+            Plan::Read(kind) => (kind, false),
+        };
+        pv.asked = seq;
+        let key = CardKey { path: t.path.clone(), modified: t.modified, size: t.size };
+        let px = if page || matches!(kind, CardKind::Text | CardKind::Archive) { 0 } else { px };
+        let frames = kind == CardKind::Image && motion && is_gif(&t.name);
+        self.previews.push(PreviewRequest { seq, key, px, kind, pane: true, look: page, frames });
     }
 
     /// 뒷줄에서 읽은 창의 본문. 지금 대상의 요청이 아니면 버린다
@@ -284,7 +298,10 @@ impl App {
         let Some(pv) = self.preview.as_mut().filter(|pv| pv.asked != 0 && pv.asked == req.seq) else { return };
         pv.body = match result {
             Some(Preview::Image(pic)) => Body::Picture(pic, req.kind == CardKind::Doc),
+            Some(Preview::Moving(frames)) => Body::Moving(Moving::new(frames, req.px)),
             Some(Preview::Text(s)) => Body::Text(s),
+            // 받은 표시가 없는 웹 페이지: 창 쪽의 Quick Look 보기가 그린다 (그 보기를 만들 수 없으면 look_view_missing이 다시 읽는다)
+            Some(Preview::Look) => Body::Look,
             None if req.kind == CardKind::Image => Body::Broken,
             // 글로 읽히지 않는 파일, 그림·글이 없는 한글 문서, 썸네일이 없는 문서
             None => Body::Info,
@@ -438,6 +455,19 @@ impl App {
         Some((self.preview_body()?, t.path.clone(), t.modified))
     }
 
+    /// 창 본문의 움직이는 gif와 그 자리 (moving.rs)
+    pub(super) fn pane_moving(&self) -> Option<(&Moving, R)> {
+        let Body::Moving(m) = &self.preview.as_ref()?.body else { return None };
+        Some((m, self.preview_body()?))
+    }
+
+    pub(super) fn pane_moving_mut(&mut self) -> Option<&mut Moving> {
+        match &mut self.preview.as_mut()?.body {
+            Body::Moving(m) => Some(m),
+            _ => None,
+        }
+    }
+
     /// 창 쪽이 Quick Look 보기를 만들지 못했다: 문서는 큰 Quick Look 썸네일로 보인다
     pub fn look_view_missing(&mut self) {
         self.look_view_ok = false;
@@ -456,12 +486,12 @@ impl App {
         Some((pv.target.as_ref().map(|t| t.name.clone()), text))
     }
 
-    /// 시험: 본문에 보이는 것의 종류와 (그림이면) 크기
-    #[cfg(test)]
-    pub(super) fn preview_body_seen(&self) -> Option<(&'static str, Option<(usize, usize)>)> {
+    /// 시험과 창 시험: 본문에 보이는 것의 종류와 (그림이면) 크기
+    pub fn preview_body_seen(&self) -> Option<(&'static str, Option<(usize, usize)>)> {
         Some(match &self.preview.as_ref()?.body {
             Body::Waiting => ("waiting", None),
             Body::Picture(pic, _) => ("picture", Some(pic.size())),
+            Body::Moving(m) => ("moving", Some(m.pic().size())),
             Body::Text(_) => ("text", None),
             Body::Look => ("look", None),
             Body::Broken => ("broken", None),
@@ -537,6 +567,7 @@ impl App {
                     g.stroke_round(Gfx::fit(pic, body).inset(-0.5, -0.5), 2.0, alpha(t.text, 0.14), 1.0);
                 }
             }
+            Body::Moving(m) => g.picture(m.pic(), body),
             Body::Text(s) => {
                 g.fill_round(body, R_CTRL, t.field);
                 g.clip(body.inset(1.0, 1.0));

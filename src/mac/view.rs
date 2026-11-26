@@ -32,7 +32,7 @@ use objc2_app_kit::{
     NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo, NSDraggingItem, NSDraggingSession, NSDraggingSource, NSPasteboard, NSPasteboardTypeFileURL,
     NSPasteboardWriting,
     NSTextField, NSTextFieldDelegate, NSTextView, NSTitlebarSeparatorStyle, NSToolbar, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle, NSWorkspace, NSWorkspaceDidMountNotification, NSWorkspaceDidRenameVolumeNotification,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle, NSWorkspace, NSWorkspaceDidMountNotification, NSWorkspaceDidRenameVolumeNotification,
     NSWorkspaceDidUnmountNotification, NSWorkspaceVolumeOldURLKey, NSWorkspaceVolumeURLKey,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL};
@@ -70,6 +70,11 @@ thread_local! {
     static WATCH: OnceCell<Option<crate::watch::Watcher>> = const { OnceCell::new() };
     /// 사이드바 줄의 움직임 때문에 다음 그림을 부탁해 두었다 (schedule_flow)
     static FLOW_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 움직이는 gif의 다음 장 때문에 부탁해 둔 그림의 때 (schedule_frame)
+    static FRAME_AT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    /// 창 시험만 켠다: 맥 설정의 '동작 줄이기'를 무시한다. GitHub의 맥 러너는 그 설정이 켜져 있어서
+    /// 이것 없이는 창 시험에서 gif가 움직이는 길을 볼 수 없다
+    static SMOKE_MOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 지금 끌어 내는 것이 압축 파일에서 꺼낸 임시 복사본이다: 받는 쪽에 복사만 허락한다
     static DRAG_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 앱이 뜨는 중에(창을 만들기 전에) Finder가 열어 달라고 보낸 경로. 창을 만든 뒤에 연다
@@ -164,20 +169,28 @@ define_class!(
             let size = self.bounds().size;
             // 화면 배율 (레티나는 2): 썸네일을 몇 픽셀로 읽을지 정한다
             let scale = self.window().map_or(2.0, |w| w.backingScaleFactor() as f32);
-            // 맥 설정의 '동작 줄이기'를 켰으면 사이드바 줄이 미끄러지지 않고 바로 옮겨진다
-            let motion = !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
-            let moving = with_app(|a| {
+            // 맥 설정의 '동작 줄이기'를 켰으면 사이드바 줄이 미끄러지지 않고 바로 옮겨지고, gif도 움직이지 않는다
+            let motion = SMOKE_MOTION.get() || !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+            // gif는 창이 key이고 보일 때만 움직인다 (다른 앱을 보는 동안이나 가려져 있는 동안 그리지 않게)
+            let live = self.window().is_some_and(|w| w.isKeyWindow() && w.occlusionState().contains(NSWindowOcclusionState::Visible));
+            let drawn = with_app(|a| {
                 a.scale = scale;
                 a.motion = motion;
                 a.resize(size.width as f32, size.height as f32);
                 // 사이드바 줄을 끌며 목록 끝에 대고 있으면 지난 그림 뒤로 지난 때만큼 스크롤한다 (마우스가 멈춰 있어도)
-                let edge = a.side_edge_step(std::time::Instant::now());
+                let now = std::time::Instant::now();
+                let edge = a.side_edge_step(now);
+                let next_frame = a.step_moving(now, live);
                 a.paint(&mut g);
-                a.side_moving() || edge
+                (a.side_moving() || edge, next_frame)
             });
+            let (moving, next_frame) = drawn.unwrap_or((false, None));
             // 사이드바 줄이 아직 미끄러지는 중이거나 끌기 자동 스크롤 중이면 다음 그림을 곧 다시 그린다
-            if moving == Some(true) {
+            if moving {
                 schedule_flow();
+            }
+            if let Some(wait) = next_frame {
+                schedule_frame(wait);
             }
             self.sync_field();
             // 방금 그린 화면에 보이는데 아직 없는 썸네일을 읽기 시작한다
@@ -1113,6 +1126,28 @@ fn schedule_flow() {
     });
 }
 
+/// 움직이는 gif의 다음 장 때(wait 뒤)에 그 그림 자리만 다시 그려 달라고 한다. 더 이른 부탁이 이미 있으면 그대로 둔다
+/// (그때 그리면서 다시 부탁한다). 자리는 그때 묻는다: 그 사이 다른 파일을 골랐으면 그리지 않는다
+fn schedule_frame(wait: Duration) {
+    let at = std::time::Instant::now() + wait;
+    if FRAME_AT.get().is_some_and(|t| t <= at) {
+        return;
+    }
+    let Ok(when) = DispatchTime::try_from(wait) else { return };
+    FRAME_AT.set(Some(at));
+    let _ = DispatchQueue::main().after(when, move || {
+        if FRAME_AT.get() == Some(at) {
+            FRAME_AT.set(None);
+        }
+        let Some(r) = with_app(|a| a.moving_rect()).flatten() else { return };
+        VIEW.with(|v| {
+            if let Some(v) = v.get() {
+                v.setNeedsDisplayInRect(NSRect::new(NSPoint::new(r.l as f64, r.t as f64), NSSize::new(r.w().max(0.0) as f64, r.h().max(0.0) as f64)));
+            }
+        });
+    });
+}
+
 /// 뒷줄 결과를 받은 뒤 (메인 줄에서): 입력 상자를 App 상태에 맞추고 다시 그려 달라고 한다.
 /// 새 폴더의 이름 상자는 입력이 아니라 뒷줄 결과(폴더를 만들고 다시 읽은 것)로 뜨므로, 그리기를 기다리지 않고 여기서 맞춘다
 fn redraw() {
@@ -1761,6 +1796,16 @@ define_class!(
             with_app(App::refresh_shown);
             pump();
             redraw();
+        }
+
+        /// 창이 가려지거나 다시 보인다: 다시 보이면 멈춰 있던 gif가 다시 움직이게 그린다 (가려진 동안은 그리기가 움직이지 않는다)
+        #[unsafe(method(windowDidChangeOcclusionState:))]
+        fn did_change_occlusion(&self, _n: &NSNotification) {
+            VIEW.with(|v| {
+                if let Some(v) = v.get() {
+                    v.setNeedsDisplay(true);
+                }
+            });
         }
 
         /// 본 창의 닫기 단추: 메뉴 막대에서 대기 중이면 닫지 않고 숨기기만 한다 (앱이 끝나지 않는다. Windows의 트레이로 숨기기와 같다).

@@ -19,6 +19,16 @@ const SCALE: f32 = 2.0;
 const DEMO_PICTURE: &str = "협재 노을.bmp";
 const DEMO_NOTE: &str = "여행 일정.txt";
 const DEMO_PDF: &str = "숙소 안내.pdf";
+const DEMO_PAGE: &str = "제주살이 안내.html";
+const DEMO_PSD: &str = "협재 노을.psd";
+/// 웹 페이지 장면의 쪽 (밖의 것을 불러오지 않는다: 글꼴은 시스템 것, 그림은 그라데이션)
+const DEMO_PAGE_HTML: &str = "<!doctype html>\n<html lang=\"ko\"><meta charset=\"utf-8\"><title>제주살이 한 달</title>\n\
+<body style=\"margin:0;font-family:-apple-system,sans-serif;background:#f4f1ea;color:#1d2433\">\n\
+<header style=\"background:#2b5cd9;color:#fff;padding:28px 32px\"><h1 style=\"margin:0;font-size:30px\">제주살이 한 달</h1>\
+<p style=\"margin:6px 0 0;opacity:.85\">협재 바닷가 숙소 · 11월</p></header>\n\
+<main style=\"padding:24px 32px\"><div style=\"height:150px;border-radius:12px;background:linear-gradient(#f9a35c,#26507a)\"></div>\n\
+<h2 style=\"font-size:20px;margin:22px 0 8px\">가는 길</h2><p style=\"line-height:1.6;margin:0\">제주공항에서 버스로 한 시간. 숙소 앞 정류장에서 내리면 바다가 보여요.</p></main>\n\
+</body></html>\n";
 /// 압축 파일 장면의 zip (업무/문서 안에 만든다. 그 폴더의 안은 다른 장면에 보이지 않는다)과 그 안의 폴더
 const DEMO_ZIP: &str = "여행 자료.zip";
 const DEMO_ZIP_DIR: &str = "여행 자료";
@@ -47,21 +57,48 @@ pub fn bmp(w: u32, h: u32, pixel: impl Fn(f32, f32) -> [u8; 3]) -> Vec<u8> {
 
 /// 데모 그림: 바다 위로 지는 해 (480×320 BMP. 맥이 바로 읽는 형식 가운데 손으로 쓰기 가장 쉽다)
 pub fn demo_picture() -> Vec<u8> {
+    bmp(480, 320, sunset)
+}
+
+/// 데모 그림의 색: 가로가 세로의 1.5배인 그림에서 (x, y) 자리의 색
+fn sunset(x: f32, y: f32) -> [u8; 3] {
     const HORIZON: f32 = 0.62;
     let mix = |a: [f32; 3], b: [f32; 3], k: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * k.clamp(0.0, 1.0));
-    bmp(480, 320, |x, y| {
-        // 하늘은 위가 짙은 파랑이고 수평선 쪽이 주황, 바다는 아래로 갈수록 어둡다
-        let base = if y < HORIZON {
-            mix([0.15, 0.24, 0.46], [0.98, 0.64, 0.36], (y / HORIZON).powf(1.6))
-        } else {
-            mix([0.22, 0.34, 0.47], [0.06, 0.12, 0.23], (y - HORIZON) / (1.0 - HORIZON))
-        };
-        // 해와 그 둘레의 빛 (바다에는 옅게 비친다). 가로가 세로의 1.5배라 거리를 잴 때 가로를 그만큼 늘린다
-        let d = (((x - 0.68) * 1.5).powi(2) + (y - 0.52).powi(2)).sqrt();
-        let glow = (1.0 - d / 0.4).max(0.0).powi(2) * if y < HORIZON { 0.7 } else { 0.3 };
-        let c = if y < HORIZON && d < 0.075 { [1.0, 0.95, 0.80] } else { mix(base, [1.0, 0.84, 0.52], glow) };
-        c.map(|v| (v * 255.0) as u8)
-    })
+    // 하늘은 위가 짙은 파랑이고 수평선 쪽이 주황, 바다는 아래로 갈수록 어둡다
+    let base = if y < HORIZON {
+        mix([0.15, 0.24, 0.46], [0.98, 0.64, 0.36], (y / HORIZON).powf(1.6))
+    } else {
+        mix([0.22, 0.34, 0.47], [0.06, 0.12, 0.23], (y - HORIZON) / (1.0 - HORIZON))
+    };
+    // 해와 그 둘레의 빛 (바다에는 옅게 비친다). 가로가 세로의 1.5배라 거리를 잴 때 가로를 그만큼 늘린다
+    let d = (((x - 0.68) * 1.5).powi(2) + (y - 0.52).powi(2)).sqrt();
+    let glow = (1.0 - d / 0.4).max(0.0).powi(2) * if y < HORIZON { 0.7 } else { 0.3 };
+    let c = if y < HORIZON && d < 0.075 { [1.0, 0.95, 0.80] } else { mix(base, [1.0, 0.84, 0.52], glow) };
+    c.map(|v| (v * 255.0) as u8)
+}
+
+/// 포토샵 파일 내용 (RGB 8비트, 레이어 없이 합친 그림만, 압축 없음). pixel은 bmp와 같다.
+/// 맥(ImageIO·Quick Look)이 읽는 최소한의 모양: 머리, 비어 있는 세 구역(색 방식 자료, 그림 자원, 레이어와 마스크), 채널마다 한 판씩
+pub fn psd(w: u32, h: u32, pixel: impl Fn(f32, f32) -> [u8; 3]) -> Vec<u8> {
+    let mut out = b"8BPS".to_vec();
+    // 판 1, 비워 두는 6바이트, 채널 3 (빨강·초록·파랑), 높이, 너비, 채널마다 8비트, 색 방식 RGB(3)
+    out.extend(1u16.to_be_bytes());
+    out.extend([0u8; 6]);
+    out.extend(3u16.to_be_bytes());
+    out.extend(h.to_be_bytes());
+    out.extend(w.to_be_bytes());
+    out.extend(8u16.to_be_bytes());
+    out.extend(3u16.to_be_bytes());
+    for _ in 0..3 {
+        out.extend(0u32.to_be_bytes());
+    }
+    // 합친 그림: 압축 없음(0), 빨강 판 전체, 초록 판, 파랑 판
+    out.extend(0u16.to_be_bytes());
+    let px: Vec<[u8; 3]> = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| pixel((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32)).collect();
+    for c in 0..3 {
+        out.extend(px.iter().map(|p| p[c]));
+    }
+    out
 }
 
 /// 한 쪽짜리 PDF (w×h pt, 쪽의 내용은 PDF 그리기 명령 content). 맥이 읽는 최소한의 모양: 개체 넷, 상호 참조표, 끝 표시
@@ -108,7 +145,14 @@ fn write_demo_previews(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     // 2026-10-17 09:20 (UTC)
     let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_792_228_800);
-    for (name, data) in [(DEMO_PICTURE, demo_picture()), (DEMO_NOTE, DEMO_NOTE_TEXT.as_bytes().to_vec()), (DEMO_PDF, demo_pdf())] {
+    let files = [
+        (DEMO_PICTURE, demo_picture()),
+        (DEMO_NOTE, DEMO_NOTE_TEXT.as_bytes().to_vec()),
+        (DEMO_PDF, demo_pdf()),
+        (DEMO_PAGE, DEMO_PAGE_HTML.as_bytes().to_vec()),
+        (DEMO_PSD, psd(480, 320, sunset)),
+    ];
+    for (name, data) in files {
         let path = dir.join(name);
         std::fs::write(&path, data)?;
         std::fs::File::options().write(true).open(&path)?.set_modified(when)?;
@@ -290,6 +334,12 @@ pub fn render_all(demo: &Path, out: &Path) -> Result<Vec<std::path::PathBuf>, St
 
         // 문서의 카드: PDF를 고르면 Quick Look이 만든 첫 쪽을 크게 보인다 (아이콘처럼 꾸미지 않고 가는 테두리만)
         shots.push(("preview-doc", preview(DEMO_PDF)));
+
+        // 웹 페이지의 카드: 코드가 아니라 맥(Quick Look)이 WebKit으로 그린 쪽 (Quick Look이 그림을 주지 못하면 코드)
+        shots.push(("preview-page", preview(DEMO_PAGE)));
+
+        // 포토샵 파일의 카드: Quick Look이 만든 그림
+        shots.push(("preview-psd", preview(DEMO_PSD)));
 
         // 오른쪽 미리 보기 창(⌥⌘P): 글 파일을 고정해 두고 지금 칸은 다른 폴더로 옮긴 모습. 핀이 켜져 있고 칸들은 그만큼 좁다
         let mut a = preview(DEMO_NOTE);

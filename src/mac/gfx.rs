@@ -6,13 +6,15 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::{NSCompositingOperation, NSFont, NSFontWeightRegular, NSFontWeightSemibold, NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSWorkspace};
-use objc2_core_foundation::{CFAttributedString, CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue};
+use objc2_core_foundation::{
+    CFAttributedString, CFData, CFDictionary, CFMutableData, CFNumber, CFRetained, CFString, CFType, CFURL, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize, kCFBooleanTrue,
+};
 use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGInterpolationQuality, CGPath, kCGColorSpaceSRGB};
 use objc2_core_text::{CTFont, CTLine, CTLineTruncationType, kCTFontAttributeName, kCTForegroundColorFromContextAttributeName};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL, NSURLLocalizedTypeDescriptionKey};
 use objc2_image_io::{
-    CGImageDestination, CGImageSource, kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceShouldCacheImmediately,
-    kCGImageSourceThumbnailMaxPixelSize,
+    CGImageDestination, CGImageSource, kCGImagePropertyGIFDelayTime, kCGImagePropertyGIFDictionary, kCGImagePropertyGIFLoopCount, kCGImagePropertyGIFUnclampedDelayTime,
+    kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceShouldCacheImmediately, kCGImageSourceThumbnailMaxPixelSize,
 };
 use sakadu::draw::{Color, Font, R};
 use std::ffi::CStr;
@@ -31,9 +33,35 @@ const QL_THUMBNAIL: usize = 1 << 2;
 /// 썸네일 하나를 기다리는 가장 긴 시간. 넘으면 요청을 거두고 만들지 못한 것으로 본다 (답이 없는 NAS의 파일 같은 것)
 const QL_WAIT: Duration = Duration::from_secs(15);
 
+/// 움직이는 gif를 다 풀어 두는 한도: 장이 이보다 많으면 첫 장만 보인다
+pub const FRAMES_MAX: usize = 400;
+/// 보이는 크기(긴 쪽을 요청한 픽셀 수까지 줄인 것)로 푼 장들이 차지할 메모리의 한도. 넘으면 첫 장만 보인다
+pub const FRAMES_BYTES_MAX: usize = 48 << 20;
+
 /// 읽어 둔 그림. 뒷줄에서 읽어(Gfx::load_picture) 메인 줄에서 그린다 (CGImage는 만든 뒤 바뀌지 않아 줄 사이로 넘겨도 된다)
+#[derive(Clone)]
 pub struct Picture {
     img: CFRetained<CGImage>,
+}
+
+/// 움직이는 gif의 장들과 장마다 머무는 시간 (같은 수. 첫 장만 담았으면 시간은 비어 있다)
+pub struct Frames {
+    pub pics: Vec<Picture>,
+    pub delays: Vec<Duration>,
+}
+
+/// 장들을 다 풀어 둘 만한가: 둘 이상이고, FRAMES_MAX장 이하이고, 한 장이 w×h 픽셀(보이는 크기)일 때 다 합쳐 FRAMES_BYTES_MAX 이하
+pub fn frames_fit(count: usize, w: usize, h: usize) -> bool {
+    (2..=FRAMES_MAX).contains(&count) && count.saturating_mul(w).saturating_mul(h).saturating_mul(4) <= FRAMES_BYTES_MAX
+}
+
+/// 장에 머무는 시간 (gif에 적힌 초). 20ms보다 짧거나 적혀 있지 않으면 100ms로 본다: 0으로 적은 gif가 흔하고, 브라우저도 그렇게 늦춘다.
+/// gif에 적을 수 있는 가장 긴 시간(655.35초)을 넘지 않는다
+pub fn frame_delay_of(secs: Option<f64>) -> Duration {
+    match secs {
+        Some(s) if s >= 0.02 => Duration::from_secs_f64(s.min(655.35)),
+        _ => Duration::from_millis(100),
+    }
 }
 
 impl Picture {
@@ -372,18 +400,39 @@ impl Gfx {
     pub fn load_picture(path: &str, max_px: u32) -> Option<Picture> {
         let url = CFURL::from_file_path(path)?;
         let source = unsafe { CGImageSource::with_url(&url, None) }?;
-        Self::thumbnail(&source, max_px)
+        Self::thumbnail(&source, 0, max_px)
     }
 
     /// 메모리에 든 그림(PNG·GIF·BMP 따위. 한글 문서 안의 미리 보기 그림)을 load_picture와 같게 읽는다
     pub fn load_picture_data(bytes: &[u8], max_px: u32) -> Option<Picture> {
         let data = CFData::from_bytes(bytes);
         let source = unsafe { CGImageSource::with_data(&data, None) }?;
-        Self::thumbnail(&source, max_px)
+        Self::thumbnail(&source, 0, max_px)
     }
 
-    /// 그림 원본에서 긴 쪽이 max_px 안에 드는 그림을 만든다 (사진에 적힌 회전도 반영한다)
-    fn thumbnail(source: &CGImageSource, max_px: u32) -> Option<Picture> {
+    /// 움직이는 gif의 장들을 load_picture처럼 줄여 읽고, 장마다 머무는 시간을 읽는다. 읽지 못하면 None.
+    /// 장이 하나뿐이거나 다 풀기에 많으면(frames_fit) 첫 장만 담는다. 중간에 망가진 장이 있으면 그 앞까지만 (브라우저처럼).
+    /// 다 풀 때까지 이 줄을 붙잡으므로 뒷줄에서만 부른다
+    pub fn load_frames(path: &str, max_px: u32) -> Option<Frames> {
+        let url = CFURL::from_file_path(path)?;
+        let source = unsafe { CGImageSource::with_url(&url, None) }?;
+        let first = Self::thumbnail(&source, 0, max_px)?;
+        let count = unsafe { source.count() };
+        let (w, h) = first.size();
+        let mut pics = vec![first];
+        if !frames_fit(count, w, h) {
+            return Some(Frames { pics, delays: Vec::new() });
+        }
+        for i in 1..count {
+            let Some(pic) = Self::thumbnail(&source, i, max_px) else { break };
+            pics.push(pic);
+        }
+        let delays = if pics.len() > 1 { (0..pics.len()).map(|i| frame_delay(&source, i)).collect() } else { Vec::new() };
+        Some(Frames { pics, delays })
+    }
+
+    /// 그림 원본의 index번째 장에서 긴 쪽이 max_px 안에 드는 그림을 만든다 (사진에 적힌 회전도 반영한다)
+    fn thumbnail(source: &CGImageSource, index: usize, max_px: u32) -> Option<Picture> {
         let max = CFNumber::new_i32(max_px.min(i32::MAX as u32) as i32);
         let yes: &CFType = unsafe { kCFBooleanTrue }?;
         // 원본이 작아도 늘 새로 만들고(파일에 든 작은 썸네일을 쓰지 않는다), 여기서 바로 풀어 둔다 (그릴 때 메인 줄에서 풀지 않게)
@@ -391,7 +440,7 @@ impl Gfx {
             unsafe { [kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceShouldCacheImmediately, kCGImageSourceThumbnailMaxPixelSize] };
         let values: [&CFType; 4] = [yes, yes, yes, max.as_ref()];
         let options = CFDictionary::from_slices(&keys, &values);
-        let img = unsafe { source.thumbnail_at_index(0, Some(options.as_opaque())) }?;
+        let img = unsafe { source.thumbnail_at_index(index, Some(options.as_opaque())) }?;
         let pic = Picture { img };
         (pic.longest() > 0).then_some(pic)
     }
@@ -510,6 +559,46 @@ impl Gfx {
         unsafe { dest.add_image(&img, None) };
         if unsafe { dest.finalize() } { Ok(()) } else { Err("PNG를 쓰지 못함".into()) }
     }
+
+    /// 끝없이 되풀이하는 gif를 쓴다: w×h, 장마다 한 가지 색([빨강, 초록, 파랑])과 머무는 초. 시험과 창 시험의 파일이다.
+    /// 메모리에 만든 뒤 Rust로 쓴다: URL로 쓰면 맥이 한글 이름을 풀어 쓴 꼴(NFD)로 바꿔, 목록의 이름이 준 이름과 달라진다
+    pub fn write_gif(path: &std::path::Path, w: usize, h: usize, frames: &[([u8; 3], f64)]) -> Result<(), String> {
+        let data = CFMutableData::new(None, 0).ok_or("gif를 담을 자리를 만들지 못함")?;
+        let gif = CFString::from_static_str("com.compuserve.gif");
+        let dest = unsafe { CGImageDestination::with_data(&data, &gif, frames.len(), None) }.ok_or("gif를 만들지 못함")?;
+        let forever = CFNumber::new_i32(0);
+        unsafe { dest.set_properties(Some(gif_properties(kCGImagePropertyGIFLoopCount, &forever).as_opaque())) };
+        for &([r, g, b], secs) in frames {
+            let canvas = Gfx::bitmap(w as f32, h as f32, 1.0).ok_or("그림판을 만들지 못함")?;
+            canvas.fill(R::new(0.0, 0.0, w as f32, h as f32), Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 });
+            let img = CGBitmapContextCreateImage(canvas.c()).ok_or("그림을 만들지 못함")?;
+            let delay = CFNumber::new_f64(secs);
+            unsafe { dest.add_image(&img, Some(gif_properties(kCGImagePropertyGIFDelayTime, &delay).as_opaque())) };
+        }
+        if !unsafe { dest.finalize() } {
+            return Err("gif를 만들지 못함".into());
+        }
+        std::fs::write(path, data.to_vec()).map_err(|e| format!("gif를 쓰지 못함: {e}"))
+    }
+}
+
+/// gif의 index번째 장에 머무는 시간. 브라우저처럼 적힌 그대로의 값(UnclampedDelayTime)을 먼저 보고, 없으면 DelayTime
+fn frame_delay(source: &CGImageSource, index: usize) -> Duration {
+    let secs = unsafe { source.properties_at_index(index, None) }.and_then(|props| {
+        // SAFETY: ImageIO의 속성 사전은 글자 열쇠를 쓴다. 값의 종류는 아래에서 확인한다
+        let props = unsafe { props.cast_unchecked::<CFString, CFType>() };
+        let gif = props.get(unsafe { kCGImagePropertyGIFDictionary })?.downcast::<CFDictionary>().ok()?;
+        let gif = unsafe { gif.cast_unchecked::<CFString, CFType>() };
+        let seconds = |key: &CFString| gif.get(key).and_then(|v| v.downcast::<CFNumber>().ok()).and_then(|n| n.as_f64());
+        seconds(unsafe { kCGImagePropertyGIFUnclampedDelayTime }).or_else(|| seconds(unsafe { kCGImagePropertyGIFDelayTime }))
+    });
+    frame_delay_of(secs)
+}
+
+/// gif 속성 사전 {"{GIF}": {key: value}} (gif를 쓸 때)
+fn gif_properties(key: &CFString, value: &CFNumber) -> CFRetained<CFDictionary<CFString, CFType>> {
+    let inner = CFDictionary::<CFString, CFType>::from_slices(&[key], &[value.as_ref()]);
+    CFDictionary::from_slices(&[unsafe { kCGImagePropertyGIFDictionary }], &[inner.as_ref()])
 }
 
 /// Quick Look 썸네일 생성기와 그 요청의 클래스. 그 프레임워크를 처음 한 번 열어 찾는다 (뒷줄 여럿이 함께 불러도 한 번만 연다)

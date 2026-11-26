@@ -7,6 +7,7 @@
 //! 새 탭 시작 화면(⌘T)과 명령 메뉴(⌘K)도: 시작 화면을 키로 열어 보고, 명령 메뉴의 입력 칸에 쳐서 걸러 보고 Esc로 닫는다.
 //! 사이드바 끌기도: 둘을 고정하고 실제 마우스 입력(mouseDown:·mouseDragged:·mouseUp:)으로 첫 줄을 아래로 끌어 순서를 바꾸고, 눌렀다 떼서 연다.
 //! 오른쪽 미리 보기 창(⌥⌘P)도: 열어 글 파일의 글을 보고, PDF를 고르면 본문 자리에 Quick Look 보기가 뜨는지 보고, 닫는다.
+//! 그 창에서 웹 페이지(받은 표시가 있으면 코드)와 움직이는 gif도 본다.
 //! 압축 파일도: 시험 폴더에 zip을 만들어(맥의 ditto) 고르고 ⌘↓로 폴더처럼 들어가고, 안에서는 읽기만 하는지 보고 ⌘↑로 나온다.
 //! 메뉴 막대 대기도: 설정 창의 스위치로 켜서 아이콘이 생기는지, 닫기 단추가 창만 숨기는지, 아이콘 메뉴로 창이 돌아오는지 본다.
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
@@ -326,6 +327,7 @@ fn script(dir: &str) -> usize {
             }
             let _ = std::fs::remove_file(&pdf);
             run.wait("the PDF leaves the list", 5, || seen().is_some_and(|s| s.ready && !s.names.iter().any(|n| n == "문서.pdf")));
+            preview_kinds(&mut run, dir, &shown);
         }
         key_with(KEY_P, alt_cmd);
         run.wait("alt-cmd-P closes the pane and hides the Quick Look view", 5, || shown().is_none() && on_main(|| look_view_showing().is_none()));
@@ -850,6 +852,80 @@ fn drop_on_row(path: &str, row: &str) -> (Option<NSDragOperation>, bool) {
         let _: () = msg_send![&*view, draggingEnded: &*drag];
         (Some(hover), dropped)
     }
+}
+
+/// 오른쪽 미리 보기 창(열려 있다)의 웹 페이지와 움직이는 gif. 시험 파일은 시험 폴더에 만들었다 지운다.
+/// 웹 페이지는 Quick Look 보기가 그리고, 받은 표시가 있으면 코드를 보인다. gif는 창을 key로 만든 뒤 장들을 읽었는지 보고,
+/// 창이 key이고 보이면 장이 저절로 넘어가는지, 아니면 그 장에 머무는지 본다 (러너의 창이 key가 되지 않을 수 있다).
+/// '동작 줄이기'가 켜져 있으면 장들을 읽지 않고 첫 장만 그림으로 보이는지 본 뒤, 이 걸음 동안만 그 설정을 무시하고
+/// (러너는 켜져 있다) gif를 다시 골라 움직이는 길도 본다
+fn preview_kinds(run: &mut Run, dir: &str, shown: &impl Fn() -> Option<(Option<String>, Option<String>)>) {
+    let html = "<!doctype html>\n<body style=\"background:#1e6fd9\"><h1>사카두</h1></body>\n";
+    let (page, got, gif) = (Path::new(dir).join("쪽.html"), Path::new(dir).join("받은 쪽.html"), Path::new(dir).join("움직임.gif"));
+    let pages = std::fs::write(&page, html).is_ok() && std::fs::write(&got, html).is_ok() && crate::app::mark_quarantined(&got.to_string_lossy());
+    run.check("web pages are made in the test folder (one marked as downloaded)", pages, String::new);
+    let made = Gfx::write_gif(&gif, 64, 48, &[([230, 60, 60], 0.05), ([60, 200, 90], 0.05), ([60, 90, 230], 0.05)]);
+    run.check("a moving gif is made in the test folder", made.is_ok(), || format!("{made:?}"));
+    if run.select("쪽.html") {
+        run.wait("a web page shows in the Quick Look view", 10, || on_main(|| look_view_showing().is_some_and(|p| p.ends_with("/쪽.html"))));
+    }
+    if run.select("받은 쪽.html") {
+        let code = || shown().is_some_and(|(n, t)| n.as_deref() == Some("받은 쪽.html") && t.is_some_and(|t| t.starts_with("<!doctype html>")));
+        run.wait("a downloaded web page shows its code, not the page", 5, || code() && on_main(|| look_view_showing().is_none()));
+    }
+    if run.select("움직임.gif") {
+        let frame = || on_main(|| with_app(|a| a.moving_frame()).flatten());
+        let body = || on_main(|| with_app(|a| a.preview_body_seen().map(|s| s.0)).flatten());
+        // 앞 걸음(훑어보기 패널 등)에서 창이 key를 잃었을 수 있다: 앱이 뜰 때처럼 창을 앞으로 가져와 key로 만든다
+        on_main(|| {
+            if let Some(w) = VIEW.with(|v| v.get().and_then(|v| v.window())) {
+                w.makeKeyAndOrderFront(None);
+            }
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(MainThreadMarker::new().expect("main")).activateIgnoringOtherApps(true);
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        // gif가 움직이는 세 조건을 따로 남긴다 (어느 것 때문에 머무는지 알게)
+        let (key, visible, reduced) = on_main(|| {
+            let w = VIEW.with(|v| v.get().and_then(|v| v.window()));
+            let key = w.as_ref().is_some_and(|w| w.isKeyWindow());
+            let visible = w.as_ref().is_some_and(|w| w.occlusionState().contains(NSWindowOcclusionState::Visible));
+            (key, visible, NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+        });
+        println!("note gif: window is key {key}, visible {visible}, reduce motion {reduced}");
+        if reduced {
+            // 동작 줄이기: 장들을 읽지 않고 첫 장만 그림으로 보인다
+            if run.wait("with reduce motion the gif shows as a still picture", 5, || body() == Some("picture")) {
+                run.check("and its frames are not read", frame().is_none(), || format!("{:?}", frame()));
+            }
+            // 러너는 '동작 줄이기'가 켜져 있다: 이 걸음 동안만 그 설정을 무시하고, 다른 것을 골랐다가 gif를 다시 골라
+            // 장들을 읽고 움직이는 길도 본다 (다음 그림부터는 창 쪽도 무시한다)
+            on_main(|| {
+                SMOKE_MOTION.set(true);
+                with_app(|a| a.motion = true);
+            });
+            println!("note gif: reduce motion is ignored from here to see the gif move");
+        }
+        let chosen = !reduced || (run.select("가나다.txt") && run.select("움직임.gif"));
+        if chosen && run.wait("the gif's frames are read in the pane", 5, || frame().is_some()) {
+            if key && visible {
+                let first = frame();
+                run.wait("the gif moves on by itself", 3, || frame() != first);
+            } else {
+                std::thread::sleep(Duration::from_millis(400));
+                let first = frame();
+                std::thread::sleep(Duration::from_millis(300));
+                run.check("the gif stays on its frame while the window is not key or not visible", frame() == first, || format!("{first:?} → {:?}", frame()));
+            }
+        }
+        // 다음 걸음들은 맥 설정 그대로 (창 쪽이 다음 그림에서 App에도 다시 넣는다)
+        on_main(|| SMOKE_MOTION.set(false));
+    }
+    for f in [&page, &got, &gif] {
+        let _ = std::fs::remove_file(f);
+    }
+    let gone = |s: &Seen| s.ready && !s.names.iter().any(|n| ["쪽.html", "받은 쪽.html", "움직임.gif"].contains(&n.as_str()));
+    run.wait("the web pages and the gif leave the list", 5, || seen().is_some_and(|s| gone(&s)));
 }
 
 /// 미리 보기 창의 Quick Look 보기가 보이면 그 보기에 넘긴 파일 (메인 줄에서)
