@@ -241,6 +241,8 @@ impl App {
             if self.thumb_failed.len() > 4096 {
                 self.thumb_failed.clear();
             }
+            // html 화면을 찍지 못했으면 미리 보기 창은 코드로 돌아간다 (카드는 다음 그리기에서 글 카드로 바뀐다)
+            self.page_shot_failed(&img.key);
             self.thumb_failed.insert(img.key);
             // 미리 보기가 이 그림을 기다리고 있으면 "미리 볼 수 없습니다"로 바꿔 그린다
             self.invalidate();

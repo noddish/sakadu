@@ -7,6 +7,7 @@ mod defaultfm;
 mod droptarget;
 mod folders;
 mod gfx;
+mod page;
 mod popup;
 mod acl;
 mod service;
@@ -624,6 +625,8 @@ fn started_without_activation() -> bool {
 }
 
 fn main() -> Result<()> {
+    // 일러스트레이터 파일의 PDF를 그리려고 띄운 짧은 프로세스면 그리고 바로 끝난다 (thumbs.rs)
+    thumbs::run_pdf_child();
     if run_service_command() {
         return Ok(());
     }

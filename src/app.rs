@@ -33,6 +33,7 @@ use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
 mod fav_ui;
 mod palette;
+mod gif;
 mod preview;
 mod preview_card;
 mod settings_ui;
@@ -473,6 +474,8 @@ pub struct App {
     preview: Option<Preview>,
     /// 자동 미리 보기 카드 (그림·글 파일을 고르면 저절로 뜬다)
     card: preview_card::Card,
+    /// 카드나 미리 보기 창에서 움직이는 gif (gif.rs)
+    gif: Option<gif::GifPlay>,
     /// 마지막 누름(두 번 클릭의 첫 누름)이 미리 보기 카드 위였는가. 그랬으면 이어지는 둘째 누름은 버리고, 아니었으면 카드 아래 것이 받는다
     press_on_card: bool,
     /// 자동 미리 보기가 켜져 있는가 (도구 막대의 눈). 세션에 저장
@@ -991,6 +994,7 @@ impl App {
             thumb_failed: HashSet::new(),
             preview: sess.as_ref().is_some_and(|s| s.preview).then(Preview::new),
             card: preview_card::Card::new(),
+            gif: None,
             press_on_card: false,
             auto_preview: sess.as_ref().is_none_or(|s| s.auto_preview),
             preview_host,

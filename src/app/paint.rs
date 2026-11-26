@@ -22,6 +22,7 @@ impl App {
         }
         self.sync_preview();
         self.sync_card();
+        self.sync_gif();
         self.place_filter_edit(false);
         if !self.gfx.begin(self.hwnd) {
             return;

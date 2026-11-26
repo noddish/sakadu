@@ -16,6 +16,7 @@ pub mod nametree;
 pub mod natural;
 pub mod palette;
 pub mod pane;
+pub mod psd;
 pub mod query;
 pub mod session;
 pub mod typo;
