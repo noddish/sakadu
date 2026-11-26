@@ -72,6 +72,9 @@ thread_local! {
     static FLOW_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 움직이는 gif의 다음 장 때문에 부탁해 둔 그림의 때 (schedule_frame)
     static FRAME_AT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    /// 창 시험만 켠다: 맥 설정의 '동작 줄이기'를 무시한다. GitHub의 맥 러너는 그 설정이 켜져 있어서
+    /// 이것 없이는 창 시험에서 gif가 움직이는 길을 볼 수 없다
+    static SMOKE_MOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 지금 끌어 내는 것이 압축 파일에서 꺼낸 임시 복사본이다: 받는 쪽에 복사만 허락한다
     static DRAG_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// 앱이 뜨는 중에(창을 만들기 전에) Finder가 열어 달라고 보낸 경로. 창을 만든 뒤에 연다
@@ -167,7 +170,7 @@ define_class!(
             // 화면 배율 (레티나는 2): 썸네일을 몇 픽셀로 읽을지 정한다
             let scale = self.window().map_or(2.0, |w| w.backingScaleFactor() as f32);
             // 맥 설정의 '동작 줄이기'를 켰으면 사이드바 줄이 미끄러지지 않고 바로 옮겨지고, gif도 움직이지 않는다
-            let motion = !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+            let motion = SMOKE_MOTION.get() || !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
             // gif는 창이 key이고 보일 때만 움직인다 (다른 앱을 보는 동안이나 가려져 있는 동안 그리지 않게)
             let live = self.window().is_some_and(|w| w.isKeyWindow() && w.occlusionState().contains(NSWindowOcclusionState::Visible));
             let drawn = with_app(|a| {

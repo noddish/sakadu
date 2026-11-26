@@ -857,7 +857,8 @@ fn drop_on_row(path: &str, row: &str) -> (Option<NSDragOperation>, bool) {
 /// 오른쪽 미리 보기 창(열려 있다)의 웹 페이지와 움직이는 gif. 시험 파일은 시험 폴더에 만들었다 지운다.
 /// 웹 페이지는 Quick Look 보기가 그리고, 받은 표시가 있으면 코드를 보인다. gif는 창을 key로 만든 뒤 장들을 읽었는지 보고,
 /// 창이 key이고 보이면 장이 저절로 넘어가는지, 아니면 그 장에 머무는지 본다 (러너의 창이 key가 되지 않을 수 있다).
-/// '동작 줄이기'가 켜져 있으면 장들을 읽지 않고 첫 장만 그림으로 보이는지 본다
+/// '동작 줄이기'가 켜져 있으면 장들을 읽지 않고 첫 장만 그림으로 보이는지 본 뒤, 이 걸음 동안만 그 설정을 무시하고
+/// (러너는 켜져 있다) gif를 다시 골라 움직이는 길도 본다
 fn preview_kinds(run: &mut Run, dir: &str, shown: &impl Fn() -> Option<(Option<String>, Option<String>)>) {
     let html = "<!doctype html>\n<body style=\"background:#1e6fd9\"><h1>사카두</h1></body>\n";
     let (page, got, gif) = (Path::new(dir).join("쪽.html"), Path::new(dir).join("받은 쪽.html"), Path::new(dir).join("움직임.gif"));
@@ -897,7 +898,16 @@ fn preview_kinds(run: &mut Run, dir: &str, shown: &impl Fn() -> Option<(Option<S
             if run.wait("with reduce motion the gif shows as a still picture", 5, || body() == Some("picture")) {
                 run.check("and its frames are not read", frame().is_none(), || format!("{:?}", frame()));
             }
-        } else if run.wait("the gif's frames are read in the pane", 5, || frame().is_some()) {
+            // 러너는 '동작 줄이기'가 켜져 있다: 이 걸음 동안만 그 설정을 무시하고, 다른 것을 골랐다가 gif를 다시 골라
+            // 장들을 읽고 움직이는 길도 본다 (다음 그림부터는 창 쪽도 무시한다)
+            on_main(|| {
+                SMOKE_MOTION.set(true);
+                with_app(|a| a.motion = true);
+            });
+            println!("note gif: reduce motion is ignored from here to see the gif move");
+        }
+        let chosen = !reduced || (run.select("가나다.txt") && run.select("움직임.gif"));
+        if chosen && run.wait("the gif's frames are read in the pane", 5, || frame().is_some()) {
             if key && visible {
                 let first = frame();
                 run.wait("the gif moves on by itself", 3, || frame() != first);
@@ -908,6 +918,8 @@ fn preview_kinds(run: &mut Run, dir: &str, shown: &impl Fn() -> Option<(Option<S
                 run.check("the gif stays on its frame while the window is not key or not visible", frame() == first, || format!("{first:?} → {:?}", frame()));
             }
         }
+        // 다음 걸음들은 맥 설정 그대로 (창 쪽이 다음 그림에서 App에도 다시 넣는다)
+        on_main(|| SMOKE_MOTION.set(false));
     }
     for f in [&page, &got, &gif] {
         let _ = std::fs::remove_file(f);
