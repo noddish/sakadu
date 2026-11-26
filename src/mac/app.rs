@@ -2153,9 +2153,11 @@ impl App {
             (None, Some((name, why))) => format!("{}: {name} · {why}", if copying { "복사하지 못했어요" } else { "옮기지 못했어요" }),
             (Some(done), Some((name, why))) => format!("{done}고 {}개는 하지 못했어요: {name} · {why}", b.failed.len()),
         };
-        // 잘라 둔 것 가운데 옮기지 못한 것(하지 못한 것, 그만둬서 하지 않은 것)은 잘라 둔 채로 남긴다
+        // 잘라 둔 것 가운데 옮기지 못한 것(하지 못한 것, 그만둬서 하지 않은 것, 다른 디스크에 복사만 하고 원본은 그대로 둔 것)은
+        // 잘라 둔 채로 남긴다 (원본이 아직 그 자리에 있으니 다시 붙여넣을 수 있게)
         if let Paste::Cut(mark) = b.how {
-            self.clip_left = Some((mark, b.failed.iter().map(|(src, _)| src.clone()).chain(b.todo.iter().map(|(src, _)| src.clone())).collect()));
+            let left = b.failed.iter().chain(&kept).map(|(src, _)| src.clone()).chain(b.todo.iter().map(|(src, _)| src.clone()));
+            self.clip_left = Some((mark, left.collect()));
         }
         if b.renamed > 0 && !b.duplicate {
             note.push_str(&format!(" · 같은 이름이 있던 {}개에는 번호를 붙였어요", b.renamed));
@@ -8364,6 +8366,43 @@ mod tests {
         crate::fileops::TRASH_FAILS.set(false);
         assert!(noted(&a, "1개를 복사했어요") && noted(&a, "휴지통으로 보내지 못해"), "{:?}", a.flash);
         assert_eq!((names(&a, 0).len(), names(&a, 1)), (3, vec!["예산.csv".to_string()]));
+        std::fs::remove_dir_all(&far).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 다른 디스크에 잘라 붙이기(⌘X 뒤 ⌘V)에서 복사만 하고 원본은 그대로 둔 것(옮기는 동안 원본이 바뀌었거나, 원본을 휴지통으로
+    /// 보내지 못했다)은 옮겨지지 않았으니 잘라 둔 채로 남는다 (다시 붙여넣을 수 있다). 옮겨 간 것은 남지 않는다.
+    /// CI가 임시 폴더와 다른 디스크의 폴더를 알려 줄 때만 돈다
+    #[test]
+    fn cut_to_another_disk_leaves_kept_originals_on_the_clipboard() {
+        let Some(other) = crate::fileops::other_volume() else { return };
+        let (root, home) = demo();
+        let far = util::join(&other, &format!("sakadu-app-cut-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&far);
+        std::fs::create_dir_all(&far).unwrap();
+        let work = util::join(&home, "업무");
+        let (mut a, _g) = app(&work);
+        a.navigate(1, Location::Dir(far.clone()), None);
+        a.settle();
+        a.activate_pane(1);
+        // 예산.csv는 복사를 마친 뒤 고쳐져 그 자리에 남고, 회의록.md는 옮겨 간다
+        let (budget, notes) = (util::join(&work, "예산.csv"), util::join(&work, "회의록.md"));
+        let edited = budget.clone();
+        crate::fileops::MID_MOVE.set(Some(Box::new(move |_src: &str| std::fs::write(&edited, b"edited").unwrap())));
+        assert!(a.paste_paths(vec![budget.clone(), notes.clone()], Paste::Cut(5)));
+        a.settle();
+        assert!(crate::fileops::MID_MOVE.take().is_none(), "the hook ran");
+        assert!(noted(&a, "옮기는 동안 원본이 바뀌었어요"), "{:?}", a.flash);
+        assert!(std::fs::metadata(&budget).is_ok() && std::fs::metadata(&notes).is_err());
+        assert_eq!(a.clip_left.take(), Some((5, vec![budget])));
+        // 원본을 휴지통으로 보내지 못한 것도 잘라 둔 채로 남는다
+        let quarter = util::join(&work, "2026 4분기");
+        crate::fileops::TRASH_FAILS.set(true);
+        assert!(a.paste_paths(vec![quarter.clone()], Paste::Cut(6)));
+        a.settle();
+        crate::fileops::TRASH_FAILS.set(false);
+        assert!(noted(&a, "휴지통으로 보내지 못해"), "{:?}", a.flash);
+        assert_eq!(a.clip_left.take(), Some((6, vec![quarter])));
         std::fs::remove_dir_all(&far).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
