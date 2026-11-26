@@ -39,6 +39,11 @@ impl ComInit {
     pub fn sta() -> ComInit {
         ComInit(unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }.is_ok())
     }
+
+    /// 다중 스레드 아파트: WinRT 비동기 호출(PDF 그리기)을 막고 기다려도 되는 스레드
+    pub fn mta() -> ComInit {
+        ComInit(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok())
+    }
 }
 impl Drop for ComInit {
     fn drop(&mut self) {

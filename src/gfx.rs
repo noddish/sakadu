@@ -85,6 +85,8 @@ pub struct Gfx {
     app_icon: Option<ID2D1Bitmap>,
     /// 키 → (비트맵, 마지막으로 그린 순번)
     thumbs: HashMap<String, (ID2D1Bitmap, u64)>,
+    /// 움직이는 gif 한 개의 프레임들 (썸네일 키, 프레임). 썸네일 캐시와 따로 두어 오래 안 그린 것으로 밀려나지 않게 한다
+    anim: Option<(String, Vec<ID2D1Bitmap>)>,
     clock: u64,
     imagelist: HIMAGELIST,
     pub dpi: f32,
@@ -189,6 +191,7 @@ impl Gfx {
                 icons: HashMap::new(),
                 app_icon: None,
                 thumbs: HashMap::new(),
+                anim: None,
                 clock: 0,
                 imagelist,
                 dpi,
@@ -412,6 +415,7 @@ impl Gfx {
         self.icons.clear();
         self.app_icon = None;
         self.thumbs.clear();
+        self.anim = None;
         self.brush = None;
         self.rt = None;
     }
@@ -430,6 +434,7 @@ impl Gfx {
         self.icons.clear();
         self.app_icon = None;
         self.thumbs.clear();
+        self.anim = None;
         // GDI식 글자 폭은 배율에 따라 픽셀 단위로 달라진다
         self.names.borrow_mut().clear();
         if let Some(rt) = &self.rt {
@@ -744,6 +749,13 @@ impl Gfx {
         let clock = self.clock;
         let Some((bmp, used)) = self.thumbs.get_mut(key) else { return false };
         *used = clock;
+        let bmp = bmp.clone();
+        self.draw_fit(&bmp, r, opacity);
+        true
+    }
+
+    /// 비트맵을 r 안에 비율을 지켜 가운데 그린다 (키우지는 않는다)
+    fn draw_fit(&self, bmp: &ID2D1Bitmap, r: R, opacity: f32) {
         let px = unsafe { bmp.GetPixelSize() };
         let scale = self.dpi / 96.0;
         let (nw, nh) = (px.width as f32 / scale, px.height as f32 / scale);
@@ -751,10 +763,45 @@ impl Gfx {
         let (w, h) = (nw * k, nh * k);
         let (x, y) = ((r.l + r.r - w) / 2.0, (r.t + r.b - h) / 2.0);
         let dst = R::new(x.round(), y.round(), (x + w).round(), (y + h).round());
-        let bmp = bmp.clone();
         unsafe {
-            self.rt().DrawBitmap(&bmp, Some(&d2d(dst)), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+            self.rt().DrawBitmap(bmp, Some(&d2d(dst)), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
         }
+    }
+
+    /// 움직이는 gif의 프레임들(미리 곱한 BGRA)을 올린다. 앞의 것은 버린다. 렌더 타깃이 없거나 만들지 못했으면 false
+    pub fn set_anim(&mut self, key: String, frames: &[(u32, u32, Vec<u8>)]) -> bool {
+        self.anim = None;
+        let Some(rt) = &self.rt else { return false };
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        let mut out = Vec::with_capacity(frames.len());
+        for (w, h, px) in frames {
+            if px.len() < (w * h * 4) as usize {
+                return false;
+            }
+            let Ok(bmp) = (unsafe { rt.CreateBitmap(D2D_SIZE_U { width: *w, height: *h }, Some(px.as_ptr() as *const _), w * 4, &props) }) else { return false };
+            out.push(bmp);
+        }
+        self.anim = Some((key, out));
+        true
+    }
+
+    /// 올려 둔 gif 프레임들의 썸네일 키
+    pub fn anim_key(&self) -> Option<&str> {
+        self.anim.as_ref().map(|(k, _)| k.as_str())
+    }
+
+    pub fn clear_anim(&mut self) {
+        self.anim = None;
+    }
+
+    /// gif의 i번째 프레임을 썸네일처럼 그린다. 그 키의 프레임이 없으면 false
+    pub fn anim_frame(&self, key: &str, i: usize, r: R, opacity: f32) -> bool {
+        let Some(bmp) = self.anim.as_ref().filter(|(k, _)| k == key).and_then(|(_, f)| f.get(i)) else { return false };
+        self.draw_fit(bmp, r, opacity);
         true
     }
 

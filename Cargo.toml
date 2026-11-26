@@ -13,6 +13,11 @@ unicode-segmentation = "1"
 # Windows API는 Windows에서만 받는다. 공통 코드(src/lib.rs)는 다른 OS에서도 빌드·테스트된다 (macOS 버전 준비)
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
+    # 일러스트레이터(ai) 파일 안의 PDF를 Windows에 들어 있는 PDF 그리기(Windows.Data.Pdf)로 그린다
+    "Data_Pdf",
+    "Foundation",
+    "Storage",
+    "Storage_Streams",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Direct2D",
@@ -41,6 +46,9 @@ windows = { version = "0.62.2", features = [
     "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_Time",
+    # gif 프레임의 자리·지연을 읽는 WIC 메타데이터 값
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
     "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",

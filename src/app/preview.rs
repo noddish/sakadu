@@ -37,8 +37,8 @@ const TEXT_LINES: usize = 600;
 
 pub(super) use sakadu::ui::preview_card::{IMAGE_EXTS, TEXT_EXTS};
 
-/// 셸이 그리지 못해 사카두가 직접 그리는 그림 형식 (thumbs.rs): SVG, 한글 문서의 미리 보기 그림
-pub(super) const DRAWN_EXTS: &[&str] = &["svg", "hwp"];
+/// 셸이 그리지 못해 사카두가 직접 그리는 그림 형식 (thumbs.rs): SVG, 한글 문서의 미리 보기 그림, 포토샵의 합친 그림, 일러스트레이터 안의 PDF
+pub(super) const DRAWN_EXTS: &[&str] = &["svg", "hwp", "psd", "psb", "ai"];
 
 #[derive(Clone)]
 struct Target {
@@ -58,6 +58,8 @@ enum Content {
     /// 셸 썸네일만 (동영상 장면, 음악 앨범 그림 등): 없으면 큰 아이콘 대신 '미리 볼 수 없어요'
     Thumb,
     Text(String),
+    /// html을 Edge로 찍은 화면 (page.rs). 찍지 못하면 글로 바꾼다
+    Page,
     Handler(GUID),
     Info,
     /// 인터넷에서 받은 파일이라 미리 보기 처리기로 열지 않았다
@@ -132,6 +134,8 @@ pub enum PreviewMsg {
     /// 미리 보기 처리기가 열려 그렸다 / 열지 못했다 (일꾼 스레드에서)
     HandlerReady { seq: u64 },
     HandlerFailed { seq: u64 },
+    /// 움직이는 gif의 프레임 (gif.rs). 움직이지 않을 gif면 None
+    Gif { key: String, frames: Option<crate::thumbs::GifFrames> },
 }
 
 pub struct Found {
@@ -510,6 +514,8 @@ impl App {
             Content::Waiting
         } else if DRAWN_EXTS.contains(&e) {
             Content::Image
+        } else if crate::page::is_page_ext(e) && crate::page::available() {
+            Content::Page
         } else if TEXT_EXTS.contains(&e) {
             spawn_text(hwnd, pv.seq, path);
             Content::Waiting
@@ -527,6 +533,7 @@ impl App {
         crate::diag::log(|| format!("preview: {} -> {}", t.name, match pv.content {
             Content::Image => "image",
             Content::Thumb => "thumbnail",
+            Content::Page => "page",
             Content::Handler(_) => "handler",
             Content::Info => "info",
             Content::Blocked => "blocked",
@@ -536,6 +543,10 @@ impl App {
     }
 
     pub(super) fn on_preview_msg(&mut self, m: PreviewMsg) {
+        let m = match m {
+            PreviewMsg::Gif { key, frames } => return self.on_gif_frames(key, frames),
+            m => m,
+        };
         // 자동 미리 보기 카드가 읽어 달라고 한 글이면 카드가 받는다
         if let PreviewMsg::Text { seq, text } = &m
             && self.card_text(*seq, text)
@@ -781,6 +792,31 @@ impl App {
         })
     }
 
+    /// 미리 보기 창에 보이는 gif: (썸네일 키, 경로, 긴 변 px). 그림으로 보이는 gif만 (gif.rs가 움직인다)
+    pub(super) fn pane_gif(&self) -> Option<(String, String, u32)> {
+        let pv = self.preview.as_ref()?;
+        let t = pv.target.as_ref()?;
+        let body = self.preview_body()?;
+        let source = pv.source.clone().unwrap_or_else(|| t.path.clone());
+        if !matches!(pv.content, Content::Image) || ext_of(util::file_name(&source)) != "gif" {
+            return None;
+        }
+        let px = image_px(body.w().max(body.h()), self.scale());
+        Some((thumb_key(&source, t.modified, px), source, px))
+    }
+
+    /// 그림을 만들지 못했다(key): 미리 보기 창이 html 화면을 기다리고 있었으면 지금처럼 글(코드)로 보인다
+    pub(super) fn page_shot_failed(&mut self, key: &str) {
+        let hwnd = self.hwnd;
+        let Some(pv) = self.preview.as_mut() else { return };
+        let Some(t) = &pv.target else { return };
+        let source = pv.source.clone().unwrap_or_else(|| t.path.clone());
+        if matches!(pv.content, Content::Page) && key.ends_with(&format!("|{}|{source}", t.modified)) {
+            spawn_text(hwnd, pv.seq, source);
+            pv.content = Content::Waiting;
+        }
+    }
+
     fn handler_failed(&mut self, seq: u64) {
         if let Some(pv) = self.preview.as_mut().filter(|pv| pv.seq == seq) {
             pv.content = Content::Info;
@@ -804,6 +840,7 @@ impl App {
         let scale = self.scale();
         let hover = self.hover;
         let hwnd = self.hwnd;
+        let anim = self.gif_now();
         let App { gfx, preview, thumb_failed, .. } = self;
         let Some(pv) = preview.as_mut() else { return };
         if !t.high_contrast && !t.dark {
@@ -855,7 +892,8 @@ impl App {
         let source = pv.source.clone().unwrap_or_else(|| target.path.clone());
         let mut image = |gfx: &mut Gfx, r: R, px: u32, only_thumb: bool| -> bool {
             let key = thumb_key(&source, target.modified, px);
-            if gfx.thumb(&key, r, 1.0) {
+            // 움직이는 gif는 지금 프레임을, 아니면 썸네일(첫 장)을
+            if anim.as_ref().is_some_and(|(k, i)| *k == key && gfx.anim_frame(&key, *i, r, 1.0)) || gfx.thumb(&key, r, 1.0) {
                 return true;
             }
             if !thumb_failed.contains(&key) {
@@ -876,9 +914,14 @@ impl App {
                     unsafe { SetTimer(Some(hwnd), TIMER_REDRAW, (300 - waited) as u32, None) };
                 }
             }
-            Content::Image | Content::Thumb => {
+            Content::Image | Content::Thumb | Content::Page => {
                 let px = image_px(body.w().max(body.h()), scale);
-                if !image(gfx, body, px, matches!(pv.content, Content::Thumb)) {
+                // 페이지는 위에서부터 읽으니 창의 위쪽에 붙인다 (찍은 화면의 비율로 자리를 잡는다)
+                let r = match pv.content {
+                    Content::Page => R::new(body.l, body.t, body.r, (body.t + body.w() * crate::page::VIEW.1 as f32 / crate::page::VIEW.0 as f32).min(body.b)),
+                    _ => body,
+                };
+                if !image(gfx, r, px, matches!(pv.content, Content::Thumb | Content::Page)) {
                     let failed = thumb_failed.contains(&thumb_key(&source, target.modified, px));
                     let waited = pv.since.elapsed().as_millis();
                     if failed {

@@ -127,6 +127,8 @@ impl App {
                         self.start_preview();
                     } else if id == preview_card::TIMER_CARD {
                         self.start_card();
+                    } else if id == gif::TIMER_GIF {
+                        self.on_gif_timer();
                     } else if id == TIMER_PROBE {
                         self.on_probe_timer();
                     } else if id == TIMER_REDRAW {

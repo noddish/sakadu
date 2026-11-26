@@ -1,6 +1,7 @@
 //! 자동 미리 보기 카드: 지금 칸에서 파일 하나를 고르면 다른 칸의 오른쪽 아래에 저절로 뜬다.
 //! 자리와 그리기는 공통 코드(ui::preview_card). 그림은 셸 썸네일(목록·미리 보기 창과 같은 캐시), 글은 앞부분을 뒤에서 읽는다.
-//! PDF·Office 문서·동영상·음악처럼 셸이 썸네일을 만들 수 있는 파일과 한글 문서(안에 든 미리 보기 그림)는 그 썸네일을 크게 보인다.
+//! PDF·Office 문서·동영상·음악처럼 셸이 썸네일을 만들 수 있는 파일과 한글 문서(안에 든 미리 보기 그림), 포토샵·일러스트레이터
+//! (사카두가 직접 그린다)는 그 썸네일을 크게 보인다. html은 Edge로 찍은 화면을 보이고, 찍지 못하면 코드를 보인다.
 //! 썸네일이 없으면 카드를 띄우지 않는다. 도구 막대의 자동 미리 보기 단추로 끄고 켠다.
 //! 오른쪽 미리 보기 창(Alt+P, preview.rs)이 열려 있으면 그 창이 보여 주므로 카드는 뜨지 않는다
 
@@ -25,6 +26,8 @@ enum CardKind {
     Text,
     /// 문서·동영상·음악의 썸네일, 한글 문서의 미리 보기 그림. 없으면 카드를 띄우지 않는다
     Doc,
+    /// html을 Edge로 찍은 화면 (page.rs). 찍지 못하면 글 카드로 바꾼다
+    Page,
 }
 
 #[derive(Clone, PartialEq)]
@@ -39,7 +42,9 @@ struct Target {
 
 /// 확장자로 카드에 보일 것을 정한다. 보일 것이 없으면 None
 fn card_kind(ext: &str) -> Option<CardKind> {
-    if TEXT_EXTS.contains(&ext) {
+    if crate::page::is_page_ext(ext) && crate::page::available() {
+        Some(CardKind::Page)
+    } else if TEXT_EXTS.contains(&ext) {
         Some(CardKind::Text)
     } else if IMAGE_EXTS.contains(&ext) || ext == "svg" {
         Some(CardKind::Image)
@@ -85,6 +90,8 @@ struct WinCardArt<'a> {
     px: u32,
     /// 셸이 그림을 주지 못했다 (다시 요청하지 않는다)
     failed: bool,
+    /// 움직이는 gif면 지금 그릴 프레임 번호 (gif.rs)
+    frame: Option<usize>,
     /// 썸네일만 (문서: 큰 아이콘을 받지 않는다)
     only_thumb: bool,
     missing: &'a mut Vec<Request>,
@@ -93,7 +100,7 @@ struct WinCardArt<'a> {
 
 impl CardArt<Gfx> for WinCardArt<'_> {
     fn image(&mut self, g: &mut Gfx, r: R) -> bool {
-        self.drawn = g.thumb(&self.key, r, 1.0);
+        self.drawn = self.frame.is_some_and(|i| g.anim_frame(&self.key, i, r, 1.0)) || g.thumb(&self.key, r, 1.0);
         if !self.drawn && !self.failed {
             // 카드의 그림은 목록보다 먼저 만든다
             self.missing.insert(0, Request { key: self.key.clone(), path: self.path.to_string(), px: self.px, only_thumb: self.only_thumb });
@@ -109,7 +116,9 @@ impl App {
         if !self.auto_preview || self.preview.is_some() || self.settings.is_some() {
             return None;
         }
-        let App { panes, types, active, .. } = self;
+        // html 화면을 찍지 못했는지 보려고 카드 그림의 크기를 미리 잰다
+        let px = card_geom(&self.pane_rects(), self.active, self.card.large).map(|m| image_px(m.body.w().max(m.body.h()), self.scale()));
+        let App { panes, types, active, thumb_failed, .. } = self;
         let tab = panes[*active].tab();
         let e = tab.entry_at(tab.cursor).filter(|e| e.selected && e.kind == Kind::File)?;
         // 압축 파일 안의 파일은 미리 보지 않는다
@@ -117,9 +126,14 @@ impl App {
             return None;
         }
         let name = e.name_string();
-        let kind = card_kind(&ext_of(&name))?;
+        let path = tab.path_of(e)?;
+        let mut kind = card_kind(&ext_of(&name))?;
+        // 찍지 못한 html(인터넷에서 받은 파일, 실패, 시간 초과)은 지금처럼 코드를 보인다
+        if kind == CardKind::Page && px.is_some_and(|px| thumb_failed.contains(&thumb_key(&path, e.modified, px))) {
+            kind = CardKind::Text;
+        }
         let (type_name, _) = type_info(types, e);
-        Some(Target { path: tab.path_of(e)?, name, size: e.size, modified: e.modified, type_name, kind })
+        Some(Target { path, name, size: e.size, modified: e.modified, type_name, kind })
     }
 
     /// 그리기 전에: 고른 것이 바뀌었으면 카드를 새 파일에 맞춘다 (조금 기다렸다 띄운다)
@@ -190,10 +204,21 @@ impl App {
         }
         let m = card_geom(&self.pane_rects(), self.active, c.large)?;
         let px = image_px(m.body.w().max(m.body.h()), self.scale());
-        if t.kind == CardKind::Doc && self.thumb_failed.contains(&thumb_key(&t.path, t.modified, px)) {
+        if matches!(t.kind, CardKind::Doc | CardKind::Page) && self.thumb_failed.contains(&thumb_key(&t.path, t.modified, px)) {
             return None;
         }
         Some(m)
+    }
+
+    /// 카드에 보이는 gif: (썸네일 키, 경로, 긴 변 px). gif.rs가 움직인다
+    pub(super) fn card_gif(&self) -> Option<(String, String, u32)> {
+        let m = self.card_rects()?;
+        let t = self.card.target.as_ref()?;
+        if t.kind != CardKind::Image || ext_of(&t.name) != "gif" {
+            return None;
+        }
+        let px = image_px(m.body.w().max(m.body.h()), self.scale());
+        Some((thumb_key(&t.path, t.modified, px), t.path.clone(), px))
     }
 
     /// 카드에서 누를 수 있는 것. 카드의 그 밖의 곳도 Hit::Card로 잡아, 아래 칸을 누르지 않게 한다
@@ -251,11 +276,13 @@ impl App {
             _ => CardHover::None,
         };
         let hwnd = self.hwnd;
+        let anim = self.gif_now();
         let App { gfx, card, thumb_failed, .. } = self;
         let Some(target) = &card.target else { return };
         let detail = format!("{} · {}", target.type_name, format_size(target.size));
         let px = image_px(m.body.w().max(m.body.h()), scale);
         let key = thumb_key(&target.path, target.modified, px);
+        let frame = anim.filter(|(k, _)| *k == key).map(|(_, i)| i);
         let failed = thumb_failed.contains(&key);
         let waited = card.since.elapsed().as_millis();
         // 그림이 곧 오면 글자를 보이지 않는다. 늦으면 0.3초 뒤에 '불러오는 중…'
@@ -270,8 +297,8 @@ impl App {
             Some(s) if text => CardBody::Text(s),
             _ => CardBody::Image,
         };
-        let only_thumb = target.kind == CardKind::Doc;
-        let mut art = WinCardArt { key, path: &target.path, px, failed, only_thumb, missing, drawn: false };
+        let only_thumb = matches!(target.kind, CardKind::Doc | CardKind::Page);
+        let mut art = WinCardArt { key, path: &target.path, px, failed, frame, only_thumb, missing, drawn: false };
         paint_preview_card(gfx, &mut art, &t, &CardScene { geom: &m, name: &target.name, detail: &detail, body, note, large: card.large, hover });
         if !text && !art.drawn && !failed && waited < 300 {
             unsafe { SetTimer(Some(hwnd), TIMER_REDRAW, (300 - waited) as u32, None) };
@@ -291,6 +318,11 @@ mod tests {
         assert_eq!(card_kind("png"), Some(CardKind::Image));
         assert_eq!(card_kind("svg"), Some(CardKind::Image));
         assert_eq!(card_kind("hwp"), Some(CardKind::Doc));
+        // 포토샵·일러스트레이터는 사카두가 직접 그리는 문서
+        assert_eq!((card_kind("psd"), card_kind("psb"), card_kind("ai")), (Some(CardKind::Doc), Some(CardKind::Doc), Some(CardKind::Doc)));
+        // html은 Edge가 있으면 화면, 없으면 지금처럼 코드
+        let page = if crate::page::available() { CardKind::Page } else { CardKind::Text };
+        assert_eq!((card_kind("html"), card_kind("htm")), (Some(page), Some(page)));
         assert_eq!(card_kind("exe"), None);
         assert_eq!(card_kind("lnk"), None);
         // 이 PC에 등록된 썸네일 처리기를 따른다: Windows에 늘 있는 동영상 썸네일
