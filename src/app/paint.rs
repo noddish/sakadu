@@ -330,6 +330,7 @@ impl App {
         // 목록의 수정한 날짜를 짧게(오늘·어제) 쓸지와 그 기준 시각
         let (short_dates, now) = (self.look.dates != "full", crate::listing::now_filetime());
         let cols = self.cols(p);
+        let rename_box = if edit_mode == EditMode::Rename(p) { self.rename_box(p) } else { None };
         let App { gfx, panes, types, thumb_failed, places, .. } = self;
         let pane = &panes[p];
         let scene = PaneScene {
@@ -354,7 +355,7 @@ impl App {
             root: Some("내 PC"),
             address: edit_mode == EditMode::Address(p),
             address_text: None,
-            renaming: edit_mode == EditMode::Rename(p),
+            rename_box,
             dragged_tab: dragged_tab.filter(|(q, _)| *q == p).map(|(_, i)| i),
             tab_drop: tab_drop.filter(|(q, _)| *q == p).map(|(_, at)| at),
             drop_on_pane,

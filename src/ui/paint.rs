@@ -73,8 +73,8 @@ pub struct PaneScene<'a> {
     /// 경로 입력 중. 입력 상자가 없으면(그림 시험) 그 글자를 직접 그린다
     pub address: bool,
     pub address_text: Option<&'a str>,
-    /// 이름 바꾸는 중 (커서 줄에 입력 자리)
-    pub renaming: bool,
+    /// 이름 바꾸는 중이면 커서 줄 이름 상자의 테두리 자리. 긴 이름이면 이웃 칸·열 위로 넓어져서 목록을 다 그린 뒤 그린다
+    pub rename_box: Option<R>,
     /// 이 칸에서 끌고 있는 탭, 이 칸에 탭을 놓을 자리
     pub dragged_tab: Option<usize>,
     pub tab_drop: Option<usize>,
@@ -354,7 +354,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
         // 선택(바탕)과 키보드 포커스(테두리)는 따로 보인다. 포커스는 활성 칸에만, 선택한 하나와 겹치면 바탕만으로
         let focused = keyboard_here && vi == tab.cursor && (!e.selected || many_selected);
         let fg = if e.selected && active { t.sel_text } else { t.text };
-        let renaming_here = s.renaming && vi == tab.cursor;
+        let renaming_here = s.rename_box.is_some() && vi == tab.cursor;
         if grid.cell == CellKind::Icon {
             // 작은 아이콘·목록: 칸 하나에 작은 아이콘과 이름
             let cell = R::new(it.l, it.t + 1.0, it.r - SP_XS, it.b - 1.0);
@@ -370,11 +370,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
             }
             let iy = it.t + (ROW_H - ICON) / 2.0;
             art.icon(gfx, tab, e, R::new(it.l + ICON_ICON_L, iy, it.l + ICON_ICON_L + ICON, iy + ICON));
-            if renaming_here {
-                let er = R::new(it.l + ICON_LABEL_L - SP_XS, it.t + SP_HAIR, it.r - SP_S, it.b - SP_HAIR);
-                gfx.fill_round(er, R_ROW, t.pane);
-                gfx.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
-            } else {
+            if !renaming_here {
                 let fg = if e.is_hidden() && !(e.selected && active) { t.faint } else { fg };
                 let nr = icon_name_rect(it);
                 gfx.text(&gfx.fit_name(e.name(), nr.w() - NAME_FIT_SLACK).0, nr, Font::Name, fg);
@@ -402,11 +398,7 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
                 art.icon(gfx, tab, e, R::new(cx - ICON, my - ICON, cx + ICON, my + ICON));
             }
             let cap = R::new(tile.l + SP_XS, bx.b + SP_S, tile.r - SP_XS, tile.b);
-            if renaming_here {
-                let er = R::new(it.l + SP_XS, bx.b + SP_S, it.r - SP_S, bx.b + SP_S + SP_XL);
-                gfx.fill_round(er, R_ROW, t.pane);
-                gfx.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
-            } else {
+            if !renaming_here {
                 // 그림 아래 두 줄은 글꼴이 글자 덩어리 단위로 끊는다. 자모로 나뉜 한글만 합쳐 보인다
                 let name = String::from_utf16_lossy(e.name());
                 gfx.text(&crate::typo::display_name(&name), cap, Font::Caption, if e.is_hidden() { t.faint } else { fg });
@@ -459,11 +451,11 @@ pub fn paint_pane_list<G: Canvas>(gfx: &mut G, art: &mut impl EntryArt<G>, t: &T
             };
             gfx.text(&s, R::new(l + SP_S, y, rr - SP_S, y + ROW_H), Font::MetaRight, dim);
         }
-        if renaming_here {
-            let er = R::new(cols.name.0 + ROW_LABEL_L - SP_XS, y + SP_HAIR, cols.name.1 - SP_XS, y + ROW_H - SP_HAIR);
-            gfx.fill_round(er, R_ROW, t.pane);
-            gfx.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
-        }
+    }
+    // 이름 상자 테두리 (글자는 입력 상자가 그린다): 넓어진 상자가 이웃 칸·열을 덮도록 맨 나중에
+    if let Some(er) = s.rename_box {
+        gfx.fill_round(er, R_ROW, t.pane);
+        gfx.stroke_round(er.inset(0.75, 0.75), R_ROW, t.accent, 1.5);
     }
     gfx.unclip();
 
@@ -596,7 +588,7 @@ mod tests {
             root: None,
             address: false,
             address_text: None,
-            renaming: false,
+            rename_box: None,
             dragged_tab: None,
             tab_drop: None,
             drop_on_pane: false,

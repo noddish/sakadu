@@ -660,6 +660,24 @@ pub fn name_edit_rect(list: R, view: ViewMode, cols: [f32; 3], vi: usize, scroll
     })
 }
 
+/// 이름 상자(name_edit_rect 자리)를 고치는 이름이 다 보이게 넓힌다. need는 이름 전체를 담는 상자 폭.
+/// 줄 보기는 이름이 시작하는 자리를 그대로 두고 오른쪽으로, 그림 아래 이름은 가운데를 두고 양쪽으로 넓힌다.
+/// 목록 밖으로는 나가지 않는다 (그보다 긴 이름은 상자 안에서 흘러간다)
+pub fn widen_name_edit(slot: R, list: R, view: ViewMode, need: f32) -> R {
+    if need <= slot.w() {
+        return slot;
+    }
+    let (min_l, max_r) = (list.l + SP_XS, list.r - SP_XS);
+    match Grid::of(list, view).cell {
+        CellKind::Tile(_) => {
+            let w = need.min(max_r - min_l).max(slot.w());
+            let l = ((slot.l + slot.r - w) / 2.0).min(max_r - w).max(min_l);
+            R::new(l, slot.t, l + w, slot.b)
+        }
+        CellKind::Icon | CellKind::Row => R::new(slot.l, slot.t, (slot.l + need).min(max_r).max(slot.r), slot.b),
+    }
+}
+
 /// 목록이 넘칠 때 (트랙, 손잡이). content는 전체 내용 높이
 pub fn scroll_metrics(list: R, content: f32, scroll: f32) -> Option<(R, R)> {
     let view = list.h();
@@ -852,6 +870,31 @@ mod tests {
             let r = name_edit_rect(list, view, cols, 0, 0.0).unwrap();
             assert!(r.l >= it.l && r.r <= it.r && r.t > it.t && r.b <= it.b && r.w() > 40.0, "{view:?}: {r:?} in {it:?}");
         }
+    }
+
+    /// 긴 이름은 상자를 넓혀 다 보인다: 줄 보기는 오른쪽으로, 그림 아래 이름은 양쪽으로. 목록 밖으로는 나가지 않는다
+    #[test]
+    fn name_edit_widens_for_a_long_name_but_stays_in_the_list() {
+        let list = R::new(0.0, 100.0, 600.0, 400.0);
+        let cols = [140.0, 180.0, 84.0];
+        // 이름이 자리에 들어가면 그대로
+        let slot = name_edit_rect(list, ViewMode::Details, cols, 0, 0.0).unwrap();
+        assert_eq!(widen_name_edit(slot, list, ViewMode::Details, slot.w() - 10.0), slot);
+        // 줄 보기: 시작은 그대로, 오른쪽으로 필요한 만큼. 목록 끝을 넘지 않는다
+        let wide = widen_name_edit(slot, list, ViewMode::Details, slot.w() + 120.0);
+        assert_eq!((wide.l, wide.t, wide.b, wide.w()), (slot.l, slot.t, slot.b, slot.w() + 120.0));
+        assert_eq!(widen_name_edit(slot, list, ViewMode::Details, 5000.0).r, list.r - SP_XS);
+        // 그림 아래 이름: 가운데를 두고 양쪽으로
+        let slot = name_edit_rect(list, ViewMode::Medium, cols, 1, 0.0).unwrap();
+        let wide = widen_name_edit(slot, list, ViewMode::Medium, 240.0);
+        assert_eq!((wide.w(), wide.t, wide.b), (240.0, slot.t, slot.b));
+        assert!(((wide.l + wide.r) - (slot.l + slot.r)).abs() < 0.01, "{wide:?} centered on {slot:?}");
+        // 맨 왼쪽 칸은 목록 왼쪽 끝에서 멈추고 오른쪽으로 더 넓힌다. 목록보다 넓어지지는 않는다
+        let first = name_edit_rect(list, ViewMode::Medium, cols, 0, 0.0).unwrap();
+        let wide = widen_name_edit(first, list, ViewMode::Medium, 240.0);
+        assert_eq!((wide.l, wide.w()), (list.l + SP_XS, 240.0));
+        let widest = widen_name_edit(first, list, ViewMode::Medium, 5000.0);
+        assert_eq!((widest.l, widest.r), (list.l + SP_XS, list.r - SP_XS));
     }
 
     /// 4칸의 가운데와 3칸의 T자에서 두 나눔선이 만난다. 1·2칸에는 없다

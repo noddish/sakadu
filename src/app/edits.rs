@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// 파일 이름 상자를 이름보다 이만큼 넓게 둔다: 테두리에서 입력 상자까지 4px씩, 입력 상자 안 여백 2px씩,
+/// 그리고 한 글자를 더 쳐도 상자가 넓어지기 전에 글자가 밀려나지 않을 여유
+const RENAME_ROOM: f32 = 8.0 + 4.0 + 16.0;
+
 impl App {
     // ---------- 입력 상자 ----------
 
@@ -27,6 +31,72 @@ impl App {
         let pane = &self.panes[p];
         let tab = pane.tab();
         name_edit_rect(list, pane.view, self.cols(p), tab.cursor, tab.scroll)
+    }
+
+    /// 파일 이름 상자의 테두리 자리: 커서 줄의 이름 자리를 고치는 이름이 다 보이게 넓힌 것 (그리기와 입력 상자 놓기가 같이 쓴다).
+    /// 줄이 다 보이지 않으면 None
+    pub(super) fn rename_box(&self, p: usize) -> Option<R> {
+        let slot = self.rename_rect(p)?;
+        let list = self.list_rect(p)?;
+        Some(widen_name_edit(slot, list, self.panes[p].view, self.rename_text_w() + RENAME_ROOM))
+    }
+
+    /// 이름 상자에 든 글자의 폭 (DIP). 입력 상자 글꼴로 잰다
+    fn rename_text_w(&self) -> f32 {
+        let text: Vec<u16> = edit_text(self.rename_edit).encode_utf16().collect();
+        let mut size = SIZE::default();
+        unsafe {
+            let dc = GetDC(Some(self.rename_edit));
+            let old = SelectObject(dc, self.edit_font.into());
+            let _ = GetTextExtentPoint32W(dc, &text, &mut size);
+            SelectObject(dc, old);
+            ReleaseDC(Some(self.rename_edit), dc);
+        }
+        size.cx as f32 / self.scale()
+    }
+
+    /// 창 좌표 x(DIP)에 가장 가까운 이름 상자의 글자 위치 (입력 상자 밖이면 가까운 끝)
+    fn rename_char_at(&self, x: f32) -> usize {
+        let mut rc = RECT::default();
+        let mut pt = [POINT { x: (x * self.scale()).round() as i32, y: 0 }];
+        unsafe {
+            let _ = GetClientRect(self.rename_edit, &mut rc);
+            MapWindowPoints(Some(self.hwnd), Some(self.rename_edit), &mut pt);
+        }
+        let (ex, ey) = (pt[0].x.clamp(0, (rc.right - 1).max(0)) as u32, (rc.bottom / 2).max(0) as u32);
+        let r = unsafe { SendMessageW(self.rename_edit, EM_CHARFROMPOS, None, Some(LPARAM(((ey << 16) | (ex & 0xFFFF)) as isize))) };
+        (r.0 as u32 & 0xFFFF) as usize
+    }
+
+    /// 마우스가 칸 p의 이름 상자(테두리 안) 위에 있으면 그 자리의 글자 위치
+    fn rename_char_at_cursor(&self, p: usize) -> Option<usize> {
+        let mut pt = POINT::default();
+        unsafe { GetCursorPos(&mut pt) }.ok()?;
+        let _ = unsafe { ScreenToClient(self.hwnd, &mut pt) };
+        let (x, y) = (pt.x as f32 / self.scale(), pt.y as f32 / self.scale());
+        self.rename_box(p)?.contains(x, y).then(|| self.rename_char_at(x))
+    }
+
+    /// 이름 상자 테두리 안을 눌렀으면(입력 상자 둘레의 여백 포함) 그 자리에 캐럿을 둔다. 눌렀으면 true
+    pub(super) fn rename_box_click(&mut self, x: f32, y: f32) -> bool {
+        let EditMode::Rename(p) = self.edit_mode else { return false };
+        if !self.rename_box(p).is_some_and(|b| b.contains(x, y)) {
+            return false;
+        }
+        let i = self.rename_char_at(x);
+        unsafe {
+            SendMessageW(self.rename_edit, EM_SETSEL, Some(WPARAM(i)), Some(LPARAM(i as isize)));
+        }
+        self.focus();
+        true
+    }
+
+    /// 이름 상자 글자가 바뀌었다: 파일 이름 상자는 이름이 다 보이게 폭을 다시 맞춘다
+    pub(super) fn rename_changed(&mut self) {
+        if matches!(self.edit_mode, EditMode::Rename(_)) {
+            self.layout_edits();
+            self.invalidate();
+        }
     }
 
     /// 실제 Win32 입력 상자(한글 IME 지원)를 그려 둔 자리 위에 맞춘다.
@@ -81,7 +151,7 @@ impl App {
         };
         place(self.addr_edit, addr);
         let ren = match self.edit_mode {
-            EditMode::Rename(p) => self.rename_rect(p).map(|r| center(r, 4.0, 4.0)),
+            EditMode::Rename(p) => self.rename_box(p).map(|r| center(r, 4.0, 4.0)),
             EditMode::FavRename(row) => self.fav_rename_rect(row).map(|r| center(r, 4.0, 4.0)),
             EditMode::PinRename(i) => self.pin_rename_rect(i).map(|r| center(r, 4.0, 4.0)),
             EditMode::WorkspaceRename => Some(center(self.workspace_rename_rect(), 4.0, 4.0)),
@@ -198,9 +268,14 @@ impl App {
         self.ensure_visible(p);
         unsafe {
             let _ = SetWindowTextW(self.rename_edit, &HSTRING::from(name));
-            SendMessageW(self.rename_edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(stem as isize)));
         }
+        // 상자를 이름에 맞게 넓힌 뒤에 고른다 (좁은 상자에서 고르면 글자가 밀려 앞부분이 가린 채로 남는다).
+        // 마우스가 이름 상자 위에 있으면 가리킨 자리에 캐럿을 둔다. 아니면 탐색기처럼 확장자 앞까지 고른다
         self.layout_edits();
+        let (from, to) = self.rename_char_at_cursor(p).map_or((0, stem), |i| (i, i));
+        unsafe {
+            SendMessageW(self.rename_edit, EM_SETSEL, Some(WPARAM(from)), Some(LPARAM(to as isize)));
+        }
         self.focus();
         self.invalidate();
     }
@@ -287,6 +362,9 @@ impl App {
             };
             unsafe {
                 let _ = SetWindowTextW(self.rename_edit, &HSTRING::from(typed));
+            }
+            self.layout_edits();
+            unsafe {
                 SendMessageW(self.rename_edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(stem as isize)));
             }
         }

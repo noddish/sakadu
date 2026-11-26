@@ -67,6 +67,10 @@ impl App {
                     }
                 }
                 WM_SETCURSOR => {
+                    // 입력 상자 같은 자식 창 위에서는 그 창이 제 커서(글자 커서)를 정하게 둔다
+                    if HWND(wp.0 as *mut c_void) != hwnd {
+                        return Some(LRESULT(0));
+                    }
                     if loword(lp.0 as usize) as u32 == HTCLIENT && self.on_set_cursor() {
                         return Some(LRESULT(1));
                     }
@@ -105,6 +109,7 @@ impl App {
                     if hiword(wp.0) as u32 == EN_CHANGE {
                         match loword(wp.0) as i32 {
                             ID_FILTER => self.sync_filter_from_edit(),
+                            ID_RENAME => self.rename_changed(),
                             ID_SEARCH => self.pal_query_changed(),
                             ID_CMD => self.cmd_rebuild(),
                             _ => {}
@@ -447,6 +452,10 @@ impl App {
         }
         if self.cmd.is_some() {
             return self.cmd_click(hit);
+        }
+        // 이름 상자 테두리 안을 누르면 이름 고치기를 끝내지 않고 누른 자리에 캐럿을 둔다
+        if self.rename_box_click(x, y) {
+            return;
         }
         // 검색 칸·검색 패널 밖을 누르면 X를 누른 것처럼 검색을 닫는다. 검색 패널은 칸을 밀어내므로, 누르는 순간 닫으면
         // 칸이 옮겨져 다른 것이 눌린다: 누른 일을 먼저 하고 버튼을 뗄 때 닫는다
@@ -940,7 +949,10 @@ impl App {
                 let under = self.pane_rects().into_iter().find(|(_, r)| r.contains(x, y)).map(|(q, _)| q);
                 let waiting = !self.probes.is_empty()
                     || under.is_some_and(|q| !self.panes[q].tab().offline && self.panes[q].tab().loading_since.is_some_and(|s| s.elapsed().as_millis() >= LOADING_SHOW_MS));
+                // 이름 상자 테두리 안(입력 상자 둘레의 여백)도 상자 안처럼 글자 커서
+                let on_rename = matches!(self.edit_mode, EditMode::Rename(p) if self.rename_box(p).is_some_and(|b| b.contains(x, y)));
                 match hit {
+                    _ if on_rename => IDC_IBEAM,
                     Hit::SplitX | Hit::HeaderResize(..) | Hit::SideResize => IDC_SIZEWE,
                     Hit::SplitY => IDC_SIZENS,
                     Hit::SplitXY => IDC_SIZEALL,
