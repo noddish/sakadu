@@ -403,7 +403,7 @@ impl App {
     }
 
     /// 검색 범위가 바뀌었다: 설정에 적고, 검색이 켜져 있으면 색인을 버리고 새 범위로 다시 훑는다
-    fn find_scope_changed(&mut self) {
+    pub(super) fn find_scope_changed(&mut self) {
         self.save_find_setting();
         if self.find.setting.on {
             self.drop_index();

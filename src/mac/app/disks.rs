@@ -30,7 +30,7 @@ fn under_composed(path: &str, root: &str) -> Option<String> {
 impl App {
     /// 디스크가 붙거나 떨어지거나 이름이 바뀌었다 (창 쪽이 맥의 알림을 받아 부른다. 연결한 공유가 붙은 뒤에도 부른다):
     /// 사이드바 '모든 공간'의 바로가기를 places로 바꾸고, 용량을 다시 읽게 한다. 떨어진 디스크를 보던 탭은 홈으로 가고
-    /// (방문 기록에서도 뺀다), 이름이 바뀐 디스크를 보던 탭은 새 자리로 따라간다
+    /// (방문 기록에서도 뺀다), 이름이 바뀐 디스크를 보던 탭과 검색에 더한 그 디스크 위의 폴더는 새 자리로 따라간다
     pub fn on_volumes(&mut self, places: Vec<(String, String)>, event: Option<VolumeEvent>) {
         // 디스크 메뉴와 누르고 있는 사이드바 줄은 줄 번호로 기억한다: 줄이 바뀌면 다른 디스크를 가리킬 수 있다
         if self.places != places {
@@ -63,6 +63,21 @@ impl App {
             Some(VolumeEvent::Renamed { from, to }) => {
                 let touched = showing(self, &from);
                 self.tabs_moved_with(|d| under_composed(d, &from).map(|rest| format!("{to}{rest}")));
+                // 검색에 더한 폴더도 새 자리로: 옛 자리는 이제 없다. 설정 창에서 폴더를 더하고 뺄 때처럼 적고 새 범위로 다시 훑는다
+                let folders = &mut self.find.setting.folders;
+                let mut moved = false;
+                for f in folders.iter_mut() {
+                    if let Some(rest) = under_composed(f, &from) {
+                        *f = format!("{to}{rest}");
+                        moved = true;
+                    }
+                }
+                if moved {
+                    // 새 자리에 이미 더해 둔 폴더와 겹치면 하나만 둔다 (폴더 더하기처럼)
+                    let mut seen = std::collections::HashSet::new();
+                    folders.retain(|f| seen.insert(f.clone()));
+                    self.find_scope_changed();
+                }
                 if touched {
                     self.refresh_changed();
                 }
@@ -150,7 +165,7 @@ mod tests {
     }
 
     /// 디스크가 떨어지면: 사이드바에서 빠지고, 그 디스크를 보던 탭은 홈으로, 방문 기록에서도 빠진다. 용량을 다시 읽는다.
-    /// 이름이 바뀌면 그 디스크를 보던 탭이 새 자리로 따라간다
+    /// 이름이 바뀌면 그 디스크를 보던 탭이 새 자리로 따라가고, 검색에 더한 그 디스크 위의 폴더도 새 자리로 고쳐 적고 다시 훑는다
     #[test]
     fn disks_coming_and_going_refresh_the_sidebar_and_the_tabs() {
         let (root, home) = demo();
@@ -173,10 +188,22 @@ mod tests {
         // 이름이 바뀐 디스크: 그 안을 보던 탭이 새 자리로 (여기서는 폴더 이름을 바꿔 흉내 낸다)
         let renamed = util::join(&home, "새 이름");
         a.on_volumes(with_disk(&home, &util::join(&home, "업무")), None);
+        // 검색에 더한 폴더: 그 디스크 위의 것과 이름만 비슷한 옆 폴더 (훑는 범위는 내려받기와 더한 폴더만. 러너의 홈은 훑지 않는다)
+        let beside = util::join(&home, "업무 보관");
+        std::fs::create_dir(&beside).unwrap();
+        a.set_find_roots(vec![util::join(&home, "다운로드")]);
+        a.add_find_folder(&util::join(&home, "업무/2026 4분기"));
+        a.add_find_folder(&beside);
+        a.set_find_on(true);
         a.navigate(0, Location::Dir(util::join(&home, "업무/2026 4분기")), None);
         a.settle();
         std::fs::rename(util::join(&home, "업무"), &renamed).unwrap();
         a.on_volumes(with_disk(&home, &renamed), Some(VolumeEvent::Renamed { from: util::join(&home, "업무"), to: renamed.clone() }));
+        // 그 디스크 위의 더한 폴더는 새 자리로 적히고(설정 창에서 더하고 뺄 때처럼 저장한다) 새 범위로 다시 훑는다. 옆 폴더는 그대로
+        let moved = util::join(&renamed, "2026 4분기");
+        assert_eq!(a.prefs().folders, [moved.clone(), beside.clone()]);
+        let opts = a.take_index_start().expect("a new index is asked for");
+        assert!(opts.roots.contains(&moved) && !opts.roots.contains(&util::join(&home, "업무/2026 4분기")), "{:?}", opts.roots);
         a.settle();
         assert_eq!(a.pane(0).tab().loc, Location::Dir(util::join(&renamed, "2026 4분기")));
         assert_eq!(names(&a, 0), ["보고서.docx"]);
