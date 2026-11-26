@@ -24,6 +24,7 @@
 mod commands;
 mod disks;
 mod find;
+mod moving;
 mod preview_pane;
 mod standby;
 mod start;
@@ -35,7 +36,8 @@ pub use standby::resolve_external;
 pub use start::{Space, volume_space};
 
 use crate::fileops::{self, Done, Fail, Job, Op, Then};
-use crate::gfx::{Gfx, MONO_LINE_H, Picture};
+use crate::gfx::{Frames, Gfx, MONO_LINE_H, Picture};
+use moving::Moving;
 use sakadu::archive_path;
 use sakadu::draw::{Color, Font, R};
 use sakadu::favorites::{self, Favorite, Favorites, Row};
@@ -656,13 +658,21 @@ pub struct PreviewRequest {
     kind: CardKind,
     /// 오른쪽 미리 보기 창의 것 (아니면 카드의 것). 창은 글을 더 많이 보인다
     pane: bool,
+    /// 웹 페이지를 오른쪽 창의 Quick Look 보기로 보일 수 있다: 받은 표시만 보고 그림은 만들지 않는다 (load_page)
+    look: bool,
+    /// 움직이는 gif의 장들을 다 읽는다 ('동작 줄이기'를 켰으면 첫 장만 읽는다)
+    frames: bool,
 }
 
 /// 뒷줄에서 읽은 카드·창의 내용
 pub enum Preview {
     Image(Picture),
+    /// 움직이는 gif의 장들 (둘 이상)
+    Moving(Frames),
     /// 글 파일의 앞부분 (decode_text가 다듬은 것)
     Text(String),
+    /// 오른쪽 창의 Quick Look 보기로 보인다 (받은 표시가 없는 웹 페이지)
+    Look,
 }
 
 /// 요청한 내용을 읽는다 (창에서는 뒷줄에서 부른다). 읽지 못하면 None
@@ -670,19 +680,64 @@ pub fn load_preview(req: &PreviewRequest) -> Option<Preview> {
     let path = &req.key.path;
     let lines = if req.pane { preview_pane::PANE_LINES } else { TEXT_LINES };
     match req.kind {
+        // 장이 하나뿐이거나 다 풀기에 많으면 첫 장만 (gfx::frames_fit)
+        CardKind::Image if req.frames => {
+            let mut f = Gfx::load_frames(path, req.px)?;
+            if f.pics.len() > 1 { Some(Preview::Moving(f)) } else { f.pics.pop().map(Preview::Image) }
+        }
         CardKind::Image => Gfx::load_picture(path, req.px).map(Preview::Image),
         CardKind::Doc if is_hwp(path) => load_hwp(path, req.px, lines),
+        CardKind::Doc if is_page(path) => load_page(req),
         // 꾸미지 않은 썸네일: PDF의 첫 쪽, 동영상의 한 장면을 그대로 크게 보인다
         CardKind::Doc => Gfx::load_quick_look(path, req.px, false).map(Preview::Image),
-        CardKind::Text => {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            std::fs::File::open(path).ok()?.take(TEXT_READ).read_to_end(&mut buf).ok()?;
-            if req.pane { decode_lines(&buf, lines) } else { decode_text(&buf) }.map(Preview::Text)
-        }
+        CardKind::Text => read_text(path, req.pane),
         // 압축 파일: 맨 위 항목들을 글로 (Windows와 같다). 읽지 못하면 정보만
         CardKind::Archive => crate::archive::list(path, path).ok().map(|v| Preview::Text(archive_path::archive_text(&v))),
     }
+}
+
+/// 글 파일의 앞부분 (카드는 80줄, 창은 더 많이). 글로 읽히지 않으면 None
+fn read_text(path: &str, pane: bool) -> Option<Preview> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path).ok()?.take(TEXT_READ).read_to_end(&mut buf).ok()?;
+    if pane { decode_lines(&buf, preview_pane::PANE_LINES) } else { decode_text(&buf) }.map(Preview::Text)
+}
+
+/// 웹 페이지(html·htm): 맥의 Quick Look이 WebKit으로 그린 쪽을 보인다 (창은 Quick Look 보기, 카드는 그 썸네일).
+/// 인터넷에서 받은 파일(받은 표시가 있는 것)은 그리지 않고 코드를 보인다: Windows가 인터넷 표시가 있는 html을 코드로 두는 것과 같다.
+/// Quick Look이 그림을 주지 못해도 코드
+fn load_page(req: &PreviewRequest) -> Option<Preview> {
+    let path = &req.key.path;
+    if !quarantined(path) {
+        if req.look {
+            return Some(Preview::Look);
+        }
+        if let Some(pic) = Gfx::load_quick_look(path, req.px, false) {
+            return Some(Preview::Image(pic));
+        }
+    }
+    read_text(path, req.pane)
+}
+
+/// 맥이 인터넷에서 받은 파일에 붙이는 확장 속성
+const QUARANTINE: &std::ffi::CStr = c"com.apple.quarantine";
+
+/// 인터넷에서 받은 파일인가: 받은 표시(com.apple.quarantine)가 있다. 표시가 없거나 확장 속성을 두지 못하는 디스크면 아니다.
+/// 그 밖의 까닭으로 알 수 없으면 받은 것으로 본다 (그리지 않고 코드를 보이는 쪽이 안전하다)
+fn quarantined(path: &str) -> bool {
+    let Ok(p) = std::ffi::CString::new(path) else { return true };
+    // SAFETY: NUL로 끝나는 경로와 속성 이름. 값은 받지 않고(크기 0) 있는지만 묻는다
+    let n = unsafe { libc::getxattr(p.as_ptr(), QUARANTINE.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
+    n >= 0 || !matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ENOATTR | libc::ENOTSUP))
+}
+
+/// 시험·창 시험: 인터넷에서 받은 파일처럼 받은 표시를 붙인다 (Safari가 붙이는 꼴). 붙였으면 true
+pub fn mark_quarantined(path: &str) -> bool {
+    let Ok(p) = std::ffi::CString::new(path) else { return false };
+    let value = b"0083;00000000;Safari;";
+    // SAFETY: NUL로 끝나는 경로와 속성 이름, 값의 바이트와 그 길이
+    unsafe { libc::setxattr(p.as_ptr(), QUARANTINE.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0) == 0 }
 }
 
 /// 한글 문서(hwp)의 미리 보기: 안에 든 그림(PrvImage: PNG·GIF·BMP)이 있으면 그 그림, 없으면 미리 보기 글(PrvText, UTF-16).
@@ -702,6 +757,16 @@ fn load_hwp(path: &str, px: u32, lines: usize) -> Option<Preview> {
 /// 한글 문서인가 (확장자 hwp)
 fn is_hwp(path: &str) -> bool {
     ext_of(path.rsplit('/').next().unwrap_or(path)).as_deref() == Some("hwp")
+}
+
+/// 웹 페이지인가 (PAGE_EXTS. 경로나 이름)
+fn is_page(path: &str) -> bool {
+    ext_of(path.rsplit('/').next().unwrap_or(path)).is_some_and(|e| PAGE_EXTS.contains(&e.as_str()))
+}
+
+/// 움직일 수 있는 그림인가 (확장자 gif. 경로나 이름)
+fn is_gif(path: &str) -> bool {
+    ext_of(path.rsplit('/').next().unwrap_or(path)).as_deref() == Some("gif")
 }
 
 /// 글 파일의 앞부분(바이트)을 카드에 보일 글로 바꾼다 (앞 80줄)
@@ -782,6 +847,9 @@ const NO_THUMBNAIL_EXTS: &[&str] = &[
     "download", "tmp", "temp", "swp", "db", "sqlite", "sqlite3", "ds_store", "localized", "icloud",
 ];
 
+/// 웹 페이지의 확장자. 공통 TEXT_EXTS에도 있지만(Windows가 따로 가린다) 맥은 글보다 먼저 가려 맥이 그린 쪽을 보인다 (load_page)
+const PAGE_EXTS: &[&str] = &["html", "htm"];
+
 /// 이름의 확장자 (소문자). Windows와 같게 가린다: 점으로 시작하는 이름(.gitignore)은 점 뒤 전체가 확장자다. 없으면 None
 fn ext_of(name: &str) -> Option<String> {
     match name.rsplit_once('.') {
@@ -790,11 +858,13 @@ fn ext_of(name: &str) -> Option<String> {
     }
 }
 
-/// 이름으로 본 카드 종류: 글 파일, 그림, 그 밖에 Quick Look이 썸네일을 만들 수 있는 문서. 카드에 띄우지 않는 파일이면 None
+/// 이름으로 본 카드 종류: 글 파일, 그림, 그 밖에 Quick Look이 썸네일을 만들 수 있는 문서(웹 페이지, psd·ai 따위도). 카드에 띄우지 않는 파일이면 None
 fn card_kind(name: &str) -> Option<CardKind> {
     let ext = ext_of(name)?;
     let e = ext.as_str();
-    if TEXT_EXTS.contains(&e) {
+    if PAGE_EXTS.contains(&e) {
+        Some(CardKind::Doc)
+    } else if TEXT_EXTS.contains(&e) {
         Some(CardKind::Text)
     } else if IMAGE_EXTS.contains(&e) {
         Some(CardKind::Image)
@@ -834,11 +904,13 @@ struct Card {
     closed: Option<String>,
     /// 크게 보기. 카드가 사라질 때까지 이어진다 (파일을 옮겨 다니며 크게 볼 수 있게)
     large: bool,
+    /// 이 파일이 움직이는 gif면 그 장들 (첫 장은 읽어 둔 그림에도 있다). 다른 파일을 고르거나 카드를 닫으면 버린다
+    moving: Option<Moving>,
 }
 
 impl Card {
     fn new() -> Card {
-        Card { key: None, text: None, failed: false, asked: 0, since: Instant::now(), closed: None, large: false }
+        Card { key: None, text: None, failed: false, asked: 0, since: Instant::now(), closed: None, large: false, moving: None }
     }
 }
 
@@ -1678,6 +1750,7 @@ impl App {
             self.card.failed = false;
             self.card.asked = 0;
             self.card.since = Instant::now();
+            self.card.moving = None;
         }
         let Some(t) = target else {
             // 카드가 사라지면(띄울 파일이 없거나 자동 미리 보기를 껐으면) 크게 보기도 끝난다
@@ -1693,17 +1766,20 @@ impl App {
             self.pics.push(c);
         }
         // 필요한 것과 이미 가진 것: 글은 1, 그림은 긴 쪽 픽셀 수 (원본 그대로 읽어 둔 그림은 더 읽을 것이 없다).
-        // 그림이 없는 한글 문서는 글을 읽었으면 더 읽을 것이 없다
+        // 그림이 없는 한글 문서(코드로 보이는 웹 페이지)는 글을 읽었으면 더 읽을 것이 없다.
+        // 움직일 gif는 장들을 읽어야 한다: 읽어 둔 첫 장만으로는 모자란다 (장이 하나뿐이거나 한도를 넘으면 한 번 묻고 만다)
+        let frames = t.kind == CardKind::Image && self.motion && is_gif(&t.key.path);
         let (want, have) = match t.kind {
             CardKind::Text => (1, self.card.text.is_some() as u32),
             CardKind::Doc if self.card.text.is_some() => (1, 1),
+            _ if frames => (if self.card.large { PX_LARGE } else { PX_SMALL }, self.card.moving.as_ref().map_or(0, Moving::have)),
             _ => (if self.card.large { PX_LARGE } else { PX_SMALL }, self.pic(&t.key).map_or(0, |c| if c.full() { u32::MAX } else { c.px })),
         };
         if have < want && self.card.asked < want {
             self.card.asked = want;
             let seq = self.next_seq();
             let px = if t.kind == CardKind::Text { 0 } else { want };
-            self.previews.push(PreviewRequest { seq, key: t.key, px, kind: t.kind, pane: false });
+            self.previews.push(PreviewRequest { seq, key: t.key, px, kind: t.kind, pane: false, look: false, frames });
         }
     }
 
@@ -1730,20 +1806,31 @@ impl App {
             return;
         }
         match result {
-            Some(Preview::Image(pic)) => {
-                // 같은 파일을 더 크게 읽은 것이 이미 있으면 그대로 둔다 (작게 읽은 것이 늦게 온 경우)
-                if self.pic(&req.key).is_some_and(|c| c.px >= req.px) {
+            Some(Preview::Image(pic)) => self.keep_card_pic(req, pic),
+            Some(Preview::Moving(frames)) => {
+                // 같은 gif를 더 크게 읽은 것이 이미 움직이고 있으면 그대로 둔다
+                if self.card.moving.as_ref().is_some_and(|m| m.have() >= req.px) {
                     return;
                 }
-                self.pics.retain(|c| c.key != req.key);
-                self.pics.push(CachedPic { key: req.key.clone(), px: req.px, pic });
-                if self.pics.len() > PICS_MAX {
-                    self.pics.remove(0);
-                }
+                // 첫 장은 읽어 둔 그림에도 둔다: 다시 고르면 장들을 읽는 동안 그것이 먼저 보인다
+                self.keep_card_pic(req, frames.pics[0].clone());
+                self.card.moving = Some(Moving::new(frames, req.px));
             }
             Some(Preview::Text(text)) => self.card.text = Some(text),
-            // 크게 읽는 것만 실패했으면 읽어 둔 작은 그림을 그대로 보인다
-            None => self.card.failed = self.pic(&req.key).is_none(),
+            // 크게 읽는 것만 실패했으면 읽어 둔 작은 그림을 그대로 보인다 (Look은 창의 요청에만 온다)
+            Some(Preview::Look) | None => self.card.failed = self.pic(&req.key).is_none(),
+        }
+    }
+
+    /// 카드에 읽어 온 그림을 남겨 둔다. 같은 파일을 더 크게 읽은 것이 이미 있으면 그대로 둔다 (작게 읽은 것이 늦게 온 경우)
+    fn keep_card_pic(&mut self, req: &PreviewRequest, pic: Picture) {
+        if self.pic(&req.key).is_some_and(|c| c.px >= req.px) {
+            return;
+        }
+        self.pics.retain(|c| c.key != req.key);
+        self.pics.push(CachedPic { key: req.key.clone(), px: req.px, pic });
+        if self.pics.len() > PICS_MAX {
+            self.pics.remove(0);
         }
     }
 
@@ -1758,6 +1845,7 @@ impl App {
     fn close_card(&mut self) {
         self.card.closed = self.card_target().map(|t| t.key.path);
         self.card.large = false;
+        self.card.moving = None;
     }
 
     /// 카드를 크게(놓인 칸을 채운다)·작게
@@ -5276,7 +5364,11 @@ impl App {
             Hit::CardClose => CardHover::Close,
             _ => CardHover::None,
         };
-        let pic = self.pic(&target.key).map(|c| &c.pic);
+        // 움직이는 gif는 지금 장
+        let pic = match &self.card.moving {
+            Some(mv) if mine => Some(mv.pic()),
+            _ => self.pic(&target.key).map(|c| &c.pic),
+        };
         // 문서의 썸네일은 흰 종이라 밝은 카드에 묻히지 않게 가는 테두리를 두른다
         let frame = (target.kind == CardKind::Doc).then(|| alpha(t.text, 0.14));
         paint_preview_card(g, &mut CardPic { pic, frame }, t, &CardScene { geom: &m, name: &name, detail: &detail, body, note: self.card_note(&target), large: self.card.large, hover });
@@ -9662,6 +9754,201 @@ mod tests {
         click_name(&mut a, &g, 0, "망가짐.hwp", none);
         a.settle();
         assert_eq!(a.preview_body_seen(), Some(("info", None)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 웹 페이지(html·htm)는 글보다 먼저 문서로 가려 맥이 그린 쪽을 보인다 (공통 TEXT_EXTS에는 남는다: Windows가 따로 가린다).
+    /// 카드는 Quick Look이 그린 쪽(맥 러너에서 실제로 그린다. 그림을 주지 못하는 맥이면 코드), 창은 Quick Look 보기.
+    /// 인터넷에서 받은 것(받은 표시)은 카드와 창 모두 그리지 않고 코드를 보인다. 창은 받은 표시를 뒷줄에서 먼저 본다
+    #[test]
+    fn web_pages_show_the_page_unless_downloaded() {
+        assert!(TEXT_EXTS.contains(&"html") && TEXT_EXTS.contains(&"htm"), "the shared list keeps them");
+        assert_eq!([card_kind("a.html"), card_kind("B.HTM")], [Some(CardKind::Doc); 2]);
+        assert!(!is_picture("a.html"), "icon view thumbnails come from Quick Look");
+        let (root, dir) = preview_demo();
+        let html = "<!doctype html>\n<body style=\"margin:0;background:#1e6fd9\"></body>\n";
+        for name in ["쪽.html", "받은 쪽.html"] {
+            std::fs::write(root.join("미리 보기").join(name), html).unwrap();
+        }
+        let (page, got) = (util::join(&dir, "쪽.html"), util::join(&dir, "받은 쪽.html"));
+        assert!(mark_quarantined(&got));
+        assert!(quarantined(&got) && !quarantined(&page) && quarantined(&util::join(&dir, "없는 쪽.html")));
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        // 카드
+        click_name(&mut a, &g, 0, "쪽.html", none);
+        let reqs = a.take_previews();
+        assert_eq!(reqs.iter().map(|r| (r.kind, r.px, r.look, r.frames)).collect::<Vec<_>>(), [(CardKind::Doc, PX_SMALL, false, false)]);
+        for r in &reqs {
+            let result = load_preview(r);
+            a.on_previewed(r, result);
+        }
+        assert!(a.card().is_some(), "the page or its code");
+        match (&a.card.text, a.pics.last()) {
+            (None, Some(c)) => {
+                let [r, gr, b, _] = c.pic.center_color().expect("could not read the thumbnail's pixels");
+                assert!(b > 180 && r < 90 && gr < 160, "the page as drawn (its blue background), not its code: {:?}", [r, gr, b]);
+            }
+            (Some(code), _) => assert!(code.starts_with("<!doctype html>"), "{code}"),
+            (None, None) => unreachable!(),
+        }
+        click_name(&mut a, &g, 0, "받은 쪽.html", none);
+        a.settle();
+        assert!(a.card().is_some());
+        assert_eq!(a.card.text.as_deref().and_then(|s| s.lines().next()), Some("<!doctype html>"), "a downloaded page shows its code");
+        // 창: 받은 표시를 먼저 보고(읽는 동안 기다린다) Quick Look 보기로
+        a.run_action(Action::Preview);
+        click_name(&mut a, &g, 0, "쪽.html", none);
+        let reqs = a.take_previews();
+        assert_eq!(reqs.iter().map(|r| (r.kind, r.px, r.look, r.pane)).collect::<Vec<_>>(), [(CardKind::Doc, 0, true, true)]);
+        assert_eq!(a.preview_body_seen(), Some(("waiting", None)));
+        assert!(a.look_view().is_none());
+        for r in &reqs {
+            let result = load_preview(r);
+            assert!(matches!(result, Some(Preview::Look)));
+            a.on_previewed(r, result);
+        }
+        assert_eq!(a.preview_body_seen(), Some(("look", None)));
+        assert!(a.look_view().is_some_and(|(r, p, _)| Some(r) == a.preview_body() && p == page), "{:?}", a.look_view());
+        click_name(&mut a, &g, 0, "받은 쪽.html", none);
+        a.settle();
+        assert_eq!(a.preview_body_seen(), Some(("text", None)));
+        assert!(a.look_view().is_none() && a.preview_seen().is_some_and(|(_, t)| t.is_some_and(|t| t.starts_with("<!doctype html>"))));
+        // Quick Look 보기를 만들 수 없으면 받은 표시가 없는 쪽도 카드처럼 그린 쪽 (주지 못하면 코드)
+        click_name(&mut a, &g, 0, "쪽.html", none);
+        a.settle();
+        a.look_view_missing();
+        a.settle();
+        assert!(matches!(a.preview_body_seen().map(|s| s.0), Some("picture" | "text")), "{:?}", a.preview_body_seen());
+        let mut canvas = Gfx::bitmap(1280.0, 800.0, 1.0).unwrap();
+        a.paint(&mut canvas);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 포토샵(psd·psb)과 일러스트레이터(ai) 파일은 문서: 카드는 Quick Look이 만든 그림, 창은 Quick Look 보기, 아이콘 보기는 Quick Look 썸네일
+    /// (썸네일을 만들지 않는 형식으로 빼지 않는다). 맥 러너에서 psd와 PDF 방식 ai를 실제로 그려 본다
+    #[test]
+    fn photoshop_and_illustrator_files_are_documents() {
+        for name in ["a.psd", "B.PSB", "c.ai"] {
+            assert_eq!(card_kind(name), Some(CardKind::Doc), "{name}");
+            assert!(!is_picture(name), "{name}: thumbnails come from Quick Look");
+        }
+        for ext in ["psd", "psb", "ai"] {
+            assert!(!NO_THUMBNAIL_EXTS.contains(&ext) && !IMAGE_EXTS.contains(&ext) && !TEXT_EXTS.contains(&ext), "{ext}");
+        }
+        let (root, dir) = preview_demo();
+        let at = root.join("미리 보기");
+        std::fs::write(at.join("로고.psd"), crate::render::psd(64, 48, |_, _| [30, 110, 220])).unwrap();
+        // PDF와 함께 쓰는 ai는 앞부분이 PDF다
+        std::fs::write(at.join("포스터.ai"), tiny_pdf(200, 300)).unwrap();
+        std::fs::write(at.join("큰 그림.psb"), b"x").unwrap();
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        for name in ["로고.psd", "포스터.ai"] {
+            click_name(&mut a, &g, 0, name, none);
+            a.settle();
+            assert!(a.card().is_some(), "Quick Look made no picture of {name}");
+            let [r, gr, b, al] = a.pics.last().unwrap().pic.center_color().expect("could not read the thumbnail's pixels");
+            assert!(b > 180 && r < 90 && gr < 160 && al > 200, "{name}: the middle should be its blue, got {:?}", [r, gr, b, al]);
+            let thumb = load_thumb(&ThumbRequest { key: ThumbKey { file: CardKey { path: util::join(&dir, name), modified: 1, size: 1 }, px: 256 } });
+            assert!(thumb.is_some(), "Quick Look made no icon-view thumbnail of {name}");
+        }
+        a.run_action(Action::Preview);
+        for name in ["로고.psd", "포스터.ai", "큰 그림.psb"] {
+            click_name(&mut a, &g, 0, name, none);
+            a.settle();
+            assert_eq!(a.preview_body_seen().map(|s| s.0), Some("look"), "{name}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 움직이는 gif: 카드와 창이 장들을 읽어(맥 러너에서 ImageIO로 쓰고 읽는다) 장마다 적힌 시간대로 넘긴다 (0은 100ms).
+    /// 창이 key가 아니거나 '동작 줄이기'를 켜면 그 장에 머물고, 동작 줄이기를 켜고 고르면 장들을 읽지 않는다.
+    /// 다른 것을 고르거나 카드·창을 닫으면 장들을 버린다. 장이 하나뿐이거나 한도를 넘으면 첫 장만 (다시 묻지 않는다)
+    #[test]
+    fn gifs_move_in_the_card_and_the_pane() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let (root, dir) = preview_demo();
+        let at = root.join("미리 보기");
+        let colors = [([230, 60, 60], 0.05), ([60, 200, 90], 0.0), ([60, 90, 230], 0.2)];
+        Gfx::write_gif(&at.join("움직임.gif"), 64, 48, &colors).unwrap();
+        Gfx::write_gif(&at.join("한 장.gif"), 64, 48, &colors[..1]).unwrap();
+        let many: Vec<([u8; 3], f64)> = (0..=crate::gfx::FRAMES_MAX).map(|i| ([(i % 200) as u8, 0, 0], 0.05)).collect();
+        Gfx::write_gif(&at.join("너무 많음.gif"), 4, 4, &many).unwrap();
+        // ImageIO로 읽은 장들: 다 합쳐진 장(한 장만 바뀐 꼴로 쓰였어도)과 머무는 시간
+        let f = Gfx::load_frames(&util::join(&dir, "움직임.gif"), PX_SMALL).expect("ImageIO read no frames");
+        assert_eq!(f.delays.iter().map(|d| (d.as_secs_f64() * 1000.0).round() as u64).collect::<Vec<_>>(), [50, 100, 200]);
+        assert_eq!(f.pics.iter().map(Picture::size).collect::<Vec<_>>(), [(64, 48); 3]);
+        let c: Vec<[u8; 4]> = f.pics.iter().map(|p| p.center_color().unwrap()).collect();
+        assert!(c[0][0] > 180 && c[1][1] > 150 && c[2][2] > 180 && c.iter().all(|c| c[3] > 200), "{c:?}");
+        assert_eq!(Gfx::load_frames(&util::join(&dir, "너무 많음.gif"), PX_SMALL).map(|f| (f.pics.len(), f.delays.len())), Some((1, 0)));
+        assert_eq!(Gfx::load_frames(&util::join(&dir, "한 장.gif"), PX_SMALL).map(|f| (f.pics.len(), f.delays.len())), Some((1, 0)));
+
+        let (mut a, g) = app(&dir);
+        let none = Mods::default();
+        let mut canvas = Gfx::bitmap(1280.0, 800.0, 1.0).unwrap();
+        click_name(&mut a, &g, 0, "움직임.gif", none);
+        let reqs = a.take_previews();
+        assert_eq!(reqs.iter().map(|r| (r.kind, r.px, r.frames)).collect::<Vec<_>>(), [(CardKind::Image, PX_SMALL, true)]);
+        for r in &reqs {
+            let result = load_preview(r);
+            a.on_previewed(r, result);
+        }
+        let t0 = Instant::now();
+        assert_eq!(a.moving_frame(), Some(0));
+        assert_eq!(a.moving_rect(), a.card().map(|m| m.body));
+        assert_eq!(a.step_moving(t0, true), Some(ms(50)));
+        assert_eq!((a.step_moving(t0 + ms(50), true), a.moving_frame()), (Some(ms(100)), Some(1)));
+        a.paint(&mut canvas);
+        // 창이 key가 아니거나 동작 줄이기를 켜면 머문다
+        assert_eq!((a.step_moving(t0 + ms(1000), false), a.moving_frame()), (None, Some(1)));
+        a.motion = false;
+        assert_eq!((a.step_moving(t0 + ms(2000), true), a.moving_frame()), (None, Some(1)));
+        a.motion = true;
+        // 첫 장은 읽어 둔 그림에도 있다. 다른 것을 고르면 장들을 버린다
+        assert_eq!(a.pics.last().map(|c| c.pic.size()), Some((64, 48)));
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.settle();
+        assert!(a.card.moving.is_none() && a.moving_frame().is_none() && a.step_moving(t0, true).is_none());
+        // 다시 고르면 다시 읽는다. 카드를 닫으면 버린다
+        click_name(&mut a, &g, 0, "움직임.gif", none);
+        a.settle();
+        assert_eq!(a.moving_frame(), Some(0));
+        a.close_card();
+        assert!(a.card.moving.is_none() && a.moving_frame().is_none());
+        for name in ["한 장.gif", "너무 많음.gif"] {
+            click_name(&mut a, &g, 0, name, none);
+            a.settle();
+            assert!(a.card().is_some() && a.card.moving.is_none() && !a.card.failed && a.pics.last().is_some(), "{name}: the first frame");
+            assert!(a.take_previews().is_empty(), "{name}: not asked for again");
+        }
+        // 동작 줄이기를 켜고 고르면 장들을 읽지 않는다 (읽어 둔 첫 장이 있어 아무것도 읽지 않을 수도 있다)
+        a.motion = false;
+        click_name(&mut a, &g, 0, "움직임.gif", none);
+        let reqs = a.take_previews();
+        assert!(reqs.iter().all(|r| !r.frames));
+        for r in &reqs {
+            let result = load_preview(r);
+            a.on_previewed(r, result);
+        }
+        assert!(a.card().is_some() && a.card.moving.is_none());
+        a.motion = true;
+        // 창: 같은 장들. 고른 것이 바뀌거나 창을 닫으면 버린다
+        a.run_action(Action::Preview);
+        a.settle();
+        assert_eq!(a.preview_body_seen(), Some(("moving", Some((64, 48)))));
+        assert_eq!(a.moving_rect(), a.preview_body());
+        assert_eq!((a.step_moving(t0, true), a.moving_frame()), (Some(ms(50)), Some(0)));
+        a.paint(&mut canvas);
+        click_name(&mut a, &g, 0, "노을.bmp", none);
+        a.settle();
+        assert!(a.moving_frame().is_none());
+        click_name(&mut a, &g, 0, "움직임.gif", none);
+        a.settle();
+        assert_eq!(a.moving_frame(), Some(0));
+        a.run_action(Action::Preview);
+        assert!(a.preview.is_none() && a.moving_frame().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
