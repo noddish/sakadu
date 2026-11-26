@@ -13,12 +13,14 @@
 //! 단위 시험은 App만 돌리고 창 쪽 코드는 타입 검사만 됐다: 그 틈을 메운다. 끌어서 놓기는 받는 쪽만 해 본다: 맥이 끌기 중에
 //! 주는 정보(NSDraggingInfo)를 흉내 낸 것을 뷰의 draggingEntered:·performDragOperation:에 넘긴다 (끌어 내는 쪽은 흉내 낼 수 없다).
 //! 시험 폴더는 임시 폴더에 새로 만들고 그 안에서만 한다 (휴지통으로 보낸 것은 되돌리기로 다시 꺼낸다).
-//! 걸음마다 `ok`나 `FAIL`을 찍고, 하나라도 실패하면 1로, 메인 줄이 답하지 않으면 2로 끝난다
+//! 걸음마다 `ok`나 `FAIL`을 찍고, 하나라도 실패하면 1로, 메인 줄이 답하지 않으면 2로 끝난다.
+//! 끝에는 메모리도 잰다: 같은 일(폴더 드나들기, 탭 열고 닫기, gif 고르기, 썸네일 넘겨 보기)을 되풀이하고 그 앞뒤의
+//! 메모리와 열린 파일 수를 `mem` 줄로 찍는다 (참고용 숫자라 실패로 세지 않는다)
 
 use super::*;
 use crate::app::{MenuKind, Seen};
 use sakadu::keys::Action;
-use sakadu::pane::{Sort, SortKey};
+use sakadu::pane::{Sort, SortKey, ViewMode};
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -40,6 +42,14 @@ const KEY_K: u16 = 0x28;
 const KEY_P: u16 = 0x23;
 const KEY_T: u16 = 0x11;
 const KEY_W: u16 = 0x0D;
+const PAGE_DOWN: u16 = 0x79;
+
+/// 메모리를 잴 때 같은 일을 되풀이하는 횟수
+const FOLDER_ROUNDS: usize = 60;
+const TAB_ROUNDS: usize = 40;
+const GIF_ROUNDS: usize = 12;
+/// 썸네일을 넘겨 볼 그림 수 (읽어 두는 한도 400장보다 많게)
+const PICTURES: usize = 480;
 
 /// 흉내 낸 끌기 정보: 끌려 온 것을 담은 붙여넣기 판, 창 좌표의 마우스 자리, 끌어 낸 쪽이 허락한 일
 struct DragIvars {
@@ -223,6 +233,8 @@ fn script(dir: &str) -> usize {
     if !run.wait("the window lists the test folder", 10, || seen().is_some_and(|s| s.ready && s.dir == dir && s.names == first)) {
         return run.failed;
     }
+    let start = mem();
+    println!("mem  the window is up: footprint {:.1} MB, rss {:.1} MB, fds {}", mb(start.footprint), mb(start.rss), start.fds);
     let active = on_main(|| {
         let app = NSApplication::sharedApplication(MainThreadMarker::new().expect("main"));
         (app.isActive(), VIEW.with(|v| v.get().and_then(|v| v.window()).is_some_and(|w| w.isKeyWindow())))
@@ -640,6 +652,7 @@ fn script(dir: &str) -> usize {
         });
         run.wait("turning standby off takes the icon away", 5, || on_main(|| standby::status_item().is_none()));
     }
+    memory(&mut run, dir, start);
     run.failed
 }
 
@@ -941,4 +954,232 @@ fn field_text() -> Option<String> {
         let field = VIEW.with(|v| v.get().and_then(|v| v.ivars().field.get().cloned()))?;
         (!field.isHidden()).then(|| field.stringValue().to_string())
     })
+}
+
+/// 이 프로세스의 메모리와 열린 파일 수
+#[derive(Clone, Copy)]
+struct Mem {
+    /// 올라와 있는 메모리 (RSS, 바이트)
+    rss: u64,
+    /// 맥의 활성 상태 보기가 '메모리'로 보이는 값 (phys_footprint, 바이트)
+    footprint: u64,
+    /// 열린 파일(fd) 수: 폴더 감시가 닫히지 않고 남으면 는다
+    fds: usize,
+}
+
+/// 지금의 메모리와 열린 파일 수. 맥이 값을 주지 않으면 메모리는 0
+fn mem() -> Mem {
+    // SAFETY: rusage_info_v2는 숫자만 든 구조체라 0으로 채워도 된다. 이 프로세스의 값을 그 구조체에 받아 읽기만 한다
+    let info = unsafe {
+        let mut info: libc::rusage_info_v2 = std::mem::zeroed();
+        (libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V2, std::ptr::addr_of_mut!(info).cast()) == 0).then_some(info)
+    };
+    let fds = std::fs::read_dir("/dev/fd").map_or(0, Iterator::count);
+    Mem { rss: info.map_or(0, |i| i.ri_resident_size), footprint: info.map_or(0, |i| i.ri_phys_footprint), fds }
+}
+
+/// 메인 줄이 쌓인 일을 마치게 조금 기다린 뒤의 메모리 (잠깐 쓰고 놓는 것은 메인 줄이 한 바퀴 돌 때 풀린다)
+fn settled() -> Mem {
+    std::thread::sleep(Duration::from_millis(400));
+    on_main(|| ());
+    mem()
+}
+
+fn mb(bytes: u64) -> f64 {
+    bytes as f64 / 1_048_576.0
+}
+
+/// 메모리 한 줄을 찍는다: 지금 값과 since(앞서 잰 값)부터 는 양. rounds가 0이 아니면 한 번에 는 양(KB)도
+fn note_mem(what: &str, now: Mem, since: Mem, rounds: usize) {
+    let grew = now.footprint as f64 - since.footprint as f64;
+    let each = if rounds > 0 { format!(", {:+.1} KB each", grew / 1024.0 / rounds as f64) } else { String::new() };
+    println!(
+        "mem  {what}: footprint {:.1} MB ({:+.1} MB{each}), rss {:.1} MB ({:+.1} MB), fds {} ({:+})",
+        mb(now.footprint),
+        grew / 1_048_576.0,
+        mb(now.rss),
+        (now.rss as f64 - since.rss as f64) / 1_048_576.0,
+        now.fds,
+        now.fds as i64 - since.fds as i64
+    );
+}
+
+/// cond가 참이 될 때까지 찍지 않고 기다린다 (0.01초마다, 길어야 limit초). 되풀이하는 걸음이 줄을 쏟아 내지 않게
+fn quiet(limit: u64, cond: impl Fn() -> bool) -> bool {
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(limit) {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// 그 이름의 줄로 실제 키(Home, 그리고 ↓를 그만큼)를 눌러 옮긴다 (Run::select와 같되 찍지 않는다)
+fn pick(name: &str) -> bool {
+    if !quiet(5, || seen().is_some_and(|s| s.ready && !s.busy && s.names.iter().any(|n| n == name))) {
+        return false;
+    }
+    let Some(i) = seen().and_then(|s| s.names.iter().position(|n| n == name)) else { return false };
+    key(HOME, false);
+    for _ in 0..i {
+        key(DOWN, false);
+    }
+    quiet(5, || seen().is_some_and(|s| s.cursor == name))
+}
+
+/// 메모리 재기. 같은 일을 여러 번 되풀이하고 그 앞뒤의 메모리와 열린 파일 수를 `mem` 줄로 찍는다 (새는 것이 있으면 한 번마다 는다).
+/// 숫자는 참고용이라 실패로 세지 않고, 되풀이가 끝까지 됐는지만 센다. start는 창이 처음 떴을 때 잰 값
+fn memory(run: &mut Run, dir: &str, start: Mem) {
+    note_mem("after the steps above (since the window came up)", settled(), start, 0);
+
+    // 폴더 드나들기: ⌘↓로 들어갔다 ⌘↑로 나온다 (폴더 읽기와 폴더 감시가 번마다 새로 생기고 없어진다)
+    let sub = sakadu::util::join(dir, "폴더");
+    if run.select("폴더") {
+        let before = settled();
+        let mut done = 0;
+        while done < FOLDER_ROUNDS {
+            key(DOWN, true);
+            if !quiet(5, || seen().is_some_and(|s| s.ready && s.dir == sub)) {
+                break;
+            }
+            key(UP, true);
+            if !quiet(5, || seen().is_some_and(|s| s.ready && s.dir == dir && s.cursor == "폴더")) {
+                break;
+            }
+            done += 1;
+        }
+        run.check(&format!("a folder is entered and left {FOLDER_ROUNDS} times"), done == FOLDER_ROUNDS, || format!("stopped after {done}"));
+        note_mem(&format!("entering and leaving a folder {done} times"), settled(), before, done);
+    }
+
+    // 탭 열고 닫기: ⌘T(시작 화면 탭)와 ⌘W
+    let tabs = || on_main(|| with_app(|a| a.seen().tabs));
+    if let Some(was) = tabs() {
+        let before = settled();
+        let mut done = 0;
+        while done < TAB_ROUNDS {
+            key(KEY_T, true);
+            if !quiet(5, || tabs() == Some(was + 1) && seen().is_some_and(|s| s.ready)) {
+                break;
+            }
+            key(KEY_W, true);
+            if !quiet(5, || tabs() == Some(was) && seen().is_some_and(|s| s.ready && s.dir == dir)) {
+                break;
+            }
+            done += 1;
+        }
+        run.check(&format!("a tab is opened and closed {TAB_ROUNDS} times"), done == TAB_ROUNDS, || format!("stopped after {done}"));
+        note_mem(&format!("opening and closing a tab {done} times"), settled(), before, done);
+    }
+
+    // 미리 보기 창에서 큰 gif(480×360, 24장)와 글 파일을 번갈아 고른다: gif를 떠나면 읽어 둔 장들이 풀려야 한다.
+    // 러너는 '동작 줄이기'가 켜져 있어 장들을 읽지 않으므로, 이 걸음 동안만 그 설정을 무시한다 (preview_kinds와 같다)
+    let gif = Path::new(dir).join("큰 움직임.gif");
+    let frames: Vec<([u8; 3], f64)> = (0..24u8).map(|i| ([i * 10, 200 - i * 5, 90], 0.05)).collect();
+    let made = Gfx::write_gif(&gif, 480, 360, &frames);
+    run.check("a larger moving gif is made in the test folder", made.is_ok(), || format!("{made:?}"));
+    let alt_cmd = NSEventModifierFlags::Command | NSEventModifierFlags::Option;
+    if made.is_ok() && pick("가나다.txt") {
+        key_with(KEY_P, alt_cmd);
+        let shown = || on_main(|| with_app(|a| a.preview_seen()).flatten());
+        let frame = || on_main(|| with_app(|a| a.moving_frame()).flatten());
+        let text = || shown().is_some_and(|(n, t)| n.as_deref() == Some("가나다.txt") && t.is_some());
+        if quiet(5, text) {
+            on_main(|| {
+                SMOKE_MOTION.set(true);
+                with_app(|a| a.motion = true);
+            });
+            let before = settled();
+            let mut held = None;
+            let mut done = 0;
+            while done < GIF_ROUNDS {
+                if !(pick("큰 움직임.gif") && quiet(5, || frame().is_some())) {
+                    break;
+                }
+                if done == 0 {
+                    held = Some(settled());
+                }
+                if !(pick("가나다.txt") && quiet(5, || frame().is_none() && text())) {
+                    break;
+                }
+                done += 1;
+            }
+            run.check(&format!("the gif and a text file are picked in turn {GIF_ROUNDS} times"), done == GIF_ROUNDS, || format!("stopped after {done}"));
+            if let Some(held) = held {
+                note_mem("while the gif shows in the preview pane (its frames are held)", held, before, 0);
+            }
+            note_mem(&format!("picking the gif and a text file in turn {done} times (the text file shows)"), settled(), before, done);
+            on_main(|| SMOKE_MOTION.set(false));
+        }
+        key_with(KEY_P, alt_cmd);
+        quiet(5, || shown().is_none());
+    }
+    let _ = std::fs::remove_file(&gif);
+
+    // 아이콘 보기의 썸네일: 그림 480장(320×320)이 든 폴더를 큰 아이콘으로 끝까지 넘겨 본다. 읽어 둔 썸네일은 한도(400장, 64MB)를
+    // 넘지 않아야 한다. 그 폴더를 떠난 뒤에도 재서, 읽어 둔 것이 남는지 본다
+    let pics = Path::new(dir).join("그림들");
+    let made = std::fs::create_dir_all(&pics).is_ok()
+        && (0..PICTURES).all(|i| {
+            let color = [(i * 7 % 256) as u8, (i * 13 % 256) as u8, (i * 29 % 256) as u8];
+            Gfx::write_gif(&pics.join(format!("그림 {i:03}.gif")), 320, 320, &[(color, 0.0)]).is_ok()
+        });
+    run.check(&format!("{PICTURES} pictures are made in a folder"), made, String::new);
+    let at_pics = sakadu::util::join(dir, "그림들");
+    if made && pick("그림들") {
+        let before = settled();
+        key(DOWN, true);
+        if quiet(10, || seen().is_some_and(|s| s.ready && s.dir == at_pics && s.names.len() == PICTURES)) {
+            let view = |mode: ViewMode| {
+                on_main(move || {
+                    with_app(|a| {
+                        let p = a.active_pane();
+                        a.set_view(p, mode);
+                    });
+                    pump();
+                    redraw();
+                })
+            };
+            let thumbs = || on_main(|| with_app(|a| a.thumbs_seen())).unwrap_or((0, 0, 0));
+            // 그 화면의 썸네일을 다 읽을 때까지: 그린 뒤에야 기다리는 것이 채워지므로 조금 두고 본다
+            let loaded = || {
+                std::thread::sleep(Duration::from_millis(80));
+                quiet(10, || thumbs().2 == 0);
+                std::thread::sleep(Duration::from_millis(40));
+                quiet(10, || thumbs().2 == 0)
+            };
+            view(ViewMode::Large);
+            key(HOME, false);
+            let mut pages = 0;
+            loop {
+                loaded();
+                let at = seen().map(|s| s.cursor);
+                key(PAGE_DOWN, false);
+                pages += 1;
+                std::thread::sleep(Duration::from_millis(30));
+                if seen().map(|s| s.cursor) == at || pages >= 200 {
+                    break;
+                }
+            }
+            loaded();
+            let (count, bytes, _) = thumbs();
+            println!("mem  thumbnails after paging through {PICTURES} pictures ({pages} pages): {count} kept, {:.1} MB by the app's own count", mb(bytes as u64));
+            run.check("the thumbnails kept stay within the limit (400 pictures, 64 MB)", count <= 400 && bytes <= 64 * 1024 * 1024, || format!("{count} pictures, {bytes} bytes"));
+            note_mem("with the thumbnails read", settled(), before, 0);
+            view(ViewMode::Details);
+            key(UP, true);
+            quiet(5, || seen().is_some_and(|s| s.ready && s.dir == dir));
+            let (count, bytes, _) = thumbs();
+            println!("mem  thumbnails after leaving that folder: {count} kept, {:.1} MB by the app's own count", mb(bytes as u64));
+            note_mem("after leaving the picture folder", settled(), before, 0);
+        } else {
+            run.check("the picture folder opens", false, || format!("{:?}", seen().map(|s| (s.dir, s.names.len()))));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&pics);
+    quiet(5, || seen().is_some_and(|s| s.ready && !s.names.iter().any(|n| n == "그림들" || n == "큰 움직임.gif")));
+
+    note_mem("at the end (since the window came up)", settled(), start, 0);
 }

@@ -1895,6 +1895,11 @@ impl App {
         self.thumbs.finish(&req.key, pic);
     }
 
+    /// 썸네일이 어디까지 됐는지 (창 시험이 메모리를 잴 때 본다): 읽어 둔 수, 그 메모리(바이트), 기다리거나 읽는 중인 수
+    pub fn thumbs_seen(&self) -> (usize, usize, usize) {
+        (self.thumbs.cache.len(), self.thumbs.bytes, self.thumbs.queue.len() + self.thumbs.loading.len())
+    }
+
     // ---------- 경로 입력 ----------
 
     /// 칸 p에서 경로 입력을 시작한다 (폴더나 시작 화면을 보고 있을 때. 시작 화면이면 빈 상자로)
