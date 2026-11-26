@@ -1822,7 +1822,10 @@ impl App {
                 }
                 // 첫 장은 읽어 둔 그림에도 둔다: 다시 고르면 장들을 읽는 동안 그것이 먼저 보인다
                 self.keep_card_pic(req, frames.pics[0].clone());
-                self.card.moving = Some(Moving::new(frames, req.px));
+                // 읽는 사이 카드를 닫았으면 첫 장만 남긴다 (닫힌 카드가 장들을 붙잡지 않게)
+                if self.card.closed.as_deref() != Some(req.key.path.as_str()) {
+                    self.card.moving = Some(Moving::new(frames, req.px));
+                }
             }
             Some(Preview::Text(text)) => self.card.text = Some(text),
             // 크게 읽는 것만 실패했으면 읽어 둔 작은 그림을 그대로 보인다 (Look은 창의 요청에만 온다)
@@ -10016,6 +10019,24 @@ mod tests {
         assert_eq!(again.iter().map(|r| (r.px, r.frames)).collect::<Vec<_>>(), [(PX_SMALL, true)]);
         a.on_previewed(&again[0], Some(Preview::Moving(frames())));
         assert_eq!(a.moving_frame(), Some(0));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 장들을 읽는 사이 카드를 닫았으면, 늦게 온 장들은 붙잡지 않고 첫 장만 읽어 둔 그림에 남긴다
+    #[test]
+    fn gif_frames_arriving_after_the_card_closes_are_dropped() {
+        let (root, dir) = preview_demo();
+        std::fs::write(root.join("미리 보기").join("움직임.gif"), b"x").unwrap();
+        let (mut a, g) = app(&dir);
+        click_name(&mut a, &g, 0, "움직임.gif", Mods::default());
+        let reqs = a.take_previews();
+        assert_eq!(reqs.iter().map(|r| r.frames).collect::<Vec<_>>(), [true]);
+        a.close_card();
+        let frames = Frames { pics: vec![Picture::blank(64, 48).unwrap(), Picture::blank(64, 48).unwrap()], delays: vec![std::time::Duration::from_millis(100); 2] };
+        a.on_previewed(&reqs[0], Some(Preview::Moving(frames)));
+        assert!(a.card.moving.is_none() && a.card().is_none());
+        assert_eq!(a.pics.last().map(|c| c.pic.size()), Some((64, 48)), "the first frame is kept");
+        assert!(a.take_previews().is_empty(), "the closed card asks for nothing");
         std::fs::remove_dir_all(root).unwrap();
     }
 
